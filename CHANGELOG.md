@@ -39,6 +39,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Rebinding a module name or an immutable variable gives a hint about that name, not a builtin to call first.
 - `sort` refuses an array that mixes numbers and strings (or other kinds) with E_BAD_ARG, and orders ints against floats by value.
 - Secret redaction no longer hides the type names in signatures, such as `token: String`; the first `approve` example passes a token.
+- A minus written directly after an operand is subtraction: `5-1` is 4 (it was `5` then `-1`), and `x-1`, `(5-1)`, `a[i-1]` and `len(a)-1` work. A minus after a space or an operator is still a negative number, so `f -1`, `x = -1` and `2*-3` are unchanged.
+- A string or record literal directly followed by `[` indexes: `"hello"[0]` is `h` and `{k: 1}["k"]` is 1, where both silently returned the bracket as an array.
+- `sort([2, 1.5, 3])` sorts its argument, as the piped form does, instead of refusing a direct call.
+- `a[start:end]` fails with a hint naming the `slice` builtin, since there is no slice syntax.
 
 ## [14.0.0] - 2026-11-06
 
