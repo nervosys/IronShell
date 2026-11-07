@@ -541,7 +541,14 @@ pub fn eval_expr(expr: &Expr, env: &mut Env) -> Result<Value> {
         Expr::Null => Ok(Value::Null),
 
         // ---------- variables ----------
-        Expr::Ident(name) => Ok(env.get_var(name).cloned().unwrap_or(Value::Null)),
+        Expr::Ident(name) => match env.get_var(name) {
+            Some(value) => Ok(value.clone()),
+            // A builtin name that nothing binds is a function value, the same
+            // kind a module member is. `g = rm` then binds a callable, where it
+            // used to bind Null and fail at `g(...)` with "got Null".
+            None if builtins::is_dispatched(name) => Ok(crate::modules::builtin_ref(name)),
+            None => Ok(Value::Null),
+        },
 
         // ---------- collections ----------
         Expr::Array(items) => {
@@ -691,7 +698,7 @@ pub fn eval_expr(expr: &Expr, env: &mut Env) -> Result<Value> {
                     // If the bound var is a Lambda or AsyncLambda, call it. Otherwise fall back
                     // to builtin behavior (e.g. when shadowing with a non-function).
                     match v {
-                        Value::Lambda(_) | Value::AsyncLambda(_) => {
+                        Value::Lambda(_) | Value::AsyncLambda(_) | Value::Builtin(_) => {
                             return call_value_with_pipe(v, pin, vals, env)
                         }
                         // A variable that is not a function and whose name is
