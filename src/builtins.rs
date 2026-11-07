@@ -60737,6 +60737,28 @@ pub fn bi_rm(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
     // Jailed: relative paths are workspace-relative; resolve before the jail check
     // so the guard validates the path that is actually deleted.
     let path = crate::safety::resolve_path_str(&path);
+    // In agent mode, a plain removal of a path that is not there is answered
+    // E_NOT_FOUND before the approval gate. The gate asked for a token to
+    // delete something that does not exist, and approving it changed nothing.
+    // Only inside the workspace (the jail still answers for anything outside
+    // it), and only when nothing is at the path: a path that exists goes
+    // through the gate as before. `force` keeps its meaning and still goes
+    // through the gate, since it is a success for an absent file.
+    if !force
+        && matches!(crate::safety::current_mode(), crate::safety::Mode::Agent)
+        && crate::safety::within_workspace(&path)
+        && std::fs::symlink_metadata(&path).is_err()
+    {
+        // The attempt is still a decision the audit log should record.
+        let _ = crate::safety::audit(
+            "rm",
+            crate::safety::Effect::Destructive,
+            "not_found",
+            &path,
+            serde_json::json!({}),
+        );
+        return Err(crate::safety::not_found("rm", "file", &path));
+    }
     crate::safety::guard(crate::safety::GuardCtx {
         builtin: "rm",
         effect: crate::safety::Effect::Destructive,
