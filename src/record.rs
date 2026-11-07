@@ -345,6 +345,10 @@ fn walk_expr(expr: &Expr, out: &mut Vec<String>) {
         }
         Expr::Unary { expr: inner, .. } => walk_expr(inner, out),
         Expr::MemberAccess { object, .. } => walk_expr(object, out),
+        Expr::Index { object, index } => {
+            walk_expr(object, out);
+            walk_expr(index, out);
+        }
         Expr::Match { scrutinee, arms } => {
             walk_expr(scrutinee, out);
             for arm in arms {

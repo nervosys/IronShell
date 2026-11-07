@@ -245,6 +245,20 @@ pub fn type_of_expr(expr: &Expr, env: &mut TypeEnv) -> Result<Type, TypeError> {
             type_binary(op, lt, rt)
         }
 
+        // --- postfix index: expr[index] ---
+        // An Array yields its element type, a String yields a one-character
+        // String, and anything else (a Record, an unknown) is Any, so a value
+        // whose type is not tracked never fails the check.
+        Expr::Index { object, index } => {
+            let obj_type = type_of_expr(object, env)?;
+            let _ = type_of_expr(index, env)?;
+            Ok(match obj_type {
+                Type::Array(elem) => *elem,
+                Type::String => Type::String,
+                _ => Type::Any,
+            })
+        }
+
         // --- member access: record.field ---
         Expr::MemberAccess { object, field: _ } => {
             let obj_type = type_of_expr(object, env)?;

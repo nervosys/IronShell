@@ -323,14 +323,18 @@ fn lex(src: &str) -> Result<Vec<Spanned>> {
     let mut line = 1usize;
     let mut col = 1usize;
 
-    // Helper to create and push a token
+    // Helper to create and push a token. Every caller is a one-character token
+    // with no newline, advanced before this runs, so its start column is one
+    // before the current one. Using the current column put `(`, `)`, `[` and
+    // `]` one column to the right of where they are, which the index parser
+    // relies on to tell `a[0]` from `a [0]`.
     macro_rules! tok {
         ($kind:expr, $text:expr) => {{
             out.push(Spanned {
                 kind: $kind,
                 text: $text.to_string(),
                 line,
-                col,
+                col: col - 1,
             });
         }};
     }
@@ -1363,7 +1367,7 @@ impl Parser {
         if self.check(Tok::Async) {
             return self.parse_async_lambda();
         }
-        let primary = self.parse_atom_expr()?;
+        let primary = self.parse_indexed_atom()?;
         // Remember the line where the primary expression ended (for word-call line tracking)
         let primary_line = self.prev().line;
         if let Expr::Ident(_) = primary {
@@ -1444,7 +1448,7 @@ impl Parser {
                 ]) {
                     break;
                 }
-                let a = self.parse_atom_expr()?;
+                let a = self.parse_indexed_atom()?;
                 args.push(a);
             }
             if args.is_empty() {
@@ -1728,6 +1732,8 @@ impl Parser {
                     object: Box::new(e),
                     field,
                 };
+            } else if self.at_index_bracket() {
+                e = self.parse_index_suffix(e)?;
             } else {
                 break;
             }
@@ -1778,7 +1784,7 @@ impl Parser {
                     if self.check_any(&[Tok::Pipe, Tok::RBrace, Tok::RParen, Tok::Eof]) {
                         break;
                     }
-                    let a = self.parse_atom_expr()?;
+                    let a = self.parse_indexed_atom()?;
                     args.push(a);
                 }
                 if !args.is_empty() {
@@ -1789,6 +1795,45 @@ impl Parser {
                     };
                 }
             }
+        }
+        Ok(e)
+    }
+
+    /// Whether the next token is a `[` written directly after an indexable token
+    /// on the same line: an identifier, a `)` or a `]`. Only that spelling is an
+    /// index. `a[0]` and `f(x)[0]` index; `f [0]` and a `[` on the next line stay
+    /// an array argument or a new statement.
+    fn at_index_bracket(&self) -> bool {
+        if !self.check(Tok::LBracket) || self.i == 0 || self.i >= self.toks.len() {
+            return false;
+        }
+        let prev = &self.toks[self.i - 1];
+        let cur = &self.toks[self.i];
+        let prev_len = match prev.kind {
+            Tok::Ident => prev.text.chars().count(),
+            Tok::RParen | Tok::RBracket => 1,
+            _ => return false,
+        };
+        prev.line == cur.line && prev.col + prev_len == cur.col
+    }
+
+    /// Consume one `[index]` suffix and wrap `object` in an [`Expr::Index`].
+    fn parse_index_suffix(&mut self, object: Expr) -> Result<Expr> {
+        self.need(Tok::LBracket, "expected '['")?;
+        let index = self.parse_expr()?;
+        self.need(Tok::RBracket, "expected ']' after index")?;
+        Ok(Expr::Index {
+            object: Box::new(object),
+            index: Box::new(index),
+        })
+    }
+
+    /// An atom with any directly-attached `[index]` suffixes, for the operands of
+    /// a word call and the head of a pipeline stage.
+    fn parse_indexed_atom(&mut self) -> Result<Expr> {
+        let mut e = self.parse_atom_expr()?;
+        while self.at_index_bracket() {
+            e = self.parse_index_suffix(e)?;
         }
         Ok(e)
     }

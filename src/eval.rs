@@ -257,6 +257,7 @@ fn is_effect_free(e: &Expr) -> bool {
         Expr::Binary { left, right, .. } => is_effect_free(left) && is_effect_free(right),
         Expr::Unary { expr, .. } => is_effect_free(expr),
         Expr::MemberAccess { object, .. } => is_effect_free(object),
+        Expr::Index { object, index } => is_effect_free(object) && is_effect_free(index),
         Expr::Pipe { left, right } => is_effect_free(left) && is_effect_free(right),
         Expr::Call {
             callee,
@@ -824,6 +825,18 @@ pub fn eval_expr(expr: &Expr, env: &mut Env) -> Result<Value> {
             }
         }
 
+        // ---------- postfix index: expr[index] ----------
+        Expr::Index { object, index } => {
+            let idx = eval_expr(index, env)?;
+            // Borrow a variable or field chain, as member access does, so that
+            // reading one element does not copy the whole array.
+            if let Some(target) = borrowed_member(object, env) {
+                return index_value(target?, &idx, object);
+            }
+            let obj = eval_expr(object, env)?;
+            index_value(&obj, &idx, object)
+        }
+
         // ---------- pattern matching ----------
         Expr::Match { scrutinee, arms } => {
             let value = eval_expr(scrutinee, env)?;
@@ -893,6 +906,60 @@ fn borrowed_member<'a>(expr: &Expr, env: &'a Env) -> Option<Result<&'a Value>> {
         }
         _ => None,
     }
+}
+
+/// `object[index]` on an evaluated value. Arrays and Strings take an Int (a
+/// negative index counts from the end, and a String yields one character),
+/// Records take a String key. Anything else, and any other index type, is an
+/// `E_BAD_ARG` that names the object.
+fn index_value(target: &Value, idx: &Value, object: &Expr) -> Result<Value> {
+    let label = match object {
+        Expr::Ident(name) => format!("{name}[...]"),
+        _ => "[...]".to_string(),
+    };
+    match (target, idx) {
+        (Value::Array(items), Value::Int(i)) => {
+            let pos = resolve_index(*i, items.len(), "Array")?;
+            Ok(items[pos].clone())
+        }
+        (Value::Str(s), Value::Int(i)) => {
+            let chars: Vec<char> = s.chars().collect();
+            let pos = resolve_index(*i, chars.len(), "String")?;
+            Ok(Value::Str(chars[pos].to_string()))
+        }
+        (Value::Record(map), Value::Str(key)) => map.get(key).cloned().ok_or_else(|| {
+            crate::safety::unknown_field(
+                key,
+                crate::builtins::nearest_names(key, map.keys().map(|k| k.as_str())),
+            )
+        }),
+        (Value::Array(_) | Value::Str(_), other) => Err(crate::safety::bad_arg(
+            &label,
+            "an Int index",
+            other.type_name(),
+        )),
+        (Value::Record(_), other) => Err(crate::safety::bad_arg(
+            &label,
+            "a String key",
+            other.type_name(),
+        )),
+        (other, _) => Err(crate::safety::bad_arg(
+            &label,
+            "an Array, String or Record to index",
+            other.type_name(),
+        )),
+    }
+}
+
+/// Turn a possibly negative index into a position in `0..len`, or an
+/// out-of-range error that states the length.
+fn resolve_index(index: i64, len: usize, kind: &str) -> Result<usize> {
+    let n = len as i64;
+    let pos = if index < 0 { n + index } else { index };
+    if pos < 0 || pos >= n {
+        return Err(crate::safety::index_out_of_range(kind, index, len));
+    }
+    Ok(pos as usize)
 }
 
 /* ---------------- pattern matching helpers ---------------- */
@@ -1271,6 +1338,11 @@ fn free_idents(expr: &Expr, bound: &mut Vec<String>, out: &mut std::collections:
         // `object.field` reads `object`; the field name is not an identifier
         // in the environment.
         Expr::MemberAccess { object, .. } => free_idents(object, bound, out),
+
+        Expr::Index { object, index } => {
+            free_idents(object, bound, out);
+            free_idents(index, bound, out);
+        }
 
         Expr::Match { scrutinee, arms } => {
             free_idents(scrutinee, bound, out);

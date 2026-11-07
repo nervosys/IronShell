@@ -2539,6 +2539,30 @@ pub fn bad_value(message: impl Into<String>, hint: &str) -> anyhow::Error {
     })
 }
 
+/// The `E_BAD_ARG` (not retryable) for an index past either end of an Array or
+/// String. The hint names the length, so the caller can pick a valid index
+/// without a second call.
+pub fn index_out_of_range(kind: &str, index: i64, len: usize) -> anyhow::Error {
+    let hint = if len == 0 {
+        format!("the {kind} is empty, so no index is valid; check its length first")
+    } else {
+        format!(
+            "the {kind} has length {len}: valid indices are 0 to {} (or -1 to -{len} from the end)",
+            len - 1
+        )
+    };
+    anyhow::Error::new(SafetyError {
+        code: ErrorCode::BadValue,
+        message: format!("index {index} is out of range: the {kind} has length {len}"),
+        builtin: String::new(),
+        hint,
+        approval: None,
+        did_you_mean: Vec::new(),
+        expected: format!("an index from -{len} to {}", len.saturating_sub(1)),
+        got: index.to_string(),
+    })
+}
+
 /// Build a structured unknown-builtin error (`E_UNKNOWN_BUILTIN`) carrying the
 /// nearest real names. `candidates` must already have been filtered against the
 /// live builtin table — this constructor does not invent names.

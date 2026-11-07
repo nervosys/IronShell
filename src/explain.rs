@@ -128,6 +128,10 @@ impl Walk<'_> {
             }
             Expr::Unary { expr, .. } => self.expr(expr),
             Expr::MemberAccess { object, .. } => self.expr(object),
+            Expr::Index { object, index } => {
+                self.expr(object);
+                self.expr(index);
+            }
             Expr::Match { scrutinee, arms } => {
                 self.expr(scrutinee);
                 for arm in arms {

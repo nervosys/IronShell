@@ -233,6 +233,10 @@ fn calls(expr: &Expr, names: &mut BTreeSet<String>, dynamic: &mut usize) {
                 calls(right, names, dynamic);
             }
         }
+        Expr::Index { object, index } => {
+            calls(object, names, dynamic);
+            calls(index, names, dynamic);
+        }
         Expr::Array(items) => {
             for item in items {
                 calls(item, names, dynamic);

@@ -153,6 +153,15 @@ pub enum Expr {
         field: String,
     },
 
+    /// Postfix indexing: `expr[index]`. An Array takes an Int (negative counts
+    /// from the end), a String takes an Int and yields one character, and a
+    /// Record takes a String key. Written with no space before the `[`, so
+    /// `a[0]` indexes while `f [1, 2]` stays a word call with an array argument.
+    Index {
+        object: Box<Expr>,
+        index: Box<Expr>,
+    },
+
     // pattern matching
     Match {
         scrutinee: Box<Expr>,
