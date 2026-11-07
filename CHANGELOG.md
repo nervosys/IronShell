@@ -30,6 +30,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - An unrecognised backslash escape in a double-quoted string keeps the backslash: `"C:\Users\adamm"` reads back intact instead of as `C:Usersadamm`. The recognised escapes (`\n`, `\r`, `\t`, `\\`, `\"`, `\$`) are unchanged, so `"C:\temp"` still contains a tab: write `\\` or single quotes for Windows paths.
 - `grep` accepts a glob path and searches every match, as `cat` does; each match passes the workspace check. A directory is E_BAD_ARG ("is a directory"), not E_OS_DENIED.
 - `undo`, `session_undo` and `session_redo` return E_BAD_STATE when the journal is not recording (outside agent mode, unless `IRONSHELL_JOURNAL=on`), instead of reporting a successful undo of nothing. Recording is still off by default for humans.
+- `expr[i]` indexes arrays, strings and records (a negative index counts from the end; out of range is E_BAD_ARG with the length). `a[0]` no longer parses as a call, and `[5,6][1]` no longer returns `[1]`. Only a `[` written directly after a name, `)` or `]` is an index: `f [1,2]` still passes an array.
+- A builtin name that nothing binds is a function value, so `g = rm` binds a callable instead of Null; calling it through the variable still passes the approval gate.
+- A file move needs one approval token, and the hinted single re-run completes it.
+- In agent mode, deleting a path that does not exist returns E_NOT_FOUND without asking for an approval token.
+- A refused call notes when IRONSHELL_APPROVE is set but none of its tokens match; tokens are bound to the exact action and target.
+- `ish --explain` on a file that does not parse prints the same E_PARSE JSON as a run and exits 2.
+- Rebinding a module name or an immutable variable gives a hint about that name, not a builtin to call first.
+- `sort` refuses an array that mixes numbers and strings (or other kinds) with E_BAD_ARG, and orders ints against floats by value.
+- Secret redaction no longer hides the type names in signatures, such as `token: String`; the first `approve` example passes a token.
 
 ## [14.0.0] - 2026-11-06
 
