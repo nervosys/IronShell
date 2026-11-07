@@ -8732,6 +8732,29 @@ fn bi_sort(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
         ));
     };
 
+    // Numbers order against numbers and strings against strings. Nothing orders
+    // a number against a string, so a mixed array has no sorted form. The
+    // comparator used to call such a pair equal, and the array came back in
+    // input order with exit 0.
+    let mut kinds: Vec<&str> = Vec::new();
+    for v in &array {
+        let kind = match v {
+            Value::Int(_) | Value::Float(_) => "number",
+            Value::Str(_) => "String",
+            other => other.type_name(),
+        };
+        if !kinds.contains(&kind) {
+            kinds.push(kind);
+        }
+    }
+    if kinds.len() > 1 {
+        return Err(crate::safety::bad_arg(
+            "sort",
+            "elements of one type (all numbers or all strings)",
+            &format!("a mix of {}", kinds.join(" and ")),
+        ));
+    }
+
     let mut sorted = array;
     sorted.sort_by(|a, b| {
         let cmp = match (a, b) {
@@ -8739,6 +8762,13 @@ fn bi_sort(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
             (Value::Int(i1), Value::Int(i2)) => i1.cmp(i2),
             (Value::Float(f1), Value::Float(f2)) => {
                 f1.partial_cmp(f2).unwrap_or(std::cmp::Ordering::Equal)
+            }
+            // An Int and a Float are both numbers, so they order by value.
+            (Value::Int(i), Value::Float(f)) => {
+                (*i as f64).partial_cmp(f).unwrap_or(std::cmp::Ordering::Equal)
+            }
+            (Value::Float(f), Value::Int(i)) => {
+                f.partial_cmp(&(*i as f64)).unwrap_or(std::cmp::Ordering::Equal)
             }
             _ => std::cmp::Ordering::Equal,
         };
