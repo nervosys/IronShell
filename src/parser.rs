@@ -245,12 +245,14 @@ pub struct Parser {
     /// The evaluator has guarded call depth since long before this; the parser
     /// guarded nothing.
     depth: usize,
+    /// Token indices of `[` written directly after a closing quote or brace.
+    glued_brackets: std::collections::HashSet<usize>,
 }
 
 /// Parse a program, returning statements and any errors encountered.
 /// Uses error recovery to report multiple errors when possible.
 pub fn parse_program(src: &str) -> Result<Vec<Stmt>> {
-    let toks = lex(src).map_err(|e| ParseError::new(e.to_string()))?;
+    let (toks, glued_brackets) = lex_marked(src).map_err(|e| ParseError::new(e.to_string()))?;
     let mut p = Parser {
         toks,
         i: 0,
@@ -259,6 +261,7 @@ pub fn parse_program(src: &str) -> Result<Vec<Stmt>> {
         implicit_row: false,
         implicit_used: false,
         depth: 0,
+        glued_brackets,
     };
 
     let mut stmts = Vec::new();
@@ -296,7 +299,7 @@ pub fn parse_program(src: &str) -> Result<Vec<Stmt>> {
 /// Parse a program without error recovery (stops at first error).
 /// Useful for cases where partial parsing is not desired.
 pub fn parse_program_strict(src: &str) -> Result<Vec<Stmt>> {
-    let toks = lex(src).map_err(|e| ParseError::new(e.to_string()))?;
+    let (toks, glued_brackets) = lex_marked(src).map_err(|e| ParseError::new(e.to_string()))?;
     let mut p = Parser {
         toks,
         i: 0,
@@ -305,6 +308,7 @@ pub fn parse_program_strict(src: &str) -> Result<Vec<Stmt>> {
         implicit_row: false,
         implicit_used: false,
         depth: 0,
+        glued_brackets,
     };
     let mut stmts = Vec::new();
     while !p.check(Tok::Eof) {
@@ -317,7 +321,15 @@ pub fn parse_program_strict(src: &str) -> Result<Vec<Stmt>> {
 // ============ Lexer ============
 
 fn lex(src: &str) -> Result<Vec<Spanned>> {
+    lex_marked(src).map(|(toks, _)| toks)
+}
+
+/// The tokens, and the indices of the `[` tokens written directly after a
+/// closing quote or brace. A string token's text is its decoded value, so its
+/// source length is not recoverable from the token; the lexer keeps this fact.
+fn lex_marked(src: &str) -> Result<(Vec<Spanned>, std::collections::HashSet<usize>)> {
     let mut out = Vec::<Spanned>::new();
+    let mut glued_brackets = std::collections::HashSet::<usize>::new();
     let chars: Vec<char> = src.chars().collect();
     let mut pos = 0;
     let mut line = 1usize;
@@ -500,7 +512,15 @@ fn lex(src: &str) -> Result<Vec<Spanned>> {
                 tok!(Tok::RParen, ")");
             }
             '[' => {
+                // A `[` written directly after a closing quote or brace may index
+                // a string or record literal. The parser decides by the atom it
+                // just parsed (a block `}` never produces a record), so the lexer
+                // only records the adjacency.
+                let glued = pos > 0 && matches!(chars[pos - 1], '"' | '\'' | '}');
                 advance(&chars, &mut pos, &mut line, &mut col);
+                if glued {
+                    glued_brackets.insert(out.len());
+                }
                 tok!(Tok::LBracket, "[");
             }
             ']' => {
@@ -959,7 +979,7 @@ fn lex(src: &str) -> Result<Vec<Spanned>> {
         line: eof_line,
         col: eof_col,
     });
-    Ok(out)
+    Ok((out, glued_brackets))
 }
 
 /// Where end of input is reported. After a trailing newline the lexer stands at
@@ -1739,7 +1759,7 @@ impl Parser {
                     object: Box::new(e),
                     field,
                 };
-            } else if self.at_index_bracket() {
+            } else if self.at_index_bracket() || self.at_literal_index(&e) {
                 e = self.parse_index_suffix(e)?;
             } else {
                 break;
@@ -1824,6 +1844,16 @@ impl Parser {
         prev.line == cur.line && prev.col + prev_len == cur.col
     }
 
+    /// Whether the next token is a `[` written directly after a string or record
+    /// literal that was just parsed: `"hello"[0]` and `{k: 1}["k"]` index. The
+    /// atom decides, so a block's `}` (an `if`, `fn` or `match` body) followed
+    /// by `[` is not affected. A spaced `"hello" [0]` is not glued and stays two
+    /// expressions.
+    fn at_literal_index(&self, atom: &Expr) -> bool {
+        let literal = matches!(atom, Expr::LitStr(_) | Expr::Record(_));
+        literal && self.check(Tok::LBracket) && self.glued_brackets.contains(&self.i)
+    }
+
     /// Consume one `[index]` suffix and wrap `object` in an [`Expr::Index`].
     fn parse_index_suffix(&mut self, object: Expr) -> Result<Expr> {
         self.need(Tok::LBracket, "expected '['")?;
@@ -1839,7 +1869,7 @@ impl Parser {
     /// a word call and the head of a pipeline stage.
     fn parse_indexed_atom(&mut self) -> Result<Expr> {
         let mut e = self.parse_atom_expr()?;
-        while self.at_index_bracket() {
+        while self.at_index_bracket() || self.at_literal_index(&e) {
             e = self.parse_index_suffix(e)?;
         }
         Ok(e)
