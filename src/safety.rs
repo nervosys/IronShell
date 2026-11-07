@@ -7511,10 +7511,23 @@ pub fn redact_str(s: &str) -> (String, bool) {
         changed = true;
     }
     if SECRET_ASSIGN_RE.is_match(&cur) {
+        let mut replaced = false;
         cur = SECRET_ASSIGN_RE
-            .replace_all(&cur, concat!("${1}", "[REDACTED]"))
+            .replace_all(&cur, |caps: &regex::Captures| {
+                let value = &caps[2];
+                let word = value.trim_end_matches(')');
+                // `token: String) -> Record` is a signature, which describes a
+                // secret without holding one. The shape cannot tell the two
+                // apart, so a value that is a signature type name is left.
+                if crate::signature::Ty::is_type_name(word) {
+                    return caps[0].to_string();
+                }
+                replaced = true;
+                // The pattern swallows a closing paren after the value; put it back.
+                format!("{}[REDACTED]{}", &caps[1], &value[word.len()..])
+            })
             .into_owned();
-        changed = true;
+        changed |= replaced;
     }
     if URL_QUERY_SECRET_RE.is_match(&cur) {
         cur = URL_QUERY_SECRET_RE

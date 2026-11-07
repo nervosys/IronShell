@@ -89,6 +89,24 @@ impl Ty {
         }
     }
 
+    /// Whether `name` is a type a signature shows as one word: `String`,
+    /// `Number`, and so on. Secret redaction asks this, so that `token: String`
+    /// in a signature is not taken for a token whose value is `String`.
+    pub fn is_type_name(name: &str) -> bool {
+        const ALL: [Ty; 9] = [
+            Ty::Any,
+            Ty::Int,
+            Ty::Numeric,
+            Ty::Str,
+            Ty::Bool,
+            Ty::Array,
+            Ty::Record,
+            Ty::Lambda,
+            Ty::Sequence,
+        ];
+        ALL.iter().any(|t| t.as_str() == name)
+    }
+
     fn accepts(self, v: &Value) -> bool {
         match self {
             Ty::Any => true,
@@ -4065,7 +4083,10 @@ pub static SIGNATURES: &[Signature] = &[
         returns: "Record",
         doc: "Grant the approval for a token in this process. Human mode only: in agent mode it is refused with E_POLICY_DENY, because the token was issued to the caller being approved. The out-of-band channel an operator uses is the IRONSHELL_APPROVE environment variable, which an agent cannot set (set_env, env_set and env_unset refuse IRONSHELL_* names in agent mode).",
         examples: &[
-            (r#"(try { approve() } catch e { e.error.code })"#, "E_BAD_ARG"),
+            (
+                r#"approve("apv_0000000000000000")"#,
+                r#"{approved: true, token: "apv_0000000000000000"}"#,
+            ),
             (r#"(try { approve(5) } catch e { e.error.code })"#, "E_BAD_ARG"),
         ],
     },
