@@ -41,6 +41,25 @@ impl ParseError {
     }
 }
 
+/// The hint for `a[start:end]`, which IronShell does not spell as a slice.
+const SLICE_HINT: &str = "IronShell has no slice syntax, so a[start:end] is not written. \
+     Use the slice builtin on the subject: `a | slice(start, end)` (for example \
+     `[1, 2, 3, 4] | slice(0, 2)`), or `slice(start)` to run to the end. For one \
+     element, write a[i].";
+
+/// A `[start:end]` index, carried as a typed error so `parse_program` can give
+/// it the slice hint in place of the generic one.
+#[derive(Debug)]
+struct SliceSpelling(String);
+
+impl std::fmt::Display for SliceSpelling {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for SliceSpelling {}
+
 impl std::fmt::Display for ParseError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         // Hand-rolled rather than via serde_json: the parser has no serde
@@ -286,11 +305,18 @@ pub fn parse_program(src: &str) -> Result<Vec<Stmt>> {
     // If we had errors, return them combined
     if !errors.is_empty() {
         let error_messages: Vec<String> = errors.iter().map(|e| e.to_string()).collect();
-        return Err(anyhow::Error::new(ParseError::new(format!(
+        let mut parse_error = ParseError::new(format!(
             "found {} error(s):\n  {}",
             errors.len(),
             error_messages.join("\n  ")
-        ))));
+        ));
+        if errors
+            .iter()
+            .any(|e| e.downcast_ref::<SliceSpelling>().is_some())
+        {
+            parse_error.hint = SLICE_HINT.to_string();
+        }
+        return Err(anyhow::Error::new(parse_error));
     }
 
     Ok(stmts)
@@ -1858,6 +1884,12 @@ impl Parser {
     fn parse_index_suffix(&mut self, object: Expr) -> Result<Expr> {
         self.need(Tok::LBracket, "expected '['")?;
         let index = self.parse_expr()?;
+        if self.check(Tok::Colon) {
+            let msg = self
+                .error_at_current("expected ']' after index")
+                .to_string();
+            return Err(anyhow::Error::new(SliceSpelling(msg)));
+        }
         self.need(Tok::RBracket, "expected ']' after index")?;
         Ok(Expr::Index {
             object: Box::new(object),
