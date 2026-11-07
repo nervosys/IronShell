@@ -4529,18 +4529,24 @@ fn guard_local_write(builtin: &str, path: &str) -> Result<String> {
 /// asking, and it is the honest one: `file_delete_lines` is already
 /// `Destructive` for altering a file in place, and moving one over another is
 /// not the smaller act.
-fn guard_local_move(builtin: &str, path: &str) -> Result<String> {
-    let path = crate::safety::resolve_path_str(path);
+///
+/// Both ends go through one `guard` call, so a move is one action with one
+/// approval token. The token is hashed over both targets, so it approves this
+/// source-to-destination pair and no other. Guarding each end separately gave
+/// two tokens, and a re-run with the first one asked for the second.
+fn guard_local_move(builtin: &str, from: &str, to: &str) -> Result<(String, String)> {
+    let from = crate::safety::resolve_path_str(from);
+    let to = crate::safety::resolve_path_str(to);
     crate::safety::guard(crate::safety::GuardCtx {
         builtin,
         effect: crate::safety::Effect::Destructive,
         what: "move",
-        targets: vec![path.clone()],
-        blast_radius: serde_json::json!({ "path": path }),
+        targets: vec![from.clone(), to.clone()],
+        blast_radius: serde_json::json!({ "from": from, "to": to }),
         reversible: false,
         fs_paths: true,
     })?;
-    Ok(path)
+    Ok((from, to))
 }
 
 // There is deliberately no read counterpart for `web_upload_file`. The jail in
@@ -48491,8 +48497,7 @@ fn bi_file_move(args: Vec<Value>, _input: Option<Value>) -> Result<Value> {
     // Classified `ReadLocal` while the body renamed one path over another —
     // which removes the source and can overwrite the destination. Both ends
     // are caller-supplied, and neither was jailed.
-    let source = guard_local_move("file_move", &source)?;
-    let dest = guard_local_move("file_move", &dest)?;
+    let (source, dest) = guard_local_move("file_move", &source, &dest)?;
 
     let metadata =
         fs::metadata(&source).map_err(|e| crate::safety::fs_error("file_move", &source, &e))?;
