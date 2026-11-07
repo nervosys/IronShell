@@ -696,10 +696,17 @@ fn lex(src: &str) -> Result<Vec<Spanned>> {
                 });
             }
             '-' => {
+                // A `-` written directly after an operand (`5-1`, `x-1`, `"s"-1`,
+                // `a[i]-1`, `f(x)-1`) is binary minus. Only whitespace or an
+                // operator before it makes a negative literal, so `f -1` still
+                // passes -1 as an argument and `[1, -1]` keeps its literal.
+                let glued_to_operand = pos > 0
+                    && (is_ident_part(chars[pos - 1])
+                        || matches!(chars[pos - 1], '"' | ')' | ']' | '}'));
                 advance(&chars, &mut pos, &mut line, &mut col);
                 // negative number if followed by digit
                 if let Some(d) = peek(&chars, pos) {
-                    if d.is_ascii_digit() {
+                    if d.is_ascii_digit() && !glued_to_operand {
                         let (kind, text) =
                             read_number(&chars, &mut pos, &mut line, &mut col, "-".to_string())?;
                         out.push(Spanned {
