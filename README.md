@@ -1050,7 +1050,7 @@ echo 'for f in *.log; do wc -l $f; done' | ish --bash
 
 | Shell Construct                       | IronShell Output            |
 | ------------------------------------- | ----------------------------- |
-| `ls -la`                              | `ls("-la")`                   |
+| `ls -la`                              | `ls("-la")`: does not run, as native `ls` takes a path, not flags (`ish -b` runs `ls -a` in-process) |
 | `grep "pattern" file`                 | `grep("pattern", "file")`    |
 | `cat file.txt`                        | `file.read("file.txt")`       |
 | `X=42`                                | `let X = 42;`                 |
