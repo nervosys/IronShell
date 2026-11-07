@@ -293,6 +293,33 @@ fn eval_expr_wasm(expr: &Expr, env: &mut Env) -> Result<Value, String> {
                 _ => Err(format!("cannot access field on {}", obj.type_name())),
             }
         }
+        Expr::Index { object, index } => {
+            let obj = eval_expr_wasm(object, env)?;
+            let idx = eval_expr_wasm(index, env)?;
+            let wasm_pos = |i: i64, len: usize| -> Result<usize, String> {
+                let n = len as i64;
+                let pos = if i < 0 { n + i } else { i };
+                if pos < 0 || pos >= n {
+                    Err(format!("index {i} is out of range: length is {len}"))
+                } else {
+                    Ok(pos as usize)
+                }
+            };
+            match (obj, idx) {
+                (Value::Array(items), Value::Int(i)) => {
+                    Ok(items[wasm_pos(i, items.len())?].clone())
+                }
+                (Value::Str(s), Value::Int(i)) => {
+                    let chars: Vec<char> = s.chars().collect();
+                    Ok(Value::Str(chars[wasm_pos(i, chars.len())?].to_string()))
+                }
+                (Value::Record(map), Value::Str(key)) => map
+                    .get(&key)
+                    .cloned()
+                    .ok_or_else(|| format!("field '{}' not found", key)),
+                (other, _) => Err(format!("cannot index {}", other.type_name())),
+            }
+        }
         Expr::Match { scrutinee, arms } => {
             let val = eval_expr_wasm(scrutinee, env)?;
             for arm in arms {
