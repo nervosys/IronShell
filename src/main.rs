@@ -436,6 +436,14 @@ fn run(cli: Cli) -> Result<()> {
                 buf
             }
         };
+        // A file that does not parse is reported as a run reports it: the
+        // parser's own `E_PARSE` JSON on stderr and exit status 2. Going through
+        // `explain`, which wraps the message as a builtin argument error, nested
+        // that JSON inside a string and exited 1.
+        if let Err(e) = iron_shell::parser::parse_program(&code) {
+            eprintln!("{e}");
+            std::process::exit(iron_shell::repl::exit_status_for(&e));
+        }
         let report = iron_shell::explain::explain(&code)?;
         println!("{}", serde_json::to_string_pretty(&report.to_json())?);
         return Ok(());
