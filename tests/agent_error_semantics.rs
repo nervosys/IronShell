@@ -258,9 +258,15 @@ fn the_agent_sees_the_module_spelling_in_did_you_mean() {
 
 #[test]
 fn a_served_gated_builtin_still_needs_approval() {
-    // The gate must still stop a real destructive builtin. The target does not
-    // exist, and the refusal comes before any action is taken.
-    let (code, text) = agent_run(r#"rm("no-such-file-d3.txt")"#);
+    // The gate must still stop a real destructive builtin. The target exists
+    // (a missing one is E_NOT_FOUND before the gate), and the refusal comes
+    // before any action is taken, so the file is still there afterwards.
+    let dir = std::path::PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("agent_error_semantics");
+    std::fs::create_dir_all(&dir).unwrap();
+    let target = dir.join("served-gate-d3.txt");
+    std::fs::write(&target, "keep").unwrap();
+    let (code, text) = agent_run(r#"rm("served-gate-d3.txt")"#);
     assert!(text.contains("E_NEEDS_APPROVAL"), "{text}");
     assert_eq!(code, 75, "{text}");
+    assert!(target.exists(), "the refused rm removed the file");
 }
