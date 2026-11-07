@@ -8710,7 +8710,10 @@ fn bi_sort(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
         .iter()
         .any(|arg| matches!(arg, Value::Str(s) if s == "-r" || s == "--reverse"));
 
-    let array = if let Some(input) = input {
+    // A direct call's subject is its first argument, so `sort([2, 1])` sorts
+    // exactly what `[2, 1] | sort` sorts.
+    let subject = input.or_else(|| args.first().cloned());
+    let array = if let Some(input) = subject {
         match input {
             Value::Array(arr) => arr,
             Value::Str(s) => {
