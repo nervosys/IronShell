@@ -3466,6 +3466,14 @@ pub fn is_approved(token: &str) -> bool {
     is_token_approved(token)
 }
 
+/// Whether `IRONSHELL_APPROVE` names at least one token. Only used after a call
+/// has failed to match, so a set value means its tokens were tried and missed.
+fn approve_env_is_set() -> bool {
+    std::env::var("IRONSHELL_APPROVE").is_ok_and(|list| {
+        list.split(',').any(|t| !t.trim().is_empty())
+    })
+}
+
 fn is_token_approved(token: &str) -> bool {
     if truthy_env("IRONSHELL_APPROVE_ALL") {
         return true;
@@ -6851,20 +6859,30 @@ pub fn guard(ctx: GuardCtx) -> Result<(), SafetyError> {
                     json!({ "token": descriptor.token }),
                 );
                 let token = descriptor.token.clone();
+                let mut hint = if ctx.effect == Effect::Network {
+                    format!(
+                        "re-run with IRONSHELL_APPROVE={token} (or call approve(\"{token}\")), or have the operator allow the destination with IRONSHELL_NET_ALLOW=<host>"
+                    )
+                } else {
+                    format!(
+                        "re-run with IRONSHELL_APPROVE={} (or call approve(\"{}\"))",
+                        token, token
+                    )
+                };
+                // This call was not approved, so every token in a set
+                // IRONSHELL_APPROVE failed to match it. Without saying so, the
+                // variable looks ignored, and a retry with the same value fails
+                // the same way.
+                if approve_env_is_set() {
+                    hint.push_str(
+                        "; IRONSHELL_APPROVE was set but none of its tokens approve this call; tokens are bound to the exact action and target",
+                    );
+                }
                 Err(SafetyError {
                     code: ErrorCode::NeedsApproval,
                     message: format!("{}: requires approval ({})", ctx.builtin, ctx.what),
                     builtin: ctx.builtin.to_string(),
-                    hint: if ctx.effect == Effect::Network {
-                        format!(
-                            "re-run with IRONSHELL_APPROVE={token} (or call approve(\"{token}\")), or have the operator allow the destination with IRONSHELL_NET_ALLOW=<host>"
-                        )
-                    } else {
-                        format!(
-                            "re-run with IRONSHELL_APPROVE={} (or call approve(\"{}\"))",
-                            token, token
-                        )
-                    },
+                    hint,
                     approval: Some(descriptor),
                     did_you_mean: Vec::new(),
                     expected: String::new(),
