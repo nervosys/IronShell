@@ -119,6 +119,19 @@ impl Env {
         }
     }
 
+    /// The hint for a `let` that cannot bind `name` because the name is taken.
+    /// It is the statement's own advice, so it fits the refusal: a module name
+    /// is not something to `let mut` over.
+    pub fn rebind_hint(&self, name: &str) -> String {
+        if self.is_module_binding(name) {
+            format!(
+                "`{name}` is a module name; use a different name (the module stays reachable as `{name}.…`)"
+            )
+        } else {
+            format!("bind `{name}` once with `let mut {name} = …`, or use a different name")
+        }
+    }
+
     /// Set a new variable or reassign if mutable.
     /// Returns error if trying to reassign an immutable variable.
     pub fn set_var<S: Into<String>>(&mut self, name: S, value: Value) -> Result<(), String> {

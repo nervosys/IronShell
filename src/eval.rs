@@ -482,7 +482,9 @@ pub fn eval_stmt(stmt: &Stmt, env: &mut Env) -> Result<Value> {
         } => {
             let v = eval_expr(value, env)?;
             env.declare_var(name, v.clone(), *is_mut).map_err(|e| {
-                crate::safety::bad_state("let", &e, "use a different name, or `let mut` to rebind")
+                // `bad_state` would read this as a builtin to call first, which
+                // is how "call `use a different name...` first" came about.
+                crate::safety::bad_state_with_hint("let", &e, &env.rebind_hint(name))
             })?;
 
             // Mark as public if visibility is Pub
