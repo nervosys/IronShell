@@ -8764,12 +8764,12 @@ fn bi_sort(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
                 f1.partial_cmp(f2).unwrap_or(std::cmp::Ordering::Equal)
             }
             // An Int and a Float are both numbers, so they order by value.
-            (Value::Int(i), Value::Float(f)) => {
-                (*i as f64).partial_cmp(f).unwrap_or(std::cmp::Ordering::Equal)
-            }
-            (Value::Float(f), Value::Int(i)) => {
-                f.partial_cmp(&(*i as f64)).unwrap_or(std::cmp::Ordering::Equal)
-            }
+            (Value::Int(i), Value::Float(f)) => (*i as f64)
+                .partial_cmp(f)
+                .unwrap_or(std::cmp::Ordering::Equal),
+            (Value::Float(f), Value::Int(i)) => f
+                .partial_cmp(&(*i as f64))
+                .unwrap_or(std::cmp::Ordering::Equal),
             _ => std::cmp::Ordering::Equal,
         };
         if reverse {

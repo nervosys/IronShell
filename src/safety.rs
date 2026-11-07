@@ -3469,9 +3469,8 @@ pub fn is_approved(token: &str) -> bool {
 /// Whether `IRONSHELL_APPROVE` names at least one token. Only used after a call
 /// has failed to match, so a set value means its tokens were tried and missed.
 fn approve_env_is_set() -> bool {
-    std::env::var("IRONSHELL_APPROVE").is_ok_and(|list| {
-        list.split(',').any(|t| !t.trim().is_empty())
-    })
+    std::env::var("IRONSHELL_APPROVE")
+        .is_ok_and(|list| list.split(',').any(|t| !t.trim().is_empty()))
 }
 
 fn is_token_approved(token: &str) -> bool {
