@@ -33936,6 +33936,9 @@ fn bi_tar_extract(args: Vec<Value>, _input: Option<Value>) -> Result<Value> {
         // here where its meaning is known.
         let d = guard_local_write("tar_extract", &d)?;
         check_archive_protected("tar_extract", &d, &members)?;
+        // unzip and Expand-Archive create a missing destination; `tar -C` fails
+        // on one ("could not chdir"), so it is created here, after the jail.
+        std::fs::create_dir_all(&d).map_err(|e| crate::safety::fs_error("tar_extract", &d, &e))?;
         cmd.args(["-C", &d]);
     } else {
         check_archive_protected("tar_extract", ".", &members)?;
