@@ -8767,6 +8767,25 @@ fn bi_sort(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
         ));
     };
 
+    // A Record, Bool, Array or Null has no order here, so a list of them has no
+    // sorted form: the comparator used to call every such pair equal, and the
+    // list came back in input order with exit 0. A list of records is sorted by
+    // one of its fields.
+    if let Some(unordered) = array.iter().find(|v| {
+        matches!(
+            v,
+            Value::Record(_) | Value::Bool(_) | Value::Array(_) | Value::Null
+        )
+    }) {
+        return Err(crate::safety::bad_arg_with_hint(
+            "sort",
+            "numbers or strings",
+            unordered.type_name(),
+            "sort a list of records by a field with sort_by(fn(r) => r.field); a list of \
+             Bools, Arrays or nulls has no order to sort by",
+        ));
+    }
+
     // Numbers order against numbers and strings against strings. Nothing orders
     // a number against a string, so a mixed array has no sorted form. The
     // comparator used to call such a pair equal, and the array came back in
