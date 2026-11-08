@@ -32,7 +32,7 @@ print("")
 # RAG query (retrieves context for LLM)
 print("RAG query: 'What is IronShell?'")
 let rag_result = rag_query("What is IronShell?", 2)
-print("  Context length: " + len(rag_result.context))
+print("  Context length: " + str(len(rag_result.context)))
 print("  Sources found: " + rag_result.doc_count)
 print("")
 

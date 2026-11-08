@@ -69,7 +69,7 @@ print("")
 print("🔹 Computing with Fields:")
 prices = products | map(fn(p) => p.price)
 total = prices | reduce(fn(a,b) => a + b, 0)
-print("  Total value: " + total)
+print("  Total value: " + str(total))
 print("")
 
 # ═══ Type Introspection ═══
@@ -82,8 +82,8 @@ data = {
 print("  Type of numbers: " + type_of(data.numbers))
 print("  Type of text: " + type_of(data.text))
 print("  Type of flag: " + type_of(data.flag))
-print("  Length of numbers: " + len(data.numbers))
-print("  Length of text: " + len(data.text))
+print("  Length of numbers: " + str(len(data.numbers)))
+print("  Length of text: " + str(len(data.text)))
 print("")
 
 # ═══ File System Example ═══

@@ -3,7 +3,7 @@ resp = http_get("https://api.github.com")
 # Access response fields with dot notation
 print("Status: " + resp.status)
 print("Response type: " + type_of(resp))
-print("Response has " + len(keys(resp)) + " fields")
+print("Response has " + str(len(keys(resp))) + " fields")
 print("")
 
 # Show field names

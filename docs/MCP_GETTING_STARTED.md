@@ -23,11 +23,11 @@ MCP servers are standalone services that expose tools and capabilities to AI age
 ```ironshell
 // Detect all available MCP servers
 let servers = mcp_servers()
-print("Found " + len(servers) + " MCP server(s)")
+print("Found " + str(len(servers)) + " MCP server(s)")
 
 // Show server details
 servers | foreach(fn(s) => 
-    print("- " + s.name + " at " + s.endpoint + " (" + len(s.tools) + " tools)")
+    print("- " + s.name + " at " + s.endpoint + " (" + str(len(s.tools)) + " tools)")
 )
 ```
 
@@ -181,7 +181,7 @@ match server {
     _ => {
         print("Server: " + server.name)
         print("Endpoint: " + server.endpoint)
-        print("Tools: " + len(server.tools))
+        print("Tools: " + str(len(server.tools)))
         server.tools | foreach(fn(t) => print("  - " + t))
     }
 }
@@ -202,7 +202,7 @@ all_servers | foreach(fn(s) => {
     })
 })
 
-print("Total unique tools: " + len(all_tools))
+print("Total unique tools: " + str(len(all_tools)))
 ```
 
 ## Best Practices
@@ -213,7 +213,7 @@ Always check server availability before use:
 
 ```ironshell
 let servers = mcp_servers()
-print("Available servers: " + len(servers))
+print("Available servers: " + str(len(servers)))
 
 // Validate tools are accessible
 servers | foreach(fn(s) => {
@@ -334,7 +334,7 @@ services:
    let servers = mcp_servers()
    match len(servers) {
        0 => print("No MCP servers detected. Check if servers are running."),
-       _ => print("Servers found: " + len(servers))
+       _ => print("Servers found: " + str(len(servers)))
    }
    ```
 
@@ -348,7 +348,7 @@ services:
    let server = mcp_detect("http://localhost:3001")
    match len(server.tools) {
        0 => print("Server running but no tools available"),
-       _ => print("Tools available: " + len(server.tools))
+       _ => print("Tools available: " + str(len(server.tools)))
    }
    ```
 
@@ -365,7 +365,7 @@ ports | foreach(fn(port) => {
     let server = mcp_detect(endpoint)
     match server {
         null => print("❌ Port " + port + ": No server"),
-        _ => print("✅ Port " + port + ": " + server.name + " (" + len(server.tools) + " tools)")
+        _ => print("✅ Port " + port + ": " + server.name + " (" + str(len(server.tools)) + " tools)")
     }
 })
 

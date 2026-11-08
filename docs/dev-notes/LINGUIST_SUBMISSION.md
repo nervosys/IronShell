@@ -110,7 +110,7 @@ files = ls(".")
 
 # Filter to show only regular files (not directories)
 regular_files = files | where(fn(r) => r.is_dir == false)
-print("Regular files: " + len(regular_files))
+print("Regular files: " + str(len(regular_files)))
 
 # Get just the file names
 file_names = regular_files | map(fn(f) => f.name)
@@ -119,7 +119,7 @@ print(first_five)
 
 # Show directories
 dirs = files | where(fn(r) => r.is_dir == true)
-print("Directories: " + len(dirs))
+print("Directories: " + str(len(dirs)))
 ```
 
 **`samples/IronShell/pattern_matching.ish`** — pattern matching with guards:

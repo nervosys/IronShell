@@ -116,7 +116,7 @@ match server {
         print("Server name: " + server.name)
         print("Endpoint: " + server.endpoint)
         print("Available: " + server.available)
-        print("Tool count: " + len(server.tools))
+        print("Tool count: " + str(len(server.tools)))
         
         match len(server.tools) {
             0 => print("⚠️ No tools registered - check server configuration"),
@@ -241,11 +241,11 @@ let endpoints = []
 
 servers | foreach(fn(s) => {
     endpoints = endpoints + [s.endpoint]
-    print(s.name + " at " + s.endpoint + " with " + len(s.tools) + " tools")
+    print(s.name + " at " + s.endpoint + " with " + str(len(s.tools)) + " tools")
 })
 
-print("Unique endpoints: " + len(endpoints))
-print("Total servers: " + len(servers))
+print("Unique endpoints: " + str(len(endpoints)))
+print("Total servers: " + str(len(servers)))
 ```
 
 #### Stop Duplicate Servers
@@ -380,13 +380,13 @@ ish examples/15_mcp_basic.ish
 // Enable verbose output
 print("=== MCP Debug Info ===")
 let servers = mcp_servers()
-print("Detected servers: " + len(servers))
+print("Detected servers: " + str(len(servers)))
 
 servers | foreach(fn(s) => {
     print("Server: " + s.name)
     print("  Endpoint: " + s.endpoint)
     print("  Available: " + s.available)
-    print("  Tools: " + len(s.tools))
+    print("  Tools: " + str(len(s.tools)))
     print("  Tool list: " + s.tools)
     print("")
 })
@@ -416,7 +416,7 @@ print("")
 // Test 1: Basic detection
 print("1. Server Detection:")
 let servers = mcp_servers()
-print("   Found " + len(servers) + " servers")
+print("   Found " + str(len(servers)) + " servers")
 
 // Test 2: Individual server checks
 print("")
@@ -427,7 +427,7 @@ standard_ports | foreach(fn(port) => {
     let server = mcp_detect(endpoint)
     match server {
         null => print("   ❌ Port " + port + ": No server"),
-        _ => print("   ✅ Port " + port + ": " + server.name + " (" + len(server.tools) + " tools)")
+        _ => print("   ✅ Port " + port + ": " + server.name + " (" + str(len(server.tools)) + " tools)")
     }
 })
 
@@ -448,7 +448,7 @@ servers | foreach(fn(s) => {
         all_tools = all_tools + [t]
     })
 })
-print("   Total tools: " + len(all_tools))
+print("   Total tools: " + str(len(all_tools)))
 
 // Test 5: Integration Test
 print("")
@@ -510,7 +510,7 @@ print("")
 print("Full server scan:")
 let start_scan = 0
 let all_servers = mcp_servers()
-print("  Found: " + len(all_servers) + " servers")
+print("  Found: " + str(len(all_servers)) + " servers")
 print("  Time: <20000ms (target)")
 
 // Benchmark repeated detection
@@ -536,7 +536,7 @@ mcp_detect("http://localhost:3001")        // Find specific server
 // Diagnostics
 let s = mcp_detect("http://localhost:3001")
 print("Server: " + s.name)                // Server name
-print("Tools: " + len(s.tools))           // Tool count
+print("Tools: " + str(len(s.tools)))           // Tool count
 s.tools | foreach(fn(t) => print(t))      // List tools
 
 // Integration

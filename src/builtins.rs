@@ -6058,8 +6058,9 @@ fn bi_len(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
 
 /// `str(v)` — render a value as the string a user would see.
 ///
-/// The language had no way to do this. `"n: " + 1` worked by coercion, but
-/// there was no conversion function, so 41 sites across the shipped examples
+/// The language had no way to do this. `"n: " + 1` worked by coercion, and no
+/// longer does, so this is the conversion. There was no conversion function
+/// before, so 41 sites across the shipped examples
 /// called a `str()` that has never existed. `to_display_string` is the same
 /// renderer `print` and string interpolation use, so the three agree.
 fn bi_str(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
@@ -12212,7 +12213,7 @@ fn bi_ontology_shacl() -> Result<Value> {
 ///
 /// Example:
 ///   let servers = mcp_servers()
-///   servers | foreach(fn(s) => print(s.name + ": " + len(s.tools) + " tools"))
+///   servers | foreach(fn(s) => print(s.name + ": " + str(len(s.tools)) + " tools"))
 fn mcp_server_record(server: &crate::ai::McpServerInfo) -> Value {
     let mut record = BTreeMap::new();
     record.insert("name".to_string(), Value::Str(server.name.clone()));

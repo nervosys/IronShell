@@ -2547,6 +2547,22 @@ pub fn os_denied(
     })
 }
 
+/// [`bad_arg`] with a free-form message and a hint, for an operation whose
+/// operands have the wrong types together: `operator Add: cannot combine String
+/// and Int`. `builtin` names the operation, so the error says where it came from.
+pub fn bad_arg_in(builtin: &str, message: impl Into<String>, hint: &str) -> anyhow::Error {
+    anyhow::Error::new(SafetyError {
+        code: ErrorCode::BadArg,
+        message: message.into(),
+        builtin: builtin.to_string(),
+        hint: hint.to_string(),
+        approval: None,
+        did_you_mean: Vec::new(),
+        expected: String::new(),
+        got: String::new(),
+    })
+}
+
 /// [`bad_value`] that names the operation it refused in `builtin`, such as
 /// `operator Div`, so the error's `builtin` field says where it came from.
 pub fn bad_value_in(builtin: &str, message: impl Into<String>, hint: &str) -> anyhow::Error {

@@ -8,7 +8,7 @@ print("")
 # 1. Detect all available backends
 print("Detecting available AI backends...")
 let backends = ai_backends()
-print("Found " + len(backends) + " backend(s)")
+print("Found " + str(len(backends)) + " backend(s)")
 print("")
 
 # 2. Extract and display backend information
@@ -37,10 +37,10 @@ print("")
 # 5. Filter backends by provider
 print("=== Backend Filtering ===")
 let ollama_filtered = backends | where(fn(b) => b.provider == "Ollama")
-print("Ollama backends: " + len(ollama_filtered))
+print("Ollama backends: " + str(len(ollama_filtered)))
 
 let openai_filtered = backends | where(fn(b) => b.provider == "OpenAI")
-print("OpenAI backends: " + len(openai_filtered))
+print("OpenAI backends: " + str(len(openai_filtered)))
 print("")
 
 # 6. Usage patterns

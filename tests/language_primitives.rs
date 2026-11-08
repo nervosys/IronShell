@@ -88,7 +88,7 @@ fn an_enormous_repeat_is_refused_rather_than_allocated() {
 
 #[test]
 fn a_string_concatenates_with_any_value() {
-    assert_eq!(s("\"n: \" + 1"), "n: 1");
+    // A number is not concatenated with a string: see `a_number_and_a_string_do_not_combine`.
     assert_eq!(s("\"hit: \" + true"), "hit: true");
     assert_eq!(s("\"v: \" + null"), "v: null");
     assert_eq!(s("\"xs: \" + [1, 2]"), "xs: [1, 2]");
@@ -211,7 +211,7 @@ fn a_single_byte_over_the_limit_is_refused() {
 fn ordinary_string_work_is_unaffected() {
     assert_eq!(s("\"a\" + \"b\""), "ab");
     assert_eq!(s("\"=\" * 10"), "==========");
-    assert_eq!(s("\"n: \" + 1"), "n: 1");
+    assert_eq!(s("\"n: \" + \"1\""), "n: 1");
 }
 
 // ── Capture must not change existing semantics (AS-2026-14) ──────────────

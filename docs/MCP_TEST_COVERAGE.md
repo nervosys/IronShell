@@ -183,7 +183,7 @@ Conditional Usage Patterns:
 **Example**:
 ```ironshell
 let servers = mcp_servers()
-servers | foreach(fn(s) => print(s.name + ": " + len(s.tools) + " tools"))
+servers | foreach(fn(s) => print(s.name + ": " + str(len(s.tools)) + " tools"))
 ```
 
 ### `mcp_detect(?endpoint)`

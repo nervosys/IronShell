@@ -42,11 +42,13 @@ let greeting = "Hello, ${name}!"    # => "Hello, world!"
 let math = "2 + 2 = ${2 + 2}"      # => "2 + 2 = 4"
 ```
 
-String concatenation works with `+` and auto-converts the other operand:
+String concatenation works with `+` between two Strings. A String and a number do not combine: that is refused, and the other operand is converted with interpolation or `str()`:
 
 ```ish
-"count: " + 42        # => "count: 42"
-100 + " items"         # => "100 items"
+"count: ${42}"        # => "count: 42"
+"count: " + str(42)   # => "count: 42"
+"100" + " items"      # => "100 items"
+"count: " + 42        # error: E_BAD_ARG, cannot combine String and Int
 ```
 
 ### URIs

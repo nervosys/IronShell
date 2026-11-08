@@ -8,14 +8,14 @@ print("")
 print("1. AI Backend Detection:")
 let backends = ai_backends()
 let selected_backend = ai_detect()
-print("   Available backends: " + len(backends))
+print("   Available backends: " + str(len(backends)))
 print("   Auto-selected: " + selected_backend)
 print("")
 
 # Part 2: Detect MCP Servers  
 print("2. MCP Server Detection:")
 let mcp_servers = mcp_servers()
-print("   Available MCP servers: " + len(mcp_servers))
+print("   Available MCP servers: " + str(len(mcp_servers)))
 print("")
 
 # Part 3: Show what's available

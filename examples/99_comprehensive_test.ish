@@ -22,8 +22,8 @@ print("")
 print("📦 Collections:")
 numbers = [1, 2, 3, 4, 5]
 person = {name: "Alice", age: 30, city: "NYC"}
-print("  Array length: " + len(numbers))
-print("  Record keys: " + len(keys(person)))
+print("  Array length: " + str(len(numbers)))
+print("  Record keys: " + str(len(keys(person))))
 print("  Keys are: ")
 print(keys(person))
 print("")
@@ -39,7 +39,7 @@ print("  Filtered (>2): ")
 print(filtered)
 
 sum = numbers | reduce(fn(a,b) => a + b, 0)
-print("  Sum: " + sum)
+print("  Sum: " + str(sum))
 
 first_three = numbers | take(3)
 print("  First 3: ")
@@ -72,7 +72,7 @@ print("🔧 Mutable Variables:")
 mut counter = 0
 counter = counter + 1
 counter = counter + 1
-print("  Counter after 2 increments: " + counter)
+print("  Counter after 2 increments: " + str(counter))
 print("")
 
 # ═══ Record Operations ═══
@@ -83,7 +83,7 @@ profile = {
   age: 25,
   active: true
 }
-print("  User record has " + len(profile) + " fields")
+print("  User record has " + str(len(profile)) + " fields")
 print("  Field names:")
 print(keys(profile))
 print("  Type: " + type_of(profile))
@@ -103,7 +103,7 @@ print("")
 print("✏️  String Operations:")
 greeting = "Hello, " + "World!"
 print("  Concatenation: " + greeting)
-print("  Length: " + len(greeting))
+print("  Length: " + str(len(greeting)))
 print("")
 
 # ═══ Array Transformations ═══

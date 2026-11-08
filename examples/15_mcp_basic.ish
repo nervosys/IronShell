@@ -9,7 +9,7 @@ let servers = mcp_servers()
 
 print("Step 1: Detection")
 print("  Scanned common ports (3001-3005, 8080-8081)")
-print("  Found " + len(servers) + " MCP server(s)")
+print("  Found " + str(len(servers)) + " MCP server(s)")
 print("")
 
 # Show what was found
@@ -17,7 +17,7 @@ print("Step 2: Results")
 print("")
 
 # Show detected servers or instructions
-servers | foreach(fn(s) => print("  - " + s.name + " at " + s.endpoint + " (" + len(s.tools) + " tools)"))
+servers | foreach(fn(s) => print("  - " + s.name + " at " + s.endpoint + " (" + str(len(s.tools)) + " tools)"))
 
 print("")
 print("To start MCP servers:")

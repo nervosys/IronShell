@@ -17,7 +17,7 @@ print("K8s/Container server tool count: " + k8s_server.tool_count)
 # List all available MCP tools
 print("\n--- All MCP Tools ---")
 let all_tools = mcp_tools()
-print("Total tools available: " + len(all_tools))
+print("Total tools available: " + str(len(all_tools)))
 
 # List tools by category
 print("\n--- Kubernetes Tools ---")

@@ -1766,12 +1766,9 @@ fn binop(op: &BinOp, a: Value, b: Value) -> Result<Value> {
         (Add, Value::Float(x), Value::Float(y)) => Value::Float(x + y),
         (Add, Value::Int(x), Value::Float(y)) => Value::Float((x as f64) + y),
         (Add, Value::Float(x), Value::Int(y)) => Value::Float(x + (y as f64)),
-        // String concatenation
+        // String concatenation. A number and a String do not combine: see the
+        // refusal arm below, which is what `"a" + 1` now reaches.
         (Add, Value::Str(x), Value::Str(y)) => checked_string(format!("{}{}", x, y))?,
-        (Add, Value::Str(x), Value::Int(y)) => checked_string(format!("{}{}", x, y))?,
-        (Add, Value::Str(x), Value::Float(y)) => checked_string(format!("{}{}", x, y))?,
-        (Add, Value::Int(x), Value::Str(y)) => checked_string(format!("{}{}", x, y))?,
-        (Add, Value::Float(x), Value::Str(y)) => checked_string(format!("{}{}", x, y))?,
 
         (Sub, Value::Int(x), Value::Int(y)) => Value::Int(x - y),
         (Sub, Value::Float(x), Value::Float(y)) => Value::Float(x - y),
@@ -1861,10 +1858,16 @@ fn binop(op: &BinOp, a: Value, b: Value) -> Result<Value> {
             }
         }
 
-        // Concatenating anything else with a string renders it the way the user
-        // would see it. Str+Int and Str+Float were special-cased above, so
-        // `"n: " + 1` worked while `"cache hit: " + true` was an error — an
-        // inconsistency with no reason behind it.
+        // A number and a String never combine, in either order or under any
+        // arithmetic operator. `"n: " + 1` used to be "n: 1", so an agent that
+        // wrote `total + 1` where `total` was text got text back, silently.
+        // String repetition (`"=" * 50`) is matched above, before this arm.
+        (op, a, b) if is_number_string_mix(&op, &a, &b) => {
+            return Err(number_string_error(&op, &a, &b))
+        }
+
+        // Concatenating a string with anything else renders it the way the user
+        // would see it. `"cache hit: " + true` is the same as `"cache hit: ${true}"`.
         (Add, Value::Str(x), other) => {
             checked_string(format!("{}{}", x, other.to_display_string()))?
         }
@@ -1882,6 +1885,35 @@ fn binop(op: &BinOp, a: Value, b: Value) -> Result<Value> {
             ))
         }
     })
+}
+
+/// Whether an arithmetic operator is applied to a number and a String, in
+/// either order. Comparison operators are not arithmetic and keep their own
+/// refusal.
+fn is_number_string_mix(op: &BinOp, a: &Value, b: &Value) -> bool {
+    use BinOp::*;
+    matches!(op, Add | Sub | Mul | Div | Rem)
+        && matches!(
+            (a, b),
+            (Value::Str(_), Value::Int(_) | Value::Float(_))
+                | (Value::Int(_) | Value::Float(_), Value::Str(_))
+        )
+}
+
+/// The refusal for a number and a String in arithmetic. The hint names the
+/// conversions that exist: interpolation, and `str()` (or its alias
+/// `to_string()`), which turns a number into text.
+fn number_string_error(op: &BinOp, a: &Value, b: &Value) -> anyhow::Error {
+    let operator = format!("operator {op:?}");
+    crate::safety::bad_arg_in(
+        &operator,
+        format!(
+            "{operator}: cannot combine {} and {}",
+            a.type_name(),
+            b.type_name()
+        ),
+        "use interpolation \"${x}\", or str(x) / to_string(x) to convert a number to text",
+    )
 }
 
 /// The record a caught error is bound to. Its fields sit at the top level, so

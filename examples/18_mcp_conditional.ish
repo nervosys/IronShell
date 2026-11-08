@@ -6,7 +6,7 @@ print("")
 
 # Detect all servers
 let all_servers = mcp_servers()
-print("Total servers detected: " + len(all_servers))
+print("Total servers detected: " + str(len(all_servers)))
 print("")
 
 # Show available servers by port

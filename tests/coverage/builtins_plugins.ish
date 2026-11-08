@@ -16,7 +16,7 @@ match type_of(p) {
     _ => print("  ✗ FAILED: plugins() type")
 }
 match len(p) >= 3 {
-    true => print("  ✓ plugins() has at least 3 plugins: " + len(p)),
+    true => print("  ✓ plugins() has at least 3 plugins: " + str(len(p))),
     false => print("  ✗ FAILED: expected at least 3 plugins")
 }
 
@@ -109,7 +109,7 @@ match len(cats) >= 6 {
     true => print("  ✓ plugin_categories() has at least 6 categories"),
     false => print("  ✗ FAILED: expected at least 6 categories")
 }
-print("  Categories count: " + len(cats))
+print("  Categories count: " + str(len(cats)))
 
 # Verify specific categories exist
 match in("AIBackend", cats) {
