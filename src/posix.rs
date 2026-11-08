@@ -3276,41 +3276,248 @@ fn numeric_prefix(s: &str) -> f64 {
     t[..end].parse().unwrap_or(0.0)
 }
 
+/// One `-k` key: fields `start` through `end` (1-based; no `end` means to the
+/// end of the line), with the key's own `n` and `r` options.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct SortKey {
+    start: usize,
+    end: Option<usize>,
+    numeric: bool,
+    reverse: bool,
+}
+
+/// The options `sort` runs in-process. Anything else (`-h`, `-b`, `-k2.3`, long
+/// options) makes [`SortSpec::parse`] decline, so the program that owns those
+/// options runs instead.
+#[derive(Debug, Default)]
+struct SortSpec {
+    numeric: bool,
+    fold: bool,
+    reverse: bool,
+    unique: bool,
+    stable: bool,
+    sep: Option<char>,
+    keys: Vec<SortKey>,
+    files: Vec<String>,
+}
+
+/// One field of a `-k` spec: a 1-based number and its `n`/`r` options.
+fn sort_field(text: &str) -> Option<(usize, bool, bool)> {
+    let digits = text
+        .find(|c: char| !c.is_ascii_digit())
+        .unwrap_or(text.len());
+    let n: usize = text[..digits].parse().ok()?;
+    if n == 0 {
+        return None;
+    }
+    let (mut numeric, mut reverse) = (false, false);
+    for c in text[digits..].chars() {
+        match c {
+            'n' => numeric = true,
+            'r' => reverse = true,
+            _ => return None,
+        }
+    }
+    Some((n, numeric, reverse))
+}
+
+/// `F[opts][,F[opts]]`, the `-k` argument.
+fn sort_key(spec: &str) -> Option<SortKey> {
+    let (first, second) = match spec.split_once(',') {
+        Some((a, b)) => (a, Some(b)),
+        None => (spec, None),
+    };
+    let (start, n1, r1) = sort_field(first)?;
+    let (end, n2, r2) = match second {
+        Some(s) => {
+            let (e, n, r) = sort_field(s)?;
+            if e < start {
+                return None;
+            }
+            (Some(e), n, r)
+        }
+        None => (None, false, false),
+    };
+    Some(SortKey {
+        start,
+        end,
+        numeric: n1 || n2,
+        reverse: r1 || r2,
+    })
+}
+
+impl SortSpec {
+    fn parse(args: &[String]) -> Option<SortSpec> {
+        let mut spec = SortSpec::default();
+        let mut ops_only = false;
+        let mut i = 0;
+        while i < args.len() {
+            let a = args[i].as_str();
+            if !ops_only && a == "--" {
+                ops_only = true;
+            } else if ops_only || a == "-" || !a.starts_with('-') {
+                spec.files.push(a.to_string());
+            } else if a.starts_with("--") {
+                return None;
+            } else {
+                let chars: Vec<char> = a[1..].chars().collect();
+                let mut j = 0;
+                while j < chars.len() {
+                    match chars[j] {
+                        'r' => spec.reverse = true,
+                        'n' => spec.numeric = true,
+                        'f' => spec.fold = true,
+                        'u' => spec.unique = true,
+                        's' => spec.stable = true,
+                        c @ ('k' | 't') => {
+                            let rest: String = chars[j + 1..].iter().collect();
+                            let value = if rest.is_empty() {
+                                i += 1;
+                                args.get(i)?.clone()
+                            } else {
+                                rest
+                            };
+                            if c == 'k' {
+                                spec.keys.push(sort_key(&value)?);
+                            } else {
+                                let mut it = value.chars();
+                                let sep = it.next()?;
+                                if it.next().is_some() {
+                                    return None;
+                                }
+                                spec.sep = Some(sep);
+                            }
+                            break;
+                        }
+                        _ => return None,
+                    }
+                    j += 1;
+                }
+            }
+            i += 1;
+        }
+        Some(spec)
+    }
+}
+
+/// The byte ranges of the fields of `line`. With a separator, fields are the
+/// pieces between it. Without one, GNU's default: a field is a run of blanks
+/// followed by a run of non-blanks, so its leading blanks belong to it.
+fn sort_fields(line: &str, sep: Option<char>) -> Vec<(usize, usize)> {
+    let mut out = Vec::new();
+    let mut start = 0;
+    match sep {
+        Some(c) => {
+            for (i, ch) in line.char_indices() {
+                if ch == c {
+                    out.push((start, i));
+                    start = i + ch.len_utf8();
+                }
+            }
+        }
+        None => {
+            let mut prev_nonblank = false;
+            for (i, ch) in line.char_indices() {
+                let blank = ch == ' ' || ch == '\t';
+                if blank && prev_nonblank {
+                    out.push((start, i));
+                    start = i;
+                }
+                prev_nonblank = !blank;
+            }
+        }
+    }
+    out.push((start, line.len()));
+    out
+}
+
+/// The text of `key` in a line whose fields are `fields`. A field that does not
+/// exist is empty, and an `end` past the last field runs to the end of the line.
+fn sort_key_text<'a>(line: &'a str, fields: &[(usize, usize)], key: &SortKey) -> &'a str {
+    let Some(&(s, _)) = fields.get(key.start - 1) else {
+        return "";
+    };
+    let e = match key.end {
+        None => line.len(),
+        Some(end) => fields.get(end - 1).map_or(line.len(), |&(_, fe)| fe),
+    };
+    &line[s..e]
+}
+
 fn sort(args: &[String], stdin: &mut Input, sink: &mut Sink) -> Util {
-    let Some((flags, files)) = short_flags(args, "rnuf") else {
+    let Some(spec) = SortSpec::parse(args) else {
         return Util::Decline;
     };
     let mut status = 0;
     let mut lines: Vec<String> = Vec::new();
-    for (_, d) in read_inputs("sort", &files, stdin, sink, &mut status) {
+    for (_, d) in read_inputs("sort", &spec.files, stdin, sink, &mut status) {
         lines.extend(
             lines_of(&d)
                 .iter()
                 .map(|l| String::from_utf8_lossy(l).into_owned()),
         );
     }
-    let numeric = flags.contains(&'n');
-    let fold = flags.contains(&'f');
-    let key_cmp = |a: &String, b: &String| -> std::cmp::Ordering {
-        if numeric {
-            numeric_prefix(a)
-                .partial_cmp(&numeric_prefix(b))
-                .unwrap_or(std::cmp::Ordering::Equal)
-        } else if fold {
-            collate(&a.to_uppercase(), &b.to_uppercase())
-        } else {
-            collate(a, b)
-        }
+    let fields: Vec<Vec<(usize, usize)>> = if spec.keys.is_empty() {
+        Vec::new()
+    } else {
+        lines.iter().map(|l| sort_fields(l, spec.sep)).collect()
     };
-    lines.sort_by(|a, b| key_cmp(a, b).then_with(|| collate(a, b)));
-    if flags.contains(&'u') {
-        lines.dedup_by(|a, b| key_cmp(a, b) == std::cmp::Ordering::Equal);
+    // Compare two lines by their keys alone (`-u` dedups on this), or by the
+    // whole line when there are no keys.
+    let by_keys = |i: usize, j: usize| -> std::cmp::Ordering {
+        if spec.keys.is_empty() {
+            let (a, b) = (&lines[i], &lines[j]);
+            return if spec.numeric {
+                numeric_prefix(a)
+                    .partial_cmp(&numeric_prefix(b))
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            } else if spec.fold {
+                collate(&a.to_uppercase(), &b.to_uppercase())
+            } else {
+                collate(a, b)
+            };
+        }
+        for key in &spec.keys {
+            let a = sort_key_text(&lines[i], &fields[i], key);
+            let b = sort_key_text(&lines[j], &fields[j], key);
+            let numeric = key.numeric || spec.numeric;
+            let o = if numeric {
+                numeric_prefix(a)
+                    .partial_cmp(&numeric_prefix(b))
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            } else if spec.fold {
+                collate(&a.to_uppercase(), &b.to_uppercase())
+            } else {
+                collate(a, b)
+            };
+            let o = if key.reverse { o.reverse() } else { o };
+            if o != std::cmp::Ordering::Equal {
+                return o;
+            }
+        }
+        std::cmp::Ordering::Equal
+    };
+    // With no keys, equal lines fall back to comparing the whole line, unless
+    // `-s`. With keys, equal lines keep their input order.
+    let last_resort = spec.keys.is_empty() && !spec.stable;
+    let mut order: Vec<usize> = (0..lines.len()).collect();
+    order.sort_by(|&i, &j| {
+        by_keys(i, j).then_with(|| {
+            if last_resort {
+                collate(&lines[i], &lines[j])
+            } else {
+                std::cmp::Ordering::Equal
+            }
+        })
+    });
+    if spec.unique {
+        order.dedup_by(|&mut j, &mut i| by_keys(i, j) == std::cmp::Ordering::Equal);
     }
-    if flags.contains(&'r') {
-        lines.reverse();
+    if spec.reverse {
+        order.reverse();
     }
-    for l in lines {
-        sink.out.extend_from_slice(l.as_bytes());
+    for i in order {
+        sink.out.extend_from_slice(lines[i].as_bytes());
         sink.out.push(b'\n');
     }
     Util::Done(status)
