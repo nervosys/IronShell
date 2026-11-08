@@ -793,6 +793,45 @@ fn lex_marked(src: &str) -> Result<(Vec<Spanned>, std::collections::HashSet<usiz
                 advance(&chars, &mut pos, &mut line, &mut col);
                 // Check for line comment //
                 if peek(&chars, pos) == Some('/') {
+                    // `//` straight after an operand, then an operand (`7 // 2`,
+                    // `(7 // 2) * 10`), is the integer-division spelling from
+                    // another language. Reading it as a comment silently dropped
+                    // the rest of the line (`5 // 999` printed 5), so it is an
+                    // error. `//` at the start of a line, or after an operator
+                    // or a complete statement, is still a comment.
+                    let after_operand = out.last().map_or(false, |t| {
+                        t.line == start_line
+                            && matches!(
+                                t.kind,
+                                Tok::Ident
+                                    | Tok::String
+                                    | Tok::Int
+                                    | Tok::Float
+                                    | Tok::RParen
+                                    | Tok::RBracket
+                                    | Tok::RBrace
+                                    | Tok::True
+                                    | Tok::False
+                                    | Tok::Null
+                            )
+                    });
+                    let mut k = pos + 1;
+                    while k < chars.len() && (chars[k] == ' ' || chars[k] == '\t') {
+                        k += 1;
+                    }
+                    let operand_next = k < chars.len()
+                        && (chars[k].is_ascii_digit()
+                            || is_ident_start(chars[k])
+                            || chars[k] == '(');
+                    if after_operand && operand_next {
+                        return Err(anyhow::Error::new(ParseError {
+                            message: format!(
+                                "`//` at line {}, column {} follows an operand",
+                                start_line, start_col
+                            ),
+                            hint: "`//` starts a comment in IronShell; there is no integer-division operator: use math.floor(a / b)".to_string(),
+                        }));
+                    }
                     advance(&chars, &mut pos, &mut line, &mut col); // consume second /
                                                                     // Skip until end of line
                     while let Some(ch) = peek(&chars, pos) {
