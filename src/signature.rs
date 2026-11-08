@@ -11142,7 +11142,7 @@ pub static SIGNATURES: &[Signature] = &[
         returns: "Array",
         doc: "Declared builtins whose name or description contains every word of a query, as {name, signature, doc}; at most 10.",
         examples: &[
-            (r#"suggest("sha256 digest") | map(fn(s) => s.name)"#, r#"["sha256"]"#),
+            (r#"suggest("sha256 digest") | map(fn(s) => s.name)"#, r#"["sha256", "crypto_hash"]"#),
         ],
     },
     Signature {
