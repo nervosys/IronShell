@@ -2590,7 +2590,13 @@ impl Parser {
             return Ok(());
         }
         let underscore = format!("{}_{}", head.text, tail.text);
-        if crate::signature::signature_of(&underscore).is_none() {
+        // The signature table is part of the native build only; the web build
+        // parses without this hint.
+        #[cfg(feature = "native")]
+        let known = crate::signature::signature_of(&underscore).is_some();
+        #[cfg(not(feature = "native"))]
+        let known = false;
+        if !known {
             return Ok(());
         }
         Err(anyhow::Error::new(HintedSyntax {
