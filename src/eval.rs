@@ -1838,29 +1838,19 @@ fn binop(op: &BinOp, a: Value, b: Value) -> Result<Value> {
 /// Interpolate ${expr} patterns in a string
 fn interpolate_string(s: &str, env: &mut Env) -> Result<Value> {
     let mut result = String::new();
-    let mut chars = s.chars().peekable();
+    let chars: Vec<char> = s.chars().collect();
+    let mut i = 0;
 
-    while let Some(ch) = chars.next() {
-        if ch == '$' && chars.peek() == Some(&'{') {
-            chars.next(); // consume '{'
-
-            // Find the closing '}'
-            let mut expr_str = String::new();
-            let mut depth = 1;
-            for ch in chars.by_ref() {
-                if ch == '{' {
-                    depth += 1;
-                    expr_str.push(ch);
-                } else if ch == '}' {
-                    depth -= 1;
-                    if depth == 0 {
-                        break;
-                    }
-                    expr_str.push(ch);
-                } else {
-                    expr_str.push(ch);
-                }
-            }
+    while i < chars.len() {
+        if chars[i] == '$' && chars.get(i + 1) == Some(&'{') {
+            // The hole's end is found by the lexer's own rule, so a string
+            // literal inside the hole can hold `}` or `${` without ending it.
+            let body = i + 2;
+            let (expr_str, next) = match crate::parser::interp_hole_end(&chars, body) {
+                Some(end) => (chars[body..end - 1].iter().collect::<String>(), end),
+                None => (chars[body..].iter().collect::<String>(), chars.len()),
+            };
+            i = next;
 
             // Parse and evaluate the expression
             match crate::parser::parse_program(&expr_str) {
@@ -1896,7 +1886,8 @@ fn interpolate_string(s: &str, env: &mut Env) -> Result<Value> {
                 }
             }
         } else {
-            result.push(ch);
+            result.push(chars[i]);
+            i += 1;
         }
     }
 

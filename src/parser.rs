@@ -940,6 +940,21 @@ fn lex_marked(src: &str) -> Result<(Vec<Spanned>, std::collections::HashSet<usiz
                         closed = true;
                         break;
                     }
+                    if ch == '$' && peek(&chars, pos) == Some('{') {
+                        // An interpolation hole is kept verbatim, quotes and
+                        // all: the expression inside it is parsed when the
+                        // string is evaluated, so its own `"` must not end
+                        // this string.
+                        if let Some(end) = interp_hole_end(&chars, pos + 1) {
+                            s.push('$');
+                            while pos < end {
+                                let hole = chars[pos];
+                                advance(&chars, &mut pos, &mut line, &mut col);
+                                s.push(hole);
+                            }
+                            continue;
+                        }
+                    }
                     if ch == '\\' {
                         if let Some(esc) = peek(&chars, pos) {
                             advance(&chars, &mut pos, &mut line, &mut col);
@@ -1167,6 +1182,53 @@ fn is_ident_start(c: char) -> bool {
 }
 fn is_ident_part(c: char) -> bool {
     c.is_ascii_alphanumeric() || c == '_'
+}
+
+/// The index just past the `}` that closes an interpolation hole whose body
+/// starts at `start` (the index just after its `{`). String literals inside the
+/// hole are skipped, and may hold holes of their own. `None` when the hole never
+/// closes.
+///
+/// The lexer and the evaluator both use this, so they agree on where a hole
+/// ends: `"x ${"b"} c"` is one string, and `"${"in ${n} q"}"` nests.
+pub fn interp_hole_end(chars: &[char], start: usize) -> Option<usize> {
+    let mut depth = 1usize;
+    let mut i = start;
+    while i < chars.len() {
+        match chars[i] {
+            '{' => depth += 1,
+            '}' => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(i + 1);
+                }
+            }
+            '"' => {
+                i = interp_string_end(chars, i + 1)?;
+                continue;
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    None
+}
+
+/// The index just past the closing `"` of a string literal whose body starts at
+/// `start`, skipping escapes and the holes of nested interpolation.
+fn interp_string_end(chars: &[char], start: usize) -> Option<usize> {
+    let mut i = start;
+    while i < chars.len() {
+        match chars[i] {
+            '\\' => i += 2,
+            '"' => return Some(i + 1),
+            '$' if chars.get(i + 1) == Some(&'{') => {
+                i = interp_hole_end(chars, i + 2)?;
+            }
+            _ => i += 1,
+        }
+    }
+    None
 }
 
 /// The scalar named by a `\xHH` or `\u{H..H}` escape whose `x` or `u` is at
