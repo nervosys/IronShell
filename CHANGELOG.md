@@ -43,6 +43,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - A string or record literal directly followed by `[` indexes: `"hello"[0]` is `h` and `{k: 1}["k"]` is 1, where both silently returned the bracket as an array.
 - `sort([2, 1.5, 3])` sorts its argument, as the piped form does, instead of refusing a direct call.
 - `a[start:end]` fails with a hint naming the `slice` builtin, since there is no slice syntax.
+- `//` directly after a value and followed only by an arithmetic expression (`7 // 2`, `a // b`) is E_PARSE with a hint to write `math.floor(a / b)`, where it silently dropped the rest of the line as a comment. `//` followed by prose (`x = 5 // note words`) is still a comment; a single word after it (`x = 5 // note`) now reads as division and is refused.
+- An unclosed single- or double-quoted string is E_PARSE at the opening quote, instead of printing its text.
+- `first(n)` and `last(n)` with an explicit count return an array (`first(1)` is `[10]`), so they can feed `map`; without a count they still return the element.
+- `file_patch` applies a batch all-or-nothing: if any patch does not apply, nothing is written or journaled, and the result names the failed patch.
+- `crypto.hash("sha256", data)` takes the algorithm first, as AGENTS.md shows; the existing forms are unchanged.
+- An unknown module name (`zzzz.parse(...)`) is E_UNKNOWN_BUILTIN naming the module, with suggestions, not a record type error.
+- A module call such as `"abc" | str.upper()` or `| crypto.hash("sha256")` works as a pipeline stage.
+- `ontology_describe` accepts the dotted spelling of a module function (`file.replace`) and describes the builtin it runs.
+- Parse errors for `=` in a comparison and for `**` name the fix (`==`, `math.pow`); `contains` on an array and `in` without a piped value name the membership form `value | in(array)`.
+- Recursive `search_*` builtins skip the `.ironshell` state directory, so a search no longer matches the audit log.
 
 ## [14.0.0] - 2026-11-06
 
