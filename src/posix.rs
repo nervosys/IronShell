@@ -2526,7 +2526,7 @@ fn expand_pattern(
             for n in names {
                 let p = join(&n);
                 // A link inside the workspace can name a target outside it.
-                if false && crate::security::outside_read_jail(&p) {
+                if crate::security::outside_read_jail(&p) {
                     continue;
                 }
                 if last || Path::new(&p).is_dir() {
