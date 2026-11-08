@@ -72,7 +72,9 @@ tools = get_agent_api_tools("http://localhost:3002")
 (`src/posix.rs`): pipelines, `&&`/`||`, variables, `$(…)`, redirections,
 `if`/`for`/`while`, `test`, and GNU-compatible `ls`/`find`/`grep`/`head`/`tail`/
 `wc`/`sort`/`uniq`/`cut`/`sed`/`cat`/`echo`/`printf` (the common GNU flags, not all: `ls` takes `-a` but not `-l`;
-an unsupported flag falls back as below). Other commands run as the
+`sort -k`/`-t`, `cat -n` and printf `%x` and `%.Nf` run in-process too). On Windows, an unsupported flag
+runs a GNU-compatible program if one is on PATH, and otherwise exits 2 naming the flag (elsewhere it runs the
+PATH program of that name). Other commands run as the
 real program, directly, through the effect gate — never via `bash -c` — so
 agent mode gates each one. On E6 (`benches/agentic/bashcompat.mjs`), 32 of 32
 matched bash byte-for-byte, and 32 of 32 on a held-out corpus.
@@ -80,9 +82,10 @@ matched bash byte-for-byte, and 32 of 32 on a held-out corpus.
 In the subset, `uniq` drops only adjacent duplicates, as Unix `uniq` does
 (`sort | uniq` drops all of them); the `arr.unique` builtin drops all duplicates.
 
-Not in the subset (functions, `case`, `$((…))`, here-documents, subshells,
-background jobs) falls back to the transpiler, which may delegate to
-`bash -lc` when `IRONSHELL_ALLOW_SH` is set; that fallback is not contained.
+A script outside the subset (functions, `case`, `$((…))`, here-documents, subshells,
+background jobs) is refused before any of it runs, naming the construct and its line, unless
+`IRONSHELL_ALLOW_SH` is set. With it, the unsupported parts fall back to the transpiler, which may
+delegate them to `bash -lc`; that fallback is not contained.
 Zsh and PowerShell input still goes through the transpilers only.
 
 ```bash
