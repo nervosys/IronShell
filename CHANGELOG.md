@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [14.0.1] - 2026-11-08
+
 ### Changed
 
 - Windows: `svc_create` with `restart: "always"` sets three restarts one second apart, with the non-crash flag on, so a non-zero exit restarts the service too. It was `E_UNIMPLEMENTED` before. The service control manager never restarts a service that stops cleanly, so on Windows "always" means restart on any failure. If the failure actions cannot be set, the new service is deleted.
@@ -4297,7 +4299,8 @@ N/A - Initial release
 
 See [ROADMAP.md](ROADMAP.md) for upcoming features.
 
-[Unreleased]: https://github.com/nervosys/AetherShell/compare/v14.0.0...HEAD
+[Unreleased]: https://github.com/nervosys/IronShell/compare/v14.0.1...HEAD
+[14.0.1]: https://github.com/nervosys/IronShell/compare/v14.0.0...v14.0.1
 [14.0.0]: https://github.com/nervosys/AetherShell/compare/v12.0.2...v14.0.0
 [8.0.0]: https://github.com/nervosys/AetherShell/compare/v7.4.0...v8.0.0
 [5.0.0]: https://github.com/nervosys/AetherShell/compare/v4.1.0...v5.0.0

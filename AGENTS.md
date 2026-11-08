@@ -8,7 +8,7 @@
 - **Tagline**: One language, every platform, deterministic typed output
 - **Binary**: `ish` (`ae`, the pre-14.0.0 name, is installed as an alias)
 - **Language**: Rust
-- **Version**: 14.0.0
+- **Version**: 14.0.1
 - **Repository**: https://github.com/nervosys/IronShell
 - **License**: AGPL-3.0-or-later
 - **File Extension**: `.ish`

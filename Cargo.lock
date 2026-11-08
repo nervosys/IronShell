@@ -2619,7 +2619,7 @@ dependencies = [
 
 [[package]]
 name = "iron-shell"
-version = "14.0.0"
+version = "14.0.1"
 dependencies = [
  "agentic-eval",
  "anyhow",
@@ -2706,7 +2706,7 @@ dependencies = [
 
 [[package]]
 name = "iron-shell-lsp"
-version = "14.0.0"
+version = "14.0.1"
 dependencies = [
  "anyhow",
  "async-trait",
