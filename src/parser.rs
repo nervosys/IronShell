@@ -1480,6 +1480,73 @@ impl Parser {
         Ok(left)
     }
 
+    /// The arguments of a parenthesised call, after the `(` has been seen by the
+    /// caller: comma-separated expressions, each `.field` argument a row lambda.
+    fn parse_paren_call_args(&mut self) -> Result<Vec<Expr>> {
+        self.match_tok(Tok::LParen);
+        let mut args = Vec::new();
+        if !self.check(Tok::RParen) {
+            loop {
+                // An argument that mentions `.field` without a receiver
+                // is a function of the row: wrap it as one.
+                let saved = (self.implicit_row, self.implicit_used);
+                self.implicit_row = true;
+                self.implicit_used = false;
+                let parsed = self.parse_expr();
+                let used = self.implicit_used;
+                (self.implicit_row, self.implicit_used) = saved;
+                let a = parsed?;
+                args.push(if used {
+                    Expr::Lambda {
+                        params: vec!["__".to_string()],
+                        body: Box::new(a),
+                    }
+                } else {
+                    a
+                });
+                if self.match_tok(Tok::Comma) {
+                    continue;
+                }
+                break;
+            }
+        }
+        self.need(Tok::RParen, "expected ')' after arguments")?;
+        Ok(args)
+    }
+
+    /// `module.member(` as a pipeline stage: the callee chain when the tokens ahead
+    /// are `ident (. ident)+` followed by `(`. Consumes them only on a match, so
+    /// `x | a.b` without a call is still refused where it was.
+    fn take_module_member_callee(&mut self) -> Option<Expr> {
+        let head = self.toks.get(self.i)?;
+        if head.kind != Tok::Ident {
+            return None;
+        }
+        let mut k = self.i + 1;
+        let mut members = Vec::new();
+        while self.toks.get(k).map(|t| t.kind) == Some(Tok::Dot) {
+            let member = self.toks.get(k + 1)?;
+            if member.kind != Tok::Ident {
+                return None;
+            }
+            members.push(member.text.clone());
+            k += 2;
+        }
+        if members.is_empty() || self.toks.get(k).map(|t| t.kind) != Some(Tok::LParen) {
+            return None;
+        }
+        let mut callee = Expr::Ident(head.text.clone());
+        self.i += 1;
+        for member in members {
+            self.i += 2;
+            callee = Expr::MemberAccess {
+                object: Box::new(callee),
+                field: member,
+            };
+        }
+        Some(callee)
+    }
+
     /// Word-call support: if the rhs begins with an identifier, slurp a sequence of
     /// atoms/lambdas as arguments to that identifier.
     fn parse_call_like(&mut self) -> Result<Expr> {
@@ -1489,6 +1556,14 @@ impl Parser {
         if self.check(Tok::Async) {
             return self.parse_async_lambda();
         }
+        if let Some(callee) = self.take_module_member_callee() {
+            let args = self.parse_paren_call_args()?;
+            return Ok(Expr::Call {
+                callee: Box::new(callee),
+                args,
+                named: Vec::new(),
+            });
+        }
         let primary = self.parse_indexed_atom()?;
         // Remember the line where the primary expression ended (for word-call line tracking)
         let primary_line = self.prev().line;
@@ -1497,34 +1572,7 @@ impl Parser {
             // If the next token is a parenthesis, parse a normal call with
             // comma-separated expressions (handles e.g. map(fn(x)=>..., 0)).
             if self.check(Tok::LParen) {
-                self.match_tok(Tok::LParen);
-                let mut args = Vec::new();
-                if !self.check(Tok::RParen) {
-                    loop {
-                        // An argument that mentions `.field` without a receiver
-                        // is a function of the row: wrap it as one.
-                        let saved = (self.implicit_row, self.implicit_used);
-                        self.implicit_row = true;
-                        self.implicit_used = false;
-                        let parsed = self.parse_expr();
-                        let used = self.implicit_used;
-                        (self.implicit_row, self.implicit_used) = saved;
-                        let a = parsed?;
-                        args.push(if used {
-                            Expr::Lambda {
-                                params: vec!["__".to_string()],
-                                body: Box::new(a),
-                            }
-                        } else {
-                            a
-                        });
-                        if self.match_tok(Tok::Comma) {
-                            continue;
-                        }
-                        break;
-                    }
-                }
-                self.need(Tok::RParen, "expected ')' after arguments")?;
+                let args = self.parse_paren_call_args()?;
                 return Ok(Expr::Call {
                     callee: Box::new(callee),
                     args,
