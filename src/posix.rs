@@ -169,7 +169,7 @@ impl<'a> Lexer<'a> {
                 e.at.get_or_insert(start);
                 return Err(e);
             }
-            at.extend(std::iter::repeat(start).take(out.len() - before));
+            at.extend(std::iter::repeat_n(start, out.len() - before));
         }
         Ok((out, at))
     }
