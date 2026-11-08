@@ -4646,11 +4646,16 @@ pub(crate) fn call_lambda_one(
             lam.params.len()
         )));
     };
+    // Captured free variables go in under the parameter (a parameter of the
+    // same name wins) and come out after it: without them a curried lambda,
+    // `fn(n) => fn(x) => x * n`, called from map or where saw `n` unbound.
+    let restore_caps = crate::eval::install_captured(&lam.captured, env);
     let saved_pipe = env.take_input();
     let prev = env.replace_param(p, arg);
     let result = eval_expr(&lam.body, env);
     let cur = env.restore_param(p, prev);
     env.set_input(saved_pipe);
+    crate::eval::restore_captured(restore_caps, env);
     result.map(|r| (r, if give_back { cur } else { None }))
 }
 
@@ -4663,6 +4668,8 @@ fn bind_eval_unbind(
     env: &mut Env,
     give_back: bool,
 ) -> (Result<Value>, Vec<Value>) {
+    // Captured free variables first, under the parameters; see call_lambda_one.
+    let restore_caps = crate::eval::install_captured(&lam.captured, env);
     let mut saved: Vec<Option<Value>> = Vec::with_capacity(args.len());
     for (p, a) in lam.params.iter().zip(args) {
         saved.push(env.replace_param(p, a));
@@ -4676,6 +4683,7 @@ fn bind_eval_unbind(
         }
     }
     back.reverse();
+    crate::eval::restore_captured(restore_caps, env);
     (result, back)
 }
 

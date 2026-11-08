@@ -1534,7 +1534,7 @@ fn capture_free_vars(
 ///
 /// Captured values are installed *under* the parameters: a parameter of the
 /// same name must win, or a lambda could not shadow a name it also closes over.
-fn install_captured(
+pub(crate) fn install_captured(
     captured: &std::collections::BTreeMap<String, Value>,
     env: &mut Env,
 ) -> Vec<(String, Option<Value>)> {
@@ -1547,7 +1547,7 @@ fn install_captured(
 }
 
 /// Undo `install_captured`.
-fn restore_captured(saved: Vec<(String, Option<Value>)>, env: &mut Env) {
+pub(crate) fn restore_captured(saved: Vec<(String, Option<Value>)>, env: &mut Env) {
     for (name, old) in saved.into_iter().rev() {
         match old {
             Some(v) => env.set_var_unchecked(&name, v),

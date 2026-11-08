@@ -434,7 +434,7 @@ fn an_effectful_prefix_is_not_abandoned_just_because_a_barrier_follows() {
 
     let (stats, _out) = stream_stats(
         "let xs = range(0, 20); \
-         xs | map(fn(x) => file_exists(\"no_such_file_xyzzy\")) | take(2) | sort()",
+         xs | map(fn(x) => file_exists(\"no_such_file_xyzzy\")) | take(2) | sort_by(fn(r) => 0)",
     );
     assert!(stats.barrier_tail);
     assert!(
