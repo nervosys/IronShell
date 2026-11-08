@@ -1204,6 +1204,25 @@ fn run_posix_or_fall_back(src: &str) {
         );
         std::process::exit(status);
     }
+    // Outside the subset, and nothing has run. The transpiler below turns the
+    // unsupported parts into `sh(...)` calls: with IRONSHELL_ALLOW_SH they run
+    // through `bash -lc`, and without it each refuses at run time, after the
+    // lines before it have already run. Without the opt-in, refuse here, naming
+    // the construct and where it starts.
+    if iron_shell::security::validate_sh_allowed().is_err() {
+        if let Some(r) = iron_shell::posix::refusal(src) {
+            let e = iron_shell::safety::policy_deny(
+                "posix",
+                format!(
+                    "{} at line {}, column {} is not in the in-process POSIX subset, so nothing in this script was run",
+                    r.construct, r.line, r.column
+                ),
+                "run the supported parts on their own, or set IRONSHELL_ALLOW_SH=true to run the unsupported parts through bash -lc, outside the effect gate",
+            );
+            iron_shell::repl::report_error(&e);
+            std::process::exit(iron_shell::repl::exit_status_for(&e));
+        }
+    }
 }
 
 fn run_code(code: &str) -> Result<()> {

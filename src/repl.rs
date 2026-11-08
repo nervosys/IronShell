@@ -318,6 +318,12 @@ pub fn exit_status_for(e: &anyhow::Error) -> i32 {
     1
 }
 
+/// Render an error the way the REPL renders an uncaught one, for a refusal made
+/// outside the REPL (`ish -b` before it runs anything).
+pub fn report_error(e: &anyhow::Error) {
+    print_eval_error(e, crate::config::colors_enabled_stderr());
+}
+
 /// Render an uncaught evaluation error.
 ///
 /// A [`crate::safety::SafetyError`]'s `Display` is JSON (so agents can branch on

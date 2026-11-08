@@ -65,6 +65,9 @@ enum Tok {
     And,
     Or,
     Semi,
+    DSemi,
+    LParen,
+    RParen,
     Nl,
     Redir(Redir),
 }
@@ -114,14 +117,23 @@ struct AndOr {
 type List = Vec<AndOr>;
 
 /// Why the subset declined a script. Never shown as an error: it is the signal
-/// to fall back.
+/// to fall back, or, for `ish -b`, the reason a refusal names.
 #[derive(Debug)]
-pub struct Unsupported(pub String);
+pub struct Unsupported {
+    /// The construct, named as the user would name it: `case ... esac`.
+    pub what: String,
+    /// The character offset in the source where the construct starts, when the
+    /// parser knows it.
+    pub at: Option<usize>,
+}
 
 type PResult<T> = Result<T, Unsupported>;
 
 fn unsupported<T>(what: &str) -> PResult<T> {
-    Err(Unsupported(what.to_string()))
+    Err(Unsupported {
+        what: what.to_string(),
+        at: None,
+    })
 }
 
 // ── lexer ────────────────────────────────────────────────────────────────
@@ -146,82 +158,110 @@ impl<'a> Lexer<'a> {
         self.s.get(self.i + n).copied()
     }
 
-    fn tokens(mut self) -> PResult<Vec<Tok>> {
+    /// The tokens of the source, and the character offset each one starts at.
+    fn tokens(mut self) -> PResult<(Vec<Tok>, Vec<usize>)> {
         let mut out = Vec::new();
+        let mut at = Vec::new();
         while let Some(c) = self.peek() {
-            match c {
-                ' ' | '\t' | '\r' => self.i += 1,
-                '\\' if self.peek_at(1) == Some('\n') => self.i += 2,
-                '#' => {
-                    while let Some(c) = self.peek() {
-                        if c == '\n' {
-                            break;
-                        }
-                        self.i += 1;
+            let start = self.i;
+            let before = out.len();
+            if let Err(mut e) = self.token(c, &mut out) {
+                e.at.get_or_insert(start);
+                return Err(e);
+            }
+            at.extend(std::iter::repeat(start).take(out.len() - before));
+        }
+        Ok((out, at))
+    }
+
+    /// One token, or the whitespace or comment before it, at `self.i`.
+    fn token(&mut self, c: char, out: &mut Vec<Tok>) -> PResult<()> {
+        match c {
+            ' ' | '\t' | '\r' => self.i += 1,
+            '\\' if self.peek_at(1) == Some('\n') => self.i += 2,
+            '#' => {
+                while let Some(c) = self.peek() {
+                    if c == '\n' {
+                        break;
                     }
-                }
-                '\n' => {
                     self.i += 1;
-                    out.push(Tok::Nl);
                 }
-                ';' => {
-                    if self.peek_at(1) == Some(';') {
-                        return unsupported("case");
-                    }
+            }
+            '\n' => {
+                self.i += 1;
+                out.push(Tok::Nl);
+            }
+            ';' => {
+                if self.peek_at(1) == Some(';') {
+                    self.i += 2;
+                    out.push(Tok::DSemi);
+                } else {
                     self.i += 1;
                     out.push(Tok::Semi);
                 }
-                '|' => {
-                    if self.peek_at(1) == Some('|') {
-                        self.i += 2;
-                        out.push(Tok::Or);
-                    } else if self.peek_at(1) == Some('&') {
-                        return unsupported("|&");
-                    } else {
-                        self.i += 1;
-                        out.push(Tok::Pipe);
-                    }
-                }
-                '&' => {
-                    if self.peek_at(1) == Some('&') {
-                        self.i += 2;
-                        out.push(Tok::And);
-                    } else if self.peek_at(1) == Some('>') {
-                        self.i += 2;
-                        if self.peek() == Some('>') {
-                            return unsupported("&>>");
-                        }
-                        let target = self.target()?;
-                        out.push(Tok::Redir(Redir::Both(target)));
-                    } else {
-                        return unsupported("background job");
-                    }
-                }
-                '(' | ')' => return unsupported("subshell"),
-                '<' | '>' => out.push(Tok::Redir(self.redir(None)?)),
-                _ => {
-                    // A word; but digits immediately followed by a redirection
-                    // operator are that operator's descriptor.
-                    let start = self.i;
-                    let mut j = self.i;
-                    while self.s.get(j).is_some_and(|c| c.is_ascii_digit()) {
-                        j += 1;
-                    }
-                    if j > start && matches!(self.s.get(j), Some('<') | Some('>')) {
-                        let fd: u8 = self.s[start..j]
-                            .iter()
-                            .collect::<String>()
-                            .parse()
-                            .map_err(|_| Unsupported("descriptor".into()))?;
-                        self.i = j;
-                        out.push(Tok::Redir(self.redir(Some(fd))?));
-                        continue;
-                    }
-                    out.push(Tok::Word(self.word()?));
+            }
+            '|' => {
+                if self.peek_at(1) == Some('|') {
+                    self.i += 2;
+                    out.push(Tok::Or);
+                } else if self.peek_at(1) == Some('&') {
+                    return unsupported("|&");
+                } else {
+                    self.i += 1;
+                    out.push(Tok::Pipe);
                 }
             }
+            '&' => {
+                if self.peek_at(1) == Some('&') {
+                    self.i += 2;
+                    out.push(Tok::And);
+                } else if self.peek_at(1) == Some('>') {
+                    self.i += 2;
+                    if self.peek() == Some('>') {
+                        return unsupported("&>>");
+                    }
+                    let target = self.target()?;
+                    out.push(Tok::Redir(Redir::Both(target)));
+                } else {
+                    return unsupported("background job");
+                }
+            }
+            // A parenthesis is the parser's to refuse, where it knows whether
+            // it opens a function definition, a subshell, or a case pattern.
+            '(' => {
+                self.i += 1;
+                out.push(Tok::LParen);
+            }
+            ')' => {
+                self.i += 1;
+                out.push(Tok::RParen);
+            }
+            '<' | '>' => out.push(Tok::Redir(self.redir(None)?)),
+            _ => {
+                // A word; but digits immediately followed by a redirection
+                // operator are that operator's descriptor.
+                let start = self.i;
+                let mut j = self.i;
+                while self.s.get(j).is_some_and(|c| c.is_ascii_digit()) {
+                    j += 1;
+                }
+                if j > start && matches!(self.s.get(j), Some('<') | Some('>')) {
+                    let fd: u8 = self.s[start..j]
+                        .iter()
+                        .collect::<String>()
+                        .parse()
+                        .map_err(|_| Unsupported {
+                            what: "descriptor".into(),
+                            at: None,
+                        })?;
+                    self.i = j;
+                    out.push(Tok::Redir(self.redir(Some(fd))?));
+                    return Ok(());
+                }
+                out.push(Tok::Word(self.word()?));
+            }
         }
-        Ok(out)
+        Ok(())
     }
 
     fn redir(&mut self, fd: Option<u8>) -> PResult<Redir> {
@@ -229,7 +269,7 @@ impl<'a> Lexer<'a> {
         self.i += 1;
         if c == '<' {
             match self.peek() {
-                Some('<') => return unsupported("here-document"),
+                Some('<') => return unsupported("here-document (<<)"),
                 Some('(') => return unsupported("process substitution"),
                 Some('&') | Some('>') => return unsupported("<& / <>"),
                 _ => {}
@@ -438,7 +478,7 @@ impl<'a> Lexer<'a> {
         match self.peek() {
             Some('(') => {
                 if self.peek_at(1) == Some('(') {
-                    return unsupported("arithmetic expansion");
+                    return unsupported("arithmetic expansion $((...))");
                 }
                 self.i += 1;
                 let start = self.i;
@@ -582,11 +622,33 @@ impl<'a> Lexer<'a> {
 
 struct Parser {
     toks: Vec<Tok>,
+    /// The character offset each token starts at.
+    at: Vec<usize>,
     i: usize,
 }
 
 /// The text of a word that is a single unquoted literal, which is what a
 /// reserved word must be to count as one.
+/// What a stray operator token is, as the construct it belongs to.
+fn operator_what(t: &Tok) -> &'static str {
+    match t {
+        Tok::LParen | Tok::RParen => "subshell",
+        Tok::DSemi => "case ... esac",
+        _ => "unexpected operator",
+    }
+}
+
+/// What a reserved word that starts a construct the subset lacks is called.
+fn keyword_what(k: &str) -> String {
+    match k {
+        "case" | "esac" => "case ... esac".into(),
+        "function" => "function definition".into(),
+        "[[" | "]]" => "[[ ... ]]".into(),
+        "select" => "select loop".into(),
+        _ => format!("`{k}`"),
+    }
+}
+
 fn plain(w: &Word) -> Option<&str> {
     match w.as_slice() {
         [Part::Lit(s, false)] => Some(s),
@@ -600,6 +662,11 @@ const RESERVED: &[&str] = &[
 ];
 
 impl Parser {
+    /// The offset of the token at `self.i`, or of the last one at the end.
+    fn offset(&self) -> usize {
+        self.at.get(self.i).or(self.at.last()).copied().unwrap_or(0)
+    }
+
     fn peek(&self) -> Option<&Tok> {
         self.toks.get(self.i)
     }
@@ -642,7 +709,7 @@ impl Parser {
                     }
                 }
                 Some(Tok::Redir(_)) => {}
-                Some(_) => return unsupported("unexpected operator"),
+                Some(t) => return unsupported(operator_what(t)),
             }
             out.push(self.and_or()?);
             match self.peek() {
@@ -798,7 +865,7 @@ impl Parser {
                     redirs: self.trailing_redirs(),
                 })
             }
-            Some(k) if !matches!(k, "!") => unsupported(&format!("`{k}`")),
+            Some(k) if !matches!(k, "!") => unsupported(&keyword_what(k)),
             _ => self.simple(),
         }
     }
@@ -831,6 +898,14 @@ impl Parser {
                 Some(Tok::Redir(r)) => {
                     redirs.push(r.clone());
                     self.i += 1;
+                }
+                Some(Tok::LParen)
+                    if words.len() == 1 && assigns.is_empty() && redirs.is_empty() =>
+                {
+                    return unsupported("function definition");
+                }
+                Some(t @ (Tok::LParen | Tok::RParen | Tok::DSemi)) => {
+                    return unsupported(operator_what(t));
                 }
                 _ => break,
             }
@@ -874,13 +949,30 @@ fn assignment(w: &Word) -> Option<(String, Word)> {
     Some((name.to_string(), value))
 }
 
+/// The 1-based line and column of character offset `at` in `src`.
+fn line_col(src: &str, at: usize) -> (usize, usize) {
+    let before: String = src.chars().take(at).collect();
+    let line = before.matches('\n').count() + 1;
+    let column = before.rsplit('\n').next().map_or(0, |s| s.chars().count()) + 1;
+    (line, column)
+}
+
 fn parse(src: &str) -> PResult<List> {
     let chars: Vec<char> = src.chars().collect();
-    let toks = Lexer { s: &chars, i: 0 }.tokens()?;
-    let mut p = Parser { toks, i: 0 };
-    let list = p.list(&[])?;
+    let (toks, at) = Lexer { s: &chars, i: 0 }.tokens()?;
+    let mut p = Parser { toks, at, i: 0 };
+    let list = match p.list(&[]) {
+        Ok(list) => list,
+        Err(mut e) => {
+            e.at.get_or_insert_with(|| p.offset());
+            return Err(e);
+        }
+    };
     if p.i != p.toks.len() {
-        return unsupported("trailing tokens");
+        return Err(Unsupported {
+            what: "trailing tokens".into(),
+            at: Some(p.offset()),
+        });
     }
     Ok(list)
 }
@@ -1255,7 +1347,7 @@ impl Shell {
     fn substitute(&mut self, body: &str) -> String {
         let list = match parse(body) {
             Ok(l) => l,
-            Err(Unsupported(what)) => {
+            Err(Unsupported { what, .. }) => {
                 let _ = writeln!(
                     std::io::stderr(),
                     "{SHELL_NAME}: command substitution uses {what}, which this shell does not run"
@@ -4583,7 +4675,27 @@ pub fn run(src: &str) -> Option<i32> {
 
 /// Whether `src` is inside the subset, without running it.
 pub fn supports(src: &str) -> Result<(), String> {
-    parse(src).map(|_| ()).map_err(|Unsupported(w)| w)
+    parse(src).map(|_| ()).map_err(|u| u.what)
+}
+
+/// Why the subset does not run `src`: the construct, and where it starts, as a
+/// 1-based line and column. `None` when the subset runs it.
+pub fn refusal(src: &str) -> Option<Refusal> {
+    let u = parse(src).err()?;
+    let (line, column) = line_col(src, u.at.unwrap_or(0));
+    Some(Refusal {
+        construct: u.what,
+        line,
+        column,
+    })
+}
+
+/// See [`refusal`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Refusal {
+    pub construct: String,
+    pub line: usize,
+    pub column: usize,
 }
 
 /// The first word of each simple command in `src`, in source order, for the
@@ -4656,7 +4768,7 @@ mod tests {
 
     /// Run in-process and capture stdout and the status.
     fn sh(src: &str) -> (String, i32) {
-        let list = parse(src).unwrap_or_else(|Unsupported(w)| panic!("{src}: {w}"));
+        let list = parse(src).unwrap_or_else(|u| panic!("{src}: {}", u.what));
         let mut shell = Shell {
             vars: HashMap::new(),
             exported: HashSet::new(),
