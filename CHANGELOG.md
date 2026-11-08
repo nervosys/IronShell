@@ -58,6 +58,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `ish -b` refuses a script outside the POSIX subset (a function, `case`, `$((...))`, a here-document) before running any of it, with E_POLICY_DENY naming the construct, line and column, instead of saying `sh()` is disabled.
 - POSIX `grep -r PATTERN FILE` with a single file operand no longer prefixes lines with the file name, as GNU grep does; `sort` exits 2 for an unreadable input with GNU's "cannot read:" message.
 - `session_end` holds the journal lock while it removes the journal directory, and on Windows retries a transient Access denied for up to half a second before reporting E_IO.
+- Security: with a workspace set, the POSIX subset (`ish -b`) no longer reads or lists outside it. `cat`, `head`, `tail`, `wc`, `grep` (including `-r`), `sort`, `uniq`, `cut`, `sed`, `ls`, `find`, `<` redirection, `test -e/-f/-d/-s` and glob expansion refuse with E_OUTSIDE_WORKSPACE, as the builtins do; before, `cat ../x` and `cat C:/Windows/win.ini` printed the file.
+- Security: `glob`, `stat`, `wc`, `file.exists`, the archive readers and other read builtins apply the workspace check, and it runs before any existence check, so E_NOT_FOUND no longer reveals whether a path outside the workspace exists.
+- Security: secret-shaped text is redacted from error messages (message, hint, expected, got) and from the POSIX subset's output, as it already was from builtin output; a file named after a key, or `ish -b -c 'cat creds.env'`, no longer prints the key.
+- `ish --explain -b` explains the script as the POSIX subset runs it, so an external program that agent mode gates is predicted as `approve` instead of `allow`.
+- A read refused by the workspace check is written to the audit log as a `deny` entry, as a refused write is.
 
 ## [14.0.0] - 2026-11-06
 
