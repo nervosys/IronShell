@@ -1808,7 +1808,14 @@ impl Shell {
                 return 126;
             }
         }
-        let mut cmd = crate::safety::child_command(&argv[0]);
+        let program = match resolve_program(argv, env) {
+            Ok(p) => p,
+            Err(refusal) => {
+                sink.eline(&refusal);
+                return 2;
+            }
+        };
+        let mut cmd = crate::safety::child_command(&program);
         cmd.args(&argv[1..]);
         for n in &self.exported {
             if let Some(v) = self.vars.get(n) {
@@ -1878,6 +1885,88 @@ impl Shell {
 /// `echo x > f` was approved as `<workspace>/f` and wrote `<cwd>/f`, outside
 /// the jail. The prior contents are journalled first, as the dispatcher does
 /// for `file.write`, so the `reversible` the guard is told is true.
+/// The commands the subset implements. A bare name from this list that the
+/// subset declines is run only as a GNU-compatible program found on PATH.
+const SUBSET_NAMES: &[&str] = &[
+    "echo", "printf", "test", "[", "cat", "head", "tail", "wc", "grep", "sort", "uniq", "cut",
+    "sed", "ls", "find", "date", "basename", "dirname", "seq",
+];
+
+/// The GNU-compatible program called `name` on PATH, if there is one.
+///
+/// Windows searches the current folder and then System32 before PATH, so a
+/// bare `sort` ran `System32\sort.exe`, which is not GNU sort, and a bare `find`
+/// ran `find.exe`, which is not GNU find. This walks PATH itself, skips the
+/// Windows folder, never searches a relative PATH entry (such as `.`), and
+/// accepts a program only when its `--version` says GNU.
+fn gnu_program(name: &str) -> Option<std::path::PathBuf> {
+    let path = std::env::var_os("PATH")?;
+    let windows_dir = if cfg!(windows) {
+        std::env::var_os("SystemRoot").map(|r| r.to_string_lossy().to_lowercase())
+    } else {
+        None
+    };
+    let file = if cfg!(windows) {
+        format!("{name}.exe")
+    } else {
+        name.to_string()
+    };
+    for dir in std::env::split_paths(&path) {
+        if !dir.is_absolute() {
+            continue;
+        }
+        if let Some(root) = &windows_dir {
+            if dir
+                .to_string_lossy()
+                .to_lowercase()
+                .starts_with(root.as_str())
+            {
+                continue;
+            }
+        }
+        let candidate = dir.join(&file);
+        if !candidate.is_file() {
+            continue;
+        }
+        let probe = crate::safety::child_command(&candidate)
+            .arg("--version")
+            .stdin(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .output();
+        if let Ok(out) = probe {
+            let first = String::from_utf8_lossy(&out.stdout);
+            if out.status.success() && first.lines().next().is_some_and(|l| l.contains("GNU")) {
+                return Some(candidate);
+            }
+        }
+    }
+    None
+}
+
+/// The program `argv` runs. A subset command goes to a GNU-compatible program,
+/// and when there is none the error names what the subset does not support.
+/// Any other name runs as typed.
+fn resolve_program(argv: &[String], env: &[(String, String)]) -> Result<String, String> {
+    let name = argv[0].as_str();
+    if name.contains(['/', '\\']) || !SUBSET_NAMES.contains(&name) {
+        return Ok(name.to_string());
+    }
+    if let Some(p) = gnu_program(name) {
+        return Ok(p.to_string_lossy().into_owned());
+    }
+    let what = if !env.is_empty() {
+        "a variable before the command".to_string()
+    } else {
+        match argv[1..].iter().find(|a| a.len() > 1 && a.starts_with('-')) {
+            Some(flag) => flag.clone(),
+            None => "this form".to_string(),
+        }
+    };
+    Err(format!(
+        "{SHELL_NAME}: {name}: {what} is not supported by the in-process subset, and no GNU-compatible {name} is installed"
+    ))
+}
+
 fn write_file(path: &str, data: &[u8], append: bool) -> Result<(), String> {
     let resolved = crate::safety::resolve_path_str(path);
     crate::safety::guard(crate::safety::GuardCtx {
@@ -2627,18 +2716,49 @@ fn printf(args: &[String], sink: &mut Sink) -> Util {
                     }
                 }
             };
+            // `.N` is a precision: how many characters of a string, how many
+            // decimals of a float. It has no meaning for an integer here, so an
+            // integer with one is declined.
+            let precision = match spec.split_once('.') {
+                None => None,
+                Some((_, "")) => Some(0),
+                Some((_, p)) => match p.parse::<usize>() {
+                    Ok(p) if p <= PRINTF_WIDTH_MAX => Some(p),
+                    _ => return Util::Decline,
+                },
+            };
             let body = match conv {
                 's' | 'b' => {
-                    if conv == 'b' {
+                    let text = if conv == 'b' {
                         unescape_echo(&arg).0
                     } else {
                         arg
+                    };
+                    match precision {
+                        Some(p) => text.chars().take(p).collect(),
+                        None => text,
                     }
                 }
+                'd' | 'i' | 'x' | 'X' | 'o' if precision.is_some() => return Util::Decline,
                 'd' | 'i' => match arg.trim().parse::<i64>() {
                     Ok(n) => n.to_string(),
                     Err(_) if arg.is_empty() => "0".into(),
                     Err(_) => return Util::Decline,
+                },
+                'x' | 'X' | 'o' => match arg.trim().parse::<i64>() {
+                    // As bash does, a negative number is shown as 64 bits.
+                    Ok(n) => match conv {
+                        'x' => format!("{:x}", n as u64),
+                        'X' => format!("{:X}", n as u64),
+                        _ => format!("{:o}", n as u64),
+                    },
+                    Err(_) if arg.is_empty() => "0".into(),
+                    Err(_) => return Util::Decline,
+                },
+                'f' => match arg.trim().parse::<f64>() {
+                    Ok(v) if v.is_finite() => format!("{:.*}", precision.unwrap_or(6), v),
+                    Err(_) if arg.is_empty() => format!("{:.*}", precision.unwrap_or(6), 0.0),
+                    _ => return Util::Decline,
                 },
                 'c' => arg.chars().next().map(String::from).unwrap_or_default(),
                 _ => return Util::Decline,
@@ -2647,7 +2767,7 @@ fn printf(args: &[String], sink: &mut Sink) -> Util {
             if left {
                 out.push_str(&body);
                 out.push_str(&" ".repeat(pad));
-            } else if zero && matches!(conv, 'd' | 'i') {
+            } else if zero && matches!(conv, 'd' | 'i' | 'x' | 'X' | 'o' | 'f') {
                 let (sign, digits) = body
                     .strip_prefix('-')
                     .map_or(("", body.as_str()), |d| ("-", d));
@@ -2758,14 +2878,25 @@ fn test(args: &[String], sink: &mut Sink) -> i32 {
 }
 
 fn cat(args: &[String], stdin: &mut Input, sink: &mut Sink) -> Util {
-    let Some((flags, files)) = short_flags(args, "") else {
+    let Some((flags, files)) = short_flags(args, "n") else {
         return Util::Decline;
     };
-    let _ = flags;
+    let number = flags.contains(&'n');
     let mut status = 0;
-    for (name, data) in read_inputs_dirs("cat", &files, stdin, sink, &mut status) {
-        let _ = name;
-        sink.out.extend_from_slice(&data);
+    let mut line_no = 0usize;
+    for (_, data) in read_inputs_dirs("cat", &files, stdin, sink, &mut status) {
+        if !number {
+            sink.out.extend_from_slice(&data);
+            continue;
+        }
+        // GNU `cat -n`: a number six wide and a tab before each line, counted
+        // across every file. A last line with no newline gets none added.
+        for line in data.split_inclusive(|&b| b == b'\n') {
+            line_no += 1;
+            sink.out
+                .extend_from_slice(format!("{line_no:>6}\t").as_bytes());
+            sink.out.extend_from_slice(line);
+        }
     }
     Util::Done(status)
 }
@@ -3708,7 +3839,7 @@ enum SedCmd {
     Print,
     Delete,
     Quit,
-    Subst(regex::bytes::Regex, Vec<u8>, bool, bool),
+    Subst(regex::bytes::Regex, Vec<u8>, bool, bool, usize),
 }
 
 struct SedLine {
@@ -3720,6 +3851,33 @@ struct SedLine {
 
 /// `sed` for the everyday scripts: `Np`, `a,bp`, `$p`, `/re/p`, `Nd`, `q`,
 /// and `s/re/rep/[gp]`, with `-n`, `-e` and `-E`. Anything else declines.
+/// `s/RE/REP/N`: replace the Nth match only, or from the Nth on with `g`.
+fn subst_nth(
+    re: &regex::bytes::Regex,
+    text: &[u8],
+    rep: &[u8],
+    global: bool,
+    nth: usize,
+) -> Vec<u8> {
+    let mut out = Vec::new();
+    let mut last = 0;
+    for (k, caps) in re.captures_iter(text).enumerate() {
+        let k = k + 1;
+        if k < nth {
+            continue;
+        }
+        if k > nth && !global {
+            break;
+        }
+        let whole = caps.get(0).expect("group 0 always matches");
+        out.extend_from_slice(&text[last..whole.start()]);
+        caps.expand(rep, &mut out);
+        last = whole.end();
+    }
+    out.extend_from_slice(&text[last..]);
+    out
+}
+
 fn sed(args: &[String], stdin: &mut Input, sink: &mut Sink) -> Util {
     let mut quiet = false;
     let mut ere = false;
@@ -3823,9 +3981,20 @@ fn sed(args: &[String], stdin: &mut Input, sink: &mut Sink) -> Util {
                     let [pat, rep, fl] = body.as_slice() else {
                         return Util::Decline;
                     };
-                    if fl.chars().any(|f| !matches!(f, 'g' | 'p')) {
+                    let fl: &str = fl;
+                    let digits: String = fl.chars().take_while(char::is_ascii_digit).collect();
+                    let tail = &fl[digits.len()..];
+                    if tail.chars().any(|f| !matches!(f, 'g' | 'p')) {
                         return Util::Decline;
                     }
+                    let nth = if digits.is_empty() {
+                        1
+                    } else {
+                        match digits.parse::<usize>() {
+                            Ok(n) if n >= 1 => n,
+                            _ => return Util::Decline,
+                        }
+                    };
                     let Some(re) = to_re(pat) else {
                         return Util::Decline;
                     };
@@ -3855,7 +4024,7 @@ fn sed(args: &[String], stdin: &mut Input, sink: &mut Sink) -> Util {
                             }
                         }
                     }
-                    SedCmd::Subst(re, r2, fl.contains('g'), fl.contains('p'))
+                    SedCmd::Subst(re, r2, tail.contains('g'), tail.contains('p'), nth)
                 }
                 _ => return Util::Decline,
             };
@@ -3931,8 +4100,10 @@ fn sed(args: &[String], stdin: &mut Input, sink: &mut Sink) -> Util {
                     }
                     break 'lines;
                 }
-                SedCmd::Subst(re, rep, global, print) => {
-                    let replaced = if *global {
+                SedCmd::Subst(re, rep, global, print, nth) => {
+                    let replaced = if *nth > 1 {
+                        subst_nth(re, &pattern, rep, *global, *nth)
+                    } else if *global {
                         re.replace_all(&pattern, rep.as_slice()).into_owned()
                     } else {
                         re.replace(&pattern, rep.as_slice()).into_owned()
