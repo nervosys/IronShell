@@ -340,7 +340,7 @@ fn schema_hint(conn: &Connection) -> String {
         })
         .unwrap_or_default();
     if tables.is_empty() {
-        return "there are no tables; pipe rows in, or name a .json/.csv file or a database"
+        return "there are no tables; pipe rows in, or name a .json, .jsonl or .csv file, or a database"
             .to_string();
     }
     let described: Vec<String> = tables
