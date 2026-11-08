@@ -3132,7 +3132,11 @@ fn grep(args: &[String], stdin: &mut Input, sink: &mut Sink) -> Util {
         ));
         return Util::Done(2);
     }
-    let prefix = (targets.len() > 1 || recursive || ops.len() > 1) && !f('h') || f('H');
+    // GNU prints file names for several operands, or when -r walks a directory
+    // (an operand that is a directory, or no operand at all). One file operand
+    // under -r prints no name.
+    let walks_dir = recursive && (ops.is_empty() || ops.iter().any(|o| Path::new(o).is_dir()));
+    let prefix = (targets.len() > 1 || walks_dir || ops.len() > 1) && !f('h') || f('H');
     let mut any = false;
     for (name, path) in &targets {
         let data = match path {
