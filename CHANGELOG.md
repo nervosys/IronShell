@@ -53,6 +53,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `ontology_describe` accepts the dotted spelling of a module function (`file.replace`) and describes the builtin it runs.
 - Parse errors for `=` in a comparison and for `**` name the fix (`==`, `math.pow`); `contains` on an array and `in` without a piped value name the membership form `value | in(array)`.
 - Recursive `search_*` builtins skip the `.ironshell` state directory, so a search no longer matches the audit log.
+- POSIX subset: `sort` runs `-k N[,M]`, `-t C`, `-s` and per-key `n`/`r` in-process and matches GNU sort, where on Windows it fell back to `sort.exe` and printed "Input file specified two times."
+- POSIX subset on Windows: an unsupported flag runs a GNU-compatible program on PATH, never the Windows folder's `sort.exe` or `find.exe`; with none it exits 2 naming the flag, instead of "command not found" (127). Elsewhere it still runs the PATH program of that name. `cat -n`, printf `%x`/`%o`/`%.Nf`/`%.Ns` and sed `s/a/b/N` now run in-process.
+- `ish -b` refuses a script outside the POSIX subset (a function, `case`, `$((...))`, a here-document) before running any of it, with E_POLICY_DENY naming the construct, line and column, instead of saying `sh()` is disabled.
+- POSIX `grep -r PATTERN FILE` with a single file operand no longer prefixes lines with the file name, as GNU grep does; `sort` exits 2 for an unreadable input with GNU's "cannot read:" message.
 
 ## [14.0.0] - 2026-11-06
 
