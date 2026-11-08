@@ -109,7 +109,7 @@ fn subcommands_and_leading_flags_still_parse() {
     let dir = scratch("subcommands");
     let (code, _, err) = ish(&dir, &["agent", "--help"]);
     assert_eq!(code, 0, "{err}");
-    let (code, out, err) = ish(&dir, &["--budget", "100000", "-c", "1 + 1"]);
+    let (code, out, err) = ish(&dir, &["--deterministic", "-c", "1 + 1"]);
     assert_eq!(code, 0, "{err}");
     assert_eq!(out, "2");
 }
