@@ -16,10 +16,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Breaking:** a number and a String do not combine in arithmetic: `"a" + 1` is E_BAD_ARG "operator Add: cannot combine String and Int"; use interpolation (`"a${1}"`) or `str()`. String repetition (`"=" * 50`) is unchanged.
 - **Breaking:** Int arithmetic that overflows 64 bits (`+`, `-`, `*`, `%`, `^`, unary minus) is E_BAD_VALUE "integer overflow in operator Add"; it wrapped.
 - **Breaking:** `sort` refuses a list holding Records, Bools, Arrays or nulls (E_BAD_ARG, with a hint to use `sort_by(fn(r) => r.field)`); numbers and strings sort as before.
+- **Breaking:** `file_replace`, `file_patch` and `file_insert` return E_NOT_FOUND ("file_replace: pattern not found in note.txt") and write nothing when the pattern or anchor is missing. They returned `success: false` with exit 0.
+- `exit(code)` runs in agent mode without approval: it ends only the ish process. It is still audited and still refused inside a transaction.
 
 ### Added
 
 - `error(message[, extra])` raises a catchable `E_USER` error with the script's own message; fields of `extra` appear on the caught error (`catch e { e.code }` is `"E_USER"`).
+- `ish script.ish a b` passes `a` and `b` to the script, read with `args()` (an Array of String; empty under `-c`). `ish -b script.sh a b` sets `$1`..`$9`, `${10}` and `$#`; `$@` and `$*` are still refused.
+- `int(x)` and `float(x)` convert numbers, Bools and text: `int(" 42 ")` is 42, `int(2.9)` is 2, `int("1.5")` is E_BAD_VALUE with a hint to use `float`. `to_int`, `parse_int`, `number`, `to_float` and similar names suggest them, and the number-and-String arithmetic hint names them.
+- `now_iso()` returns the current UTC time as ISO 8601 to the second (`2026-11-08T14:03:05Z`); `now_iso("local")` gives local time with its offset.
 
 ### Fixed
 
