@@ -4791,6 +4791,20 @@ pub fn run(src: &str) -> Option<i32> {
     Some(status)
 }
 
+/// How the subset runs a command word in-process, for `--explain`: `Some(true)`
+/// for a utility that reads the paths it is given, `Some(false)` for one that
+/// does not, and `None` for a name the subset does not run itself (which runs
+/// as a program through the effect gate).
+pub fn in_process_reads(name: &str) -> Option<bool> {
+    match name {
+        "cat" | "head" | "tail" | "wc" | "grep" | "sort" | "uniq" | "cut" | "sed" | "ls"
+        | "find" | "test" | "[" => Some(true),
+        "echo" | "printf" | "date" | "basename" | "dirname" | "seq" | "true" | ":" | "false"
+        | "exit" | "break" | "continue" | "export" | "unset" | "cd" | "read" | "pwd" => Some(false),
+        _ => None,
+    }
+}
+
 /// Whether `src` is inside the subset, without running it.
 pub fn supports(src: &str) -> Result<(), String> {
     parse(src).map(|_| ()).map_err(|u| u.what)

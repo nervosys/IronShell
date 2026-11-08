@@ -252,6 +252,80 @@ pub fn explain(code: &str) -> Result<Value> {
     Ok(Value::Record(out))
 }
 
+/// `--explain` for the POSIX subset (`ish -b`). Each command word the source
+/// names is listed with the class the run gives it, and the decision is the
+/// strictest of them. A word the subset runs itself is judged by its effect: a
+/// utility that reads a path is `read_local`, the rest `pure`. Any other word
+/// runs as a program through the effect gate, as `exec`, which agent mode
+/// approves; so `git --version` is `approve`, as the run is refused for approval.
+/// Source outside the subset is run by the transpiler, which is not predicted,
+/// so it is `unknown`. Nothing is run.
+pub fn explain_posix(src: &str) -> Result<Value> {
+    let in_subset = crate::posix::supports(src).is_ok();
+    let mut calls = Vec::new();
+    let mut effects: BTreeMap<u8, &'static str> = BTreeMap::new();
+    let mut unresolved = Vec::new();
+    let mut verdict = if in_subset { "allow" } else { "unknown" };
+    for head in crate::posix::heads(src) {
+        let mut r = BTreeMap::new();
+        r.insert("call".to_string(), Value::Str(head.clone()));
+        if head.is_empty() {
+            // A command name computed at run time: its class is not known here.
+            if !unresolved.contains(&head) {
+                unresolved.push(head.clone());
+            }
+            if rank("unknown") > rank(verdict) {
+                verdict = "unknown";
+            }
+            r.insert("decision".to_string(), Value::Str("unknown".to_string()));
+        } else {
+            let effect = match crate::posix::in_process_reads(&head) {
+                Some(true) => Effect::ReadLocal,
+                Some(false) => Effect::Pure,
+                None => Effect::Exec,
+            };
+            let decision = agent_decision(effect);
+            effects.insert(effect as u8, effect.as_str());
+            if rank(decision) > rank(verdict) {
+                verdict = decision;
+            }
+            r.insert(
+                "effect".to_string(),
+                Value::Str(effect.as_str().to_string()),
+            );
+            r.insert("decision".to_string(), Value::Str(decision.to_string()));
+        }
+        calls.push(Value::Record(r));
+    }
+
+    let mut out = BTreeMap::new();
+    out.insert("calls".to_string(), Value::Array(calls));
+    out.insert(
+        "effects".to_string(),
+        Value::Array(
+            effects
+                .values()
+                .map(|e| Value::Str(e.to_string()))
+                .collect(),
+        ),
+    );
+    out.insert("decision".to_string(), Value::Str(verdict.to_string()));
+    out.insert(
+        "unresolved".to_string(),
+        Value::Array(unresolved.into_iter().map(Value::Str).collect()),
+    );
+    out.insert(
+        "note".to_string(),
+        Value::Str(
+            "static, POSIX subset: a program named here runs through the effect gate as exec; \
+             a utility the subset runs itself is judged by its read effect; a utility that \
+             declines its flags runs as a program and is not predicted"
+                .to_string(),
+        ),
+    );
+    Ok(Value::Record(out))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

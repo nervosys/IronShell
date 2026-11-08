@@ -436,6 +436,14 @@ fn run(cli: Cli) -> Result<()> {
                 buf
             }
         };
+        // `-b` runs the source as the POSIX subset does, not as IronShell, so it
+        // is explained as the subset runs it: a program is an exec, and the
+        // decision is the one the run gets.
+        if cli.bash {
+            let report = iron_shell::explain::explain_posix(&code)?;
+            println!("{}", serde_json::to_string_pretty(&report.to_json())?);
+            return Ok(());
+        }
         // A file that does not parse is reported as a run reports it: the
         // parser's own `E_PARSE` JSON on stderr and exit status 2. Going through
         // `explain`, which wraps the message as a builtin argument error, nested
