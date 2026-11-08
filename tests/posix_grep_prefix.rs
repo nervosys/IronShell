@@ -58,11 +58,20 @@ fn a_directory_under_r_prints_names() {
         grep_run("d", "grep -r todo tree"),
         ("tree/top.rs:todo again\n".into(), 0)
     );
-    // GNU: grep -r todo (searches the working directory)
+    // GNU: grep -r todo (searches the working directory). The walk's order is
+    // the filesystem's, which GNU grep's is too, so the lines are compared sorted.
+    let (out, status) = grep_run("e", "grep -r todo");
+    assert_eq!(status, 0);
     assert_eq!(
-        grep_run("e", "grep -r todo"),
-        ("other.txt:todo one\ntree/top.rs:todo again\n".into(), 0)
+        sorted_lines(&out),
+        sorted_lines("other.txt:todo one\ntree/top.rs:todo again\n")
     );
+}
+
+fn sorted_lines(s: &str) -> Vec<String> {
+    let mut v: Vec<String> = s.lines().map(str::to_string).collect();
+    v.sort();
+    v
 }
 
 #[test]
