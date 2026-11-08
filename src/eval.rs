@@ -786,7 +786,11 @@ pub fn eval_expr(expr: &Expr, env: &mut Env) -> Result<Value> {
         Expr::Unary { op, expr } => {
             let v = eval_expr(expr, env)?;
             match (op, v) {
-                (UnOp::Neg, Value::Int(n)) => Ok(Value::Int(-n)),
+                // `-i64::MIN` is the one negation that does not fit.
+                (UnOp::Neg, Value::Int(n)) => Ok(Value::Int(
+                    n.checked_neg()
+                        .ok_or_else(|| crate::safety::integer_overflow("Neg"))?,
+                )),
                 (UnOp::Neg, Value::Float(x)) => Ok(Value::Float(-x)),
                 (UnOp::Not, v) => Ok(Value::Bool(!is_truthy(&v))),
                 (_, other) => Err(crate::safety::bad_arg(
@@ -1762,7 +1766,9 @@ fn value_eq(a: &Value, b: &Value) -> bool {
 fn binop(op: &BinOp, a: Value, b: Value) -> Result<Value> {
     use BinOp::*;
     Ok(match (op, a, b) {
-        (Add, Value::Int(x), Value::Int(y)) => Value::Int(x + y),
+        // Int results are checked: a result past 64 bits is an error, not a
+        // wrapped number. See `checked_int`.
+        (Add, Value::Int(x), Value::Int(y)) => Value::Int(checked_int(x.checked_add(y), "Add")?),
         (Add, Value::Float(x), Value::Float(y)) => Value::Float(x + y),
         (Add, Value::Int(x), Value::Float(y)) => Value::Float((x as f64) + y),
         (Add, Value::Float(x), Value::Int(y)) => Value::Float(x + (y as f64)),
@@ -1770,12 +1776,12 @@ fn binop(op: &BinOp, a: Value, b: Value) -> Result<Value> {
         // refusal arm below, which is what `"a" + 1` now reaches.
         (Add, Value::Str(x), Value::Str(y)) => checked_string(format!("{}{}", x, y))?,
 
-        (Sub, Value::Int(x), Value::Int(y)) => Value::Int(x - y),
+        (Sub, Value::Int(x), Value::Int(y)) => Value::Int(checked_int(x.checked_sub(y), "Sub")?),
         (Sub, Value::Float(x), Value::Float(y)) => Value::Float(x - y),
         (Sub, Value::Int(x), Value::Float(y)) => Value::Float((x as f64) - y),
         (Sub, Value::Float(x), Value::Int(y)) => Value::Float(x - (y as f64)),
 
-        (Mul, Value::Int(x), Value::Int(y)) => Value::Int(x * y),
+        (Mul, Value::Int(x), Value::Int(y)) => Value::Int(checked_int(x.checked_mul(y), "Mul")?),
         (Mul, Value::Float(x), Value::Float(y)) => Value::Float(x * y),
         (Mul, Value::Int(x), Value::Float(y)) => Value::Float((x as f64) * y),
         (Mul, Value::Float(x), Value::Int(y)) => Value::Float(x * (y as f64)),
@@ -1804,7 +1810,8 @@ fn binop(op: &BinOp, a: Value, b: Value) -> Result<Value> {
         (Div, Value::Int(x), Value::Float(y)) => Value::Float((x as f64) / y),
         (Div, Value::Float(x), Value::Int(y)) => Value::Float(x / (y as f64)),
 
-        (Rem, Value::Int(x), Value::Int(y)) => Value::Int(x % y),
+        // `i64::MIN % -1` does not fit either, and panics in Rust unless checked.
+        (Rem, Value::Int(x), Value::Int(y)) => Value::Int(checked_int(x.checked_rem(y), "Rem")?),
 
         (Eq, x, y) => Value::Bool(value_eq(&x, &y)),
         (Ne, x, y) => Value::Bool(!value_eq(&x, &y)),
@@ -1824,8 +1831,10 @@ fn binop(op: &BinOp, a: Value, b: Value) -> Result<Value> {
         // Power: numeric exponentiation. Promote to float when necessary.
         (Pow, Value::Int(x), Value::Int(y)) => {
             if y >= 0 {
-                // use integer pow for non-negative integer exponents
-                Value::Int(x.pow(y as u32))
+                // use integer pow for non-negative integer exponents. An exponent
+                // past u32 cannot be exact in 64 bits unless the base is 0 or 1.
+                let exp = u32::try_from(y).map_err(|_| crate::safety::integer_overflow("Pow"))?;
+                Value::Int(checked_int(x.checked_pow(exp), "Pow")?)
             } else {
                 // negative exponent -> float result
                 Value::Float((x as f64).powf(y as f64))
@@ -1885,6 +1894,11 @@ fn binop(op: &BinOp, a: Value, b: Value) -> Result<Value> {
             ))
         }
     })
+}
+
+/// The Int result of an operation, or the overflow refusal when it does not fit.
+fn checked_int(result: Option<i64>, operator: &str) -> Result<i64> {
+    result.ok_or_else(|| crate::safety::integer_overflow(operator))
 }
 
 /// Whether an arithmetic operator is applied to a number and a String, in

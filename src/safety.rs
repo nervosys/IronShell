@@ -1587,6 +1587,12 @@ pub enum ErrorCode {
     /// the same value fails the same way, and only the caller's data can change
     /// that. `BadArg` stays retryable because a corrected call can succeed.
     BadValue,
+    /// An Int operation whose result does not fit in 64 bits: `+`, `-`, `*`,
+    /// `%`, `**` and unary minus. It used to wrap, or panic in a debug build,
+    /// and the wrapped number flowed on as an answer. Reported as `E_BAD_VALUE`,
+    /// which is documented next to `E_BAD_ARG` (the same call with the same
+    /// operands overflows again, so it is not retryable).
+    Overflow,
     /// A resource governor (op count, files, processes, or wall-clock) was hit.
     BudgetExceeded,
     /// A builtin was called by a name that does not exist. Carries
@@ -1721,6 +1727,7 @@ impl ErrorCode {
             ErrorCode::NeedsApproval => "E_NEEDS_APPROVAL",
             ErrorCode::OutsideWorkspace => "E_OUTSIDE_WORKSPACE",
             ErrorCode::BadArg | ErrorCode::BadValue => "E_BAD_ARG",
+            ErrorCode::Overflow => "E_BAD_VALUE",
             ErrorCode::BudgetExceeded => "E_BUDGET_EXCEEDED",
             ErrorCode::UnknownBuiltin => "E_UNKNOWN_BUILTIN",
             ErrorCode::UnknownField => "E_UNKNOWN_FIELD",
@@ -1760,6 +1767,8 @@ impl ErrorCode {
             ErrorCode::NeedsApproval => true,
             // Not retryable: the same value is undefined on every attempt.
             ErrorCode::BadValue => false,
+            // The same operands overflow again; only different operands can fit.
+            ErrorCode::Overflow => false,
             // Retryable by naming a real builtin, which is what did_you_mean
             // carries. `SafetyError::is_retryable` narrows this to the calls
             // that have a candidate: with none, the same name fails again.
@@ -1822,7 +1831,10 @@ impl ErrorCode {
             // without being told.
             ErrorCode::UnknownBuiltin | ErrorCode::UnknownName | ErrorCode::ToolMissing => 127,
             // EX_USAGE — the call was malformed.
-            ErrorCode::BadArg | ErrorCode::BadValue | ErrorCode::UnknownField => 64,
+            ErrorCode::BadArg
+            | ErrorCode::BadValue
+            | ErrorCode::Overflow
+            | ErrorCode::UnknownField => 64,
             // EX_NOPERM — refused, and retrying unchanged will refuse again.
             ErrorCode::PolicyDeny | ErrorCode::OutsideWorkspace => 77,
             // EX_TEMPFAIL — the same call may succeed once approved.
@@ -2544,6 +2556,23 @@ pub fn os_denied(
         did_you_mean: Vec::new(),
         expected: String::new(),
         got: "permission denied".to_string(),
+    })
+}
+
+/// The refusal for an Int result that does not fit in 64 bits (`E_BAD_VALUE`).
+/// `operator` names the operation, such as `Add` or `Pow`.
+pub fn integer_overflow(operator: &str) -> anyhow::Error {
+    anyhow::Error::new(SafetyError {
+        code: ErrorCode::Overflow,
+        message: format!("integer overflow in operator {operator}"),
+        builtin: format!("operator {operator}"),
+        hint: "the result does not fit in a 64-bit Int; write one operand as a Float (2.0, \
+               not 2) to get a Float result, or split the computation"
+            .to_string(),
+        approval: None,
+        did_you_mean: Vec::new(),
+        expected: String::new(),
+        got: String::new(),
     })
 }
 
