@@ -331,7 +331,7 @@ fn resolve(source: &str) -> Result<PathBuf> {
 fn read_module(path: &Path) -> Result<String> {
     let shown = display(path);
     let file = File::open(path).map_err(|e| {
-        safety::bad_state(
+        safety::bad_state_with_hint(
             "import",
             &format!("cannot open module '{shown}': {e}"),
             "check that the file exists and is readable",
@@ -341,7 +341,7 @@ fn read_module(path: &Path) -> Result<String> {
     file.take(MAX_MODULE_BYTES + 1)
         .read_to_end(&mut bytes)
         .map_err(|e| {
-            safety::bad_state(
+            safety::bad_state_with_hint(
                 "import",
                 &format!("cannot read module '{shown}': {e}"),
                 "check that the file is readable",

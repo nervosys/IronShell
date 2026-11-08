@@ -153,14 +153,15 @@ fn add_backend(
         return register_windows("cron_add", "cron", schedule, command, &mut run);
     }
     let _lock = CRON_CHANGE_LOCK.lock().map_err(|_| {
-        safety::bad_state("cron_add", "scheduler lock poisoned", "restart the runtime")
+        safety::bad_state_with_hint("cron_add", "scheduler lock poisoned", "restart the runtime")
     })?;
     let output = run("crontab", &["-l"], None)?;
     // Reuse the narrowly recognized no-crontab result; arbitrary failures must
     // never be treated as an empty table that we are allowed to overwrite.
     let text = if output.status.success() {
-        String::from_utf8(output.stdout)
-            .map_err(|_| safety::bad_state("cron_add", "non-UTF-8 crontab", "UTF-8 user crontab"))?
+        String::from_utf8(output.stdout).map_err(|_| {
+            safety::bad_state_with_hint("cron_add", "non-UTF-8 crontab", "UTF-8 user crontab")
+        })?
     } else {
         parse_cron_listing(output, false)?;
         String::new()
@@ -176,7 +177,7 @@ fn add_backend(
         .lines()
         .any(|line| line == entry || line.strip_prefix("# ironshell-disabled: ") == Some(&entry))
     {
-        return Err(safety::bad_state(
+        return Err(safety::bad_state_with_hint(
             "cron_add",
             "job already exists",
             "use its existing target for lifecycle operations",
@@ -262,7 +263,7 @@ fn schedule_backend(
 }
 
 fn unknown_at_id() -> anyhow::Error {
-    safety::bad_state(
+    safety::bad_state_with_hint(
         "at_schedule",
         "at accepted the job but its job ID could not be read; the job may exist",
         "inspect atq before retrying",
@@ -364,7 +365,7 @@ fn register_windows(
     windows_command_text(command)?;
     let id = format!("IronShell-{kind}-{}", uuid::Uuid::new_v4());
     let cwd = std::env::current_dir().map_err(|_| {
-        safety::bad_state(
+        safety::bad_state_with_hint(
             name,
             "working directory unavailable",
             "an existing working directory",
@@ -386,14 +387,14 @@ fn register_windows(
     )?;
     check(name, "powershell Register-ScheduledTask", &output)?;
     let reported: String = serde_json::from_slice(&output.stdout).map_err(|_| {
-        safety::bad_state(
+        safety::bad_state_with_hint(
             name,
             "task may have been registered but its ID could not be read",
             &format!("inspect task {id} before retrying"),
         )
     })?;
     if reported != id {
-        return Err(safety::bad_state(
+        return Err(safety::bad_state_with_hint(
             name,
             "registered task ID differs from requested ID",
             &format!("inspect task {id} before retrying"),
@@ -424,7 +425,7 @@ try { ConvertTo-Json -InputObject @(Get-ScheduledTask -ErrorAction Stop | Where-
 fn parse_windows_at(output: Output) -> Result<Value> {
     check("at_list", "powershell Get-ScheduledTask", &output)?;
     let malformed = || {
-        safety::bad_state(
+        safety::bad_state_with_hint(
             "at_list",
             "unexpected one-time task JSON",
             "complete IronShell task records",

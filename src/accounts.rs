@@ -53,7 +53,7 @@ pub use macos::{
 
 use crate::safety::{arg_err, bad_arg, policy_deny};
 #[cfg(not(any(windows, target_os = "macos")))]
-use crate::safety::{bad_state, not_found, tool_failed};
+use crate::safety::{bad_state_with_hint, not_found, tool_failed};
 use crate::value::Value;
 
 /// uids and gids below this are system accounts and groups.
@@ -74,7 +74,7 @@ pub fn user_add(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
     let plan = UserAdd::parse(&args, &input)?;
     refuse_in_transaction("user_add")?;
     if lookup_user("user_add", &plan.name)?.is_some() {
-        return Err(bad_state(
+        return Err(bad_state_with_hint(
             "user_add",
             &format!("user {} already exists", plan.name),
             "a different name; the existing account is not changed",
@@ -262,7 +262,7 @@ pub fn group_add(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
     let plan = GroupAdd::parse(&args, &input)?;
     refuse_in_transaction("group_add")?;
     if lookup_group("group_add", &plan.name)?.is_some() {
-        return Err(bad_state(
+        return Err(bad_state_with_hint(
             "group_add",
             &format!("group {} already exists", plan.name),
             "a different name; the existing group is not changed",
@@ -314,7 +314,7 @@ pub fn group_mod(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
     guard_group("group_mod", &plan.name, group.gid)?;
     if let Some(new_name) = &plan.new_name {
         if lookup_group("group_mod", new_name)?.is_some() {
-            return Err(bad_state(
+            return Err(bad_state_with_hint(
                 "group_mod",
                 &format!("group {new_name} already exists"),
                 "a different new_name; the existing group is not changed",

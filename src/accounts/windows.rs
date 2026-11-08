@@ -23,7 +23,7 @@ use super::{
     record, refuse_in_transaction, strings, GroupAdd, GroupDel, GroupMod, UserAdd, UserDel,
     UserMod, UserOnly, UserPasswd,
 };
-use crate::safety::{arg_err, bad_state, not_found, os_denied, policy_deny, tool_failed};
+use crate::safety::{arg_err, bad_state_with_hint, not_found, os_denied, policy_deny, tool_failed};
 use crate::value::Value;
 
 const NERR_SUCCESS: u32 = 0;
@@ -192,7 +192,7 @@ pub fn user_add(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
         ));
     }
     if user_state("user_add", &plan.name)?.is_some() {
-        return Err(bad_state(
+        return Err(bad_state_with_hint(
             "user_add",
             &format!("user {} already exists", plan.name),
             "a different name; the existing account is not changed",
@@ -401,7 +401,7 @@ pub fn group_add(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
         ));
     }
     if local_group_exists("group_add", &plan.name)? {
-        return Err(bad_state(
+        return Err(bad_state_with_hint(
             "group_add",
             &format!("group {} already exists", plan.name),
             "a different name; the existing group is not changed",
@@ -471,7 +471,7 @@ pub fn group_mod(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
         .clone()
         .ok_or_else(|| arg_err("group_mod needs new_name"))?;
     if local_group_exists("group_mod", &new_name)? {
-        return Err(bad_state(
+        return Err(bad_state_with_hint(
             "group_mod",
             &format!("group {new_name} already exists"),
             "a different new_name; the existing group is not changed",
@@ -704,7 +704,7 @@ fn current_account(builtin: &str) -> Result<String> {
     // NUL-terminated name into it.
     let ok = unsafe { GetUserNameW(buf.as_mut_ptr(), &mut len) };
     if ok == 0 {
-        return Err(bad_state(
+        return Err(bad_state_with_hint(
             builtin,
             &format!("GetUserNameW failed: {}", std::io::Error::last_os_error()),
             "a process that can read its own account name",
@@ -728,7 +728,7 @@ fn no_windows_meaning(builtin: &str, option: &str, why: &str) -> anyhow::Error {
 fn net_failure(builtin: &str, api: &str, status: u32, name: &str, kind: &str) -> anyhow::Error {
     match status {
         NERR_USER_NOT_FOUND | NERR_GROUP_NOT_FOUND => not_found(builtin, kind, name),
-        NERR_USER_EXISTS | NERR_GROUP_EXISTS | ERROR_ALIAS_EXISTS => bad_state(
+        NERR_USER_EXISTS | NERR_GROUP_EXISTS | ERROR_ALIAS_EXISTS => bad_state_with_hint(
             builtin,
             &format!("{kind} {name} already exists"),
             &format!("a different name; the existing {kind} is not changed"),

@@ -5,7 +5,7 @@ use serde_json::Value as Json;
 use std::{collections::BTreeMap, io::Read};
 const NAME: &str = "project_scripts";
 fn bad(message: &str) -> anyhow::Error {
-    safety::bad_state(NAME, message, "supply a valid supported manifest mapping")
+    safety::bad_state_with_hint(NAME, message, "supply a valid supported manifest mapping")
 }
 fn entry(name: &str, command: Value, kind: &str, path: &str) -> Value {
     Value::Record(BTreeMap::from([

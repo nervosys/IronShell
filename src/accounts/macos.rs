@@ -40,7 +40,7 @@ use super::{
     record, refuse_in_transaction, strings, GroupAdd, GroupDel, GroupMod, UserAdd, UserDel,
     UserMod, UserOnly, UserPasswd,
 };
-use crate::safety::{arg_err, bad_state, not_found, os_denied, policy_deny, tool_failed};
+use crate::safety::{arg_err, bad_state_with_hint, not_found, os_denied, policy_deny, tool_failed};
 use crate::value::Value;
 
 /// The first uid and gid of a person on macOS. Below it are system records.
@@ -90,7 +90,7 @@ pub fn user_add(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
     }
     require_root(B)?;
     if lookup_user(B, &plan.name)?.is_some() {
-        return Err(bad_state(
+        return Err(bad_state_with_hint(
             B,
             &format!("user {} already exists", plan.name),
             "a different name; the existing account is not changed",
@@ -171,7 +171,7 @@ pub fn user_del(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
     let mut removed_home = false;
     if plan.remove_home && Path::new(&account.home).exists() {
         std::fs::remove_dir_all(&account.home).map_err(|e| {
-            bad_state(
+            bad_state_with_hint(
                 B,
                 &format!(
                     "account {} is deleted, but {} could not be removed: {e}",
@@ -339,7 +339,7 @@ pub fn group_add(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
     }
     require_root(B)?;
     if lookup_group(B, &plan.name)?.is_some() {
-        return Err(bad_state(
+        return Err(bad_state_with_hint(
             B,
             &format!("group {} already exists", plan.name),
             "a different name; the existing group is not changed",
@@ -351,7 +351,7 @@ pub fn group_add(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
         .collect();
     let gid = match plan.gid {
         Some(gid) if used.contains(&gid) => {
-            return Err(bad_state(
+            return Err(bad_state_with_hint(
                 B,
                 &format!("gid {gid} is already used by another group"),
                 "a different gid; the existing group is not changed",
@@ -396,7 +396,7 @@ pub fn group_del(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
     // macOS would leave an account without a primary group, so refuse that.
     let primaries = records(B, "/Users", "PrimaryGroupID")?;
     if let Some((user, _)) = primaries.iter().find(|(_, g)| *g == gid) {
-        return Err(bad_state(
+        return Err(bad_state_with_hint(
             B,
             &format!("group {} is the primary group of account {user}", plan.name),
             "change that account's primary group first, or delete the account",
@@ -422,7 +422,7 @@ pub fn group_mod(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
             .iter()
             .any(|(name, _)| name.as_str() == new_name.as_str())
         {
-            return Err(bad_state(
+            return Err(bad_state_with_hint(
                 B,
                 &format!("group {new_name} already exists"),
                 "a different new_name; the existing group is not changed",
@@ -434,7 +434,7 @@ pub fn group_mod(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
             .iter()
             .any(|(name, id)| *id == new_gid && name.as_str() != plan.name.as_str())
         {
-            return Err(bad_state(
+            return Err(bad_state_with_hint(
                 B,
                 &format!("gid {new_gid} is already used by another group"),
                 "a different gid; the group is not renumbered",
@@ -590,7 +590,7 @@ fn set_disabled(builtin: &str, name: &str, disable: bool) -> Result<()> {
         )?;
     }
     if is_disabled(builtin, name)? != disable {
-        return Err(bad_state(
+        return Err(bad_state_with_hint(
             builtin,
             &format!(
                 "dscl reported success but {name} is still {}",

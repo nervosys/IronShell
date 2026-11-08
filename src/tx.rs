@@ -956,7 +956,7 @@ pub fn rollback_to(name: &str) -> Result<usize> {
             .iter()
             .rposition(|(n, _)| n == name)
             .ok_or_else(|| {
-                crate::safety::bad_state(
+                crate::safety::bad_state_with_hint(
                     "tx_rollback_to",
                     &format!("no savepoint named '{}'", name),
                     "tx_savepoint(name) inside the transaction",

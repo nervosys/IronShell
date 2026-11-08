@@ -71,11 +71,11 @@ fn transaction(name: &str) -> Result<()> {
 }
 fn lookup(name: &str, value: &Value) -> Result<(String, Arc<Socket>)> {
     let id = string(name, value)?;
-    let sockets = registry()
-        .lock()
-        .map_err(|_| safety::bad_state(name, "socket registry poisoned", "restart the process"))?;
+    let sockets = registry().lock().map_err(|_| {
+        safety::bad_state_with_hint(name, "socket registry poisoned", "restart the process")
+    })?;
     let socket = sockets.get(id).cloned().ok_or_else(|| {
-        safety::bad_state(
+        safety::bad_state_with_hint(
             name,
             "unknown or closed socket handle",
             "use a live handle returned by net_connect or net_listen in this process",
@@ -99,9 +99,9 @@ fn register(name: &str, stream: TcpStream, timeout: Duration) -> Result<Value> {
         stream.peer_addr().map_err(|e| io_error(name, e))?
     );
     let shutdown = stream.try_clone().map_err(|e| io_error(name, e))?;
-    let mut sockets = registry()
-        .lock()
-        .map_err(|_| safety::bad_state(name, "socket registry poisoned", "restart the process"))?;
+    let mut sockets = registry().lock().map_err(|_| {
+        safety::bad_state_with_hint(name, "socket registry poisoned", "restart the process")
+    })?;
     if sockets.len() >= MAX_HANDLES {
         return Err(safety::budget_exceeded(
             name,
@@ -146,7 +146,9 @@ pub(super) fn guard_and_open(
     // Check before opening and again during registration, including concurrent opens.
     if registry()
         .lock()
-        .map_err(|_| safety::bad_state(name, "socket registry poisoned", "restart the process"))?
+        .map_err(|_| {
+            safety::bad_state_with_hint(name, "socket registry poisoned", "restart the process")
+        })?
         .len()
         >= MAX_HANDLES
     {
@@ -224,7 +226,7 @@ pub(super) fn guard_and_send(args: Vec<Value>, input: Option<Value>) -> Result<V
     transaction(name)?;
     guard_network(name, &socket.peer)?;
     let mut stream = socket.stream.try_lock().map_err(|_| {
-        safety::bad_state(
+        safety::bad_state_with_hint(
             name,
             "socket busy or poisoned",
             "finish the other operation or close the handle",
@@ -234,7 +236,7 @@ pub(super) fn guard_and_send(args: Vec<Value>, input: Option<Value>) -> Result<V
     let mut sent = 0;
     while sent < bytes.len() {
         if socket.closed.load(Ordering::Acquire) {
-            return Err(safety::bad_state(
+            return Err(safety::bad_state_with_hint(
                 name,
                 "socket closed during send; a prefix may have been transmitted",
                 "use another connection; do not blindly retry",
@@ -285,7 +287,7 @@ pub(super) fn guard_and_recv(args: Vec<Value>, input: Option<Value>) -> Result<V
     transaction(name)?;
     guard_network(name, &socket.peer)?;
     let mut stream = socket.stream.try_lock().map_err(|_| {
-        safety::bad_state(
+        safety::bad_state_with_hint(
             name,
             "socket busy or poisoned",
             "finish the other operation or close the handle",
@@ -296,7 +298,7 @@ pub(super) fn guard_and_recv(args: Vec<Value>, input: Option<Value>) -> Result<V
     let mut bytes = vec![0; limit];
     let count = loop {
         if socket.closed.load(Ordering::Acquire) {
-            return Err(safety::bad_state(
+            return Err(safety::bad_state_with_hint(
                 name,
                 "socket closed during receive",
                 "use another connection",
@@ -352,7 +354,9 @@ pub(super) fn guard_and_close(args: Vec<Value>, input: Option<Value>) -> Result<
     let result = socket.shutdown.shutdown(Shutdown::Both);
     registry()
         .lock()
-        .map_err(|_| safety::bad_state(name, "socket registry poisoned", "restart the process"))?
+        .map_err(|_| {
+            safety::bad_state_with_hint(name, "socket registry poisoned", "restart the process")
+        })?
         .remove(&id);
     match result {
         Ok(()) => Ok(Value::Bool(true)),

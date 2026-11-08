@@ -495,7 +495,7 @@ fn multimodal_backend_from_model(uri: String) -> Box<dyn MultiModalLlmBackend> {
 struct StubMultiModalBackend;
 impl MultiModalLlmBackend for StubMultiModalBackend {
     fn chat_multimodal(&self, _messages: &[MultiModalMessage]) -> Result<String> {
-        Err(crate::safety::bad_state(
+        Err(crate::safety::bad_state_with_hint(
             "ai",
             "no AI provider is configured for multi-modal queries",
             "set IRONSHELL_AI=openai and OPENAI_API_KEY for vision and audio",
@@ -795,7 +795,7 @@ pub fn complete_sync_router(prompt: &str) -> Result<String> {
         // A missing prerequisite, not an unidentified fault: this was a
         // twenty-line help text returned as E_UNKNOWN, so an agent was told
         // not to reason about the one failure with a known fix.
-        "" => Err(crate::safety::bad_state(
+        "" => Err(crate::safety::bad_state_with_hint(
             "ai",
             "no AI provider is configured",
             "set IRONSHELL_AI to a provider (irongate, openai, anthropic, google, ollama, deepseek, groq, ...) or provider:model",
@@ -833,7 +833,7 @@ pub fn complete_via_registry(prompt: &str, model_uri: Option<&str>) -> Result<St
             // A prerequisite that has not been met, not an unidentified
             // fault: the repair is a different action (set the variable),
             // which is exactly what E_BAD_STATE is for.
-            return Err(crate::safety::bad_state(
+            return Err(crate::safety::bad_state_with_hint(
                 "ai",
                 "no AI provider is configured",
                 "set IRONSHELL_AI to irongate, openai, ollama or compat",
@@ -1342,7 +1342,7 @@ pub trait LlmBackend: Send + Sync {
 struct StubBackend;
 impl LlmBackend for StubBackend {
     fn chat(&self, _messages: &[ChatMessage]) -> Result<String> {
-        Err(crate::safety::bad_state(
+        Err(crate::safety::bad_state_with_hint(
             "ai",
             "no AI provider is configured",
             "set IRONSHELL_AI to irongate, openai, ollama or compat",

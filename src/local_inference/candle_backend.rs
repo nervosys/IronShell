@@ -711,7 +711,7 @@ impl LocalInferenceBackend for CandleBackend {
             model.eos_token.as_deref().unwrap_or(""),
         )
         .map_err(|e| {
-            crate::safety::bad_state(
+            crate::safety::bad_state_with_hint(
                 "ai_local_generate",
                 &format!("the model's chat template failed: {e}"),
                 "a model whose chat template renders",

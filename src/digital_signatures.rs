@@ -83,7 +83,7 @@ fn bad(name: &str, message: &str) -> anyhow::Error {
 }
 
 fn sign_failed(name: &str) -> anyhow::Error {
-    safety::bad_state(
+    safety::bad_state_with_hint(
         name,
         "signature generation failed",
         "check operating-system randomness availability",
@@ -91,7 +91,7 @@ fn sign_failed(name: &str) -> anyhow::Error {
 }
 
 fn generation_failed(name: &str) -> anyhow::Error {
-    safety::bad_state(
+    safety::bad_state_with_hint(
         name,
         "secure key generation failed",
         "check operating-system randomness availability",
@@ -99,7 +99,7 @@ fn generation_failed(name: &str) -> anyhow::Error {
 }
 
 fn verify_failed(name: &str) -> anyhow::Error {
-    safety::bad_state(
+    safety::bad_state_with_hint(
         name,
         "signature check could not run",
         "check the cryptographic module's self-test status",

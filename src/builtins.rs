@@ -5780,7 +5780,7 @@ fn bi_config_set(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
     })?;
     // Make the running shell use the saved value, as config_reload does.
     reload_config().map_err(|e| {
-        crate::safety::bad_state(
+        crate::safety::bad_state_with_hint(
             B,
             &format!("the saved configuration could not be reloaded: {e}"),
             "fix the config file (see config_path()) and reload",
@@ -5887,7 +5887,7 @@ fn bi_config_reload() -> Result<Value> {
     // The failure was an uncoded string; success was the prose
     // "Configuration reloaded".
     reload_config().map_err(|e| {
-        crate::safety::bad_state(
+        crate::safety::bad_state_with_hint(
             "config_reload",
             &format!("the configuration could not be reloaded: {e}"),
             "fix the config file (see config_path()) and reload",
@@ -8683,7 +8683,7 @@ fn bi_find(args: Vec<Value>, _input: Option<Value>) -> Result<Value> {
                         e.path().unwrap_or(validated_path.as_path()),
                         io,
                     ),
-                    None => crate::safety::bad_state(
+                    None => crate::safety::bad_state_with_hint(
                         "find",
                         &e.to_string(),
                         "a tree without symbolic-link loops",
@@ -9221,7 +9221,7 @@ fn file_record(name: String, full_name: String, metadata: &fs::Metadata) -> Valu
 fn walk_failure(path: &str, e: walkdir::Error) -> anyhow::Error {
     match e.io_error() {
         Some(io) => crate::safety::fs_error("get_files", path, io),
-        None => crate::safety::bad_state(
+        None => crate::safety::bad_state_with_hint(
             "Get-Files",
             &format!("{path}: {e}"),
             "a tree without symbolic-link loops",
@@ -12254,7 +12254,7 @@ fn bi_mcp_cache_clear(_args: Vec<Value>, input: Option<Value>) -> Result<Value> 
     refuse_piped("mcp_cache_clear", &input)?;
     // A failed clear used to be `let _ =`, and `true` came back regardless.
     crate::ai::clear_mcp_cache().map_err(|e| {
-        crate::safety::bad_state(
+        crate::safety::bad_state_with_hint(
             "mcp_cache_clear",
             &format!("the MCP cache could not be cleared: {e}"),
             "a new ish process",
@@ -12282,7 +12282,7 @@ fn bi_mcp_cache_status(_args: Vec<Value>, input: Option<Value>) -> Result<Value>
     let has_cached_data = match crate::ai::MCP_CACHE.lock() {
         Ok(cache_guard) => cache_guard.is_some(),
         Err(_) => {
-            return Err(crate::safety::bad_state(
+            return Err(crate::safety::bad_state_with_hint(
                 "mcp_cache_status",
                 "the MCP cache lock is poisoned by an earlier panic",
                 "a new ish process",
@@ -14789,7 +14789,7 @@ fn bi_nn_forward(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
     }
     let output = network.forward(&input_vec);
     if output.iter().any(|n| !n.is_finite()) {
-        return Err(crate::safety::bad_state(
+        return Err(crate::safety::bad_state_with_hint(
             "nn_forward",
             "non-finite output",
             "the computation exceeded the numeric range",
@@ -15100,7 +15100,7 @@ fn bi_consensus_vote(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
         .chain(consensus.iter())
         .any(|n| !n.is_finite())
     {
-        return Err(crate::safety::bad_state(
+        return Err(crate::safety::bad_state_with_hint(
             "consensus_vote",
             "non-finite output",
             "the computation exceeded the numeric range",
@@ -15421,7 +15421,7 @@ fn run_population_operation<G: crate::evolution::Evolvable>(
         .iter()
         .any(|n| !n.is_finite())
         {
-            return Err(crate::safety::bad_state(
+            return Err(crate::safety::bad_state_with_hint(
                 name,
                 "non-finite statistics",
                 "fitness arithmetic exceeded the numeric range",
@@ -15429,7 +15429,7 @@ fn run_population_operation<G: crate::evolution::Evolvable>(
         }
         for individual in &pop.individuals {
             validate(&individual.genome).map_err(|_| {
-                crate::safety::bad_state(
+                crate::safety::bad_state_with_hint(
                     name,
                     "invalid resulting genome",
                     "mutation exceeded the numeric range",
@@ -15457,7 +15457,7 @@ fn bi_best_individual(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
                 .iter()
                 .any(|individual| individual.fitness.is_none())
             {
-                return Err(crate::safety::bad_state(
+                return Err(crate::safety::bad_state_with_hint(
                     "best_individual",
                     "population is not fully evaluated",
                     "call fitness before ranking individuals",
@@ -15487,7 +15487,7 @@ fn bi_best_individual(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
                 .iter()
                 .any(|individual| individual.fitness.is_none())
             {
-                return Err(crate::safety::bad_state(
+                return Err(crate::safety::bad_state_with_hint(
                     "best_individual",
                     "population is not fully evaluated",
                     "call fitness before ranking individuals",
@@ -16734,7 +16734,7 @@ fn bi_rl_update(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
     }
     agent.update(state, action, reward, next_state, *done);
     validate_q_agent(&agent).map_err(|_| {
-        crate::safety::bad_state(
+        crate::safety::bad_state_with_hint(
             "rl_update",
             "non-finite Q-learning result",
             "the update exceeded the numeric range",
@@ -16797,7 +16797,7 @@ fn bi_rl_sarsa_update(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
     }
     agent.update(state, action, reward, next_state, next_action, *done);
     validate_sarsa_agent(&agent).map_err(|_| {
-        crate::safety::bad_state(
+        crate::safety::bad_state_with_hint(
             "rl_sarsa_update",
             "non-finite SARSA result",
             "the update exceeded the numeric range",
@@ -16965,7 +16965,7 @@ fn bi_rl_pg_episode_end(args: Vec<Value>, input: Option<Value>) -> Result<Value>
         }
         agent.end_episode();
         validate_pg_agent(&agent).map_err(|_| {
-            crate::safety::bad_state(
+            crate::safety::bad_state_with_hint(
                 "rl_pg_episode_end",
                 "non-finite policy-gradient result",
                 "the update exceeded the numeric range",
@@ -17080,7 +17080,7 @@ fn bi_rl_ac_update(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
     }
     agent.update(&state, action, reward, &next, *done);
     validate_ac_agent(&agent).map_err(|_| {
-        crate::safety::bad_state(
+        crate::safety::bad_state_with_hint(
             "rl_ac_update",
             "non-finite actor-critic result",
             "the update exceeded the numeric range",
@@ -17301,7 +17301,7 @@ fn bi_rl_dqn_step(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
     agent
         .step(state, action, reward, next, *done)
         .map_err(|reason| {
-            crate::safety::bad_state(
+            crate::safety::bad_state_with_hint(
                 "rl_dqn_step",
                 reason,
                 "finite training arithmetic; use smaller values or learning rate",
@@ -21991,7 +21991,7 @@ fn bi_try_repair(args: Vec<Value>, input: Option<Value>, env: &mut Env) -> Resul
             if e.downcast_ref::<crate::safety::SafetyError>().is_some() {
                 return e;
             }
-            crate::safety::bad_state(
+            crate::safety::bad_state_with_hint(
                 "try_repair",
                 &e.to_string(),
                 "finish or roll back the open transaction",
@@ -22000,7 +22000,7 @@ fn bi_try_repair(args: Vec<Value>, input: Option<Value>, env: &mut Env) -> Resul
     }
     let mark = format!("__repair_{}", REPAIR_SEQ.fetch_add(1, Ordering::Relaxed));
     crate::tx::savepoint(&mark).map_err(|e| {
-        crate::safety::bad_state(
+        crate::safety::bad_state_with_hint(
             "try_repair",
             &e.to_string(),
             "finish or roll back the open transaction",
@@ -22017,7 +22017,7 @@ fn bi_try_repair(args: Vec<Value>, input: Option<Value>, env: &mut Env) -> Resul
         Ok(v) => {
             if owned {
                 crate::tx::commit().map_err(|e| {
-                    crate::safety::bad_state(
+                    crate::safety::bad_state_with_hint(
                         "try_repair",
                         &e.to_string(),
                         "finish or roll back the open transaction",
@@ -22501,7 +22501,7 @@ fn bi_audit_tail(args: Vec<Value>, _input: Option<Value>) -> Result<Value> {
     // first, so "nothing was recorded" and "the log cannot be read" stay
     // different answers.
     let Some(path) = crate::safety::audit_path() else {
-        return Err(crate::safety::bad_state(
+        return Err(crate::safety::bad_state_with_hint(
             "audit_tail",
             "no audit log is active",
             "run in agent mode, or set IRONSHELL_AUDIT_LOG to a file",
@@ -22591,7 +22591,7 @@ fn bi_audit_verify(args: Vec<Value>, _input: Option<Value>) -> Result<Value> {
         None => match crate::safety::audit_path() {
             Some(p) => p,
             None => {
-                return Err(crate::safety::bad_state(
+                return Err(crate::safety::bad_state_with_hint(
                     "audit_verify",
                     "no audit log is active",
                     "pass the path of a log to verify, or run in agent mode, which keeps one",
@@ -24199,7 +24199,7 @@ fn bi_finetune_cancel(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
                 result.insert("job_id".to_string(), Value::Str(job_id));
                 Ok(Value::Record(result))
             }
-            _ => Err(crate::safety::bad_state(
+            _ => Err(crate::safety::bad_state_with_hint(
                 "finetune_cancel",
                 &format!(
                     "job '{}' cannot be cancelled (status: {})",
@@ -24965,7 +24965,7 @@ fn win_process_cpu_seconds(pid: u32) -> Option<f64> {
         // SAFETY: `h` is the live handle win_with_process opened; each
         // out-pointer is a valid, writable FILETIME.
         if unsafe { GetProcessTimes(h, &mut creation, &mut exit, &mut kernel, &mut user) } == 0 {
-            return Err(crate::safety::bad_state(
+            return Err(crate::safety::bad_state_with_hint(
                 "proc_list",
                 &format!(
                     "GetProcessTimes failed: {}",
@@ -26002,7 +26002,7 @@ fn win_with_process<T>(
             Some(ERROR_INVALID_PARAMETER) => {
                 crate::safety::not_found(builtin, "process", &pid.to_string())
             }
-            _ => crate::safety::bad_state(
+            _ => crate::safety::bad_state_with_hint(
                 builtin,
                 &format!("OpenProcess on process {pid} failed: {err}"),
                 "a live process this user can query",
@@ -26035,7 +26035,7 @@ fn win_thread_count(builtin: &str, pid: i64) -> Result<i64> {
     // snapshot handle or INVALID_HANDLE_VALUE; the handle is closed below.
     let snap = unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0) };
     if snap == invalid {
-        return Err(crate::safety::bad_state(
+        return Err(crate::safety::bad_state_with_hint(
             builtin,
             &format!(
                 "CreateToolhelp32Snapshot failed: {}",
@@ -26077,7 +26077,7 @@ fn win_thread_count(builtin: &str, pid: i64) -> Result<i64> {
     // SAFETY: `snap` is a handle from CreateToolhelp32Snapshot, closed once.
     unsafe { CloseHandle(snap) };
     match failure {
-        Some(err) => Err(crate::safety::bad_state(
+        Some(err) => Err(crate::safety::bad_state_with_hint(
             builtin,
             &format!("Thread32Next failed: {err}"),
             "a thread snapshot of this system",
@@ -26106,7 +26106,7 @@ fn bi_proc_priority(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
             // only reads it.
             let class = unsafe { GetPriorityClass(h) };
             if class == 0 {
-                return Err(crate::safety::bad_state(
+                return Err(crate::safety::bad_state_with_hint(
                     "proc_priority",
                     &format!(
                         "GetPriorityClass failed: {}",
@@ -26270,7 +26270,7 @@ fn bi_proc_cpu_usage(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
         // SAFETY: `h` is the live handle win_with_process opened; each
         // out-pointer is a valid, writable FILETIME.
         if unsafe { GetProcessTimes(h, &mut creation, &mut exit, &mut kernel, &mut user) } == 0 {
-            return Err(crate::safety::bad_state(
+            return Err(crate::safety::bad_state_with_hint(
                 "proc_cpu_usage",
                 &format!(
                     "GetProcessTimes failed: {}",
@@ -27213,7 +27213,7 @@ pub(crate) fn windows_account_sid(builtin: &str, name: &str) -> Result<Vec<u32>>
         Some(ERROR_INSUFFICIENT_BUFFER) => {}
         Some(ERROR_NONE_MAPPED) => return Err(crate::safety::not_found(builtin, "account", name)),
         _ => {
-            return Err(crate::safety::bad_state(
+            return Err(crate::safety::bad_state_with_hint(
                 builtin,
                 &format!("LookupAccountNameW failed: {sizing}"),
                 "an account name this machine or its domain knows",
@@ -27237,7 +27237,7 @@ pub(crate) fn windows_account_sid(builtin: &str, name: &str) -> Result<Vec<u32>>
         )
     };
     if ok == 0 {
-        return Err(crate::safety::bad_state(
+        return Err(crate::safety::bad_state_with_hint(
             builtin,
             &format!(
                 "LookupAccountNameW failed: {}",
@@ -27323,7 +27323,7 @@ fn windows_set_file_principal(
                 "setting yourself as owner needs no privilege; setting another account as owner needs SeRestorePrivilege, and any change needs WRITE_OWNER on the file",
             ))
         }
-        other => Err(crate::safety::bad_state(
+        other => Err(crate::safety::bad_state_with_hint(
             builtin,
             &format!("SetNamedSecurityInfoW failed with Win32 error {other}"),
             "a file this process can name and change",
@@ -28727,7 +28727,7 @@ fn windows_adapters(builtin: &str) -> Result<Vec<WinAdapter>> {
         return Ok(Vec::new());
     }
     if status != 0 {
-        return Err(crate::safety::bad_state(
+        return Err(crate::safety::bad_state_with_hint(
             builtin,
             &format!(
                 "GetAdaptersAddresses failed: {}",
@@ -29472,7 +29472,7 @@ fn lsof_windows_path(path: &str) -> Result<Value> {
             return Err(crate::safety::not_found(NAME, "file", path));
         }
         Err(e) => {
-            return Err(crate::safety::bad_state(
+            return Err(crate::safety::bad_state_with_hint(
                 NAME,
                 &format!("cannot read '{path}': {e}"),
                 "a file this user can read",
@@ -29487,7 +29487,7 @@ fn lsof_windows_path(path: &str) -> Result<Value> {
         ));
     }
     let canonical = std::fs::canonicalize(path).map_err(|e| {
-        crate::safety::bad_state(
+        crate::safety::bad_state_with_hint(
             NAME,
             &format!("cannot resolve '{path}': {e}"),
             "a file this user can read",
@@ -29577,7 +29577,7 @@ fn lsof_rm_holders(name: &str, path: &[u16]) -> Result<Vec<RmProcessInfo>> {
                 "the file is not visible to this user; read a file this user owns",
             )
         } else {
-            crate::safety::bad_state(
+            crate::safety::bad_state_with_hint(
                 name,
                 &detail,
                 "a file this user can read, and the Restart Manager service running",
@@ -29673,7 +29673,7 @@ fn lsof_rm_holders(name: &str, path: &[u16]) -> Result<Vec<RmProcessInfo>> {
             ));
         }
     }
-    Err(crate::safety::bad_state(
+    Err(crate::safety::bad_state_with_hint(
         name,
         "the processes holding this file kept changing while they were listed",
         "a file whose holders are stable; try again",
@@ -30582,7 +30582,7 @@ impl WindowsVersion {
         // SAFETY: `info` is an OSVERSIONINFOW with its size field set.
         let status = unsafe { RtlGetVersion(&mut info) };
         if status != 0 {
-            return Err(crate::safety::bad_state(
+            return Err(crate::safety::bad_state_with_hint(
                 builtin,
                 &format!("RtlGetVersion returned NTSTATUS {status:#x}"),
                 "a Windows kernel that reports its version",
@@ -30643,7 +30643,7 @@ fn bi_sys_kernel(_args: Vec<Value>, _input: Option<Value>) -> Result<Value> {
 fn uptime_seconds(builtin: &str, text: &str) -> Result<i64> {
     match text.trim().parse::<f64>() {
         Ok(secs) if secs.is_finite() && secs >= 0.0 => Ok(secs as i64),
-        _ => Err(crate::safety::bad_state(
+        _ => Err(crate::safety::bad_state_with_hint(
             builtin,
             &format!("uptime reported `{}`", text.trim()),
             "a number of seconds since boot",
@@ -30675,7 +30675,7 @@ fn bi_sys_uptime(_args: Vec<Value>, _input: Option<Value>) -> Result<Value> {
         let text = probe_stdout("sys_uptime", "sysctl -n kern.boottime", output)?;
         // Parse "{ sec = 1234567890, usec = 0 }" or "sec = 1234567890"
         let bad = || {
-            crate::safety::bad_state(
+            crate::safety::bad_state_with_hint(
                 "sys_uptime",
                 &format!("kern.boottime reported `{}`", text.trim()),
                 "a `sec = N` boot time",
@@ -30725,7 +30725,7 @@ fn windows_uptime_ms() -> u64 {
 /// the second, for example `2026-10-30T12:34:56Z`.
 fn boot_time_value(epoch_secs: i64) -> Result<Value> {
     utc_iso_seconds(epoch_secs).map(Value::Str).ok_or_else(|| {
-        crate::safety::bad_state(
+        crate::safety::bad_state_with_hint(
             "sys_boot_time",
             &format!("the boot time {epoch_secs} is out of range"),
             "a boot time within the calendar",
@@ -30762,7 +30762,7 @@ fn bi_sys_boot_time(_args: Vec<Value>, _input: Option<Value>) -> Result<Value> {
         let output = bounded_cmd_output("sys_boot_time", "sysctl", cmd, PROBE_DEADLINE_SECS)?;
         let text = probe_stdout("sys_boot_time", "sysctl -n kern.boottime", output)?;
         let secs = kern_boottime_secs(&text).ok_or_else(|| {
-            crate::safety::bad_state(
+            crate::safety::bad_state_with_hint(
                 "sys_boot_time",
                 &format!("kern.boottime reported `{}`", text.trim()),
                 "a `sec = N` boot time",
@@ -30779,7 +30779,7 @@ fn bi_sys_boot_time(_args: Vec<Value>, _input: Option<Value>) -> Result<Value> {
         let output = bounded_cmd_output("sys_boot_time", "uptime", cmd, PROBE_DEADLINE_SECS)?;
         let text = probe_stdout("sys_boot_time", "uptime -s", output)?;
         let bad = || {
-            crate::safety::bad_state(
+            crate::safety::bad_state_with_hint(
                 "sys_boot_time",
                 &format!("uptime -s reported `{}`", text.trim()),
                 "a `YYYY-MM-DD HH:MM:SS` local boot time",
@@ -30819,7 +30819,7 @@ fn parse_cpuinfo(text: &str) -> Result<Value> {
         } else if line.starts_with("cpu cores") {
             if let Some(cores) = line.split(':').nth(1) {
                 let n = cores.trim().parse::<i64>().map_err(|_| {
-                    crate::safety::bad_state(
+                    crate::safety::bad_state_with_hint(
                         "sys_cpu_info",
                         &format!("cpu cores is `{}`", cores.trim()),
                         "a whole number of cores in /proc/cpuinfo",
@@ -30830,7 +30830,7 @@ fn parse_cpuinfo(text: &str) -> Result<Value> {
         } else if line.starts_with("cpu MHz") {
             if let Some(mhz) = line.split(':').nth(1) {
                 let f = mhz.trim().parse::<f64>().map_err(|_| {
-                    crate::safety::bad_state(
+                    crate::safety::bad_state_with_hint(
                         "sys_cpu_info",
                         &format!("cpu MHz is `{}`", mhz.trim()),
                         "a clock speed in /proc/cpuinfo",
@@ -30901,7 +30901,7 @@ fn bi_sys_cpu_info(_args: Vec<Value>, _input: Option<Value>) -> Result<Value> {
                 // A count that does not parse was 0 cores before.
                 let text = String::from_utf8_lossy(&output.stdout).trim().to_string();
                 let cores = text.parse::<i64>().map_err(|_| {
-                    crate::safety::bad_state(
+                    crate::safety::bad_state_with_hint(
                         "sys_cpu_info",
                         &format!("hw.physicalcpu reported `{text}`"),
                         "a whole number of physical cores",
@@ -30923,7 +30923,7 @@ fn bi_sys_cpu_info(_args: Vec<Value>, _input: Option<Value>) -> Result<Value> {
                 // frequency is reported, so the record leaves `mhz` out.
                 if !text.is_empty() {
                     let hz = text.parse::<f64>().map_err(|_| {
-                        crate::safety::bad_state(
+                        crate::safety::bad_state_with_hint(
                             "sys_cpu_info",
                             &format!("hw.cpufrequency reported `{text}`"),
                             "a clock frequency in hertz",
@@ -30977,7 +30977,7 @@ fn bi_sys_cpu_freq(_args: Vec<Value>, _input: Option<Value>) -> Result<Value> {
                 .parse::<i64>()
                 .map(|khz| Value::Int(khz / 1000))
                 .map_err(|_| {
-                    crate::safety::bad_state(
+                    crate::safety::bad_state_with_hint(
                         "sys_cpu_freq",
                         &format!("{PATH} does not hold a frequency: `{}`", freq.trim()),
                         "a cpufreq driver that reports scaling_cur_freq in kHz",
@@ -31016,7 +31016,7 @@ fn bi_sys_cpu_freq(_args: Vec<Value>, _input: Option<Value>) -> Result<Value> {
         // Hz to MHz
         return match text.parse::<i64>() {
             Ok(hz) => Ok(Value::Int(hz / 1_000_000)),
-            Err(_) => Err(crate::safety::bad_state(
+            Err(_) => Err(crate::safety::bad_state_with_hint(
                 "sys_cpu_freq",
                 &format!("sysctl reported no frequency: `{text}`"),
                 "a Mac whose hw.cpufrequency is an integer",
@@ -31111,7 +31111,7 @@ fn bi_sys_disk_info(_args: Vec<Value>, _input: Option<Value>) -> Result<Value> {
 #[cfg(any(target_os = "linux", target_os = "macos", test))]
 fn load_average_record(builtin: &str, parts: &[&str]) -> Result<Value> {
     if parts.len() < 3 {
-        return Err(crate::safety::bad_state(
+        return Err(crate::safety::bad_state_with_hint(
             builtin,
             &format!("load average had {} fields", parts.len()),
             "three load averages (1, 5 and 15 minutes)",
@@ -31120,7 +31120,7 @@ fn load_average_record(builtin: &str, parts: &[&str]) -> Result<Value> {
     let mut rec = std::collections::BTreeMap::new();
     for (key, text) in ["1min", "5min", "15min"].iter().zip(parts.iter()) {
         let load = text.trim().parse::<f64>().map_err(|_| {
-            crate::safety::bad_state(
+            crate::safety::bad_state_with_hint(
                 builtin,
                 &format!("load average `{text}` is not a number"),
                 "a decimal load average",
@@ -31208,7 +31208,7 @@ fn bi_sys_load_avg(_args: Vec<Value>, _input: Option<Value>) -> Result<Value> {
 #[cfg(any(not(target_os = "windows"), test))]
 fn account_id(builtin: &str, text: &str) -> Result<i64> {
     text.trim().parse::<i64>().map_err(|_| {
-        crate::safety::bad_state(
+        crate::safety::bad_state_with_hint(
             builtin,
             &format!("account id `{text}` is not a number"),
             "numeric uid and gid fields in the account file",
@@ -31456,7 +31456,7 @@ fn bi_sys_users(_args: Vec<Value>, _input: Option<Value>) -> Result<Value> {
         let json_str = probe_stdout("sys_users", "powershell Get-LocalUser", output)?;
         // Output that is not a list of accounts was [] before: "no users".
         let json: serde_json::Value = serde_json::from_str(&json_str).map_err(|_| {
-            crate::safety::bad_state(
+            crate::safety::bad_state_with_hint(
                 "sys_users",
                 "Get-LocalUser printed text that is not JSON",
                 "the ConvertTo-Json list of local accounts",
@@ -31466,7 +31466,7 @@ fn bi_sys_users(_args: Vec<Value>, _input: Option<Value>) -> Result<Value> {
             serde_json::Value::Array(arr) => arr.clone(),
             obj @ serde_json::Value::Object(_) => vec![obj.clone()],
             _ => {
-                return Err(crate::safety::bad_state(
+                return Err(crate::safety::bad_state_with_hint(
                     "sys_users",
                     "Get-LocalUser printed neither a list nor an account",
                     "the ConvertTo-Json list of local accounts",
@@ -31520,7 +31520,7 @@ fn bi_sys_groups(_args: Vec<Value>, _input: Option<Value>) -> Result<Value> {
         let output = bounded_cmd_output("sys_groups", "powershell", cmd, PROBE_DEADLINE_SECS)?;
         let json_str = probe_stdout("sys_groups", "powershell Get-LocalGroup", output)?;
         let json: serde_json::Value = serde_json::from_str(&json_str).map_err(|_| {
-            crate::safety::bad_state(
+            crate::safety::bad_state_with_hint(
                 "sys_groups",
                 "Get-LocalGroup printed text that is not JSON",
                 "the ConvertTo-Json list of local groups",
@@ -31530,7 +31530,7 @@ fn bi_sys_groups(_args: Vec<Value>, _input: Option<Value>) -> Result<Value> {
             serde_json::Value::Array(arr) => arr.clone(),
             obj @ serde_json::Value::Object(_) => vec![obj.clone()],
             _ => {
-                return Err(crate::safety::bad_state(
+                return Err(crate::safety::bad_state_with_hint(
                     "sys_groups",
                     "Get-LocalGroup printed neither a list nor a group",
                     "the ConvertTo-Json list of local groups",
@@ -31589,7 +31589,7 @@ fn bi_whoami(_args: Vec<Value>, _input: Option<Value>) -> Result<Value> {
             let name = unsafe { std::ffi::CStr::from_ptr(pwd.pw_name) };
             return Ok(Value::Str(name.to_string_lossy().into_owned()));
         }
-        return Err(crate::safety::bad_state(
+        return Err(crate::safety::bad_state_with_hint(
             "whoami",
             &format!("uid {uid} has no entry in the user database"),
             "the process runs as a uid with no passwd entry (common in containers)",
@@ -31599,7 +31599,7 @@ fn bi_whoami(_args: Vec<Value>, _input: Option<Value>) -> Result<Value> {
     {
         return match std::env::var("USERNAME") {
             Ok(u) if !u.is_empty() => Ok(Value::Str(u)),
-            _ => Err(crate::safety::bad_state(
+            _ => Err(crate::safety::bad_state_with_hint(
                 "whoami",
                 "USERNAME is not set",
                 "this process was started without a user environment",
@@ -31998,7 +31998,7 @@ fn bi_svc_status(args: Vec<Value>, _input: Option<Value>) -> Result<Value> {
         // A loaded unit always reports its ActiveState; an empty one would
         // answer "" as a status.
         if prop("ActiveState").is_empty() {
-            return Err(crate::safety::bad_state(
+            return Err(crate::safety::bad_state_with_hint(
                 "svc_status",
                 &format!("systemctl reported no ActiveState for `{name}`"),
                 "a systemd that reports ActiveState for every unit it loads",
@@ -32463,7 +32463,7 @@ fn parse_cron_listing(output: std::process::Output, windows: bool) -> Result<Val
         ));
     }
     let malformed = || {
-        crate::safety::bad_state(
+        crate::safety::bad_state_with_hint(
             "cron_list",
             "unexpected scheduler output",
             "complete task JSON or supported user-crontab syntax",
@@ -32741,7 +32741,7 @@ fn change_cron_backend(
         ));
     }
     let _lock = CRON_CHANGE_LOCK.lock().map_err(|_| {
-        crate::safety::bad_state(name, "scheduler lock poisoned", "restart the runtime")
+        crate::safety::bad_state_with_hint(name, "scheduler lock poisoned", "restart the runtime")
     })?;
     let check = |output: std::process::Output, tool: &str| -> Result<Vec<u8>> {
         if !output.status.success() {
@@ -32765,7 +32765,7 @@ fn change_cron_backend(
     } else {
         let bytes = check(run("crontab", &["-l"], None)?, "crontab")?;
         let text = std::str::from_utf8(&bytes).map_err(|_| {
-            crate::safety::bad_state(name, "non-UTF-8 crontab", "UTF-8 user crontab")
+            crate::safety::bad_state_with_hint(name, "non-UTF-8 crontab", "UTF-8 user crontab")
         })?;
         let replacement = transform_cron_entry(text, target, action)?;
         if replacement == text {
@@ -32801,7 +32801,7 @@ fn transform_cron_entry(text: &str, target: &str, action: &str) -> Result<String
         .filter(|line| *line == target || *line == disabled)
         .count();
     if matches != 1 {
-        return Err(crate::safety::bad_state(
+        return Err(crate::safety::bad_state_with_hint(
             "cron",
             &format!("expected one matching job, found {matches}"),
             "select a unique existing crontab entry",
@@ -33003,7 +33003,7 @@ fn parse_at_queue(output: std::process::Output) -> Result<Value> {
         ));
     }
     let malformed = || {
-        crate::safety::bad_state(
+        crate::safety::bad_state_with_hint(
             "at_list",
             "unexpected atq output",
             "tab-separated job ID and schedule/queue/user layout",
@@ -35001,7 +35001,7 @@ fn bi_capabilities(_args: Vec<Value>, _input: Option<Value>) -> Result<Value> {
                 _ => continue,
             };
             let caps = decode_capability_mask(val).ok_or_else(|| {
-                crate::safety::bad_state(
+                crate::safety::bad_state_with_hint(
                     "capabilities",
                     &format!(
                         "/proc/self/status has an unreadable {key} mask: {}",
@@ -35020,7 +35020,7 @@ fn bi_capabilities(_args: Vec<Value>, _input: Option<Value>) -> Result<Value> {
             "ambient",
         ] {
             if !rec.contains_key(field) {
-                return Err(crate::safety::bad_state(
+                return Err(crate::safety::bad_state_with_hint(
                     "capabilities",
                     &format!("/proc/self/status does not report the {field} set"),
                     "this kernel predates the capability set, or /proc is not procfs",
@@ -35088,7 +35088,7 @@ fn parse_whoami_priv_csv(builtin: &str, text: &str) -> Result<Vec<Value>> {
             continue;
         }
         let Some(fields) = csv_fields(line) else {
-            return Err(crate::safety::bad_state(
+            return Err(crate::safety::bad_state_with_hint(
                 builtin,
                 &format!("whoami /priv printed a malformed CSV line: {line:?}"),
                 "this host's whoami output is not the CSV layout this shell reads",
@@ -35102,14 +35102,14 @@ fn parse_whoami_priv_csv(builtin: &str, text: &str) -> Result<Vec<Value>> {
                 seen_header = true;
                 continue;
             }
-            return Err(crate::safety::bad_state(
+            return Err(crate::safety::bad_state_with_hint(
                 builtin,
                 &format!("whoami /priv printed an unexpected header: {line:?}"),
                 "the privilege table is read only in its English layout",
             ));
         }
         if fields.len() != 3 {
-            return Err(crate::safety::bad_state(
+            return Err(crate::safety::bad_state_with_hint(
                 builtin,
                 &format!(
                     "whoami /priv printed a line with {} fields, not 3: {line:?}",
@@ -35125,7 +35125,7 @@ fn parse_whoami_priv_csv(builtin: &str, text: &str) -> Result<Vec<Value>> {
         rows.push(Value::Record(rec));
     }
     if !seen_header {
-        return Err(crate::safety::bad_state(
+        return Err(crate::safety::bad_state_with_hint(
             builtin,
             "whoami /priv printed no privilege table",
             "this host's whoami output is not the CSV layout this shell reads",
@@ -49515,7 +49515,7 @@ fn git_succeeded(builtin: &str, output: &std::process::Output, dir: &str) -> Res
     let in_repo = bounded_cmd_output("git_succeeded", "git", cmd, TOOL_DEADLINE_SECS)
         .is_ok_and(|o| o.status.success());
     if !in_repo {
-        return Err(crate::safety::bad_state(
+        return Err(crate::safety::bad_state_with_hint(
             builtin,
             "the working directory is not inside a git repository",
             "cd into a repository (or pass its path where the builtin takes one)",
@@ -49950,7 +49950,7 @@ fn bi_git_ignore(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
     cmd.args(["rev-parse", "--is-inside-work-tree"]);
     let inside = bounded_cmd_output("git_ignore", "git", cmd, TOOL_DEADLINE_SECS)?;
     if !(inside.status.success() && inside.stdout.starts_with(b"true")) {
-        return Err(crate::safety::bad_state(
+        return Err(crate::safety::bad_state_with_hint(
             "git_ignore",
             "the working directory is not inside a git repository",
             "cd into a repository",
@@ -52789,7 +52789,7 @@ fn platform_store_parse(
     content: &str,
 ) -> Result<serde_json::Map<String, serde_json::Value>> {
     serde_json::from_str(content).map_err(|e| {
-        crate::safety::bad_state(
+        crate::safety::bad_state_with_hint(
             builtin,
             &format!(
                 "the platform store {} is not valid JSON: {e}",
@@ -53350,7 +53350,7 @@ fn bi_platform_machine_id(_args: Vec<Value>, _input: Option<Value>) -> Result<Va
 
 fn non_empty_machine_id(id: String) -> Result<Value> {
     if id.is_empty() {
-        return Err(crate::safety::bad_state(
+        return Err(crate::safety::bad_state_with_hint(
             "platform_machine_id",
             "the platform reported no machine identifier",
             "a host with a machine identifier (/etc/machine-id, IOPlatformUUID or the system UUID)",
@@ -53845,7 +53845,7 @@ pub(crate) fn windows_is_admin(builtin: &str) -> Result<bool> {
     const TOKEN_QUERY: u32 = 0x0008;
     const TOKEN_ELEVATION: u32 = 20;
     let failed = |call: &str| {
-        crate::safety::bad_state(
+        crate::safety::bad_state_with_hint(
             builtin,
             &format!("{call} failed: {}", std::io::Error::last_os_error()),
             "a process token this process can query",
@@ -53996,7 +53996,7 @@ fn windows_volumes_now(builtin: &str) -> Result<Vec<WinVolume>> {
     // table.
     let mask = unsafe { GetLogicalDrives() };
     if mask == 0 {
-        return Err(crate::safety::bad_state(
+        return Err(crate::safety::bad_state_with_hint(
             builtin,
             &format!(
                 "GetLogicalDrives failed: {}",
@@ -54194,7 +54194,7 @@ fn windows_hklm_string_from(
 fn windows_cpu_mhz(builtin: &str) -> Result<Option<u32>> {
     windows_hklm_dword(r"HARDWARE\DESCRIPTION\System\CentralProcessor\0", "~MHz").map_err(
         |status| {
-            crate::safety::bad_state(
+            crate::safety::bad_state_with_hint(
                 builtin,
                 &format!(
                     "the processor's ~MHz registry value could not be read: {}",
@@ -54825,7 +54825,7 @@ fn bi_platform_db_load(args: Vec<Value>, _input: Option<Value>) -> Result<Value>
     // A corrupt store read as empty, so every key answered null.
     let db: serde_json::Map<String, serde_json::Value> =
         serde_json::from_str(&content).map_err(|e| {
-            crate::safety::bad_state(
+            crate::safety::bad_state_with_hint(
                 "platform_db_load",
                 &format!(
                     "the platform store {} is not valid JSON: {e}",
@@ -54851,7 +54851,7 @@ fn bi_platform_db_list(_args: Vec<Value>, _input: Option<Value>) -> Result<Value
     // A corrupt file was listed as empty before. It is now named as bad state.
     let db: serde_json::Map<String, serde_json::Value> =
         serde_json::from_str(&content).map_err(|e| {
-            crate::safety::bad_state(
+            crate::safety::bad_state_with_hint(
                 "platform_db_list",
                 &format!("{} is not a JSON object: {e}", db_path.display()),
                 "a valid platform DB file; repair or remove it",
@@ -55558,7 +55558,7 @@ fn bi_platform_system_libs(_args: Vec<Value>, _input: Option<Value>) -> Result<V
                     info.insert("msvc".to_string(), Value::Str(line));
                 }
                 None => {
-                    return Err(crate::safety::bad_state(
+                    return Err(crate::safety::bad_state_with_hint(
                         "platform_system_libs",
                         "unexpected `cl` output",
                         "a `Microsoft (R) C/C++ Optimizing Compiler Version` banner",
@@ -55911,7 +55911,7 @@ fn msvcp140_version() -> Result<String> {
         );
     let path = system_root.join("System32").join("msvcp140.dll");
     let Some(file) = open_candidate(&path)? else {
-        return Err(crate::safety::bad_state(
+        return Err(crate::safety::bad_state_with_hint(
             "platform_libcpp",
             "no MSVC C++ runtime (msvcp140.dll) was found",
             "install the Visual C++ Redistributable",
@@ -55919,7 +55919,7 @@ fn msvcp140_version() -> Result<String> {
     };
     let bytes = read_up_to(file, &path, MSVCP140_READ_LIMIT)?;
     pe_version::pe_file_version(&bytes).ok_or_else(|| {
-        crate::safety::bad_state(
+        crate::safety::bad_state_with_hint(
             "platform_libcpp",
             "the version resource of msvcp140.dll could not be read",
             "reinstall the Visual C++ Redistributable",
@@ -55942,7 +55942,7 @@ fn libcxx_version_macos() -> Result<String> {
     const LIBCXX: &str = "/usr/lib/libc++.1.dylib";
     const LC_ID_DYLIB: u32 = 0xd;
     let unreadable = |why: &str| {
-        crate::safety::bad_state(
+        crate::safety::bad_state_with_hint(
             "platform_libcpp",
             &format!("the version of the system libc++ could not be read: {why}"),
             "check that /usr/lib/libc++.1.dylib is present in the dyld shared cache",
@@ -56072,7 +56072,7 @@ fn bi_platform_libcpp(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
                 return Ok(lib("libc++", None, None));
             }
         }
-        return Err(crate::safety::bad_state(
+        return Err(crate::safety::bad_state_with_hint(
             "platform_libcpp",
             "no C++ standard library (libstdc++ or libc++) was found in the usual locations",
             "install libstdc++6 or libc++1",
@@ -56287,7 +56287,7 @@ fn bi_platform_cpu(_args: Vec<Value>, _input: Option<Value>) -> Result<Value> {
         cmd.args(["-n", "hw.physicalcpu"]);
         let cores = probe_text("platform_cpu", "sysctl", cmd)?;
         let cores = cores.parse::<i64>().map_err(|e| {
-            crate::safety::bad_state(
+            crate::safety::bad_state_with_hint(
                 "platform_cpu",
                 &format!("hw.physicalcpu is not a number: {e}"),
                 "a sysctl that reports the physical CPU count",
@@ -56298,7 +56298,7 @@ fn bi_platform_cpu(_args: Vec<Value>, _input: Option<Value>) -> Result<Value> {
         cmd.args(["-n", "hw.logicalcpu"]);
         let logical = probe_text("platform_cpu", "sysctl", cmd)?;
         let logical = logical.parse::<i64>().map_err(|e| {
-            crate::safety::bad_state(
+            crate::safety::bad_state_with_hint(
                 "platform_cpu",
                 &format!("hw.logicalcpu is not a number: {e}"),
                 "a sysctl that reports the logical CPU count",
@@ -56319,7 +56319,7 @@ fn bi_platform_cpu_count(_args: Vec<Value>, _input: Option<Value>) -> Result<Val
     // answer 1, which is a real count; it is an error now.
     match std::thread::available_parallelism() {
         Ok(count) => Ok(Value::Int(count.get() as i64)),
-        Err(e) => Err(crate::safety::bad_state(
+        Err(e) => Err(crate::safety::bad_state_with_hint(
             "platform_cpu_count",
             &format!("the CPU count could not be read: {e}"),
             "a host that reports its available parallelism",
@@ -56688,7 +56688,7 @@ fn bi_platform_disk_usage(args: Vec<Value>, _input: Option<Value>) -> Result<Val
         .filter(|d| resolved.starts_with(d.mount_point()))
         .max_by_key(|d| d.mount_point().as_os_str().len())
         .ok_or_else(|| {
-            crate::safety::bad_state(
+            crate::safety::bad_state_with_hint(
                 "platform_disk_usage",
                 &format!("no mounted disk contains {}", resolved.display()),
                 "pass a path on a mounted filesystem",
@@ -56804,7 +56804,7 @@ fn bi_platform_gpus(_args: Vec<Value>, _input: Option<Value>) -> Result<Value> {
             for line in output.lines() {
                 let parts: Vec<&str> = line.split(',').map(|s| s.trim()).collect();
                 if parts.len() < 7 {
-                    return Err(crate::safety::bad_state(
+                    return Err(crate::safety::bad_state_with_hint(
                         "platform_gpus",
                         &format!(
                             "nvidia-smi row has {} columns, expected 7: {line}",
@@ -56893,7 +56893,7 @@ fn gpu_memory_record(output: &str) -> Result<Value> {
     for line in output.lines().map(str::trim).filter(|l| !l.is_empty()) {
         let parts: Vec<&str> = line.split(',').map(str::trim).collect();
         if parts.len() != 3 {
-            return Err(crate::safety::bad_state(
+            return Err(crate::safety::bad_state_with_hint(
                 "platform_gpu_memory",
                 &format!("nvidia-smi memory row is not total,used,free: {line:?}"),
                 "the csv query nvidia-smi was asked for",
@@ -56901,7 +56901,7 @@ fn gpu_memory_record(output: &str) -> Result<Value> {
         }
         for (i, text) in parts.iter().enumerate() {
             let value = text.parse::<i64>().map_err(|e| {
-                crate::safety::bad_state(
+                crate::safety::bad_state_with_hint(
                     "platform_gpu_memory",
                     &format!("nvidia-smi memory field {i} is not a number: {e}"),
                     "the csv query nvidia-smi was asked for",
@@ -56912,7 +56912,7 @@ fn gpu_memory_record(output: &str) -> Result<Value> {
         devices += 1;
     }
     if devices == 0 {
-        return Err(crate::safety::bad_state(
+        return Err(crate::safety::bad_state_with_hint(
             "platform_gpu_memory",
             "nvidia-smi printed no memory rows",
             "the csv query nvidia-smi was asked for",
@@ -62476,7 +62476,7 @@ fn dd_io(builtin: &str, path: &str, e: &std::io::Error) -> anyhow::Error {
             "check the path and its permissions",
         ),
         // A device that stops answering, a full disk: still a coded refusal.
-        _ => crate::safety::bad_state(
+        _ => crate::safety::bad_state_with_hint(
             builtin,
             &format!("`{path}` failed: {e}"),
             "a readable source and a writable destination",
@@ -62863,7 +62863,7 @@ fn create_new_output(builtin: &str, path: &str) -> Result<std::fs::File> {
         .open(path)
         .map_err(|e| {
             if e.kind() == std::io::ErrorKind::AlreadyExists {
-                crate::safety::bad_state(
+                crate::safety::bad_state_with_hint(
                     builtin,
                     &format!("{path} already exists"),
                     "remove it first; the existing file is not overwritten",
@@ -62877,7 +62877,7 @@ fn create_new_output(builtin: &str, path: &str) -> Result<std::fs::File> {
 /// Refuses an output path that already exists, for a tool that writes its own file.
 fn refuse_existing(builtin: &str, path: &str) -> Result<()> {
     if std::path::Path::new(path).exists() {
-        return Err(crate::safety::bad_state(
+        return Err(crate::safety::bad_state_with_hint(
             builtin,
             &format!("{path} already exists"),
             "remove it first; the existing file is not overwritten",
@@ -65597,7 +65597,7 @@ fn bi_perf_stat(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
         let (stats, waited) = match sampled {
             Some((Ok(stats), waited)) => (stats, waited),
             Some((Err(e), _)) => {
-                return Err(crate::safety::bad_state(
+                return Err(crate::safety::bad_state_with_hint(
                     "perf_stat",
                     &format!(
                         "GetProcessTimes or K32GetProcessMemoryInfo failed on `{}`: {e}",
@@ -65607,7 +65607,7 @@ fn bi_perf_stat(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
                 ))
             }
             None => {
-                return Err(crate::safety::bad_state(
+                return Err(crate::safety::bad_state_with_hint(
                     "perf_stat",
                     "the child was not sampled before it was reaped",
                     "a child this process started and waited for",

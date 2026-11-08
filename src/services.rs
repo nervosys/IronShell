@@ -729,7 +729,7 @@ mod win_sudo {
 #[cfg(windows)]
 mod scm {
     use super::*;
-    use crate::safety::{bad_state, budget_exceeded, not_found, os_denied, policy_deny};
+    use crate::safety::{bad_state_with_hint, budget_exceeded, not_found, os_denied, policy_deny};
     use std::ffi::c_void;
     use std::ptr::{null, null_mut};
     use std::time::{Duration, Instant};
@@ -920,12 +920,12 @@ mod scm {
                 "run as an administrator; the shell did not refuse this",
             ),
             ERROR_SERVICE_DOES_NOT_EXIST => not_found(builtin, "service", service),
-            ERROR_SERVICE_EXISTS | ERROR_DUPLICATE_SERVICE_NAME => bad_state(
+            ERROR_SERVICE_EXISTS | ERROR_DUPLICATE_SERVICE_NAME => bad_state_with_hint(
                 builtin,
                 &format!("{service} already exists, or its display name is taken; a service is never overwritten"),
                 "choose another name",
             ),
-            ERROR_SERVICE_MARKED_FOR_DELETE => bad_state(
+            ERROR_SERVICE_MARKED_FOR_DELETE => bad_state_with_hint(
                 builtin,
                 &format!("{service} is marked for deletion and goes when the machine restarts"),
                 "restart the machine, then retry",
@@ -937,7 +937,7 @@ mod scm {
                     "use a built-in or virtual account such as LocalSystem; IronShell never supplies a password",
                 )
             }
-            _ => bad_state(
+            _ => bad_state_with_hint(
                 builtin,
                 &format!("{call} failed for '{service}': {win} (Win32 error {code})"),
                 "check the service with `sc.exe query`, then retry",
@@ -1656,7 +1656,9 @@ mod linux {
 mod launchd {
     use super::*;
     use crate::builtins::bounded_cmd_output;
-    use crate::safety::{bad_state, fs_error, not_found, os_denied, policy_deny, tool_failed};
+    use crate::safety::{
+        bad_state_with_hint, fs_error, not_found, os_denied, policy_deny, tool_failed,
+    };
     use std::io::{ErrorKind, Write};
     use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
     use std::path::{Path, PathBuf};
@@ -1891,7 +1893,7 @@ mod launchd {
             Ok(_) => {
                 let text = std::fs::read_to_string(&path).unwrap_or_default();
                 if text.lines().any(|line| line == PLIST_MARKER) {
-                    return Err(bad_state(
+                    return Err(bad_state_with_hint(
                         BUILTIN,
                         &format!("{label} already exists; a service is never overwritten"),
                         "choose another name, or svc_delete the existing one first",
@@ -1907,7 +1909,7 @@ mod launchd {
             Err(e) => return Err(fs_error(BUILTIN, &path, &e)),
         }
         if loaded_print(BUILTIN, &label)?.is_some() {
-            return Err(bad_state(
+            return Err(bad_state_with_hint(
                 BUILTIN,
                 &format!("{label} is already loaded in the system domain; a service is never overwritten"),
                 "choose another name, or svc_delete it first",

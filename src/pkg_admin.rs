@@ -722,7 +722,7 @@ fn checked(builtin: &str, tool: &str, args: &[String]) -> Result<Output> {
         String::from_utf8_lossy(&output.stdout)
     );
     if is_lock_busy(&combined) {
-        return Err(safety::bad_state(
+        return Err(safety::bad_state_with_hint(
             builtin,
             "the apt/dpkg lock is held by another process; NOTHING WAS CHANGED",
             "the other apt or dpkg run to finish",
