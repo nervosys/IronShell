@@ -43130,7 +43130,15 @@ fn algo_param(builtin: &str, params: &[Value], default: &str) -> Result<String> 
 fn is_hash_algorithm(name: &str) -> bool {
     matches!(
         name.to_ascii_lowercase().as_str(),
-        "md5" | "sha1" | "sha-1" | "sha256" | "sha-256" | "sha384" | "sha-384" | "sha512" | "sha-512"
+        "md5"
+            | "sha1"
+            | "sha-1"
+            | "sha256"
+            | "sha-256"
+            | "sha384"
+            | "sha-384"
+            | "sha512"
+            | "sha-512"
     )
 }
 
@@ -50746,6 +50754,9 @@ const SEARCH_SKIP_DIRS: &[&str] = &[
     "vendor",
     ".venv",
     "__pycache__",
+    // IronShell's own state (the audit log, sessions, journal). A search for a
+    // word the shell itself logged found the log, not the project.
+    ".ironshell",
 ];
 
 /// A search that has not finished in this long is not going to be useful to
