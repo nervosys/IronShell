@@ -818,12 +818,9 @@ pub fn eval_expr(expr: &Expr, env: &mut Env) -> Result<Value> {
                 // A missing field is how a misspelled *module function* presents
                 // (`file.raed` — modules are records in the env), so suggest from
                 // the record's own keys rather than dead-ending on prose.
-                Value::Record(mut map) => map.remove(field).ok_or_else(|| {
-                    crate::safety::unknown_field(
-                        field,
-                        crate::builtins::nearest_names(field, map.keys().map(|k| k.as_str())),
-                    )
-                }),
+                Value::Record(mut map) => map
+                    .remove(field)
+                    .ok_or_else(|| module_field_error(field, &map, object)),
                 // Uncoded (E_UNKNOWN), though it is the commonest type error
                 // an agent makes: reading a field of a string or null.
                 // Named after the expression when it is a plain name, so
@@ -916,6 +913,22 @@ fn unbound_receiver_error(object: &Expr, env: &Env) -> Option<anyhow::Error> {
     }
 }
 
+/// The error for a field a record lacks. When the record is a module imported
+/// as `import "..." as name`, the hint says why the name is missing: the module
+/// defines it without `pub`, or it exports nothing.
+fn module_field_error(
+    field: &str,
+    map: &std::collections::BTreeMap<String, Value>,
+    object: &Expr,
+) -> anyhow::Error {
+    let candidates = crate::builtins::nearest_names(field, map.keys().map(|k| k.as_str()));
+    let specific = crate::module_loader::unexported_hint(field).or_else(|| match object {
+        Expr::Ident(name) => crate::module_loader::empty_module_hint(name),
+        _ => None,
+    });
+    crate::safety::unknown_field_hinted(field, candidates, specific)
+}
+
 /// Resolve only identifiers and field chains, which cannot mutate the env.
 /// Other expressions keep the normal evaluator path and its evaluation order.
 fn borrowed_member<'a>(expr: &Expr, env: &'a Env) -> Option<Result<&'a Value>> {
@@ -931,12 +944,9 @@ fn borrowed_member<'a>(expr: &Expr, env: &'a Env) -> Option<Result<&'a Value>> {
             Some(value.and_then(|value| {
                 crate::safety::check_deadline()?;
                 match value {
-                    Value::Record(map) => map.get(field).ok_or_else(|| {
-                        crate::safety::unknown_field(
-                            field,
-                            crate::builtins::nearest_names(field, map.keys().map(|k| k.as_str())),
-                        )
-                    }),
+                    Value::Record(map) => map
+                        .get(field)
+                        .ok_or_else(|| module_field_error(field, map, object)),
                     other => Err(crate::safety::bad_arg(
                         &match object.as_ref() {
                             Expr::Ident(name) => format!("{name}.{field}"),

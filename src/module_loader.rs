@@ -44,6 +44,22 @@ type Exports = BTreeMap<String, Value>;
 /// Modules evaluated so far in this process, by canonical path.
 static CACHE: OnceLock<Mutex<HashMap<PathBuf, Exports>>> = OnceLock::new();
 
+/// What a loaded module defines, under the source string it was imported by.
+/// The import hints read it when a name is unknown; nothing else does.
+struct ModuleFacts {
+    source: String,
+    /// Top-level names left without `pub`.
+    private: Vec<String>,
+    /// Names the module exports.
+    exported: Vec<String>,
+}
+
+/// One entry per module loaded in this process.
+static FACTS: Mutex<Vec<ModuleFacts>> = Mutex::new(Vec::new());
+
+/// `import "path" as name` bindings, as (name, source).
+static ALIASES: Mutex<Vec<(String, String)>> = Mutex::new(Vec::new());
+
 thread_local! {
     /// Directory of each file being evaluated, innermost last. The entry
     /// script's directory is pushed by `enter_entry_file`; each module pushes its
@@ -117,6 +133,10 @@ pub fn import(
             env.set_var_unchecked(bound.to_string(), value.clone());
         }
     } else if let Some(name) = alias {
+        ALIASES
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .push((name.to_string(), source.to_string()));
         env.set_var_unchecked(name.to_string(), Value::Record(module));
     } else {
         for (name, value) in module {
@@ -159,6 +179,47 @@ pub fn reexport(items: &[ExportItem], source: &str, env: &mut Env) -> Result<()>
         env.add_export(name);
     }
     Ok(())
+}
+
+fn remember_facts(source: &str, private: Vec<String>, exported: Vec<String>) {
+    let mut facts = FACTS.lock().unwrap_or_else(|e| e.into_inner());
+    facts.retain(|f| f.source != source);
+    facts.push(ModuleFacts {
+        source: source.to_string(),
+        private,
+        exported,
+    });
+}
+
+/// The hint for a name that is unknown but defined in a loaded module without
+/// `pub`: the module keeps it private, so it is not reachable from here.
+pub(crate) fn unexported_hint(name: &str) -> Option<String> {
+    let facts = FACTS.lock().unwrap_or_else(|e| e.into_inner());
+    facts
+        .iter()
+        .find(|f| f.private.iter().any(|p| p == name) && !f.exported.iter().any(|e| e == name))
+        .map(|f| {
+            format!(
+                "`{name}` is defined in {} but not exported; mark it `pub`",
+                f.source
+            )
+        })
+}
+
+/// The hint for a missing field of `alias`, when `alias` names a module imported
+/// with `import "..." as alias` and that module exports nothing.
+pub(crate) fn empty_module_hint(alias: &str) -> Option<String> {
+    let aliases = ALIASES.lock().unwrap_or_else(|e| e.into_inner());
+    let source = aliases.iter().rev().find(|(a, _)| a == alias)?.1.clone();
+    drop(aliases);
+    let facts = FACTS.lock().unwrap_or_else(|e| e.into_inner());
+    let module = facts.iter().find(|f| f.source == source)?;
+    module.exported.is_empty().then(|| {
+        format!(
+            "`{alias}` is the module {source}, which exports nothing: mark the \
+             definitions you want to use `pub`"
+        )
+    })
 }
 
 /// Load a module's exports, evaluating it on first use.
@@ -222,7 +283,17 @@ fn load(source: &str) -> Result<(PathBuf, Exports)> {
     let stmts = crate::parser::parse_program(&source_text)
         .map_err(|e| in_module(&path, anyhow!("{e:#}")))?;
 
+    let private: Vec<String> = stmts
+        .iter()
+        .filter_map(|stmt| match stmt {
+            crate::ast::Stmt::Let {
+                name, visibility, ..
+            } if *visibility != crate::ast::Visibility::Pub => Some(name.clone()),
+            _ => None,
+        })
+        .collect();
     let exports = evaluate(&path, &stmts).map_err(|e| in_module(&path, e))?;
+    remember_facts(source, private, exports.keys().cloned().collect());
 
     cache()
         .lock()

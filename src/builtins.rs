@@ -4169,7 +4169,11 @@ fn call_with_input_inner(
     // refused for approval, for a builtin that does not exist. Only a name no
     // implementation serves is answered here; a served name is gated as before.
     if !is_served(name) {
-        return Err(crate::safety::unknown_builtin(name, did_you_mean(name)));
+        return Err(crate::safety::unknown_builtin_hinted(
+            name,
+            did_you_mean(name),
+            crate::module_loader::unexported_hint(name),
+        ));
     }
 
     // Enforce policy before the builtin runs. `effect_of` only ever *described*
@@ -4351,7 +4355,11 @@ fn call_with_input_inner(
         _ if crate::plugins::is_manifest_builtin(name) => {
             crate::plugins::call_manifest_builtin(name, args, input)
         }
-        _ => Err(crate::safety::unknown_builtin(name, did_you_mean(name))),
+        _ => Err(crate::safety::unknown_builtin_hinted(
+            name,
+            did_you_mean(name),
+            crate::module_loader::unexported_hint(name),
+        )),
     }
 }
 

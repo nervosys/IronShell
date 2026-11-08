@@ -2598,7 +2598,19 @@ pub fn index_out_of_range(kind: &str, index: i64, len: usize) -> anyhow::Error {
 /// nearest real names. `candidates` must already have been filtered against the
 /// live builtin table — this constructor does not invent names.
 pub fn unknown_builtin(name: &str, candidates: Vec<String>) -> anyhow::Error {
-    let hint = if candidates.is_empty() {
+    unknown_builtin_hinted(name, candidates, None)
+}
+
+/// [`unknown_builtin`] whose hint is `specific` when given, in place of the
+/// candidate list: for a name a loaded module defines without `pub`.
+pub fn unknown_builtin_hinted(
+    name: &str,
+    candidates: Vec<String>,
+    specific: Option<String>,
+) -> anyhow::Error {
+    let hint = if let Some(specific) = specific {
+        specific
+    } else if candidates.is_empty() {
         "no builtin has a similar name; call ontology_manifest() to list the \
          available categories"
             .to_string()
@@ -2649,7 +2661,19 @@ pub fn unknown_module(name: &str, candidates: Vec<String>) -> anyhow::Error {
 /// writes dotted module paths far more often than bare builtin names.
 /// `candidates` must come from the record's own keys.
 pub fn unknown_field(field: &str, candidates: Vec<String>) -> anyhow::Error {
-    let hint = if candidates.is_empty() {
+    unknown_field_hinted(field, candidates, None)
+}
+
+/// [`unknown_field`] whose hint is `specific` when given, in place of the
+/// candidate list.
+pub fn unknown_field_hinted(
+    field: &str,
+    candidates: Vec<String>,
+    specific: Option<String>,
+) -> anyhow::Error {
+    let hint = if let Some(specific) = specific {
+        specific
+    } else if candidates.is_empty() {
         format!("no field named '{}'; check the record's keys", field)
     } else {
         format!("did you mean: {}", candidates.join(", "))
