@@ -8713,7 +8713,7 @@ pub static SIGNATURES: &[Signature] = &[
         aliases: &["stat"],
         subject: None,
         params: &[req("path", Ty::Str, "a file path")],
-        returns: "Record",
+        returns: "Record | Null",
         doc: "File metadata: size, times, and on Unix mode, inode and ownership. Null if the path does not exist; any other failure is an error.",
         examples: &[
             (r#"typeof(fs_stat("Cargo.toml"))"#, r#"Record"#),
