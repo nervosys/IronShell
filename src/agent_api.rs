@@ -3107,7 +3107,13 @@ pub fn builtin_tool_specs() -> Vec<JsonValue> {
 /// effect). Case-insensitive. Returns an `{error, hint}` record when unknown.
 pub fn ontology_describe_json(query: &str) -> JsonValue {
     let defs = get_all_builtin_definitions();
-    let q = query.trim();
+    // `file.replace` names the builtin that the call runs (`file_replace`), so
+    // the dotted spelling describes that same entry.
+    let resolved = query
+        .trim()
+        .split_once('.')
+        .and_then(|(m, f)| crate::modules::builtin_for_member(m, f));
+    let q = resolved.as_deref().unwrap_or(query.trim());
 
     // An exact, case-sensitive category name wins. Categories are capitalised
     // ("Platform") and builtins are not ("platform"), but the builtin lookup

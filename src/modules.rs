@@ -1514,6 +1514,18 @@ pub fn is_module_member(module: &str, func: &str) -> bool {
     })
 }
 
+/// The builtin a module member calls, so `file.replace` resolves to
+/// `file_replace`. `None` when the module has no such member.
+pub fn builtin_for_member(module: &str, func: &str) -> Option<String> {
+    module_table().iter().find_map(|(m, v)| match v {
+        Value::Record(members) if *m == module => match members.get(func) {
+            Some(Value::Builtin(b)) => Some(b.name.clone()),
+            _ => None,
+        },
+        _ => None,
+    })
+}
+
 lazy_static::lazy_static! {
     static ref MODULE_NAMES: std::collections::HashSet<&'static str> =
         all_modules().into_iter().map(|(n, _)| n).collect();
