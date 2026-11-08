@@ -9778,6 +9778,8 @@ fn json_to_value(json: serde_json::Value) -> Value {
 
 fn value_to_json(value: Value) -> serde_json::Value {
     match value {
+        // A null is a JSON null, not the text "<null>" that value_to_string gives.
+        Value::Null => serde_json::Value::Null,
         Value::Str(s) => serde_json::Value::String(s),
         Value::Int(i) => serde_json::Value::Number(serde_json::Number::from(i)),
         Value::Float(f) => serde_json::Value::Number(
@@ -9881,7 +9883,11 @@ fn bi_to_csv(_args: Vec<Value>, input: Option<Value>) -> Result<Value> {
                         .map(|header| {
                             record
                                 .get(header)
-                                .map(|v| csv_escape(&value_to_string(v)))
+                                .map(|v| match v {
+                                    // An empty CSV field, not "<null>".
+                                    Value::Null => String::new(),
+                                    v => csv_escape(&value_to_string(v)),
+                                })
                                 .unwrap_or_default()
                         })
                         .collect();
