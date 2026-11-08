@@ -547,8 +547,61 @@ pub fn validate_safe_path(path: &str) -> Result<PathBuf> {
     Ok(canonical)
 }
 
+/// Whether a read of `path` would leave the jail: true when the path resolves
+/// outside the workspace (or, with `allowed_base_dirs` configured, outside every
+/// base). False when no jail applies.
+///
+/// The jail is the one `validate_safe_path` enforces: agent mode, an explicit
+/// `IRONSHELL_WORKSPACE`, or configured base directories. A relative path is
+/// judged where the OS will read it, against the process working directory, not
+/// against the workspace root.
+pub fn outside_read_jail(path: &str) -> bool {
+    let explicit: Vec<PathBuf> = PATH_CONFIG
+        .lock()
+        .map(|c| c.allowed_base_dirs.clone())
+        .unwrap_or_default();
+    if explicit.is_empty() && !crate::safety::jail_enforced(crate::safety::current_mode()) {
+        return false;
+    }
+    let given = Path::new(path);
+    let absolute = if given.is_absolute() {
+        given.to_path_buf()
+    } else {
+        match std::env::current_dir() {
+            Ok(cwd) => cwd.join(given),
+            // Without a working directory the path cannot be placed: refuse it.
+            Err(_) => return true,
+        }
+    };
+    let absolute = absolute.to_string_lossy();
+    if explicit.is_empty() {
+        !crate::safety::within_workspace(&absolute)
+    } else {
+        !explicit
+            .iter()
+            .any(|base| crate::safety::within_root(&absolute, base))
+    }
+}
+
+/// The read jail as a builtin's error: `E_OUTSIDE_WORKSPACE` when `path` is
+/// refused by [`outside_read_jail`]. It runs before any existence check, so a
+/// missing path outside the workspace and an existing one answer alike.
+pub fn check_read_jail(builtin: &str, path: &str) -> Result<()> {
+    if outside_read_jail(path) {
+        return Err(crate::safety::outside_workspace(
+            builtin,
+            &sanitize_path_in_error(path),
+        ));
+    }
+    Ok(())
+}
+
 /// Validate a path for read operations (less strict)
+///
+/// The jail is checked first, so the answer for a path outside the workspace is
+/// the same whether or not the path exists.
 pub fn validate_read_path(path: &str) -> Result<PathBuf> {
+    check_read_jail("", path)?;
     validate_safe_path(path)
 }
 

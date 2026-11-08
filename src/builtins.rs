@@ -8276,6 +8276,7 @@ fn bi_ls(args: Vec<Value>, _input: Option<Value>) -> Result<Value> {
                 .map(std::path::PathBuf::from)
                 .collect()
         } else {
+            crate::security::check_read_jail("ls", &path_str)?;
             if !std::path::Path::new(&path_str).exists() {
                 return Err(crate::safety::not_found("ls", "directory", &path_str));
             }
@@ -8395,6 +8396,9 @@ fn read_named_files(builtin: &str, path_str: &str) -> Result<String> {
 }
 
 fn read_named_file(builtin: &str, path_str: &str) -> Result<String> {
+    // The jail comes before the existence check, so a missing path outside the
+    // workspace is E_OUTSIDE_WORKSPACE and not E_NOT_FOUND (an existence oracle).
+    crate::security::check_read_jail(builtin, path_str)?;
     // A missing parent directory made validate_read_path fail with an uncoded
     // "Failed to canonicalize parent directory".
     if !std::path::Path::new(path_str).exists() {
@@ -8512,6 +8516,7 @@ fn read_bytes_capped(builtin: &str, path: impl AsRef<std::path::Path>) -> Result
 
 fn read_bytes_capped_at(builtin: &str, path: &std::path::Path, max: u64) -> Result<Vec<u8>> {
     use std::io::Read;
+    crate::security::check_read_jail(builtin, &path.to_string_lossy())?;
     let over = || {
         crate::safety::budget_exceeded(
             builtin,
@@ -26851,6 +26856,7 @@ fn bi_fs_stat(args: Vec<Value>, _input: Option<Value>) -> Result<Value> {
         }
     };
 
+    crate::security::check_read_jail("fs_stat", &path)?;
     // A missing path is the documented Null. The old code returned Null for
     // any metadata error, so a permission or I/O failure read as absence.
     let meta = match std::fs::metadata(&path) {
@@ -27662,6 +27668,9 @@ fn expand_glob_for(builtin: &str, pattern: &str) -> Result<Vec<String>> {
     // Windows callers may write either separator; globbing is done on `/`.
     let pattern = pattern.replace(char::from(92), "/");
     let dir = glob_literal_dir(&pattern);
+    // The jail judges the directory the pattern walks before anything is listed,
+    // so `glob("../*")` is refused whether or not that directory exists.
+    crate::security::check_read_jail(builtin, if dir.is_empty() { "." } else { &dir })?;
     if !dir.is_empty() && !std::path::Path::new(&dir).is_dir() {
         return Err(crate::safety::not_found(builtin, "directory", &dir));
     }
@@ -27671,7 +27680,12 @@ fn expand_glob_for(builtin: &str, pattern: &str) -> Result<Vec<String>> {
     if over {
         return Err(walk_over(builtin, WALK_MAX_ENTRIES));
     }
-    Ok(paths)
+    // A match that resolves outside the workspace (through a link, say) is not
+    // returned.
+    Ok(paths
+        .into_iter()
+        .filter(|p| !crate::security::outside_read_jail(p))
+        .collect())
 }
 
 fn bi_fs_glob(args: Vec<Value>, _input: Option<Value>) -> Result<Value> {
@@ -27961,6 +27975,7 @@ fn bi_fs_du(args: Vec<Value>, _input: Option<Value>) -> Result<Value> {
         _ => ".".to_string(),
     };
 
+    crate::security::check_read_jail("fs_du", &path)?;
     // A total that leaves out an entry it could not stat or list is wrong, so
     // those are errors. The old code counted such an entry as 0 bytes, and an
     // unreadable or missing root as an empty directory.
@@ -33427,6 +33442,7 @@ fn zip_archive_entries(
     archive: &str,
 ) -> Result<(Vec<(String, Option<String>)>, u64)> {
     use std::io::Read as _;
+    crate::security::check_read_jail(builtin, archive)?;
     let file =
         std::fs::File::open(archive).map_err(|e| crate::safety::fs_error(builtin, archive, &e))?;
     let mut zip = zip::ZipArchive::new(file).map_err(|e| {
@@ -33610,6 +33626,7 @@ fn tar_archive_listing(
     archive: &str,
 ) -> Result<(Vec<(String, Option<String>)>, u64)> {
     use std::io::{Read, Seek, SeekFrom};
+    crate::security::check_read_jail(builtin, archive)?;
     let mut file =
         std::fs::File::open(archive).map_err(|e| crate::safety::fs_error(builtin, archive, &e))?;
     let mut magic = [0u8; 2];
@@ -33941,6 +33958,7 @@ fn archive_path_arg(builtin: &str, args: &[Value]) -> Result<String> {
 }
 
 fn archive_open(builtin: &str, path: &str) -> Result<std::fs::File> {
+    crate::security::check_read_jail(builtin, path)?;
     std::fs::File::open(path).map_err(|e| crate::safety::fs_error(builtin, path, &e))
 }
 
@@ -34026,6 +34044,7 @@ fn bi_zip_list(args: Vec<Value>, _input: Option<Value>) -> Result<Value> {
 fn bi_archive_info(args: Vec<Value>, _input: Option<Value>) -> Result<Value> {
     // A file that did not exist still answered {path, type}.
     let path = archive_path_arg("archive_info", &args)?;
+    crate::security::check_read_jail("archive_info", &path)?;
     let meta =
         std::fs::metadata(&path).map_err(|e| crate::safety::fs_error("archive_info", &path, &e))?;
     let mut rec = BTreeMap::new();
@@ -34238,6 +34257,7 @@ fn gzip_file_capped(
     decompress: bool,
     cap: u64,
 ) -> Result<Value> {
+    crate::security::check_read_jail(builtin, input)?;
     let src =
         std::fs::File::open(input).map_err(|e| crate::safety::fs_error(builtin, input, &e))?;
     // The exclusive create is the existence check: a file that appears after an
@@ -34703,6 +34723,7 @@ fn bi_perm_get(args: Vec<Value>, _input: Option<Value>) -> Result<Value> {
     };
 
     // A path that could not be read was null.
+    crate::security::check_read_jail("perm_get", &path)?;
     let meta =
         std::fs::metadata(&path).map_err(|e| crate::safety::fs_error("perm_get", &path, &e))?;
     #[cfg(unix)]
@@ -34751,6 +34772,7 @@ fn bi_perm_check(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
         }
     };
     let path = crate::safety::resolve_path_str(&path);
+    crate::security::check_read_jail("perm_check", &path)?;
     let metadata =
         fs::metadata(&path).map_err(|e| crate::safety::fs_error("perm_check", &path, &e))?;
     // This is a metadata query, not an access check for the caller's identity,
@@ -42877,6 +42899,7 @@ fn run_editor(name: &str, editor: &str, path: &std::path::Path) -> Result<()> {
 /// file longer than `INPUT_EDITOR_MAX_BYTES` is refused, not truncated.
 fn read_edit_file(name: &str, path: &std::path::Path) -> Result<String> {
     use std::io::Read;
+    crate::security::check_read_jail(name, &path.to_string_lossy())?;
     let file = std::fs::File::open(path).map_err(|e| crate::safety::fs_error(name, path, &e))?;
     let mut bytes = Vec::new();
     file.take(INPUT_EDITOR_MAX_BYTES as u64 + 1)
@@ -44191,6 +44214,7 @@ fn bi_crypto_cert_info(args: Vec<Value>, input: Option<Value>) -> Result<Value> 
     };
     crate::safety::reject_option_like(name, std::slice::from_ref(path))?;
     let path = crate::safety::resolve_path_str(path);
+    crate::security::check_read_jail(name, &path)?;
     let metadata =
         std::fs::metadata(&path).map_err(|e| crate::safety::fs_error(name, &path, &e))?;
     if !metadata.is_file() {
@@ -44232,6 +44256,7 @@ fn sqlite_db_file(builtin: &str, path: &str) -> Result<()> {
     if path == ":memory:" {
         return Ok(());
     }
+    crate::security::check_read_jail(builtin, path)?;
     let mut file = match std::fs::File::open(path) {
         Ok(f) => f,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
@@ -46470,6 +46495,7 @@ fn bi_crypto_cert_verify(args: Vec<Value>, _input: Option<Value>) -> Result<Valu
     };
 
     crate::safety::reject_option_like("crypto_cert_verify", std::slice::from_ref(&cert_path))?;
+    crate::security::check_read_jail("crypto_cert_verify", &cert_path)?;
     // A certificate file that did not exist answered false, "invalid".
     if !std::path::Path::new(&cert_path).is_file() {
         return Err(crate::safety::not_found(
@@ -48630,6 +48656,7 @@ fn bi_file_exists(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
         _ => return Err(crate::safety::arg_err("file_exists requires a path")),
     };
 
+    crate::security::check_read_jail("file_exists", &path)?;
     // Path::exists/is_file/is_dir answer false for any stat error, so a path
     // that could not be checked read as absent. Only NotFound is absent now.
     let p = std::path::Path::new(&path);

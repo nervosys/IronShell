@@ -3269,7 +3269,7 @@ fn windows_file_id(path: &Path) -> Option<(u32, u64)> {
 
 /// Whether the jail is enforced. Enforced in agent mode, or whenever the
 /// workspace root is set explicitly (humans opting into reproducible jails).
-fn jail_enforced(mode: Mode) -> bool {
+pub(crate) fn jail_enforced(mode: Mode) -> bool {
     mode == Mode::Agent || std::env::var("IRONSHELL_WORKSPACE").is_ok()
 }
 
@@ -3305,7 +3305,12 @@ pub fn resolve_path_str(path: &str) -> String {
 /// is correct across platforms (Windows verbatim `\\?\` prefixes, POSIX symlink
 /// targets) and cannot be escaped by `..` traversal.
 pub fn within_workspace(path: &str) -> bool {
-    let root = match workspace_root().canonicalize() {
+    within_root(path, &workspace_root())
+}
+
+/// [`within_workspace`] for an arbitrary root: whether `path` resolves inside it.
+pub fn within_root(path: &str, base: &Path) -> bool {
+    let root = match base.canonicalize() {
         Ok(r) => r,
         Err(_) => return false,
     };
