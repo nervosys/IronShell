@@ -807,6 +807,9 @@ pub fn eval_expr(expr: &Expr, env: &mut Env) -> Result<Value> {
             if let Some(value) = borrowed_member(expr, env) {
                 return value.cloned();
             }
+            if let Some(e) = unbound_receiver_error(object, env) {
+                return Err(e);
+            }
             let obj = eval_expr(object, env)?;
             match obj {
                 // A missing field is how a misspelled *module function* presents
@@ -884,6 +887,32 @@ pub fn eval_expr(expr: &Expr, env: &mut Env) -> Result<Value> {
     }
 }
 
+/// The unknown-module error for `name.member` when `name` is an unbound
+/// identifier that is neither a module nor a builtin. Without it the access
+/// reached the record check with Null and was refused as "expected a Record".
+fn unbound_receiver_error(object: &Expr, env: &Env) -> Option<anyhow::Error> {
+    #[cfg(feature = "native")]
+    {
+        let Expr::Ident(name) = object else {
+            return None;
+        };
+        if env.get_var(name).is_some()
+            || crate::modules::is_module_name(name)
+            || builtins::is_dispatched(name)
+        {
+            return None;
+        }
+        let candidates =
+            builtins::nearest_names(name, crate::modules::all_modules().iter().map(|(m, _)| *m));
+        Some(crate::safety::unknown_module(name, candidates))
+    }
+    #[cfg(not(feature = "native"))]
+    {
+        let _ = (object, env);
+        None
+    }
+}
+
 /// Resolve only identifiers and field chains, which cannot mutate the env.
 /// Other expressions keep the normal evaluator path and its evaluation order.
 fn borrowed_member<'a>(expr: &Expr, env: &'a Env) -> Option<Result<&'a Value>> {
@@ -892,6 +921,9 @@ fn borrowed_member<'a>(expr: &Expr, env: &'a Env) -> Option<Result<&'a Value>> {
             crate::safety::check_deadline().map(|()| env.get_var(name).unwrap_or(&Value::Null)),
         ),
         Expr::MemberAccess { object, field } => {
+            if let Some(e) = unbound_receiver_error(object, env) {
+                return Some(Err(e));
+            }
             let value = borrowed_member(object, env)?;
             Some(value.and_then(|value| {
                 crate::safety::check_deadline()?;

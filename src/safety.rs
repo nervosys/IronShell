@@ -2586,6 +2586,30 @@ pub fn unknown_builtin(name: &str, candidates: Vec<String>) -> anyhow::Error {
     })
 }
 
+/// Build the unknown-name error for `name.member` where `name` is neither a
+/// bound value nor a module. It carries the same code `nope()` gets
+/// (`E_UNKNOWN_BUILTIN`), and names the module, not a field: the reader wrote a
+/// module that does not exist, and "expected a Record" sent them looking at a
+/// value they never had.
+pub fn unknown_module(name: &str, candidates: Vec<String>) -> anyhow::Error {
+    let hint = if candidates.is_empty() {
+        "no module has a similar name; call ontology_manifest() to list the          available categories"
+            .to_string()
+    } else {
+        format!("did you mean: {}", candidates.join(", "))
+    };
+    anyhow::Error::new(SafetyError {
+        code: ErrorCode::UnknownBuiltin,
+        message: format!("unknown module: {}", name),
+        builtin: name.to_string(),
+        hint,
+        approval: None,
+        did_you_mean: candidates,
+        expected: String::new(),
+        got: String::new(),
+    })
+}
+
 /// Build a structured unknown-field error (`E_UNKNOWN_FIELD`) carrying the
 /// nearest real field names.
 ///
