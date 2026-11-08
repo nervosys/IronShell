@@ -12856,10 +12856,12 @@ fn value_to_json_owned(v: Value) -> serde_json::Value {
 /// first(n?) - Get first n elements from array input (default: 1)
 /// Args:
 ///   - n (optional): Int - Number of elements to take (default: 1)
-/// Returns: Array with first n elements, or Value if n=1
+/// Returns: the first element when n is omitted; an Array of the first n
+/// elements when n is given, even n=1 (so `first(1) | map(...)` works)
 ///
 /// Example:
 ///   [1,2,3,4,5] | first()      # Returns 1
+///   [1,2,3,4,5] | first(1)     # Returns [1]
 ///   [1,2,3,4,5] | first(3)     # Returns [1,2,3]
 fn bi_first(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
     let (arr_val, count_arg) = if let Some(inp) = input {
@@ -12884,8 +12886,10 @@ fn bi_first(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
         return Ok(Value::Array(vec![]));
     }
 
-    // Fast path for single element (most common case)
-    if count == 1 {
+    // Fast path for the bare call (most common case). An explicit count of 1
+    // is an Array like every other count: `first(1) | map(...)` must map over
+    // a list, not a scalar.
+    if count == 1 && count_arg.is_none() {
         return if arr.is_empty() {
             Ok(Value::Array(vec![]))
         } else {
@@ -12901,10 +12905,12 @@ fn bi_first(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
 /// last(n?) - Get last n elements from array input (default: 1)
 /// Args:
 ///   - n (optional): Int - Number of elements to take (default: 1)
-/// Returns: Array with last n elements, or Value if n=1
+/// Returns: the last element when n is omitted; an Array of the last n
+/// elements when n is given, even n=1 (so `last(1) | map(...)` works)
 ///
 /// Example:
 ///   [1,2,3,4,5] | last()       # Returns 5
+///   [1,2,3,4,5] | last(1)      # Returns [5]
 ///   [1,2,3,4,5] | last(3)      # Returns [3,4,5]
 fn bi_last(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
     let (arr_val, count_arg) = if let Some(inp) = input {
@@ -12929,8 +12935,9 @@ fn bi_last(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
         return Ok(Value::Array(vec![]));
     }
 
-    // Fast path for single element (most common case)
-    if count == 1 {
+    // Fast path for the bare call (most common case). An explicit count of 1
+    // is an Array like every other count, as in `first`.
+    if count == 1 && count_arg.is_none() {
         return if arr.is_empty() {
             Ok(Value::Array(vec![]))
         } else {

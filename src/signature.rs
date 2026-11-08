@@ -2308,7 +2308,7 @@ pub static SIGNATURES: &[Signature] = &[
         )],
         returns: "Any",
         doc: "First element of an array, or the first `count` elements.",
-        examples: &[("[1, 2, 3] | first", "1"), ("[1, 2, 3] | first(2)", "[1, 2]")],
+        examples: &[("[1, 2, 3] | first", "1"), ("[1, 2, 3] | first(1)", "[1]"), ("[1, 2, 3] | first(2)", "[1, 2]")],
     },
     Signature {
         name: "last",
@@ -2323,7 +2323,7 @@ pub static SIGNATURES: &[Signature] = &[
         )],
         returns: "Any",
         doc: "Last element of an array, or the last `count` elements.",
-        examples: &[("[1, 2, 3] | last", "3"), ("[1, 2, 3] | last(2)", "[2, 3]")],
+        examples: &[("[1, 2, 3] | last", "3"), ("[1, 2, 3] | last(1)", "[3]"), ("[1, 2, 3] | last(2)", "[2, 3]")],
     },
     Signature {
         name: "flatten",
