@@ -63,6 +63,17 @@ const SLICE_HINT: &str = "IronShell has no slice syntax, so a[start:end] is not 
      `[1, 2, 3, 4] | slice(0, 2)`), or `slice(start)` to run to the end. For one \
      element, write a[i].";
 
+/// The hint for a `{ ... }` that holds statements. Records are `{name: value}`,
+/// and a braced block holds one expression: `name = value` and `let` are
+/// statements, so they cannot sit between the braces.
+const BLOCK_HINT: &str = "a braced `{ ... }` holds one expression, not statements: \
+     `name = value` and `let` are statements, and a record field is written \
+     `{name: value}`. Put one expression in the braces, or move the statements out.";
+
+/// The hint for `while`, `for` and `loop`, which IronShell does not have.
+const LOOP_HINT: &str = "IronShell has no loop statements; iterate with map/where/reduce \
+     over arr.range(n) or a list, or recurse";
+
 /// A `[start:end]` index, carried as a typed error so `parse_program` can give
 /// it the slice hint in place of the generic one.
 #[derive(Debug)]
@@ -2220,6 +2231,20 @@ impl Parser {
             if !self.check(Tok::RBrace) {
                 loop {
                     let key = self.need_field("expected key in record")?;
+                    // A `{ ... }` with statements in it parses as a record, so
+                    // the first statement fails here: `name = value`, or `let`.
+                    if !self.check(Tok::Colon)
+                        && (key == "let" || self.check(Tok::Equal) || self.check(Tok::ColonEqual))
+                    {
+                        let at = self.peek();
+                        return Err(anyhow::Error::new(HintedSyntax {
+                            msg: format!(
+                                "expected ':' after key at line {}, column {}",
+                                at.line, at.col
+                            ),
+                            hint: BLOCK_HINT.to_string(),
+                        }));
+                    }
                     self.need(Tok::Colon, "expected ':' after key")?;
                     let val = self.parse_expr()?;
                     kvs.push((key, val));
@@ -2276,6 +2301,32 @@ impl Parser {
         }
         if self.match_tok(Tok::Null) {
             return Ok(Expr::Null);
+        }
+        // `while (...)`, `for x in ...`, `loop { ... }`: a loop head. The next
+        // token is what makes it one, so `for = 1` and `for.x` stay names.
+        if self.check(Tok::Ident)
+            && matches!(self.peek().text.as_str(), "while" | "for" | "loop")
+            && self.peek_ahead(1).is_some_and(|k| {
+                matches!(
+                    k,
+                    Tok::LParen
+                        | Tok::LBrace
+                        | Tok::LBracket
+                        | Tok::Ident
+                        | Tok::Int
+                        | Tok::Float
+                        | Tok::String
+                )
+            })
+        {
+            let at = self.peek();
+            return Err(anyhow::Error::new(HintedSyntax {
+                msg: format!(
+                    "`{}` starts a loop at line {}, column {}",
+                    at.text, at.line, at.col
+                ),
+                hint: LOOP_HINT.to_string(),
+            }));
         }
         if self.match_tok(Tok::Ident) {
             let name = self.prev().text.clone();
