@@ -33437,12 +33437,23 @@ const ARCHIVE_LINK_TARGET_MAX: u64 = 4096;
 /// List every entry of a zip archive, with the target of each symlink entry.
 /// The zip format stores a symlink as a member whose unix mode is `S_IFLNK` and
 /// whose content is the target path.
+/// The read jail for an archive a builtin opens. Extracting is an import: the
+/// archive may come from outside the workspace, as `file_copy` may copy a file
+/// in, and every member it writes is still checked against the workspace.
+/// Listing or inspecting an archive is a read, and is refused outside it.
+fn archive_source_jail(builtin: &str, archive: &str) -> Result<()> {
+    if builtin.ends_with("_extract") {
+        return Ok(());
+    }
+    crate::security::check_read_jail(builtin, archive)
+}
+
 fn zip_archive_entries(
     builtin: &str,
     archive: &str,
 ) -> Result<(Vec<(String, Option<String>)>, u64)> {
     use std::io::Read as _;
-    crate::security::check_read_jail(builtin, archive)?;
+    archive_source_jail(builtin, archive)?;
     let file =
         std::fs::File::open(archive).map_err(|e| crate::safety::fs_error(builtin, archive, &e))?;
     let mut zip = zip::ZipArchive::new(file).map_err(|e| {
@@ -33626,7 +33637,7 @@ fn tar_archive_listing(
     archive: &str,
 ) -> Result<(Vec<(String, Option<String>)>, u64)> {
     use std::io::{Read, Seek, SeekFrom};
-    crate::security::check_read_jail(builtin, archive)?;
+    archive_source_jail(builtin, archive)?;
     let mut file =
         std::fs::File::open(archive).map_err(|e| crate::safety::fs_error(builtin, archive, &e))?;
     let mut magic = [0u8; 2];
@@ -74631,6 +74642,9 @@ mod quiet_walk_tests {
 
     #[test]
     fn project_loc_counts_a_non_utf8_source_file() {
+        let _env = crate::safety::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let dir = scratch("loc");
         std::fs::write(dir.join("main.rs"), b"fn main() {}\n").unwrap();
         // Latin-1 e-acute is not UTF-8. Three lines, the last unterminated.
@@ -74643,6 +74657,9 @@ mod quiet_walk_tests {
     #[cfg(unix)]
     #[test]
     fn walks_refuse_a_directory_they_cannot_read() {
+        let _env = crate::safety::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         use std::os::unix::fs::PermissionsExt;
         // Root reads a mode-000 directory anyway, so there is nothing to refuse.
         let running_as_root = unsafe { libc::geteuid() } == 0;
@@ -74694,6 +74711,9 @@ mod quiet_fs_tests {
 
     #[test]
     fn fs_stat_missing_path_is_null() {
+        let _env = crate::safety::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let dir = scratch("stat_missing");
         let r = bi_fs_stat(path_arg(&dir.join("nope")), None);
         std::fs::remove_dir_all(&dir).ok();
@@ -74702,6 +74722,9 @@ mod quiet_fs_tests {
 
     #[test]
     fn fs_stat_existing_file_is_a_record() {
+        let _env = crate::safety::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let dir = scratch("stat_existing");
         let file = dir.join("plain.txt");
         std::fs::write(&file, b"abc").unwrap();
@@ -74715,6 +74738,9 @@ mod quiet_fs_tests {
 
     #[test]
     fn fs_stat_below_a_file_is_null() {
+        let _env = crate::safety::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let dir = scratch("stat_below_file");
         let file = dir.join("plain");
         std::fs::write(&file, b"x").unwrap();
@@ -74731,6 +74757,9 @@ mod quiet_fs_tests {
     #[cfg(unix)]
     #[test]
     fn a_stat_the_os_denies_is_an_error_not_absence() {
+        let _env = crate::safety::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         use std::os::unix::fs::PermissionsExt;
         if unsafe { libc::geteuid() } == 0 {
             return;
@@ -74753,6 +74782,9 @@ mod quiet_fs_tests {
 
     #[test]
     fn fs_lstat_missing_path_is_null() {
+        let _env = crate::safety::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let dir = scratch("lstat_missing");
         let r = bi_fs_lstat(path_arg(&dir.join("nope")), None);
         std::fs::remove_dir_all(&dir).ok();
@@ -74761,6 +74793,9 @@ mod quiet_fs_tests {
 
     #[test]
     fn fs_realpath_missing_path_is_null() {
+        let _env = crate::safety::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let dir = scratch("realpath_missing");
         let r = bi_fs_realpath(path_arg(&dir.join("nope")), None);
         std::fs::remove_dir_all(&dir).ok();
@@ -74769,6 +74804,9 @@ mod quiet_fs_tests {
 
     #[test]
     fn file_exists_missing_is_false() {
+        let _env = crate::safety::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let dir = scratch("exists_missing");
         let r = bi_file_exists(path_arg(&dir.join("nope")), None);
         std::fs::remove_dir_all(&dir).ok();
@@ -74784,6 +74822,9 @@ mod quiet_fs_tests {
 
     #[test]
     fn file_exists_below_a_file_is_false() {
+        let _env = crate::safety::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let dir = scratch("exists_below_file");
         let file = dir.join("plain");
         std::fs::write(&file, b"x").unwrap();
@@ -74797,6 +74838,9 @@ mod quiet_fs_tests {
 
     #[test]
     fn read_text_lossy_keeps_latin1_text() {
+        let _env = crate::safety::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let dir = scratch("lossy_latin1");
         let file = dir.join("README.md");
         std::fs::write(&file, [b'c', b'a', b'f', 0xE9, b'\n']).unwrap();
@@ -74807,6 +74851,9 @@ mod quiet_fs_tests {
 
     #[test]
     fn read_text_lossy_missing_file_is_none() {
+        let _env = crate::safety::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let dir = scratch("lossy_missing");
         let got = read_text_lossy("project_readme", &dir.join("README.md"));
         std::fs::remove_dir_all(&dir).ok();
@@ -74815,6 +74862,9 @@ mod quiet_fs_tests {
 
     #[test]
     fn read_text_lossy_of_a_directory_is_an_error() {
+        let _env = crate::safety::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let dir = scratch("lossy_dir");
         let got = read_text_lossy("project_readme", &dir);
         std::fs::remove_dir_all(&dir).ok();
@@ -75485,6 +75535,9 @@ mod glob_cap_tests {
 
     #[test]
     fn capped_glob_refuses_over_and_matches_below() {
+        let _env = crate::safety::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let root = dir_with_five("caps");
         let base = root.to_string_lossy().replace('\\', "/");
         let pattern = format!("{base}/*.txt");
