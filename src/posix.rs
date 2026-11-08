@@ -3448,9 +3448,28 @@ fn sort(args: &[String], stdin: &mut Input, sink: &mut Sink) -> Util {
     let Some(spec) = SortSpec::parse(args) else {
         return Util::Decline;
     };
+    // GNU sort: an unreadable input is reported as "cannot read" and makes the
+    // exit status 2 (read_inputs would say 1, which is what cat and grep say).
     let mut status = 0;
     let mut lines: Vec<String> = Vec::new();
-    for (_, d) in read_inputs("sort", &spec.files, stdin, sink, &mut status) {
+    let mut inputs: Vec<Vec<u8>> = Vec::new();
+    if spec.files.is_empty() {
+        inputs.push(stdin.read_all());
+    }
+    for f in &spec.files {
+        if f == "-" {
+            inputs.push(stdin.read_all());
+            continue;
+        }
+        match std::fs::read(f) {
+            Ok(d) => inputs.push(d),
+            Err(e) => {
+                sink.eline(&format!("sort: cannot read: {f}: {}", io_reason(&e)));
+                status = 2;
+            }
+        }
+    }
+    for d in inputs {
         lines.extend(
             lines_of(&d)
                 .iter()
