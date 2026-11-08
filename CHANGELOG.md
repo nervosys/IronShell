@@ -63,6 +63,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Security: secret-shaped text is redacted from error messages (message, hint, expected, got) and from the POSIX subset's output, as it already was from builtin output; a file named after a key, or `ish -b -c 'cat creds.env'`, no longer prints the key.
 - `ish --explain -b` explains the script as the POSIX subset runs it, so an external program that agent mode gates is predicted as `approve` instead of `allow`.
 - A read refused by the workspace check is written to the audit log as a `deny` entry, as a refused write is.
+- `json.stringify`, `to-json`, `save_json` and `to-csv` write a JSON `null` (an empty CSV cell) where they wrote the text `"<null>"`; `save_json` had been putting `"<null>"` on disk.
+- `ls`, `find` and `fs_realpath` report ordinary drive paths (`C:\Users\...`) instead of Windows verbatim paths (`\\?\C:\Users\...`).
+- `stat`'s ontology entry declares `Record | Null`, matching its Null result for a missing path.
+- Refusals whose hint is a sentence show it as written: 148 call sites (among them `zip_create` on an existing archive) read "call `remove it first; ...` first".
+- A hyphenated pipeline stage such as `from-csv` or `to-csv` is an E_PARSE whose hint names the underscore builtin (`from_csv`).
+- `tar_extract` creates a missing destination directory, as `zip_extract` does, after the workspace check.
+- `sql`'s hint for a file it cannot read names `.jsonl`, which it reads, alongside `.json` and `.csv`.
 
 ## [14.0.0] - 2026-11-06
 
