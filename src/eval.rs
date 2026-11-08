@@ -701,7 +701,7 @@ pub fn eval_expr(expr: &Expr, env: &mut Env) -> Result<Value> {
                     // to builtin behavior (e.g. when shadowing with a non-function).
                     match v {
                         Value::Lambda(_) | Value::AsyncLambda(_) | Value::Builtin(_) => {
-                            return call_value_with_pipe(v, pin, vals, env)
+                            return call_value_named(Some(name), v, pin, vals, env)
                         }
                         // A variable that is not a function and whose name is
                         // no builtin either: `let f = 5; f(1)` said "unknown
@@ -1110,6 +1110,18 @@ fn match_pattern_impl(
 pub(crate) fn call_value_with_pipe(
     f: Value,
     pin: Option<Value>,
+    args: Vec<Value>,
+    env: &mut Env,
+) -> Result<Value> {
+    call_value_named(None, f, pin, args, env)
+}
+
+/// [`call_value_with_pipe`], naming the variable the value was called through,
+/// so an arity error can say `f takes 2 arguments` rather than `lambda takes`.
+pub(crate) fn call_value_named(
+    name: Option<&str>,
+    f: Value,
+    pin: Option<Value>,
     mut args: Vec<Value>,
     env: &mut Env,
 ) -> Result<Value> {
@@ -1149,8 +1161,10 @@ pub(crate) fn call_value_with_pipe(
                 }
                 // N-arg (3+): if we have exact arity match, call with all args
                 (_, n, m) if n >= 3 && n == m => call_lambda_n(&l, args, env),
-                _ => Err(crate::safety::arg_err(
-                    "lambda arity mismatch or missing input",
+                (pin, _, _) => Err(crate::safety::lambda_arity(
+                    name,
+                    &l.params,
+                    args.len() + usize::from(pin.is_some()),
                 )),
             }
         }

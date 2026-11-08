@@ -2779,6 +2779,31 @@ pub fn arg_err(message: impl Into<String>) -> anyhow::Error {
     })
 }
 
+/// The arity error for calling a lambda with the wrong number of arguments. It
+/// names the callee (`f`, or `lambda` when the value has no variable name), lists
+/// the parameters, and says what a lambda does about a missing argument: nothing,
+/// since its parameters take no defaults.
+pub fn lambda_arity(name: Option<&str>, params: &[String], got: usize) -> anyhow::Error {
+    let label = name.unwrap_or("lambda");
+    let plural = |k: usize| if k == 1 { "argument" } else { "arguments" };
+    let want = format!("{} {}", params.len(), plural(params.len()));
+    let received = format!("{got} {}", plural(got));
+    anyhow::Error::new(SafetyError {
+        code: ErrorCode::BadArg,
+        message: format!("{label} takes {want} ({}), got {got}", params.join(", ")),
+        builtin: String::new(),
+        hint: format!(
+            "a lambda takes exactly the parameters it was written with and has no \
+             defaults: call it with {want}, or pass null for a value you do not have \
+             and check for null in the body"
+        ),
+        approval: None,
+        did_you_mean: Vec::new(),
+        expected: want,
+        got: received,
+    })
+}
+
 /// A describable action an agent may be asked to approve (§7.2). The `token`
 /// is cryptographically bound to the action's content, so it cannot be replayed
 /// to approve a different action.
