@@ -7117,7 +7117,14 @@ pub fn guard(ctx: GuardCtx) -> Result<(), SafetyError> {
     // 3. Policy decision, with the egress rule `effective_decision` adds.
     //    `Network` is `Allow` in the policy table; the rule that makes it ask in
     //    agent mode is there, not here.
-    let decision = effective_decision(ctx.effect, mode);
+    // `exit` is a process-lifecycle call, so it stays `Process` for the audit and
+    // the governor. What it ends is this ish process alone: nothing outside it
+    // changes, and agent mode had been asking for approval to do that. The
+    // transaction refusal for it is separate and still applies.
+    let decision = match ctx.builtin {
+        "exit" => Decision::Allow,
+        _ => effective_decision(ctx.effect, mode),
+    };
     match decision {
         Decision::Allow => {
             let _ = audit(ctx.builtin, ctx.effect, "allow", &resource, json!({}));
