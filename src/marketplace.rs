@@ -71,6 +71,7 @@ fn registry_coded(code: crate::safety::ErrorCode, message: String, hint: &str) -
         did_you_mean: Vec::new(),
         expected: String::new(),
         got: String::new(),
+        extra: serde_json::Map::new(),
     })
 }
 

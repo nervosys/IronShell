@@ -372,6 +372,7 @@ env_unset	WriteLocal
 env_var	ReadLocal
 env_vars	ReadLocal
 env_venv	ReadLocal
+error	Pure
 eslint	Exec
 eslint_check	Exec
 evolution_config	Pure

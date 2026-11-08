@@ -7213,6 +7213,24 @@ pub static SIGNATURES: &[Signature] = &[
         ],
     },
     Signature {
+        name: "error",
+        category: None,
+        subject_required: false,
+        aliases: &[],
+        subject: None,
+        params: &[
+            opt("message", Ty::Str, "the message the caught error carries, as given; omitted, it is the pipeline input"),
+            opt("extra", Ty::Record, "fields added to the caught error record, such as {field: \"age\"}; they never replace code, message or hint"),
+        ],
+        returns: "Null",
+        doc: "Raise an error the script chose. It is E_USER with the message as given, and it does not return. A Record extra adds its fields to the caught error, so a script can name the bad field without parsing the message. Catch it with try/catch; uncaught, the script stops with a non-zero status. With no argument it takes the message from pipeline input.",
+        examples: &[
+            (r#"try { error("boom") } catch e { e.message }"#, "boom"),
+            (r#"try { error("bad", {field: "age"}) } catch e { e.field }"#, "age"),
+            (r#"try { error("bad") } catch e { e.code }"#, "E_USER"),
+        ],
+    },
+    Signature {
         name: "assert",
         category: None,
         subject_required: false,

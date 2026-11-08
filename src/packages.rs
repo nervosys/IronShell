@@ -49,6 +49,7 @@ fn registry_absent(name: &str) -> anyhow::Error {
         did_you_mean: Vec::new(),
         expected: "an existing package".to_string(),
         got: name.to_string(),
+        extra: serde_json::Map::new(),
     })
 }
 
@@ -67,6 +68,7 @@ fn auth_required() -> anyhow::Error {
         did_you_mean: Vec::new(),
         expected: "IRONSHELL_REGISTRY_TOKEN or IRONSHELL_TOKEN".to_string(),
         got: "neither set".to_string(),
+        extra: serde_json::Map::new(),
     })
 }
 

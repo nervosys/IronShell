@@ -150,6 +150,7 @@ pub fn require_fips_hash(algo: &str) -> anyhow::Result<()> {
             did_you_mean: Vec::new(),
             expected: "a FIPS-approved hash algorithm".to_string(),
             got: algo.to_string(),
+            extra: serde_json::Map::new(),
         }));
     }
     Ok(())
@@ -1593,6 +1594,11 @@ pub enum ErrorCode {
     /// which is documented next to `E_BAD_ARG` (the same call with the same
     /// operands overflows again, so it is not retryable).
     Overflow,
+    /// An error the script raised itself with `error(message[, extra])`. The
+    /// message is the script's own, and the script can add fields to the record.
+    /// Not retryable: the script decided this call fails, and a retry runs the
+    /// same script into the same decision.
+    User,
     /// A resource governor (op count, files, processes, or wall-clock) was hit.
     BudgetExceeded,
     /// A builtin was called by a name that does not exist. Carries
@@ -1728,6 +1734,7 @@ impl ErrorCode {
             ErrorCode::OutsideWorkspace => "E_OUTSIDE_WORKSPACE",
             ErrorCode::BadArg | ErrorCode::BadValue => "E_BAD_ARG",
             ErrorCode::Overflow => "E_BAD_VALUE",
+            ErrorCode::User => "E_USER",
             ErrorCode::BudgetExceeded => "E_BUDGET_EXCEEDED",
             ErrorCode::UnknownBuiltin => "E_UNKNOWN_BUILTIN",
             ErrorCode::UnknownField => "E_UNKNOWN_FIELD",
@@ -1804,6 +1811,7 @@ impl ErrorCode {
             // about the call needs to change.
             ErrorCode::Network => true,
             ErrorCode::PolicyDeny | ErrorCode::BudgetExceeded | ErrorCode::Unknown => false,
+            ErrorCode::User => false,
         }
     }
 
@@ -1863,6 +1871,8 @@ impl ErrorCode {
             ErrorCode::FipsDisallowed => 77,
             // EX_SOFTWARE -- the library failed on a valid request.
             ErrorCode::CryptoFailed => 70,
+            // The script's own failure: the generic failure status, as Unknown's.
+            ErrorCode::User => 1,
             ErrorCode::Unknown => 1,
         }
     }
@@ -1895,6 +1905,7 @@ pub fn no_ui(builtin: &str) -> anyhow::Error {
         did_you_mean: Vec::new(),
         expected: "a UI listening for prompts".to_string(),
         got: "nothing attached".to_string(),
+        extra: serde_json::Map::new(),
     })
 }
 
@@ -1908,6 +1919,7 @@ pub fn tool_missing(builtin: &str, tool: &str, cause: &str) -> anyhow::Error {
         did_you_mean: Vec::new(),
         expected: format!("`{tool}` on PATH"),
         got: "not installed".to_string(),
+        extra: serde_json::Map::new(),
     })
 }
 
@@ -1932,6 +1944,7 @@ pub fn unimplemented(builtin: &str, what: &str, instead: &str) -> anyhow::Error 
         did_you_mean: Vec::new(),
         expected: "an operation IronShell implements".to_string(),
         got: "one it does not".to_string(),
+        extra: serde_json::Map::new(),
     })
 }
 
@@ -1987,6 +2000,7 @@ fn tool_failed_text(
         did_you_mean: Vec::new(),
         expected: format!("`{command}` to exit 0"),
         got: status_text,
+        extra: serde_json::Map::new(),
     })
 }
 
@@ -2005,6 +2019,7 @@ pub fn bad_state(builtin: &str, state: &str, needs: &str) -> anyhow::Error {
         did_you_mean: Vec::new(),
         expected: format!("the state left by `{needs}`"),
         got: state.to_string(),
+        extra: serde_json::Map::new(),
     })
 }
 
@@ -2021,6 +2036,7 @@ pub fn bad_state_with_hint(builtin: &str, state: &str, hint: &str) -> anyhow::Er
         did_you_mean: Vec::new(),
         expected: "the precondition named in the message".to_string(),
         got: state.to_string(),
+        extra: serde_json::Map::new(),
     })
 }
 
@@ -2036,6 +2052,7 @@ pub fn io_fault(builtin: &str, what: &str, hint: &str) -> anyhow::Error {
         did_you_mean: Vec::new(),
         expected: "a working environment".to_string(),
         got: what.to_string(),
+        extra: serde_json::Map::new(),
     })
 }
 
@@ -2060,6 +2077,7 @@ pub fn lock_poisoned(builtin: &str, what: &str) -> anyhow::Error {
         did_you_mean: Vec::new(),
         expected: "a lock no earlier call left poisoned".to_string(),
         got: "a poisoned lock".to_string(),
+        extra: serde_json::Map::new(),
     })
 }
 
@@ -2099,6 +2117,7 @@ pub fn not_found(builtin: &str, kind: &str, name: &str) -> anyhow::Error {
         did_you_mean: Vec::new(),
         expected: format!("an existing {kind}"),
         got: name.to_string(),
+        extra: serde_json::Map::new(),
     })
 }
 
@@ -2326,6 +2345,7 @@ pub fn spawn_error(builtin: &str, tool: &str, e: &std::io::Error) -> anyhow::Err
         did_you_mean: Vec::new(),
         expected: format!("`{tool}` to start"),
         got: e.kind().to_string(),
+        extra: serde_json::Map::new(),
     })
 }
 
@@ -2347,6 +2367,7 @@ pub fn decrypt_failed(
         did_you_mean: Vec::new(),
         expected: String::new(),
         got: String::new(),
+        extra: serde_json::Map::new(),
     })
 }
 
@@ -2363,6 +2384,7 @@ pub fn ic_refusal(builtin: &str, e: ironcrypto::core_types::Error) -> SafetyErro
         did_you_mean: Vec::new(),
         expected: String::new(),
         got: String::new(),
+        extra: serde_json::Map::new(),
     }
 }
 
@@ -2397,6 +2419,7 @@ pub fn crypto_failed(
         did_you_mean: Vec::new(),
         expected: String::new(),
         got: String::new(),
+        extra: serde_json::Map::new(),
     })
 }
 
@@ -2418,6 +2441,7 @@ pub fn outside_workspace(builtin: &str, path: &str) -> anyhow::Error {
         did_you_mean: Vec::new(),
         expected: "a path inside the workspace".to_string(),
         got: path.to_string(),
+        extra: serde_json::Map::new(),
     })
 }
 
@@ -2479,6 +2503,7 @@ pub fn fs_error(
             did_you_mean: Vec::new(),
             expected: format!("`{path}` to be readable"),
             got: e.kind().to_string(),
+            extra: serde_json::Map::new(),
         }),
     }
 }
@@ -2493,6 +2518,7 @@ pub fn bad_arg(builtin: &str, expected: &str, got: &str) -> anyhow::Error {
         did_you_mean: Vec::new(),
         expected: expected.to_string(),
         got: got.to_string(),
+        extra: serde_json::Map::new(),
     })
 }
 
@@ -2509,6 +2535,7 @@ pub fn bad_arg_with_hint(builtin: &str, expected: &str, got: &str, hint: &str) -
         did_you_mean: Vec::new(),
         expected: expected.to_string(),
         got: got.to_string(),
+        extra: serde_json::Map::new(),
     })
 }
 
@@ -2536,6 +2563,7 @@ pub fn policy_deny(
         did_you_mean: Vec::new(),
         expected: String::new(),
         got: String::new(),
+        extra: serde_json::Map::new(),
     })
 }
 
@@ -2556,6 +2584,28 @@ pub fn os_denied(
         did_you_mean: Vec::new(),
         expected: String::new(),
         got: "permission denied".to_string(),
+        extra: serde_json::Map::new(),
+    })
+}
+
+/// The error a script raises with `error(message[, extra])` (`E_USER`). `extra`
+/// is merged into the caught record by [`SafetyError::to_json`].
+pub fn user_error(
+    message: String,
+    extra: serde_json::Map<String, serde_json::Value>,
+) -> anyhow::Error {
+    anyhow::Error::new(SafetyError {
+        code: ErrorCode::User,
+        message,
+        builtin: "error".to_string(),
+        hint: "raised by error() in the script; catch it with try { } catch e { ... }, \
+               or fix the step that raised it"
+            .to_string(),
+        approval: None,
+        did_you_mean: Vec::new(),
+        expected: String::new(),
+        got: String::new(),
+        extra,
     })
 }
 
@@ -2573,6 +2623,7 @@ pub fn integer_overflow(operator: &str) -> anyhow::Error {
         did_you_mean: Vec::new(),
         expected: String::new(),
         got: String::new(),
+        extra: serde_json::Map::new(),
     })
 }
 
@@ -2589,6 +2640,7 @@ pub fn bad_arg_in(builtin: &str, message: impl Into<String>, hint: &str) -> anyh
         did_you_mean: Vec::new(),
         expected: String::new(),
         got: String::new(),
+        extra: serde_json::Map::new(),
     })
 }
 
@@ -2604,6 +2656,7 @@ pub fn bad_value_in(builtin: &str, message: impl Into<String>, hint: &str) -> an
         did_you_mean: Vec::new(),
         expected: String::new(),
         got: String::new(),
+        extra: serde_json::Map::new(),
     })
 }
 
@@ -2620,6 +2673,7 @@ pub fn bad_value(message: impl Into<String>, hint: &str) -> anyhow::Error {
         did_you_mean: Vec::new(),
         expected: String::new(),
         got: String::new(),
+        extra: serde_json::Map::new(),
     })
 }
 
@@ -2644,6 +2698,7 @@ pub fn index_out_of_range(kind: &str, index: i64, len: usize) -> anyhow::Error {
         did_you_mean: Vec::new(),
         expected: format!("an index from -{len} to {}", len.saturating_sub(1)),
         got: index.to_string(),
+        extra: serde_json::Map::new(),
     })
 }
 
@@ -2679,6 +2734,7 @@ pub fn unknown_builtin_hinted(
         did_you_mean: candidates,
         expected: String::new(),
         got: String::new(),
+        extra: serde_json::Map::new(),
     })
 }
 
@@ -2703,6 +2759,7 @@ pub fn unknown_module(name: &str, candidates: Vec<String>) -> anyhow::Error {
         did_you_mean: candidates,
         expected: String::new(),
         got: String::new(),
+        extra: serde_json::Map::new(),
     })
 }
 
@@ -2727,6 +2784,7 @@ pub fn unknown_name(name: &str, candidates: Vec<String>) -> anyhow::Error {
         did_you_mean: candidates,
         expected: String::new(),
         got: String::new(),
+        extra: serde_json::Map::new(),
     })
 }
 
@@ -2764,6 +2822,7 @@ pub fn unknown_field_hinted(
         did_you_mean: candidates,
         expected: String::new(),
         got: String::new(),
+        extra: serde_json::Map::new(),
     })
 }
 
@@ -2857,6 +2916,7 @@ pub fn ensure_structured(builtin: &str, e: anyhow::Error) -> anyhow::Error {
             did_you_mean: Vec::new(),
             expected: String::new(),
             got: String::new(),
+            extra: serde_json::Map::new(),
         });
     }
     anyhow::Error::new(SafetyError {
@@ -2872,6 +2932,7 @@ pub fn ensure_structured(builtin: &str, e: anyhow::Error) -> anyhow::Error {
         did_you_mean: Vec::new(),
         expected: String::new(),
         got: String::new(),
+        extra: serde_json::Map::new(),
     })
 }
 
@@ -2892,6 +2953,7 @@ pub fn arg_err(message: impl Into<String>) -> anyhow::Error {
         did_you_mean: Vec::new(),
         expected: String::new(),
         got: String::new(),
+        extra: serde_json::Map::new(),
     })
 }
 
@@ -2917,6 +2979,7 @@ pub fn lambda_arity(name: Option<&str>, params: &[String], got: usize) -> anyhow
         did_you_mean: Vec::new(),
         expected: want,
         got: received,
+        extra: serde_json::Map::new(),
     })
 }
 
@@ -2984,6 +3047,10 @@ pub struct SafetyError {
     /// `Int` was wanted where a `Str` arrived. Both empty when not applicable.
     pub expected: String,
     pub got: String,
+    /// Fields a script added to its own error (`error(message, {field: ...})`),
+    /// merged into the structured record after the standard ones, which they
+    /// cannot replace. Empty for every error the shell raises itself.
+    pub extra: serde_json::Map<String, serde_json::Value>,
 }
 
 impl SafetyError {
@@ -3032,6 +3099,20 @@ impl SafetyError {
         if !self.expected.is_empty() && !self.got.is_empty() {
             err["expected"] = Json::String(scrub(&self.expected));
             err["got"] = Json::String(scrub(&self.got));
+        }
+        // A script's own fields go in after the standard ones and never replace
+        // them: `error("x", {code: "mine"})` still has the code E_USER.
+        if let Some(object) = err.as_object_mut() {
+            for (key, value) in &self.extra {
+                if object.contains_key(key) {
+                    continue;
+                }
+                let value = match value {
+                    Json::String(s) => Json::String(scrub(s)),
+                    other => other.clone(),
+                };
+                object.insert(key.clone(), value);
+            }
         }
         json!({ "error": err })
     }
@@ -4558,6 +4639,7 @@ fn budget_error(builtin: &str, message: String, hint: &str) -> SafetyError {
         did_you_mean: Vec::new(),
         expected: String::new(),
         got: String::new(),
+        extra: serde_json::Map::new(),
     }
 }
 
@@ -4774,6 +4856,7 @@ pub fn reject_option_like(builtin: &str, values: &[String]) -> anyhow::Result<()
                 did_you_mean: Vec::new(),
                 expected: String::new(),
                 got: String::new(),
+                extra: serde_json::Map::new(),
             }));
         }
     }
@@ -4830,6 +4913,7 @@ pub fn reject_unsafe_url(builtin: &str, url: &str) -> anyhow::Result<()> {
                 ALLOWED_SCHEMES.join(", ")
             ),
             got: url.to_string(),
+            extra: serde_json::Map::new(),
         })
     };
 
@@ -5038,6 +5122,7 @@ pub fn ps_bare_number(builtin: &str, value: &str) -> anyhow::Result<PsLiteral> {
         did_you_mean: Vec::new(),
         expected: String::new(),
         got: String::new(),
+        extra: serde_json::Map::new(),
     }))
 }
 
@@ -5141,6 +5226,7 @@ pub fn sql_literal(builtin: &str, value: &str) -> anyhow::Result<String> {
             did_you_mean: Vec::new(),
             expected: String::new(),
             got: String::new(),
+            extra: serde_json::Map::new(),
         }));
     }
     Ok(format!("'{}'", value.replace('\'', "''")))
@@ -5168,6 +5254,7 @@ pub fn sql_identifier(builtin: &str, name: &str) -> anyhow::Result<String> {
             did_you_mean: Vec::new(),
             expected: "an identifier".to_string(),
             got: name.to_string(),
+            extra: serde_json::Map::new(),
         }));
     }
     Ok(name.to_string())
@@ -5275,6 +5362,7 @@ pub fn sql_column_type(builtin: &str, spec: &str) -> anyhow::Result<String> {
             did_you_mean: Vec::new(),
             expected: "a column type such as 'TEXT', 'VARCHAR(255) NOT NULL'".to_string(),
             got: spec.to_string(),
+            extra: serde_json::Map::new(),
         })
     };
 
@@ -5373,6 +5461,7 @@ pub fn reject_sqlite_dot_command(builtin: &str, sql: &str) -> anyhow::Result<()>
             did_you_mean: Vec::new(),
             expected: String::new(),
             got: String::new(),
+            extra: serde_json::Map::new(),
         }));
     }
     Ok(())
@@ -5487,6 +5576,7 @@ fn egress_denied(
         did_you_mean: Vec::new(),
         expected: format!("a destination in {allow}"),
         got: detail,
+        extra: serde_json::Map::new(),
     }
 }
 
@@ -6871,6 +6961,7 @@ pub fn guard(ctx: GuardCtx) -> Result<(), SafetyError> {
                     did_you_mean: Vec::new(),
                     expected: String::new(),
                     got: String::new(),
+                    extra: serde_json::Map::new(),
                 });
             }
             // The audited party must not own the evidence (AS-2026-02).
@@ -6909,6 +7000,7 @@ pub fn guard(ctx: GuardCtx) -> Result<(), SafetyError> {
                     did_you_mean: Vec::new(),
                     expected: String::new(),
                     got: String::new(),
+                    extra: serde_json::Map::new(),
                 });
             }
             // The gate's own configuration, for the same reason: what the
@@ -6937,6 +7029,7 @@ pub fn guard(ctx: GuardCtx) -> Result<(), SafetyError> {
                     did_you_mean: Vec::new(),
                     expected: String::new(),
                     got: String::new(),
+                    extra: serde_json::Map::new(),
                 });
             }
             if mode == Mode::Agent && is_git_control_path(t) {
@@ -6962,6 +7055,7 @@ pub fn guard(ctx: GuardCtx) -> Result<(), SafetyError> {
                     did_you_mean: Vec::new(),
                     expected: String::new(),
                     got: String::new(),
+                    extra: serde_json::Map::new(),
                 });
             }
         }
@@ -7027,6 +7121,7 @@ pub fn guard(ctx: GuardCtx) -> Result<(), SafetyError> {
                 did_you_mean: Vec::new(),
                 expected: String::new(),
                 got: String::new(),
+                extra: serde_json::Map::new(),
             })
         }
         Decision::Approve => {
@@ -7084,6 +7179,7 @@ pub fn guard(ctx: GuardCtx) -> Result<(), SafetyError> {
                     did_you_mean: Vec::new(),
                     expected: String::new(),
                     got: String::new(),
+                    extra: serde_json::Map::new(),
                 })
             }
         }

@@ -69,6 +69,7 @@ fn bad(builtin: &str, message: String, hint: String, expected: &str, got: String
         did_you_mean: Vec::new(),
         expected: expected.to_string(),
         got,
+        extra: serde_json::Map::new(),
     })
 }
 
@@ -327,6 +328,7 @@ fn internal(builtin: &str, e: &dyn std::fmt::Display) -> anyhow::Error {
         did_you_mean: Vec::new(),
         expected: String::new(),
         got: e.to_string(),
+        extra: serde_json::Map::new(),
     })
 }
 
@@ -663,6 +665,7 @@ pub fn sql_value(args: Vec<Value>, subject: Option<Value>) -> Result<Value> {
         did_you_mean: Vec::new(),
         expected: "1 row × 1 column".to_string(),
         got: format!("{} × {}", rows.len(), columns.len()),
+        extra: serde_json::Map::new(),
     }))
 }
 

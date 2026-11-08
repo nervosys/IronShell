@@ -161,6 +161,7 @@ match score { s if s >= 90 => "A", s if s >= 80 => "B", _ => "F" }
 
 # Error handling
 result = try { risky() } catch e { "fallback" }
+try { error("bad", {field: "age"}) } catch e { e.code }   # "E_USER"; error(message[, extra Record]) raises your own
 
 # String interpolation
 msg = "Hello ${name}, you have ${count} items"

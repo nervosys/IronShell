@@ -35,6 +35,7 @@ fn io_error(name: &str, error: std::io::Error) -> anyhow::Error {
         message: format!("{name}: {error}"),
         hint: "A failed send may have transmitted a prefix; do not blindly retry. A receive timeout is not EOF.".into(),
         approval: None, did_you_mean: vec![], expected: "successful TCP operation".into(), got: format!("{:?}", error.kind()),
+        extra: serde_json::Map::new(),
     })
 }
 fn shape(name: &str, args: &[Value], input: Option<Value>, min: usize, max: usize) -> Result<()> {

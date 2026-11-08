@@ -737,6 +737,8 @@ lazy_static::lazy_static! {
         map.insert("base64_decode", 486);
         map.insert("md5", 1158); // was 480, crypto_hash: md5 answered SHA-256
         map.insert("sha256", 1159); // was 480, crypto_hash: md5 answered SHA-256
+        // Appended with the other rows: the id is the row's index in BUILTIN_DISPATCH.
+        map.insert("error", 1160);
         // 500-519: Database
         map.insert("db_sqlite_open", 500);
         map.insert("db_sqlite_query", 501);
@@ -3768,6 +3770,7 @@ static BUILTIN_DISPATCH: &[fn(Vec<Value>, Option<Value>, &mut Env) -> Result<Val
     |args, input, _| bi_whoami(args, input),       // 1157
     |args, input, _| bi_named_hash("md5", args, input), // 1158
     |args, input, _| bi_named_hash("sha256", args, input), // 1159
+    |args, input, _| bi_error(args, input),        // 1160
 ];
 
 /// The dispatch row that serves `name`, if the fast table has one.
@@ -4435,6 +4438,7 @@ fn mcp_tool_failed(tool: &str, text: &str) -> anyhow::Error {
         did_you_mean: Vec::new(),
         expected: format!("`{tool}` to succeed"),
         got: "a failure".to_string(),
+        extra: serde_json::Map::new(),
     })
 }
 
@@ -6054,6 +6058,53 @@ fn bi_len(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
     };
 
     Ok(Value::Int(length as i64))
+}
+
+/// `error(message[, extra])` — raise an error the script chose.
+///
+/// The error is `E_USER` with `message` as given. A Record `extra` adds its
+/// fields to the caught error record, so a script can say which field was bad
+/// without parsing the message. Catchable with try/catch; uncaught, it exits
+/// non-zero like any other error.
+///
+/// Example:
+///   try { error("boom") } catch e { e.message }                 # "boom"
+///   try { error("bad", {field: "age"}) } catch e { e.field }   # "age"
+fn bi_error(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
+    let message = match args.first().or(input.as_ref()) {
+        Some(Value::Str(s)) => s.clone(),
+        Some(other) => {
+            return Err(crate::safety::bad_arg(
+                "error",
+                "a message String",
+                other.type_name(),
+            ))
+        }
+        None => {
+            return Err(crate::safety::bad_arg(
+                "error",
+                "a message String",
+                "nothing",
+            ))
+        }
+    };
+    let mut extra = serde_json::Map::new();
+    match args.get(1) {
+        None => {}
+        Some(Value::Record(fields)) => {
+            for (key, value) in fields {
+                extra.insert(key.clone(), value.to_json());
+            }
+        }
+        Some(other) => {
+            return Err(crate::safety::bad_arg(
+                "error",
+                "a Record of extra fields, or nothing",
+                other.type_name(),
+            ))
+        }
+    }
+    Err(crate::safety::user_error(message, extra))
 }
 
 /// `str(v)` — render a value as the string a user would see.
@@ -9749,6 +9800,7 @@ fn bi_from_json(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
                 did_you_mean: vec![format!("open({path:?})")],
                 expected: "JSON text".to_string(),
                 got: "a file path".to_string(),
+                extra: serde_json::Map::new(),
             });
         }
         crate::safety::bad_arg("from_json", "valid JSON", &e.to_string())
@@ -21604,6 +21656,7 @@ fn bi_governor_reset(_args: Vec<Value>, _input: Option<Value>) -> Result<Value> 
             did_you_mean: Vec::new(),
             expected: String::new(),
             got: String::new(),
+            extra: serde_json::Map::new(),
         }));
     }
     crate::safety::governor_reset();
@@ -22600,6 +22653,7 @@ fn bi_approve(args: Vec<Value>, _input: Option<Value>) -> Result<Value> {
             did_you_mean: Vec::new(),
             expected: String::new(),
             got: String::new(),
+            extra: serde_json::Map::new(),
         }));
     }
 
@@ -25138,6 +25192,7 @@ fn proc_kill_failed(message: String, hint: &str, got: &str) -> anyhow::Error {
         did_you_mean: Vec::new(),
         expected: "the signal to be delivered".to_string(),
         got: got.to_string(),
+        extra: serde_json::Map::new(),
     })
 }
 
@@ -28457,6 +28512,7 @@ fn net_unparsed(name: &str, tool: &str) -> anyhow::Error {
         did_you_mean: Vec::new(),
         expected: format!("`{tool}` output this builtin reads"),
         got: "unreadable output".to_string(),
+        extra: serde_json::Map::new(),
     })
 }
 
@@ -30300,6 +30356,7 @@ fn net_state(
             did_you_mean: Vec::new(),
             expected: "an accepted or refused connect".to_string(),
             got: format!("{:?}", e.kind()),
+            extra: serde_json::Map::new(),
         })),
         Err(std::sync::mpsc::RecvTimeoutError::Timeout) => Ok("filtered"),
         Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
@@ -30313,6 +30370,7 @@ fn net_state(
                 did_you_mean: Vec::new(),
                 expected: "an accepted or refused connect".to_string(),
                 got: "no answer".to_string(),
+                extra: serde_json::Map::new(),
             }))
         }
     }
@@ -40217,6 +40275,7 @@ fn web_failure(builtin: &str, message: String, hint: &str) -> anyhow::Error {
         did_you_mean: Vec::new(),
         expected: String::new(),
         got: String::new(),
+        extra: serde_json::Map::new(),
     })
 }
 
@@ -44658,6 +44717,7 @@ fn budget_unnamed(message: &str, hint: &str) -> anyhow::Error {
         did_you_mean: Vec::new(),
         expected: String::new(),
         got: String::new(),
+        extra: serde_json::Map::new(),
     })
 }
 
@@ -44674,6 +44734,7 @@ fn coded_io(builtin: &str, message: String, hint: &str) -> anyhow::Error {
         did_you_mean: Vec::new(),
         expected: String::new(),
         got: String::new(),
+        extra: serde_json::Map::new(),
     })
 }
 
@@ -57192,6 +57253,7 @@ fn container_error(builtin: &str, message: String, hint: &str, got: &str) -> any
         did_you_mean: Vec::new(),
         expected: String::new(),
         got: got.to_string(),
+        extra: serde_json::Map::new(),
     })
 }
 
@@ -61516,6 +61578,7 @@ fn net_io_error(builtin: &str, what: &str, detail: impl std::fmt::Display) -> an
         did_you_mean: Vec::new(),
         expected: format!("{what} to complete"),
         got: "no answer".to_string(),
+        extra: serde_json::Map::new(),
     })
 }
 
@@ -64517,6 +64580,7 @@ fn monitor_store_error(builtin: &str, path: &std::path::Path, why: &str) -> anyh
         did_you_mean: Vec::new(),
         expected: "an alert store written by monitor_alert_create".to_string(),
         got: "a file that does not parse".to_string(),
+        extra: serde_json::Map::new(),
     })
 }
 
@@ -66982,6 +67046,7 @@ fn repl_io_error(builtin: &str, message: &str) -> anyhow::Error {
         did_you_mean: vec![],
         expected: "a complete reply line from the REPL listener".into(),
         got: message.into(),
+        extra: serde_json::Map::new(),
     })
 }
 
@@ -70949,6 +71014,7 @@ fn tmux_unparsed() -> anyhow::Error {
         did_you_mean: Vec::new(),
         expected: "`tmux list-sessions` output this builtin reads".to_string(),
         got: "unreadable output".to_string(),
+        extra: serde_json::Map::new(),
     })
 }
 
@@ -72314,6 +72380,7 @@ fn nc_io_error(name: &str, error: std::io::Error) -> anyhow::Error {
         did_you_mean: vec![],
         expected: "one complete TCP connection".into(),
         got: format!("{:?}", error.kind()),
+        extra: serde_json::Map::new(),
     })
 }
 

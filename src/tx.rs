@@ -200,6 +200,7 @@ fn rollback_incomplete(
         did_you_mean: Vec::new(),
         expected: String::new(),
         got: String::new(),
+        extra: serde_json::Map::new(),
     })
 }
 

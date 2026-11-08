@@ -347,6 +347,7 @@ fn no_store(builtin: &str, message: String, got: String) -> anyhow::Error {
         did_you_mean: Vec::new(),
         expected: "a PEM trust store".to_string(),
         got,
+        extra: serde_json::Map::new(),
     })
 }
 

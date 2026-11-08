@@ -720,6 +720,7 @@ impl A2UIChannel {
                     did_you_mean: Vec::new(),
                     expected: "an answer from the attached UI".to_string(),
                     got: "no answer before the timeout".to_string(),
+                    extra: serde_json::Map::new(),
                 }));
             }
 

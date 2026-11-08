@@ -1179,6 +1179,7 @@ fn ended_run(message: String, hint: &str) -> anyhow::Error {
         did_you_mean: Vec::new(),
         expected: "a run that has not ended".to_string(),
         got: message,
+        extra: serde_json::Map::new(),
     })
 }
 

@@ -82,6 +82,7 @@ echo
 ends_with
 env_activate
 env_detect
+error
 evolution_config
 evolution_stats
 evolve
