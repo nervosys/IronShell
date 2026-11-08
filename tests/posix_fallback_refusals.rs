@@ -1,11 +1,13 @@
 //! Flags and formats the subset does not implement, and the fallback that runs
 //! them.
 //!
-//! A subset command that declines runs a GNU-compatible program found on PATH,
-//! and only that. On Windows a bare `sort` used to run `System32\sort.exe`, and
-//! any name the subset did not know was looked up the same way, so an
-//! impostor program could run in place of GNU. With no GNU program there is an
-//! error that names the flag and exits 2 (not 127, "command not found").
+//! On Windows, a subset command that declines runs a GNU-compatible program
+//! found on PATH, and only that. A bare `sort` used to run `System32\sort.exe`,
+//! which is not GNU. With no GNU program there is an error that names the flag
+//! and exits 2 (not 127, "command not found").
+//!
+//! Elsewhere the fallback is the PATH program of that name, as before, and
+//! relative PATH entries are never searched.
 //!
 //! Also here: the forms the subset does implement now (`cat -n`, printf's
 //! `%x`, `%o`, `%X`, `%.Nf`, `%.Ns` and zero padding, and sed's `s/a/b/N`).
@@ -39,8 +41,7 @@ impl Sandbox {
         Sandbox(root)
     }
 
-    /// `ish -b -c script`, with PATH set to `path` (so no GNU program is found
-    /// unless the test puts one there).
+    /// `ish -b -c script`, with PATH set to `path`.
     fn run_with_path(&self, script: &str, path: &Path) -> Output {
         Command::new(env!("CARGO_BIN_EXE_ish"))
             .args(["-b", "-c", script])
@@ -119,12 +120,13 @@ fn sed_numeric_flag_matches_gnu() {
     ok("sed -n 's/p/P/2p' s.txt", "pPpp\n");
 }
 
+#[cfg(windows)]
 #[test]
 fn a_flag_with_no_gnu_program_is_refused_with_status_2() {
     let sb = Sandbox::new("refuse");
     // GNU would print the listing. `ls -R` is outside the subset on every
-    // platform (`-l` is inside it on Unix), so with no GNU ls on PATH the subset
-    // says why it cannot and exits 2 rather than "command not found" (127).
+    // platform, so with no GNU ls on PATH the subset says why it cannot and
+    // exits 2 rather than "command not found" (127).
     for (script, want) in [
         (
             "ls -R tree",
@@ -160,7 +162,7 @@ fn system32_is_never_the_fallback_for_a_subset_name() {
 }
 
 #[cfg(unix)]
-mod with_a_program_on_path {
+mod unix_falls_back_by_name {
     use super::*;
     use std::os::unix::fs::PermissionsExt;
 
@@ -171,42 +173,33 @@ mod with_a_program_on_path {
     }
 
     #[test]
-    fn an_impostor_named_like_a_subset_command_never_runs() {
-        let sb = Sandbox::new("impostor");
-        let bin = sb.0.join("impostor-bin");
+    fn an_unsupported_flag_runs_the_path_program_of_that_name() {
+        let sb = Sandbox::new("by-name");
+        let bin = sb.0.join("abs-bin");
         std::fs::create_dir_all(&bin).unwrap();
-        // It answers --version with something that is not GNU, and would print
-        // "IMPOSTOR RAN" if it were run for the flag.
-        write_program(
-            &bin,
-            "sort",
-            "if [ \"$1\" = --version ]; then echo 'Impostor 1.0'; exit 0; fi\necho 'IMPOSTOR RAN'",
-        );
-        let out = sb.run_with_path("sort -h nums.txt", &bin);
-        let err = String::from_utf8_lossy(&out.stderr);
-        assert!(!String::from_utf8_lossy(&out.stdout).contains("IMPOSTOR"));
-        assert_eq!(out.status.code(), Some(2));
-        assert!(
-            err.contains("no GNU-compatible sort is installed"),
-            "{err:?}"
-        );
-    }
-
-    #[test]
-    fn a_gnu_program_on_path_is_the_fallback() {
-        let sb = Sandbox::new("gnu-fallback");
-        let bin = sb.0.join("gnu-bin");
-        std::fs::create_dir_all(&bin).unwrap();
-        write_program(
-            &bin,
-            "sort",
-            "if [ \"$1\" = --version ]; then echo 'sort (GNU coreutils) 9.9'; exit 0; fi\necho \"fake GNU sort: $*\"",
-        );
+        write_program(&bin, "sort", "echo \"path sort: $*\"");
         let out = sb.run_with_path("sort -h nums.txt", &bin);
         assert_eq!(out.status.code(), Some(0));
         assert_eq!(
             String::from_utf8_lossy(&out.stdout),
-            "fake GNU sort: -h nums.txt\n"
+            "path sort: -h nums.txt\n"
+        );
+    }
+
+    #[test]
+    fn a_relative_path_entry_is_never_searched() {
+        let sb = Sandbox::new("relative");
+        let rel = sb.0.join("rel-bin");
+        std::fs::create_dir_all(&rel).unwrap();
+        write_program(&rel, "sort", "echo \"ran from a relative entry\"");
+        // The entry `rel-bin` is relative to the working folder, which is the
+        // sandbox: a program there must not be run.
+        let out = sb.run_with_path("sort -h nums.txt", Path::new("rel-bin"));
+        assert_eq!(out.status.code(), Some(127));
+        assert!(out.stdout.is_empty());
+        assert_eq!(
+            String::from_utf8_lossy(&out.stderr),
+            "ish: sort: command not found\n"
         );
     }
 }

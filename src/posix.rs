@@ -1902,9 +1902,9 @@ impl Shell {
         }
         let program = match resolve_program(argv, env) {
             Ok(p) => p,
-            Err(refusal) => {
-                sink.eline(&refusal);
-                return 2;
+            Err((code, message)) => {
+                sink.eline(&message);
+                return code;
             }
         };
         let mut cmd = crate::safety::child_command(&program);
@@ -1969,22 +1969,15 @@ impl Shell {
     }
 }
 
-/// Write a redirection's output through the same guard as `file.write`.
-///
-/// The write goes to the path the guard checked. It went to `path` as given,
-/// which the OS resolved against the working directory while the guard, in
-/// agent mode, had resolved it against the workspace: with the two apart,
-/// `echo x > f` was approved as `<workspace>/f` and wrote `<cwd>/f`, outside
-/// the jail. The prior contents are journalled first, as the dispatcher does
-/// for `file.write`, so the `reversible` the guard is told is true.
-/// The commands the subset implements. A bare name from this list that the
-/// subset declines is run only as a GNU-compatible program found on PATH.
+/// The commands the subset implements. On Windows, a bare name from this list
+/// that the subset declines runs only as a GNU-compatible program found on
+/// PATH, because a `sort.exe` that is not GNU would be the wrong program.
 const SUBSET_NAMES: &[&str] = &[
     "echo", "printf", "test", "[", "cat", "head", "tail", "wc", "grep", "sort", "uniq", "cut",
     "sed", "ls", "find", "date", "basename", "dirname", "seq",
 ];
 
-/// The GNU-compatible program called `name` on PATH, if there is one.
+/// The GNU-compatible program called `name` on PATH, if there is one (Windows).
 ///
 /// Windows searches the current folder and then System32 before PATH, so a
 /// bare `sort` ran `System32\sort.exe`, which is not GNU sort, and a bare `find`
@@ -2035,13 +2028,32 @@ fn gnu_program(name: &str) -> Option<std::path::PathBuf> {
     None
 }
 
-/// The program `argv` runs. A subset command goes to a GNU-compatible program,
-/// and when there is none the error names what the subset does not support.
-/// Any other name runs as typed.
-fn resolve_program(argv: &[String], env: &[(String, String)]) -> Result<String, String> {
+/// The first PATH program called `name`, from an absolute PATH entry only, so
+/// a relative entry such as `.` never runs a program from the working folder.
+fn path_program(name: &str) -> Option<std::path::PathBuf> {
+    let path = std::env::var_os("PATH")?;
+    std::env::split_paths(&path)
+        .filter(|dir| dir.is_absolute())
+        .map(|dir| dir.join(name))
+        .find(|candidate| candidate.is_file())
+}
+
+/// The program `argv` runs, or the status and message of why it cannot.
+///
+/// On Windows a subset command goes to a GNU-compatible program; with none, the
+/// error names what the subset does not support and the status is 2. Elsewhere
+/// it runs the PATH program of that name, as it did before, and a missing one is
+/// "command not found" (127). Any other name runs as typed.
+fn resolve_program(argv: &[String], env: &[(String, String)]) -> Result<String, (i32, String)> {
     let name = argv[0].as_str();
     if name.contains(['/', '\\']) || !SUBSET_NAMES.contains(&name) {
         return Ok(name.to_string());
+    }
+    if !cfg!(windows) {
+        return match path_program(name) {
+            Some(p) => Ok(p.to_string_lossy().into_owned()),
+            None => Err((127, format!("{SHELL_NAME}: {name}: command not found"))),
+        };
     }
     if let Some(p) = gnu_program(name) {
         return Ok(p.to_string_lossy().into_owned());
@@ -2054,11 +2066,22 @@ fn resolve_program(argv: &[String], env: &[(String, String)]) -> Result<String, 
             None => "this form".to_string(),
         }
     };
-    Err(format!(
-        "{SHELL_NAME}: {name}: {what} is not supported by the in-process subset, and no GNU-compatible {name} is installed"
+    Err((
+        2,
+        format!(
+            "{SHELL_NAME}: {name}: {what} is not supported by the in-process subset, and no GNU-compatible {name} is installed"
+        ),
     ))
 }
 
+/// Write a redirection's output through the same guard as `file.write`.
+///
+/// The write goes to the path the guard checked. It went to `path` as given,
+/// which the OS resolved against the working directory while the guard, in
+/// agent mode, had resolved it against the workspace: with the two apart,
+/// `echo x > f` was approved as `<workspace>/f` and wrote `<cwd>/f`, outside
+/// the jail. The prior contents are journalled first, as the dispatcher does
+/// for `file.write`, so the `reversible` the guard is told is true.
 fn write_file(path: &str, data: &[u8], append: bool) -> Result<(), String> {
     let resolved = crate::safety::resolve_path_str(path);
     crate::safety::guard(crate::safety::GuardCtx {
