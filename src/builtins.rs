@@ -742,6 +742,7 @@ lazy_static::lazy_static! {
         map.insert("args", 1161);
         map.insert("int", 1162);
         map.insert("float", 1163);
+        map.insert("now_iso", 1164);
         // 500-519: Database
         map.insert("db_sqlite_open", 500);
         map.insert("db_sqlite_query", 501);
@@ -3777,6 +3778,7 @@ static BUILTIN_DISPATCH: &[fn(Vec<Value>, Option<Value>, &mut Env) -> Result<Val
     |args, input, _| bi_args(args, input),         // 1161
     |args, input, _| bi_int(args, input),          // 1162
     |args, input, _| bi_float(args, input),        // 1163
+    |args, input, _| bi_now_iso(args, input),      // 1164
 ];
 
 /// The dispatch row that serves `name`, if the fast table has one.
@@ -3850,6 +3852,8 @@ pub fn did_you_mean(name: &str) -> Vec<String> {
         "number" | "to_number" | "parse_number" => {
             vec!["int".to_string(), "float".to_string()]
         }
+        // Date and time names have no builtin of their own; the clock one is.
+        "date_iso" | "iso_date" | "today" => vec!["now_iso".to_string()],
         _ => Vec::new(),
     };
     // The module spelling comes next. `file_read` is not a builtin, but
@@ -14227,6 +14231,45 @@ fn bi_float(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
             other.type_name(),
         )),
     }
+}
+
+/// now_iso(zone?) - The current time as an ISO 8601 / RFC 3339 String.
+/// Args:
+///   - zone: String (optional) - "utc" (the default) or "local"
+/// Returns: String, to the second
+///
+/// In UTC it ends in `Z`: 2026-11-08T14:03:05Z. With "local" it is the local
+/// time with its offset from UTC: 2026-11-08T06:03:05-08:00.
+///
+/// Example:
+///   now_iso()          # e.g. "2026-11-08T14:03:05Z"
+fn bi_now_iso(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
+    refuse_piped("now_iso", &input)?;
+    let local = match args.as_slice() {
+        [] => false,
+        [Value::Str(zone)] if zone.as_str() == "utc" => false,
+        [Value::Str(zone)] if zone.as_str() == "local" => true,
+        [other] => {
+            return Err(crate::safety::bad_arg(
+                "now_iso",
+                "\"utc\" or \"local\"",
+                other.type_name(),
+            ))
+        }
+        _ => {
+            return Err(crate::safety::bad_arg(
+                "now_iso",
+                "at most one argument, the zone",
+                &format!("{} arguments", args.len()),
+            ))
+        }
+    };
+    let text = if local {
+        chrono::Local::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, false)
+    } else {
+        chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
+    };
+    Ok(Value::Str(text))
 }
 
 /// exit(code?) - Exit the shell process with a status.

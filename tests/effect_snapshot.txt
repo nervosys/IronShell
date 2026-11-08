@@ -825,6 +825,7 @@ nodemon_run	Exec
 nodes	ReadLocal
 notify_user	WriteLocal
 now	Pure
+now_iso	Pure
 npm_install	Exec
 npm_run	Exec
 objdump	ReadLocal

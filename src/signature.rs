@@ -7271,6 +7271,17 @@ pub static SIGNATURES: &[Signature] = &[
         ],
     },
     Signature {
+        name: "now_iso",
+        category: None,
+        subject_required: false,
+        aliases: &[],
+        subject: None,
+        params: &[opt("zone", Ty::Str, "\"utc\" (the default) or \"local\", the local time with its UTC offset")],
+        returns: "String",
+        doc: "The current time as an ISO 8601 / RFC 3339 String, to the second. In UTC it ends in Z, such as 2026-11-08T14:03:05Z; with \"local\" it is the local time with its offset, such as 2026-11-08T06:03:05-08:00.",
+        examples: &[("len(now_iso()) > 18", "true")],
+    },
+    Signature {
         name: "assert",
         category: None,
         subject_required: false,
