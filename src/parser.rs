@@ -271,7 +271,7 @@ pub struct Parser {
 /// Parse a program, returning statements and any errors encountered.
 /// Uses error recovery to report multiple errors when possible.
 pub fn parse_program(src: &str) -> Result<Vec<Stmt>> {
-    let (toks, glued_brackets) = lex_marked(src).map_err(|e| ParseError::new(e.to_string()))?;
+    let (toks, glued_brackets) = lex_marked(src).map_err(lex_error)?;
     let mut p = Parser {
         toks,
         i: 0,
@@ -325,7 +325,7 @@ pub fn parse_program(src: &str) -> Result<Vec<Stmt>> {
 /// Parse a program without error recovery (stops at first error).
 /// Useful for cases where partial parsing is not desired.
 pub fn parse_program_strict(src: &str) -> Result<Vec<Stmt>> {
-    let (toks, glued_brackets) = lex_marked(src).map_err(|e| ParseError::new(e.to_string()))?;
+    let (toks, glued_brackets) = lex_marked(src).map_err(lex_error)?;
     let mut p = Parser {
         toks,
         i: 0,
@@ -348,6 +348,26 @@ pub fn parse_program_strict(src: &str) -> Result<Vec<Stmt>> {
 
 fn lex(src: &str) -> Result<Vec<Spanned>> {
     lex_marked(src).map(|(toks, _)| toks)
+}
+
+/// A string literal with no closing quote. Reported at the opening quote,
+/// because that is where the literal starts and where the fix goes.
+fn unterminated_string(line: usize, col: usize) -> anyhow::Error {
+    anyhow::Error::new(ParseError {
+        message: format!("unterminated string at line {}, column {}", line, col),
+        hint: "close the string with the same quote character it opened with, \
+               or escape the quote inside it"
+            .to_string(),
+    })
+}
+
+/// A lexer failure as a `ParseError`. The lexer hands back a finished
+/// `ParseError` when it has a specific hint; anything else is wrapped.
+fn lex_error(e: anyhow::Error) -> ParseError {
+    match e.downcast::<ParseError>() {
+        Ok(parse_error) => parse_error,
+        Err(other) => ParseError::new(other.to_string()),
+    }
 }
 
 /// The tokens, and the indices of the `[` tokens written directly after a
@@ -861,9 +881,11 @@ fn lex_marked(src: &str) -> Result<(Vec<Spanned>, std::collections::HashSet<usiz
             '"' => {
                 advance(&chars, &mut pos, &mut line, &mut col);
                 let mut s = String::new();
+                let mut closed = false;
                 while let Some(ch) = peek(&chars, pos) {
                     advance(&chars, &mut pos, &mut line, &mut col);
                     if ch == '"' {
+                        closed = true;
                         break;
                     }
                     if ch == '\\' {
@@ -892,6 +914,9 @@ fn lex_marked(src: &str) -> Result<(Vec<Spanned>, std::collections::HashSet<usiz
                         s.push(ch);
                     }
                 }
+                if !closed {
+                    return Err(unterminated_string(start_line, start_col));
+                }
                 out.push(Spanned {
                     kind: Tok::String,
                     text: s,
@@ -902,12 +927,17 @@ fn lex_marked(src: &str) -> Result<(Vec<Spanned>, std::collections::HashSet<usiz
             '\'' => {
                 advance(&chars, &mut pos, &mut line, &mut col);
                 let mut s = String::new();
+                let mut closed = false;
                 while let Some(ch) = peek(&chars, pos) {
                     advance(&chars, &mut pos, &mut line, &mut col);
                     if ch == '\'' {
+                        closed = true;
                         break;
                     }
                     s.push(ch);
+                }
+                if !closed {
+                    return Err(unterminated_string(start_line, start_col));
                 }
                 out.push(Spanned {
                     kind: Tok::String,
