@@ -108,3 +108,58 @@ fn a_hash_comment_after_an_operand_is_still_a_comment() {
 fn single_slash_division_is_unchanged() {
     assert_prints("div", "7 / 2\n", "3.5");
 }
+
+#[test]
+fn prose_after_a_number_is_a_comment() {
+    assert_prints(
+        "prose_num",
+        "x = 5 // note words
+x
+",
+        "5",
+    );
+}
+
+#[test]
+fn a_trailing_comment_after_a_call_is_a_comment() {
+    assert_prints(
+        "prose_call",
+        "x = [1, 2]
+y = len(x) // TODO fix this
+y
+",
+        "2",
+    );
+}
+
+#[test]
+fn a_name_divided_by_a_name_is_refused() {
+    assert_refused(
+        "names",
+        "a = 7
+b = 2
+a // b
+",
+    );
+}
+
+#[test]
+fn a_call_divided_by_a_number_is_refused() {
+    assert_refused(
+        "call",
+        "x = [1, 2]
+len(x) // 2
+",
+    );
+}
+
+#[test]
+fn a_name_divided_by_a_parenthesised_sum_is_refused() {
+    assert_refused(
+        "paren_sum",
+        "n = 7
+k = 2
+n // (k+1)
+",
+    );
+}

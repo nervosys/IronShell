@@ -380,6 +380,46 @@ fn unterminated_string(line: usize, col: usize) -> anyhow::Error {
     })
 }
 
+/// Whether the text after a `//` that follows an operand is an integer-division
+/// spelling rather than a comment: the rest of the line is one arithmetic
+/// expression over numbers, names and parentheses (`2`, `b`, `(k+1)`,
+/// `len(x)`). Prose (two words separated by a space), or any other
+/// punctuation, is a comment, as SPEC section 2.0 documents `//`.
+fn division_spelling(rest: &[char]) -> bool {
+    let line: String = rest.iter().take_while(|c| **c != '\n').collect();
+    let body = line.trim();
+    let Some(first) = body.chars().next() else {
+        return false;
+    };
+    if !(first.is_ascii_digit() || is_ident_start(first) || first == '(') {
+        return false;
+    }
+    let allowed = |c: char| {
+        c.is_ascii_alphanumeric()
+            || matches!(c, '_' | '.' | '+' | '-' | '*' | '/' | '%' | '^' | '(' | ')')
+            || c.is_whitespace()
+    };
+    if !body.chars().all(allowed) {
+        return false;
+    }
+    // Two words with only spaces between them are prose ("note words").
+    let mut prev_word = false;
+    let mut gap = false;
+    for c in body.chars() {
+        if c.is_whitespace() {
+            gap = true;
+            continue;
+        }
+        let word = c.is_ascii_alphanumeric() || c == '_';
+        if word && prev_word && gap {
+            return false;
+        }
+        prev_word = word;
+        gap = false;
+    }
+    true
+}
+
 /// A lexer failure as a `ParseError`. The lexer hands back a finished
 /// `ParseError` when it has a specific hint; anything else is wrapped.
 fn lex_error(e: anyhow::Error) -> ParseError {
@@ -854,14 +894,7 @@ fn lex_marked(src: &str) -> Result<(Vec<Spanned>, std::collections::HashSet<usiz
                                     | Tok::Null
                             )
                     });
-                    let mut k = pos + 1;
-                    while k < chars.len() && (chars[k] == ' ' || chars[k] == '\t') {
-                        k += 1;
-                    }
-                    let operand_next = k < chars.len()
-                        && (chars[k].is_ascii_digit()
-                            || is_ident_start(chars[k])
-                            || chars[k] == '(');
+                    let operand_next = division_spelling(&chars[pos + 1..]);
                     if after_operand && operand_next {
                         return Err(anyhow::Error::new(ParseError {
                             message: format!(
