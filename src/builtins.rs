@@ -6116,7 +6116,16 @@ fn bi_is_error(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
         ));
     };
 
-    let is_err = matches!(val, Value::Error(_));
+    // A caught error is a record whose `error` field holds the error's fields
+    // (see eval's `caught_error_record`), so it counts as an error too.
+    let is_err = match &val {
+        Value::Error(_) => true,
+        Value::Record(fields) => matches!(
+            fields.get("error"),
+            Some(Value::Record(inner)) if inner.contains_key("code")
+        ),
+        _ => false,
+    };
     Ok(Value::Bool(is_err))
 }
 

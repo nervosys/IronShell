@@ -2539,6 +2539,21 @@ pub fn os_denied(
     })
 }
 
+/// [`bad_value`] that names the operation it refused in `builtin`, such as
+/// `operator Div`, so the error's `builtin` field says where it came from.
+pub fn bad_value_in(builtin: &str, message: impl Into<String>, hint: &str) -> anyhow::Error {
+    anyhow::Error::new(SafetyError {
+        code: ErrorCode::BadValue,
+        message: message.into(),
+        builtin: builtin.to_string(),
+        hint: hint.to_string(),
+        approval: None,
+        did_you_mean: Vec::new(),
+        expected: String::new(),
+        got: String::new(),
+    })
+}
+
 /// Build a structured value error (`E_BAD_ARG`, not retryable): the argument is
 /// well-formed but its value makes the operation undefined. The hint says what
 /// to change, which for these is the caller's data.

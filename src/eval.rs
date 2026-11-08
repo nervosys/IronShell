@@ -651,11 +651,10 @@ pub fn eval_expr(expr: &Expr, env: &mut Env) -> Result<Value> {
                 }
                 Err(e) => {
                     // Runtime error - catch it. Safety refusals carry structured
-                    // data: bind the catch variable to a Record {error: {code,
-                    // message, hint, ...}} so agents can branch on `e.error.code`
-                    // instead of parsing a string. Other errors stay as strings.
+                    // data, and the catch variable is bound to their record (see
+                    // `caught_error_record`). Other errors stay as strings.
                     let caught = match e.downcast_ref::<crate::safety::SafetyError>() {
-                        Some(se) => Value::from_json(&se.to_json()),
+                        Some(se) => Value::from_json(&caught_error_record(&se.to_json())),
                         None => Value::Str(e.to_string()),
                     };
                     bind_caught(catch_var.as_deref(), caught, catch_expr, env)
@@ -1219,10 +1218,11 @@ fn is_zero_divisor(v: &Value) -> bool {
 }
 
 /// The refusal both `/` and `%` give for a zero divisor.
-fn divide_by_zero(what: &str) -> anyhow::Error {
+fn divide_by_zero(what: &str, operator: &str) -> anyhow::Error {
     // Not retryable: the divisor is data, and re-running with the same values
     // divides by the same zero. The hint says what to change.
-    crate::safety::bad_value(
+    crate::safety::bad_value_in(
+        operator,
         format!(
             "{what} by zero: the divisor evaluated to 0. Guard the divisor, or \
              filter the empty case before dividing"
@@ -1765,10 +1765,10 @@ fn binop(op: &BinOp, a: Value, b: Value) -> Result<Value> {
         // jq and nushell both raise an error here, so refusing is also the
         // least surprising behaviour for anyone arriving from either.
         (Div, x, y) if is_zero_divisor(&y) && matches!(x, Value::Int(_) | Value::Float(_)) => {
-            return Err(divide_by_zero("division"))
+            return Err(divide_by_zero("division", "operator Div"))
         }
         (Rem, x, y) if is_zero_divisor(&y) && matches!(x, Value::Int(_) | Value::Float(_)) => {
-            return Err(divide_by_zero("remainder"))
+            return Err(divide_by_zero("remainder", "operator Rem"))
         }
 
         (Div, Value::Int(x), Value::Int(y)) => Value::Float((x as f64) / (y as f64)),
@@ -1851,6 +1851,20 @@ fn binop(op: &BinOp, a: Value, b: Value) -> Result<Value> {
             ))
         }
     })
+}
+
+/// The record a caught error is bound to. Its fields sit at the top level, so
+/// `e.code`, `e.message`, `e.hint`, `e.retryable` and `e.builtin` read as an
+/// agent expects, and the same record is under `error`, so `e.error.code` keeps
+/// working for scripts already written that way.
+pub(crate) fn caught_error_record(wire: &serde_json::Value) -> serde_json::Value {
+    let inner = wire
+        .get("error")
+        .cloned()
+        .unwrap_or(serde_json::Value::Null);
+    let mut top = inner.as_object().cloned().unwrap_or_default();
+    top.insert("error".to_string(), inner);
+    serde_json::Value::Object(top)
 }
 
 /// The check an annotated `let` makes: the value must have the declared type.
