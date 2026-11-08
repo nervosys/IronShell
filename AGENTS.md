@@ -163,6 +163,8 @@ match score { s if s >= 90 => "A", s if s >= 80 => "B", _ => "F" }
 result = try { risky() } catch e { "fallback" }
 try { error("bad", {field: "age"}) } catch e { e.code }   # "E_USER"; error(message[, extra Record]) raises your own
 
+# Script arguments: `ish script.ish a b` gives the script args() == ["a", "b"] (empty under -c)
+
 # String interpolation
 msg = "Hello ${name}, you have ${count} items"
 

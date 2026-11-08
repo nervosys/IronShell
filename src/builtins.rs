@@ -739,6 +739,7 @@ lazy_static::lazy_static! {
         map.insert("sha256", 1159); // was 480, crypto_hash: md5 answered SHA-256
         // Appended with the other rows: the id is the row's index in BUILTIN_DISPATCH.
         map.insert("error", 1160);
+        map.insert("args", 1161);
         // 500-519: Database
         map.insert("db_sqlite_open", 500);
         map.insert("db_sqlite_query", 501);
@@ -3771,6 +3772,7 @@ static BUILTIN_DISPATCH: &[fn(Vec<Value>, Option<Value>, &mut Env) -> Result<Val
     |args, input, _| bi_named_hash("md5", args, input), // 1158
     |args, input, _| bi_named_hash("sha256", args, input), // 1159
     |args, input, _| bi_error(args, input),        // 1160
+    |args, input, _| bi_args(args, input),         // 1161
 ];
 
 /// The dispatch row that serves `name`, if the fast table has one.
@@ -14059,6 +14061,48 @@ fn bi_pow(args: Vec<Value>, _input: Option<Value>) -> Result<Value> {
 }
 
 // ==================== Utility Functions ====================
+
+/// The arguments the running script was given (`ish script.ish a b`). Set once
+/// at startup by `main`; empty for `-c`, stdin and the REPL.
+static SCRIPT_ARGS: std::sync::OnceLock<Vec<String>> = std::sync::OnceLock::new();
+
+/// Record the arguments of the script about to run. Only the first call counts.
+pub fn set_script_args(args: Vec<String>) {
+    let _ = SCRIPT_ARGS.set(args);
+}
+
+/// The script's arguments in order: what `args()` returns and what `$1`..`$9`
+/// name under `ish -b script.sh a b`.
+pub fn script_args() -> &'static [String] {
+    match SCRIPT_ARGS.get() {
+        Some(args) => args.as_slice(),
+        None => &[],
+    }
+}
+
+/// args() - The arguments the running script was given, as an Array of Strings.
+///
+/// `ish script.ish a b` gives `["a", "b"]`. The array is empty when there are no
+/// arguments, and always under `-c`, stdin and the REPL, where no script runs.
+///
+/// Example:
+///   args()     # [] in the REPL
+fn bi_args(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
+    refuse_piped("args", &input)?;
+    if !args.is_empty() {
+        return Err(crate::safety::bad_arg(
+            "args",
+            "no arguments",
+            &format!("{} arguments", args.len()),
+        ));
+    }
+    Ok(Value::Array(
+        script_args()
+            .iter()
+            .map(|a| Value::Str(a.clone()))
+            .collect(),
+    ))
+}
 
 /// exit(code?) - Exit the shell process with a status.
 /// Args:

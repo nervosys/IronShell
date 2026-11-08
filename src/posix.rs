@@ -1147,6 +1147,9 @@ struct Shell {
     /// report errors itself) and taken by the command that contains it, which
     /// is then refused rather than run with part of its arguments.
     glob_refused: Option<String>,
+    /// The script's arguments: `$1`..`$9` and `$#`. Empty unless the script was
+    /// run with arguments (`ish -b script.sh a b`).
+    positional: Vec<String>,
 }
 
 const SHELL_NAME: &str = "ish";
@@ -1156,12 +1159,19 @@ impl Shell {
         match name {
             "?" => return Some(self.last.to_string()),
             "$" => return Some(std::process::id().to_string()),
-            "#" => return Some("0".into()),
+            "#" => return Some(self.positional.len().to_string()),
             "0" => return Some(SHELL_NAME.into()),
             _ => {}
         }
         if name.chars().all(|c| c.is_ascii_digit()) {
-            return None;
+            // `$1`..`$9` and `${10}` name the script's arguments; past the last
+            // one, unset.
+            return name
+                .parse::<usize>()
+                .ok()
+                .and_then(|n| n.checked_sub(1))
+                .and_then(|i| self.positional.get(i))
+                .cloned();
         }
         if let Some(v) = self.vars.get(name) {
             return Some(v.clone());
@@ -4749,12 +4759,18 @@ fn date(args: &[String], sink: &mut Sink) -> Util {
 /// subset does not run -- decided before anything executes, so the caller can
 /// fall back without a half-run script behind it.
 pub fn run(src: &str) -> Option<i32> {
+    run_with_args(src, &[])
+}
+
+/// [`run`] with the script's arguments, which become `$1`..`$9` and `$#`.
+pub fn run_with_args(src: &str, args: &[String]) -> Option<i32> {
     let list = parse(src).ok()?;
     let mut sh = Shell {
         vars: HashMap::new(),
         exported: HashSet::new(),
         last: 0,
         glob_refused: None,
+        positional: args.to_vec(),
     };
     let mut stdin = Input::real();
     let mut sink = Sink::new(ErrMode::Real);
@@ -4908,6 +4924,7 @@ mod tests {
             exported: HashSet::new(),
             last: 0,
             glob_refused: None,
+            positional: Vec::new(),
         };
         let mut stdin = Input::buf(Vec::new());
         let mut sink = Sink::new(ErrMode::Null);

@@ -7231,6 +7231,17 @@ pub static SIGNATURES: &[Signature] = &[
         ],
     },
     Signature {
+        name: "args",
+        category: None,
+        subject_required: false,
+        aliases: &[],
+        subject: None,
+        params: &[],
+        returns: "Array",
+        doc: "The arguments the running script was given: `ish script.ish a b` gives [\"a\", \"b\"]. Empty when there are none, and always under -c, stdin and the REPL.",
+        examples: &[("len(args())", "0")],
+    },
+    Signature {
         name: "assert",
         category: None,
         subject_required: false,

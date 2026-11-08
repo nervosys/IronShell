@@ -117,6 +117,7 @@ approve	WriteLocal
 apt	Privileged
 archive_info	ReadLocal
 archive_test	ReadLocal
+args	Pure
 asdf	ReadLocal
 asdf_install	Exec
 asdf_list	ReadLocal
