@@ -36,6 +36,10 @@ pub enum Stmt {
         /// Visibility: `pub let x = ...` makes x importable
         #[serde(default)]
         visibility: Visibility,
+        /// The annotation in `let x: Int = ...`, checked when the value is bound.
+        /// `None` when the binding has no annotation.
+        #[serde(default)]
+        ty: Option<String>,
     },
     Expr(Expr),
     /// Import statement: `import "path"` or `import { a, b } from "path"`

@@ -479,8 +479,12 @@ pub fn eval_stmt(stmt: &Stmt, env: &mut Env) -> Result<Value> {
             value,
             is_mut,
             visibility,
+            ty,
         } => {
             let v = eval_expr(value, env)?;
+            if let Some(declared) = ty {
+                check_declared_type(name, declared, &v)?;
+            }
             env.declare_var(name, v.clone(), *is_mut).map_err(|e| {
                 // `bad_state` would read this as a builtin to call first, which
                 // is how "call `use a different name...` first" came about.
@@ -1847,6 +1851,35 @@ fn binop(op: &BinOp, a: Value, b: Value) -> Result<Value> {
             ))
         }
     })
+}
+
+/// The check an annotated `let` makes: the value must have the declared type.
+///
+/// Only the type names the language has a value for are checked (`Int`,
+/// `Float`, `String`, `Bool`, `Array`, `Record`, `Null`). Any other annotation
+/// is not checked, as it has never been. An Int is not accepted where a Float is
+/// declared: the language does not widen at a binding, so the hint says to write
+/// the decimal point.
+fn check_declared_type(name: &str, declared: &str, value: &Value) -> Result<()> {
+    let expected = match declared {
+        "Int" | "Float" | "String" | "Bool" | "Array" | "Record" | "Null" => declared,
+        _ => return Ok(()),
+    };
+    let actual = value.type_name();
+    if actual == expected {
+        return Ok(());
+    }
+    let hint = if expected == "Float" && actual == "Int" {
+        format!("`{name}` is declared Float: write the literal with a decimal point, such as 1.0")
+    } else {
+        format!("`{name}` is declared {expected}: bind a {expected} value, or remove the `: {expected}` annotation")
+    };
+    Err(crate::safety::bad_arg_with_hint(
+        &format!("let {name}"),
+        expected,
+        actual,
+        &hint,
+    ))
 }
 
 /// Interpolate ${expr} patterns in a string

@@ -1299,6 +1299,7 @@ impl Parser {
                     value,
                     is_mut: true,
                     visibility,
+                    ty: None,
                 });
             }
         }
@@ -1318,6 +1319,7 @@ impl Parser {
                     value,
                     is_mut: false,
                     visibility,
+                    ty: None,
                 });
             }
         }
@@ -1326,9 +1328,11 @@ impl Parser {
             // Keep let/let mut for explicit declarations
             let is_mut = self.match_tok(Tok::Mut);
             let name = self.need_ident("expected identifier after let")?;
-            if self.match_tok(Tok::Colon) {
-                let _ = self.need_ident("expected type after ':'")?;
-            }
+            let ty = if self.match_tok(Tok::Colon) {
+                Some(self.need_ident("expected type after ':'")?)
+            } else {
+                None
+            };
             // Accept either = or :=
             if !self.match_tok(Tok::Equal) {
                 self.need(Tok::ColonEqual, "expected '=' or ':=' in let")?;
@@ -1339,6 +1343,7 @@ impl Parser {
                 value,
                 is_mut,
                 visibility,
+                ty,
             })
         } else if self.match_tok(Tok::Import) {
             // Parse import statement

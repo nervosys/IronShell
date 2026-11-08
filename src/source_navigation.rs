@@ -108,6 +108,7 @@ impl Document {
                     value,
                     is_mut,
                     visibility,
+                    ..
                 } => out.push((name, value, *is_mut, *visibility)),
                 Stmt::Cfg { body, .. } => collect(body, out),
                 _ => {}
