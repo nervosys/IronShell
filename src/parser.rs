@@ -2324,6 +2324,33 @@ impl Parser {
         })
     }
 
+    /// The error for a lambda parameter followed by `=` (a default value) or `:`
+    /// (a type annotation): lambda parameters have neither. `let` takes the type
+    /// annotation, and it is checked; a default is written as a null check.
+    fn reject_parameter_extra(&self, name: &str) -> Result<()> {
+        let at = self.peek();
+        let (what, hint) = if self.check(Tok::Equal) {
+            (
+                "lambda parameters take no default values",
+                "lambda parameters take no default values: leave the parameter out of the \
+                 list, or take it and check for null in the body, as in \
+                 fn(a, b) => if b == null { a + 10 } else { a + b }",
+            )
+        } else if self.check(Tok::Colon) {
+            (
+                "lambda parameters take no type annotations",
+                "lambda parameters take no type annotations: write fn(x) => x. Only \
+                 `let x: Type = value` takes a type, and that type is checked",
+            )
+        } else {
+            return Ok(());
+        };
+        Err(anyhow::Error::new(HintedSyntax {
+            msg: format!("{what}: '{name}' at line {}, column {}", at.line, at.col),
+            hint: hint.to_string(),
+        }))
+    }
+
     fn parse_lambda_after_fn(&mut self, is_async: bool) -> Result<Expr> {
         let saved = self.implicit_row;
         self.implicit_row = false;
@@ -2338,6 +2365,7 @@ impl Parser {
         if !self.check(Tok::RParen) {
             loop {
                 let p = self.need_ident("expected parameter name")?;
+                self.reject_parameter_extra(&p)?;
                 params.push(p);
                 if self.match_tok(Tok::Comma) {
                     continue;
@@ -2720,10 +2748,29 @@ impl Parser {
     /// error is one: `=` where a comparison was meant, and `**` for a power.
     fn spelling_hint(&self) -> Option<&'static str> {
         let cur = self.peek().kind;
-        if matches!(cur, Tok::Equal) {
+        let prev = self.i.checked_sub(1).and_then(|j| self.toks.get(j));
+        // `=` is a comparison's spelling only directly after an operand, as in
+        // `r.state = "open"`. After an operator or an opening bracket it is
+        // not one, and the hint would name a comparison that was never written.
+        if matches!(cur, Tok::Equal)
+            && prev.is_some_and(|p| {
+                matches!(
+                    p.kind,
+                    Tok::Ident
+                        | Tok::String
+                        | Tok::Int
+                        | Tok::Float
+                        | Tok::True
+                        | Tok::False
+                        | Tok::Null
+                        | Tok::RParen
+                        | Tok::RBracket
+                        | Tok::RBrace
+                )
+            })
+        {
             return Some("use `==` to compare; `=` assigns");
         }
-        let prev = self.i.checked_sub(1).and_then(|j| self.toks.get(j));
         if matches!(cur, Tok::Star) && prev.is_some_and(|p| matches!(p.kind, Tok::Star)) {
             return Some("no `**` operator: use math.pow(a, b)");
         }
