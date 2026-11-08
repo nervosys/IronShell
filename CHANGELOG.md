@@ -57,6 +57,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - POSIX subset on Windows: an unsupported flag runs a GNU-compatible program on PATH, never the Windows folder's `sort.exe` or `find.exe`; with none it exits 2 naming the flag, instead of "command not found" (127). Elsewhere it still runs the PATH program of that name. `cat -n`, printf `%x`/`%o`/`%.Nf`/`%.Ns` and sed `s/a/b/N` now run in-process.
 - `ish -b` refuses a script outside the POSIX subset (a function, `case`, `$((...))`, a here-document) before running any of it, with E_POLICY_DENY naming the construct, line and column, instead of saying `sh()` is disabled.
 - POSIX `grep -r PATTERN FILE` with a single file operand no longer prefixes lines with the file name, as GNU grep does; `sort` exits 2 for an unreadable input with GNU's "cannot read:" message.
+- `session_end` holds the journal lock while it removes the journal directory, and on Windows retries a transient Access denied for up to half a second before reporting E_IO.
 
 ## [14.0.0] - 2026-11-06
 
