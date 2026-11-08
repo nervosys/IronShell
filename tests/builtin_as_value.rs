@@ -4,7 +4,7 @@
 //! to Null, and `g("x")` then failed with "expected a function in `g`, got
 //! Null". A builtin name with no binding now evaluates to the builtin reference
 //! a module member already is, so `g` calls the same builtin, through the same
-//! gate. A name that is neither bound nor a builtin is still Null.
+//! gate. A name that is neither bound nor a builtin is E_UNKNOWN_NAME.
 
 use iron_shell::env::Env;
 use iron_shell::safety::ErrorCode;
@@ -41,9 +41,14 @@ fn a_bound_builtin_name_calls_the_builtin() {
 }
 
 #[test]
-fn an_unbound_name_that_is_not_a_builtin_is_still_null() {
+fn an_unbound_name_that_is_not_a_builtin_is_an_unknown_name() {
+    // It was Null until unbound names became errors (E_UNKNOWN_NAME).
     let _g = lock();
-    assert_eq!(run("nosuchname_zz").unwrap(), Value::Null);
+    let err = run("nosuchname_zz").expect_err("an unbound name must not be null");
+    let se = err
+        .downcast_ref::<iron_shell::safety::SafetyError>()
+        .expect("structured refusal");
+    assert_eq!(se.code, ErrorCode::UnknownName);
 }
 
 #[test]

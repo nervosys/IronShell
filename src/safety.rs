@@ -1596,6 +1596,11 @@ pub enum ErrorCode {
     /// A record field (which is how module functions like `file.read` resolve)
     /// does not exist. Like `UnknownBuiltin`, carries `did_you_mean`.
     UnknownField,
+    /// A bare name that nothing binds: not a variable, not a builtin, not a
+    /// module. It used to evaluate to null, so a typo ran on and failed later,
+    /// or never failed at all. Carries `did_you_mean` drawn from the bound
+    /// variables and the builtins. Retryable by naming something that exists.
+    UnknownName,
     /// An external tool the builtin shells out to is not installed.
     ///
     /// Distinct from every other code here because the fix is neither a
@@ -1719,6 +1724,7 @@ impl ErrorCode {
             ErrorCode::BudgetExceeded => "E_BUDGET_EXCEEDED",
             ErrorCode::UnknownBuiltin => "E_UNKNOWN_BUILTIN",
             ErrorCode::UnknownField => "E_UNKNOWN_FIELD",
+            ErrorCode::UnknownName => "E_UNKNOWN_NAME",
             ErrorCode::ToolMissing => "E_TOOL_MISSING",
             ErrorCode::NoUi => "E_NO_UI",
             ErrorCode::Unimplemented => "E_UNIMPLEMENTED",
@@ -1744,6 +1750,8 @@ impl ErrorCode {
     pub fn retryable(&self) -> bool {
         match self {
             ErrorCode::BadArg | ErrorCode::UnknownField => true,
+            // Retryable by naming a variable or builtin that exists.
+            ErrorCode::UnknownName => true,
             // Retryable by naming something that exists...
             ErrorCode::NotFound => true,
             // ...and this one by running the prerequisite the hint names, not
@@ -1812,7 +1820,7 @@ impl ErrorCode {
             // bash: "command not found". A missing external tool is the same
             // condition one level out, and an agent that knows shell reads 127
             // without being told.
-            ErrorCode::UnknownBuiltin | ErrorCode::ToolMissing => 127,
+            ErrorCode::UnknownBuiltin | ErrorCode::UnknownName | ErrorCode::ToolMissing => 127,
             // EX_USAGE — the call was malformed.
             ErrorCode::BadArg | ErrorCode::BadValue | ErrorCode::UnknownField => 64,
             // EX_NOPERM — refused, and retrying unchanged will refuse again.
@@ -2645,6 +2653,30 @@ pub fn unknown_module(name: &str, candidates: Vec<String>) -> anyhow::Error {
         code: ErrorCode::UnknownBuiltin,
         message: format!("unknown module: {}", name),
         builtin: name.to_string(),
+        hint,
+        approval: None,
+        did_you_mean: candidates,
+        expected: String::new(),
+        got: String::new(),
+    })
+}
+
+/// Build the error for a bare name that nothing binds (`E_UNKNOWN_NAME`). The
+/// candidates are the nearest bound variables and builtins; `candidates` must
+/// come from those tables, as with the other `unknown_*` constructors.
+pub fn unknown_name(name: &str, candidates: Vec<String>) -> anyhow::Error {
+    let hint = if candidates.is_empty() {
+        format!(
+            "`{name}` is not a variable, builtin or module; bind it with `let {name} = ...`, \
+             or call a builtin as `{name}(...)`"
+        )
+    } else {
+        format!("did you mean: {}", candidates.join(", "))
+    };
+    anyhow::Error::new(SafetyError {
+        code: ErrorCode::UnknownName,
+        message: format!("unknown name `{name}`"),
+        builtin: String::new(),
         hint,
         approval: None,
         did_you_mean: candidates,

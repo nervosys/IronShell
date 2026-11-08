@@ -553,7 +553,9 @@ pub fn eval_expr(expr: &Expr, env: &mut Env) -> Result<Value> {
             // kind a module member is. `g = rm` then binds a callable, where it
             // used to bind Null and fail at `g(...)` with "got Null".
             None if builtins::is_dispatched(name) => Ok(crate::modules::builtin_ref(name)),
-            None => Ok(Value::Null),
+            // A name nothing binds is an error. It used to be null, so a typo
+            // in a variable ran on with null and failed later, far from its cause.
+            None => Err(unknown_name_error(name, env)),
         },
 
         // ---------- collections ----------
@@ -929,13 +931,32 @@ fn module_field_error(
     crate::safety::unknown_field_hinted(field, candidates, specific)
 }
 
+/// The error for a bare name that nothing binds. Its candidates are the nearest
+/// bound variables and builtins, so a misspelt variable names its own fix.
+fn unknown_name_error(name: &str, env: &Env) -> anyhow::Error {
+    let candidates = builtins::nearest_names(
+        name,
+        env.vars()
+            .keys()
+            .map(|k| k.as_str())
+            .chain(builtins::BUILTIN_LOOKUP.keys().copied()),
+    );
+    crate::safety::unknown_name(name, candidates)
+}
+
 /// Resolve only identifiers and field chains, which cannot mutate the env.
 /// Other expressions keep the normal evaluator path and its evaluation order.
 fn borrowed_member<'a>(expr: &Expr, env: &'a Env) -> Option<Result<&'a Value>> {
     match expr {
-        Expr::Ident(name) => Some(
-            crate::safety::check_deadline().map(|()| env.get_var(name).unwrap_or(&Value::Null)),
-        ),
+        Expr::Ident(name) => {
+            Some(
+                crate::safety::check_deadline().and_then(|()| match env.get_var(name) {
+                    Some(value) => Ok(value),
+                    None if builtins::is_dispatched(name) => Ok(&Value::Null),
+                    None => Err(unknown_name_error(name, env)),
+                }),
+            )
+        }
         Expr::MemberAccess { object, field } => {
             if let Some(e) = unbound_receiver_error(object, env) {
                 return Some(Err(e));
@@ -1936,6 +1957,14 @@ fn interpolate_string(s: &str, env: &mut Env) -> Result<Value> {
                                 // `"x: ${r}"` came out as
                                 // `x: Record({"a": Int(1)})`.
                                 result.push_str(&val.to_display_string());
+                            }
+                            // A name nothing binds is an error of the string, not a
+                            // hole to print: `"${nosuch}"` must not come out as text.
+                            Err(e)
+                                if crate::safety::code_of(&e)
+                                    == crate::safety::ErrorCode::UnknownName =>
+                            {
+                                return Err(e);
                             }
                             Err(e) => {
                                 // On error, keep the ${expr} literal
