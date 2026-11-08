@@ -41,6 +41,22 @@ impl ParseError {
     }
 }
 
+/// A syntax error with a specific hint, carried so `parse_program` can give it
+/// in place of the generic one. Its display is the ordinary message.
+#[derive(Debug)]
+struct HintedSyntax {
+    msg: String,
+    hint: &'static str,
+}
+
+impl std::fmt::Display for HintedSyntax {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.msg)
+    }
+}
+
+impl std::error::Error for HintedSyntax {}
+
 /// The hint for `a[start:end]`, which IronShell does not spell as a slice.
 const SLICE_HINT: &str = "IronShell has no slice syntax, so a[start:end] is not written. \
      Use the slice builtin on the subject: `a | slice(start, end)` (for example \
@@ -315,6 +331,9 @@ pub fn parse_program(src: &str) -> Result<Vec<Stmt>> {
             .any(|e| e.downcast_ref::<SliceSpelling>().is_some())
         {
             parse_error.hint = SLICE_HINT.to_string();
+        }
+        if let Some(hinted) = errors.iter().find_map(|e| e.downcast_ref::<HintedSyntax>()) {
+            parse_error.hint = hinted.hint.to_string();
         }
         return Err(anyhow::Error::new(parse_error));
     }
@@ -2500,7 +2519,25 @@ impl Parser {
     /// Create an error message with line/column information at current token
     fn error_at_current(&self, msg: &str) -> anyhow::Error {
         let tok = self.peek();
-        anyhow!("{} at line {}, column {}", msg, tok.line, tok.col)
+        let text = format!("{} at line {}, column {}", msg, tok.line, tok.col);
+        match self.spelling_hint() {
+            Some(hint) => anyhow::Error::new(HintedSyntax { msg: text, hint }),
+            None => anyhow!("{}", text),
+        }
+    }
+
+    /// The fix for a spelling from another language, when the token at the
+    /// error is one: `=` where a comparison was meant, and `**` for a power.
+    fn spelling_hint(&self) -> Option<&'static str> {
+        let cur = self.peek().kind;
+        if matches!(cur, Tok::Equal) {
+            return Some("use `==` to compare; `=` assigns");
+        }
+        let prev = self.i.checked_sub(1).and_then(|j| self.toks.get(j));
+        if matches!(cur, Tok::Star) && prev.is_some_and(|p| matches!(p.kind, Tok::Star)) {
+            return Some("no `**` operator: use math.pow(a, b)");
+        }
+        None
     }
 
     /// Create an error message with line/column information at previous token

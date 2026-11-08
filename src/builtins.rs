@@ -13277,6 +13277,16 @@ fn bi_contains(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
         )
     };
 
+    // An array is the usual reason for this error: `contains` searches a string,
+    // and array membership is `in`.
+    if let Value::Array(_) = input_val {
+        return Err(crate::safety::bad_arg_with_hint(
+            "contains",
+            "a string",
+            "Array",
+            "contains searches a string for a substring; to test whether an array              holds a value, pipe the value to in: `value | in(array)`",
+        ));
+    }
     let text = expect_string("contains", &input_val)?;
     let substring = expect_string("contains", substring_arg)?;
     Ok(Value::Bool(text.contains(substring)))

@@ -2476,6 +2476,22 @@ pub fn bad_arg(builtin: &str, expected: &str, got: &str) -> anyhow::Error {
     })
 }
 
+/// [`bad_arg`] with a hint that says what the caller should do instead, in
+/// place of the generic "pass an argument matching: ...". For the cases where
+/// the generic hint is correct but leaves the actual fix unsaid.
+pub fn bad_arg_with_hint(builtin: &str, expected: &str, got: &str, hint: &str) -> anyhow::Error {
+    anyhow::Error::new(SafetyError {
+        code: ErrorCode::BadArg,
+        message: format!("{}: expected {}, got {}", builtin, expected, got),
+        builtin: builtin.to_string(),
+        hint: hint.to_string(),
+        approval: None,
+        did_you_mean: Vec::new(),
+        expected: expected.to_string(),
+        got: got.to_string(),
+    })
+}
+
 /// Build a structured policy refusal (`E_POLICY_DENY`) for a gate that is not
 /// the central effect governor.
 ///

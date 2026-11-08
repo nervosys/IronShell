@@ -14581,6 +14581,16 @@ pub fn validate(name: &str, args: &[Value], input: Option<&Value>) -> anyhow::Re
 
     let required = sig.params.iter().filter(|p| p.required).count();
     if supplied < required {
+        // `in` is a pipe stage far more often than a call with two arguments,
+        // so the missing collection is the one thing worth saying in words.
+        if name == "in" {
+            return Err(crate::safety::bad_arg_with_hint(
+                name,
+                &sig.render(),
+                &format!("{supplied} of {required} required"),
+                "to test membership, pipe the value to in: `\"bug\" | in([\"bug\", \"x\"])`",
+            ));
+        }
         // `expected` is the signature alone, with no "— missing x" tail. The
         // tail read well and cost twice: `diagnose` carries the signature in
         // its own field, generated from this same declaration, so a restated
