@@ -583,11 +583,25 @@ pub fn outside_read_jail(path: &str) -> bool {
     }
 }
 
+/// Record a refused read in the audit log, as a refused write is: one `deny`
+/// entry per refusal. The audit writer redacts the path, as it does for writes.
+pub fn audit_read_refusal(builtin: &str, path: &str) {
+    let tool = if builtin.is_empty() { "read" } else { builtin };
+    let _ = crate::safety::audit(
+        tool,
+        crate::safety::Effect::ReadLocal,
+        "deny",
+        path,
+        serde_json::json!({ "reason": "outside_workspace" }),
+    );
+}
+
 /// The read jail as a builtin's error: `E_OUTSIDE_WORKSPACE` when `path` is
 /// refused by [`outside_read_jail`]. It runs before any existence check, so a
 /// missing path outside the workspace and an existing one answer alike.
 pub fn check_read_jail(builtin: &str, path: &str) -> Result<()> {
     if outside_read_jail(path) {
+        audit_read_refusal(builtin, path);
         return Err(crate::safety::outside_workspace(
             builtin,
             &sanitize_path_in_error(path),

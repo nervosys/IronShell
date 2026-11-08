@@ -2573,8 +2573,10 @@ fn redacted(bytes: &[u8]) -> std::borrow::Cow<'_, [u8]> {
 }
 
 fn jail_refusal(tool: &str, path: &str) -> Option<String> {
-    crate::security::outside_read_jail(path)
-        .then(|| crate::safety::outside_workspace(tool, path).to_string())
+    crate::security::outside_read_jail(path).then(|| {
+        crate::security::audit_read_refusal(tool, path);
+        crate::safety::outside_workspace(tool, path).to_string()
+    })
 }
 
 fn read_inputs(
