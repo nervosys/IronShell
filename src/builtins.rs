@@ -8313,9 +8313,15 @@ fn bi_ls(args: Vec<Value>, _input: Option<Value>) -> Result<Value> {
 
         let mut record = BTreeMap::new();
         record.insert("name".to_string(), Value::Str(name));
+        // The walk is over the canonical directory, so its entries carry the
+        // verbatim prefix; report the ordinary drive path.
         record.insert(
             "path".to_string(),
-            Value::Str(path.to_string_lossy().to_string()),
+            Value::Str(
+                crate::safety::strip_verbatim_prefix(&path)
+                    .to_string_lossy()
+                    .to_string(),
+            ),
         );
         record.insert("ext".to_string(), Value::Str(ext));
         record.insert("is_dir".to_string(), Value::Bool(metadata.is_dir()));
@@ -8685,7 +8691,10 @@ fn bi_find(args: Vec<Value>, _input: Option<Value>) -> Result<Value> {
                 });
             }
         };
-        let path_str = entry.path().to_string_lossy().to_string();
+        // Reported without the verbatim prefix `canonicalize` put on the root.
+        let path_str = crate::safety::strip_verbatim_prefix(entry.path())
+            .to_string_lossy()
+            .to_string();
 
         if let Some(ref pattern) = pattern {
             // Simple glob matching: support * for any characters
@@ -27581,7 +27590,11 @@ fn bi_fs_realpath(args: Vec<Value>, _input: Option<Value>) -> Result<Value> {
 
     // Only a missing path is Null; the old code made every failure Null.
     match std::fs::canonicalize(&path) {
-        Ok(real) => Ok(Value::Str(real.to_string_lossy().to_string())),
+        Ok(real) => Ok(Value::Str(
+            crate::safety::strip_verbatim_prefix(&real)
+                .to_string_lossy()
+                .to_string(),
+        )),
         Err(e) if path_is_absent(&e) => Ok(Value::Null),
         Err(e) => Err(crate::safety::fs_error("fs_realpath", &path, &e)),
     }

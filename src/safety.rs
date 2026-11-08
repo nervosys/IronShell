@@ -2957,7 +2957,7 @@ pub fn pin_workspace_root() {
 /// `canonicalize` on Windows returns the `\\?\C:\...` form. Strip it for the
 /// variable, so the root reads and passes to children as an ordinary path.
 /// Verbatim UNC (`\\?\UNC\...`) keeps its prefix, since there is no plain form.
-fn strip_verbatim_prefix(p: &Path) -> PathBuf {
+pub(crate) fn strip_verbatim_prefix(p: &Path) -> PathBuf {
     let s = p.to_string_lossy();
     match s.strip_prefix(r"\\?\") {
         Some(rest) if !rest.starts_with("UNC\\") && rest.as_bytes().get(1) == Some(&b':') => {
@@ -8004,6 +8004,20 @@ mod deadline_tests {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn verbatim_prefix_is_stripped_only_for_a_drive_path() {
+        // String-only: nothing here touches the filesystem.
+        use std::path::{Path, PathBuf};
+        let strip = |s: &str| super::strip_verbatim_prefix(Path::new(s));
+        assert_eq!(
+            strip(r"\\?\C:\Users\x\f.txt"),
+            PathBuf::from(r"C:\Users\x\f.txt")
+        );
+        assert_eq!(strip(r"\\?\d:\x"), PathBuf::from(r"d:\x"));
+        assert_eq!(strip(r"C:\Users\x"), PathBuf::from(r"C:\Users\x"));
+        assert_eq!(strip(r"relative\f"), PathBuf::from(r"relative\f"));
+    }
+
     #[test]
     fn existing_paths_never_probes_a_remote_share() {
         // Each of these, probed, opens an SMB session on Windows (about 48 s to
