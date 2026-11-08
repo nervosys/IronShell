@@ -950,6 +950,20 @@ fn lex_marked(src: &str) -> Result<(Vec<Spanned>, std::collections::HashSet<usiz
                                 '\\' => s.push('\\'),
                                 '"' => s.push('"'),
                                 '$' => s.push('$'),
+                                'x' | 'u' => match hex_escape(&chars, pos, esc) {
+                                    Some((scalar, width)) => {
+                                        for _ in 0..width {
+                                            advance(&chars, &mut pos, &mut line, &mut col);
+                                        }
+                                        s.push(scalar);
+                                    }
+                                    // A malformed escape keeps its backslash, as
+                                    // any unknown escape does.
+                                    None => {
+                                        s.push('\\');
+                                        s.push(esc);
+                                    }
+                                },
                                 // Not an escape the lexer knows (`C:\Users`,
                                 // `\d`, `\e`). The backslash was dropped here
                                 // before, so a Windows path lost its
@@ -1153,6 +1167,30 @@ fn is_ident_start(c: char) -> bool {
 }
 fn is_ident_part(c: char) -> bool {
     c.is_ascii_alphanumeric() || c == '_'
+}
+
+/// The scalar named by a `\xHH` or `\u{H..H}` escape whose `x` or `u` is at
+/// `at`, and how many source characters after `at` the escape spans. `None` when
+/// the escape is malformed, or names no Unicode scalar value.
+fn hex_escape(chars: &[char], at: usize, kind: char) -> Option<(char, usize)> {
+    if kind == 'x' {
+        let hex: String = chars.get(at..at + 2)?.iter().collect();
+        if !hex.chars().all(|c| c.is_ascii_hexdigit()) {
+            return None;
+        }
+        let value = u32::from_str_radix(&hex, 16).ok()?;
+        return Some((char::from_u32(value)?, 2));
+    }
+    if chars.get(at) != Some(&'{') {
+        return None;
+    }
+    let close = (at + 1..chars.len().min(at + 9)).find(|&k| chars[k] == '}')?;
+    let hex: String = chars[at + 1..close].iter().collect();
+    if hex.is_empty() || hex.len() > 6 || !hex.chars().all(|c| c.is_ascii_hexdigit()) {
+        return None;
+    }
+    let value = u32::from_str_radix(&hex, 16).ok()?;
+    Some((char::from_u32(value)?, close - at + 1))
 }
 
 // ============ Parser ============
