@@ -46,7 +46,7 @@ impl ParseError {
 #[derive(Debug)]
 struct HintedSyntax {
     msg: String,
-    hint: &'static str,
+    hint: String,
 }
 
 impl std::fmt::Display for HintedSyntax {
@@ -1523,6 +1523,7 @@ impl Parser {
                 };
                 continue;
             }
+            self.reject_hyphenated_stage()?;
             let right = self.parse_call_like()?;
             left = Expr::Pipe {
                 left: Box::new(left),
@@ -2554,9 +2555,54 @@ impl Parser {
         let tok = self.peek();
         let text = format!("{} at line {}, column {}", msg, tok.line, tok.col);
         match self.spelling_hint() {
-            Some(hint) => anyhow::Error::new(HintedSyntax { msg: text, hint }),
+            Some(hint) => anyhow::Error::new(HintedSyntax {
+                msg: text,
+                hint: hint.to_string(),
+            }),
             None => anyhow!("{}", text),
         }
+    }
+
+    /// A pipeline stage written `from-csv` or `to-csv`. The lexer reads that as
+    /// `from - csv` (or as the unknown name `to`, which is a word), and the
+    /// error named a token the user never wrote. When the two words are joined
+    /// by a hyphen and their underscore spelling is a builtin, say which name
+    /// to write. Only the stage head is looked at, and only with no spaces.
+    fn reject_hyphenated_stage(&self) -> Result<()> {
+        let (Some(head), Some(minus), Some(tail)) = (
+            self.toks.get(self.i),
+            self.toks.get(self.i + 1),
+            self.toks.get(self.i + 2),
+        ) else {
+            return Ok(());
+        };
+        let is_word = |t: &Spanned| {
+            t.text
+                .chars()
+                .next()
+                .is_some_and(|c| c.is_alphabetic() || c == '_')
+                && t.text.chars().all(|c| c.is_alphanumeric() || c == '_')
+        };
+        let joined = minus.line == head.line
+            && minus.col == head.col + head.text.len()
+            && tail.col == minus.col + 1;
+        if !(is_word(head) && is_word(tail) && matches!(minus.kind, Tok::Minus) && joined) {
+            return Ok(());
+        }
+        let underscore = format!("{}_{}", head.text, tail.text);
+        if crate::signature::signature_of(&underscore).is_none() {
+            return Ok(());
+        }
+        Err(anyhow::Error::new(HintedSyntax {
+            msg: format!(
+                "unexpected '-' in `{}-{}` at line {}, column {}",
+                head.text, tail.text, head.line, minus.col
+            ),
+            hint: format!(
+                "IronShell builtin names use underscores: write `{underscore}`, not `{}-{}`",
+                head.text, tail.text
+            ),
+        }))
     }
 
     /// The fix for a spelling from another language, when the token at the
