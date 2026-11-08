@@ -11,6 +11,7 @@ fn grep_run(tag: &str, script: &str) -> (String, i32) {
     let _ = std::fs::remove_dir_all(&root);
     std::fs::create_dir_all(root.join("session")).unwrap();
     std::fs::create_dir_all(root.join("tree")).unwrap();
+    std::fs::create_dir_all(root.join("empty-path")).unwrap();
     std::fs::write(
         root.join("tree").join("top.rs"),
         "TODO fix\nnothing\ntodo again\nplain\n",
@@ -21,6 +22,8 @@ fn grep_run(tag: &str, script: &str) -> (String, i32) {
         .args(["-b", "-c", script])
         .current_dir(&root)
         .env("NO_COLOR", "1")
+        // An empty PATH: grep must run in-process, or the run fails with stderr.
+        .env("PATH", root.join("empty-path"))
         .env("IRONSHELL_SESSION_DIR", root.join("session"))
         .output()
         .expect("run ish");

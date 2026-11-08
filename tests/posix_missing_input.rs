@@ -12,10 +12,13 @@ fn run(tag: &str, script: &str) -> (String, String) {
     let root = std::env::temp_dir().join(format!("ae-posix-missing-{tag}-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&root);
     std::fs::create_dir_all(root.join("session")).unwrap();
+    std::fs::create_dir_all(root.join("empty-path")).unwrap();
     let out = Command::new(env!("CARGO_BIN_EXE_ish"))
         .args(["-b", "-c", script])
         .current_dir(&root)
         .env("NO_COLOR", "1")
+        // An empty PATH: these utilities must run in-process, not as programs.
+        .env("PATH", root.join("empty-path"))
         .env("IRONSHELL_SESSION_DIR", root.join("session"))
         .output()
         .expect("run ish");

@@ -14,10 +14,13 @@ fn run(tag: &str, script: &str, agent: bool) -> Output {
     let root = std::env::temp_dir().join(format!("ae-posix-refusal-{tag}-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&root);
     std::fs::create_dir_all(root.join("session")).unwrap();
+    std::fs::create_dir_all(root.join("empty-path")).unwrap();
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_ish"));
+    // An empty PATH: a refused script runs nothing, so no program can run here.
     cmd.args(["-b", "-c", script])
         .current_dir(&root)
         .env("NO_COLOR", "1")
+        .env("PATH", root.join("empty-path"))
         .env_remove("IRONSHELL_ALLOW_SH")
         .env("IRONSHELL_SESSION_DIR", root.join("session"));
     if agent {

@@ -18,6 +18,7 @@ impl Dir {
             std::env::temp_dir().join(format!("ae-posix-sortkeys-{tag}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(root.join("session")).unwrap();
+        std::fs::create_dir_all(root.join("empty-path")).unwrap();
         Dir(root)
     }
 }
@@ -36,6 +37,12 @@ const WORDS: &str = "pear\napple\n\nfig\napple\n";
 
 /// Run `script` under `ish -b -c` in a folder holding the fixtures, and return
 /// stdout and the exit status. Stderr must be empty.
+///
+/// PATH is an empty folder and LC_ALL is C. With no GNU program on PATH, a
+/// declined `sort` cannot be answered by a fallback: it fails with stderr, so
+/// these cases prove the in-process sort ran. LC_ALL=C is what the expected
+/// outputs were recorded under: a UTF-8 locale such as en_US collates the
+/// blanks away (`a   1` sorts first), and that is the locale's order, not a bug.
 fn sort_run(tag: &str, script: &str) -> (String, i32) {
     let dir = Dir::new(tag);
     std::fs::write(dir.0.join("people.csv"), PEOPLE).unwrap();
@@ -46,6 +53,8 @@ fn sort_run(tag: &str, script: &str) -> (String, i32) {
         .args(["-b", "-c", script])
         .current_dir(&dir.0)
         .env("NO_COLOR", "1")
+        .env("LC_ALL", "C")
+        .env("PATH", dir.0.join("empty-path"))
         .env("IRONSHELL_SESSION_DIR", dir.0.join("session"))
         .output()
         .expect("run ish");
