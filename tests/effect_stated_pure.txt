@@ -95,6 +95,7 @@ first
 fitness
 fix
 flatten
+float
 floor
 foreach
 foreach-object
@@ -122,6 +123,7 @@ input_spinner
 input_table
 input_timeout
 inspect
+int
 is_bsd
 is_error
 is_macos

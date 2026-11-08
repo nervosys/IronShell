@@ -164,6 +164,7 @@ result = try { risky() } catch e { "fallback" }
 try { error("bad", {field: "age"}) } catch e { e.code }   # "E_USER"; error(message[, extra Record]) raises your own
 
 # Script arguments: `ish script.ish a b` gives the script args() == ["a", "b"] (empty under -c)
+int("42") + 1                  # int(x) / float(x) convert text or numbers; int("1.5") is refused, float("1.5") is 1.5
 
 # String interpolation
 msg = "Hello ${name}, you have ${count} items"

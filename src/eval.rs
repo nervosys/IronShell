@@ -1926,7 +1926,7 @@ fn number_string_error(op: &BinOp, a: &Value, b: &Value) -> anyhow::Error {
             a.type_name(),
             b.type_name()
         ),
-        "use interpolation \"${x}\", or str(x) / to_string(x) to convert a number to text",
+        "use interpolation \"${x}\", or str(x) / to_string(x) to convert a number to text, or int(x) / float(x) to convert text to a number",
     )
 }
 

@@ -740,6 +740,8 @@ lazy_static::lazy_static! {
         // Appended with the other rows: the id is the row's index in BUILTIN_DISPATCH.
         map.insert("error", 1160);
         map.insert("args", 1161);
+        map.insert("int", 1162);
+        map.insert("float", 1163);
         // 500-519: Database
         map.insert("db_sqlite_open", 500);
         map.insert("db_sqlite_query", 501);
@@ -3773,6 +3775,8 @@ static BUILTIN_DISPATCH: &[fn(Vec<Value>, Option<Value>, &mut Env) -> Result<Val
     |args, input, _| bi_named_hash("sha256", args, input), // 1159
     |args, input, _| bi_error(args, input),        // 1160
     |args, input, _| bi_args(args, input),         // 1161
+    |args, input, _| bi_int(args, input),          // 1162
+    |args, input, _| bi_float(args, input),        // 1163
 ];
 
 /// The dispatch row that serves `name`, if the fast table has one.
@@ -3837,11 +3841,21 @@ fn edit_distance_within(a: &str, b: &str, max: usize) -> Option<usize> {
 /// result is empty. The budget scales with name length (1 for very short names,
 /// where every neighbour is a different command; up to 3 for long dotted ones).
 pub fn did_you_mean(name: &str) -> Vec<String> {
-    // The module spelling comes first. `file_read` is not a builtin, but
+    // The conversion spellings of other languages come first. `to_int` is four
+    // edits from `int`, past the edit budget, so the nearest-name search would
+    // never find them; they are named outright.
+    let mut out: Vec<String> = match name {
+        "to_int" | "parse_int" | "as_int" => vec!["int".to_string()],
+        "to_float" | "parse_float" | "as_float" => vec!["float".to_string()],
+        "number" | "to_number" | "parse_number" => {
+            vec!["int".to_string(), "float".to_string()]
+        }
+        _ => Vec::new(),
+    };
+    // The module spelling comes next. `file_read` is not a builtin, but
     // `file.read` is the call an agent meant, and an edit-distance guess
     // (`file_rename`) is a worse answer than that one. It is offered only when
     // the module really has that member.
-    let mut out = Vec::new();
     if let Some((module, func)) = name.split_once('_') {
         if crate::modules::is_module_member(module, func) {
             out.push(format!("{module}.{func}"));
@@ -14102,6 +14116,117 @@ fn bi_args(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
             .map(|a| Value::Str(a.clone()))
             .collect(),
     ))
+}
+
+/// The operand of a conversion: its first argument, or the pipeline input.
+fn conversion_operand<'a>(
+    builtin: &str,
+    args: &'a [Value],
+    input: &'a Option<Value>,
+) -> Result<&'a Value> {
+    if args.len() > 1 {
+        return Err(crate::safety::bad_arg(
+            builtin,
+            "one value to convert",
+            &format!("{} arguments", args.len()),
+        ));
+    }
+    match args.first().or(input.as_ref()) {
+        Some(value) => Ok(value),
+        None => Err(crate::safety::bad_arg(
+            builtin,
+            "a value to convert",
+            "nothing",
+        )),
+    }
+}
+
+/// The hint for text that is not a number of the wanted kind. It names the
+/// other conversion, because that is the one that accepts the text.
+const NUMBER_TEXT_HINT: &str = "float(\"1.5\") parses decimals; int(\"42\") parses whole numbers";
+
+/// int(x) - Convert a value to an Int.
+/// Args:
+///   - x: Int, Float, String or Bool (or the pipeline input)
+/// Returns: Int
+///
+/// An Int is returned as it is, and a Bool is 1 or 0. A Float is truncated
+/// toward zero; NaN, infinity and a Float outside the Int range are refused. A
+/// String is parsed as a whole number, with surrounding whitespace and an
+/// optional sign allowed. Anything else, such as "1.5", "abc" or "", is refused
+/// and the refusal names the text.
+///
+/// Example:
+///   int("42")      # 42
+///   int(3.9)       # 3
+fn bi_int(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
+    let value = conversion_operand("int", &args, &input)?;
+    match value {
+        Value::Int(n) => Ok(Value::Int(*n)),
+        Value::Bool(b) => Ok(Value::Int(i64::from(*b))),
+        Value::Float(f) => {
+            // The bounds are the Int range as Floats: 2^63 is the first value
+            // past i64::MAX, and -2^63 is i64::MIN exactly.
+            let truncated = f.trunc();
+            if !f.is_finite()
+                || truncated < -9_223_372_036_854_775_808.0
+                || truncated >= 9_223_372_036_854_775_808.0
+            {
+                return Err(crate::safety::value_not_representable(
+                    "int",
+                    format!("int: {f} has no Int value"),
+                    "an Int holds whole numbers from -9223372036854775808 to 9223372036854775807",
+                ));
+            }
+            Ok(Value::Int(truncated as i64))
+        }
+        Value::Str(text) => match text.trim().parse::<i64>() {
+            Ok(n) => Ok(Value::Int(n)),
+            Err(_) => Err(crate::safety::value_not_representable(
+                "int",
+                format!("int: {text:?} is not a whole number"),
+                NUMBER_TEXT_HINT,
+            )),
+        },
+        other => Err(crate::safety::bad_arg(
+            "int",
+            "an Int, Float, String or Bool",
+            other.type_name(),
+        )),
+    }
+}
+
+/// float(x) - Convert a value to a Float.
+/// Args:
+///   - x: Int, Float or String (or the pipeline input)
+/// Returns: Float
+///
+/// A String is parsed as a decimal, with surrounding whitespace allowed and
+/// exponents such as "1e3" accepted. Text that is not a finite number, such as
+/// "abc", "" or "inf", is refused and the refusal names the text.
+///
+/// Example:
+///   float("1e3")   # 1000.0
+///   float(2)       # 2.0
+fn bi_float(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
+    let value = conversion_operand("float", &args, &input)?;
+    match value {
+        Value::Float(f) => Ok(Value::Float(*f)),
+        Value::Int(n) => Ok(Value::Float(*n as f64)),
+        Value::Str(text) => match text.trim().parse::<f64>() {
+            Ok(f) if f.is_finite() => Ok(Value::Float(f)),
+            _ => Err(crate::safety::value_not_representable(
+                "float",
+                format!("float: {text:?} is not a number"),
+                NUMBER_TEXT_HINT,
+            )),
+        },
+        other => Err(crate::safety::bad_arg(
+            "float",
+            "an Int, Float or String",
+            other.type_name(),
+        )),
+    }
 }
 
 /// exit(code?) - Exit the shell process with a status.

@@ -422,6 +422,7 @@ first	Pure
 fitness	Pure
 fix	Pure
 flatten	Pure
+float	Pure
 floor	Pure
 foreach	Pure
 foreach-object	Pure
@@ -598,6 +599,7 @@ input_table	Pure
 input_timeout	Pure
 insert_lines	WriteLocal
 inspect	Pure
+int	Pure
 iperf3	Network
 iperf3_client	Network
 iperf3_server	Network

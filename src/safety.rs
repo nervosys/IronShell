@@ -2627,6 +2627,24 @@ pub fn integer_overflow(operator: &str) -> anyhow::Error {
     })
 }
 
+/// A conversion's operand that has no value of the target type, such as
+/// `int("1.5")` or `int(NaN)`. The operand has the right type; its value cannot
+/// be represented. It is `E_BAD_VALUE`, which is the wire name `ErrorCode::Overflow`
+/// carries (`BadValue` writes `E_BAD_ARG`), and it is not retryable.
+pub fn value_not_representable(builtin: &str, message: String, hint: &str) -> anyhow::Error {
+    anyhow::Error::new(SafetyError {
+        code: ErrorCode::Overflow,
+        message,
+        builtin: builtin.to_string(),
+        hint: hint.to_string(),
+        approval: None,
+        did_you_mean: Vec::new(),
+        expected: String::new(),
+        got: String::new(),
+        extra: serde_json::Map::new(),
+    })
+}
+
 /// [`bad_arg`] with a free-form message and a hint, for an operation whose
 /// operands have the wrong types together: `operator Add: cannot combine String
 /// and Int`. `builtin` names the operation, so the error says where it came from.
