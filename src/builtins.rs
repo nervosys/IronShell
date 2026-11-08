@@ -47944,6 +47944,8 @@ fn bi_file_patch(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
     let mut failed = Vec::new();
     // The patch index of each entry in `failed`, in the same order.
     let mut failed_at: Vec<usize> = Vec::new();
+    // The text each unmatched patch looked for, in the same order.
+    let mut failed_find: Vec<String> = Vec::new();
 
     for (i, patch) in patches.iter().enumerate() {
         let record = match patch {
@@ -47992,6 +47994,7 @@ fn bi_file_patch(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
             applied.push(Value::Record(patch_result));
         } else {
             failed_at.push(i);
+            failed_find.push(find_str.clone());
             failed.push(Value::Str(format!(
                 "patch {}: '{}' not found",
                 i,
@@ -48004,12 +48007,23 @@ fn bi_file_patch(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
         }
     }
 
-    // All or nothing: the batch is written only when every patch applied. A
-    // patch that did not match used to leave the earlier ones written, so the
-    // file changed while the record said success=false. Nothing is written
-    // otherwise, and the journal step recorded for this call is dropped by the
-    // dispatcher.
-    let written = failed.is_empty() && !applied.is_empty();
+    // All or nothing, and a batch that does not apply is an error: a patch that
+    // finds nothing is a failed edit, not a success with a flag in the record.
+    // Nothing is written, and the error makes the dispatcher drop the journal
+    // step this call would have recorded.
+    if let Some(&first) = failed_at.first() {
+        let find = failed_find.first().cloned().unwrap_or_default();
+        return Err(crate::safety::edit_not_found(
+            "file_patch",
+            format!("file_patch: pattern not found in {path}"),
+            &format!(
+                "patch {first} looks for {find:?}, which is not in the file as written. \
+                 Nothing was written. Read the file first and copy the exact text: a \
+                 match is an exact, case-sensitive substring."
+            ),
+        ));
+    }
+    let written = !applied.is_empty();
     if written {
         // Write back atomically
         crate::tx::snapshot(&path); // record pre-patch state if a transaction is active
@@ -48092,10 +48106,33 @@ fn bi_file_replace(args: Vec<Value>, _input: Option<Value>) -> Result<Value> {
     patch.insert("find".to_string(), Value::Str(old_text));
     patch.insert("replace".to_string(), Value::Str(new_text));
 
-    bi_file_patch(
-        vec![Value::Str(path), Value::Array(vec![Value::Record(patch)])],
+    // The one-patch batch reports its miss as `file_patch`; a caller who asked
+    // for file_replace is told about file_replace.
+    match bi_file_patch(
+        vec![
+            Value::Str(path.clone()),
+            Value::Array(vec![Value::Record(patch)]),
+        ],
         None,
-    )
+    ) {
+        Err(e)
+            if matches!(
+                e.downcast_ref::<crate::safety::SafetyError>(),
+                Some(se) if se.code == crate::safety::ErrorCode::NotFound
+            ) =>
+        {
+            let hint = e
+                .downcast_ref::<crate::safety::SafetyError>()
+                .map(|se| se.hint.clone())
+                .unwrap_or_default();
+            Err(crate::safety::edit_not_found(
+                "file_replace",
+                format!("file_replace: pattern not found in {path}"),
+                &hint,
+            ))
+        }
+        other => other,
+    }
 }
 
 /// file_insert(path, position, content) - Insert content at a specific position
@@ -48205,6 +48242,26 @@ fn bi_file_insert(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
                 "file_insert: position must be a line number, string, or record",
             ))
         }
+    }
+
+    // An anchor that no line contains is a failed insert. It used to be written
+    // at the end of the file and reported as a success.
+    if !pattern_found {
+        let anchor = match &args[1] {
+            Value::Str(text) => text.clone(),
+            Value::Record(r) => match r.get("after").or(r.get("before")) {
+                Some(Value::Str(text)) => text.clone(),
+                _ => String::new(),
+            },
+            _ => String::new(),
+        };
+        return Err(crate::safety::edit_not_found(
+            "file_insert",
+            format!("file_insert: anchor {anchor:?} not found in {path}"),
+            "no line contains the anchor text. Read the file first and copy a line from \
+             it exactly (the match is an exact, case-sensitive substring), or insert by \
+             line number. Nothing was written.",
+        ));
     }
 
     for (i, line) in insert_lines.iter().enumerate() {

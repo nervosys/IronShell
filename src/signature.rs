@@ -870,7 +870,7 @@ pub static SIGNATURES: &[Signature] = &[
     Signature {
         name: "file_patch", category: None, subject_required: false, aliases: &["patch_file"],
         subject: None, params: &[req("path", Ty::Str, "file to patch"), opt("patches", Ty::Any, "patch record or array; omitted uses pipeline input")], returns: "Record",
-        doc: "Apply find/replace patches in order and report applied patches and unmatched searches.",
+        doc: "Apply find/replace patches in order, all or nothing. A patch whose find text is not in the file is an E_NOT_FOUND error and nothing is written; a success reports the applied patches.",
         examples: &[
             (r#"let d = fs_tempdir("ae_patch"); let f = d + "/x"; file_write(f, "hello"); let result = file_patch(f, {find: "hello", replace: "hi"}); rmdir(d, true); result.patches_applied"#, "1"),
             (r#"let d = fs_tempdir("ae_patch"); let f = d + "/x"; file_write(f, "hello"); let result = [{find: "hello", replace: "hi"}] | file_patch(f); rmdir(d, true); result.success"#, "true"),
@@ -879,13 +879,13 @@ pub static SIGNATURES: &[Signature] = &[
     Signature {
         name: "file_replace", category: None, subject_required: false, aliases: &["str_replace_in_file", "text_replace"],
         subject: None, params: &[req("path", Ty::Str, "file to edit"), req("old_text", Ty::Str, "text to replace"), req("new_text", Ty::Str, "replacement text")], returns: "Record",
-        doc: "Replace all occurrences of text in a file and return the patch result.",
+        doc: "Replace all occurrences of text in a file and return the patch result. Text that is not in the file is an E_NOT_FOUND error and nothing is written.",
         examples: &[(r#"let d = fs_tempdir("ae_replace"); let f = d + "/x"; file_write(f, "hello"); let result = file_replace(f, "hello", "hi"); rmdir(d, true); result.success"#, "true")],
     },
     Signature {
         name: "file_insert", category: None, subject_required: false, aliases: &["insert_lines"],
         subject: None, params: &[req("path", Ty::Str, "file to edit"), req("position", Ty::Any, "1-based line, named position, text pattern, or after/before/line record"), opt("content", Ty::Any, "lines to insert; omitted uses pipeline input")], returns: "Record",
-        doc: "Insert lines at a position or pattern, returning the insertion location and whether a pattern matched.",
+        doc: "Insert lines at a position or pattern, returning the insertion location. An anchor that no line contains is an E_NOT_FOUND error and nothing is written.",
         examples: &[
             (r#"let d = fs_tempdir("ae_insert"); let f = d + "/x"; file_write(f, "a"); let result = file_insert(f, 1, "b"); rmdir(d, true); result.at_line"#, "1"),
             (r#"let d = fs_tempdir("ae_insert"); let f = d + "/x"; file_write(f, "a"); let result = "b" | file_insert(f, "end"); rmdir(d, true); result.at_line"#, "2"),

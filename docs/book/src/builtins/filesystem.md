@@ -120,7 +120,7 @@ file_append "log.txt" "New log entry\n"
 ```
 
 ### `file_insert` / `insert_lines`
-Insert content at a specific line number.
+Insert content at a specific line number, or after or before a line that contains an anchor. An anchor no line contains is an `E_NOT_FOUND` error, and nothing is written.
 
 ```ironshell
 file_insert "config.txt" 5 "new_setting = true"
@@ -129,7 +129,7 @@ file_insert "config.txt" 5 "new_setting = true"
 ## Editing
 
 ### `file_replace` / `str_replace_in_file`
-Replace text in a file.
+Replace text in a file. Text the file does not contain is an `E_NOT_FOUND` error, and nothing is written.
 
 ```ironshell
 file_replace "config.toml" "debug = false" "debug = true"

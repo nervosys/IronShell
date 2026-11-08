@@ -665,15 +665,15 @@ fn other_creating_writers_are_removed_by_undo() {
 
 #[test]
 fn a_failed_edit_leaves_no_journal_step() {
-    // `file_replace` with a pattern that is not present returns success=false
-    // rather than an error, and used to leave a journal step anyway. The later
-    // undo then reported `restored=1` for a file that had not changed.
+    // `file_replace` with a pattern that is not present is an error, and it used
+    // to leave a journal step anyway. The later undo then reported `restored=1`
+    // for a file that had not changed.
     let _g = LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let s = Session::new("failed_edit");
     let p = s.path("u2.txt");
     std::fs::write(&p, "alpha").expect("seed");
 
-    let edit = call(
+    let error = call(
         "file_replace",
         vec![
             Value::Str(p.clone()),
@@ -681,8 +681,8 @@ fn a_failed_edit_leaves_no_journal_step() {
             Value::Str("x".into()),
         ],
     )
-    .expect("a non-matching edit is a result, not an error");
-    assert_eq!(field(&edit, "success"), Value::Bool(false), "{edit:?}");
+    .expect_err("a pattern the file does not contain is an error");
+    assert!(error.contains("E_NOT_FOUND"), "{error}");
     assert_eq!(std::fs::read_to_string(&p).unwrap(), "alpha");
     assert!(
         journal::entries().is_empty(),
@@ -720,9 +720,8 @@ fn a_failed_edit_after_a_real_one_does_not_hide_the_real_one() {
             Value::Str("not-present".into()),
             Value::Str("x".into()),
         ],
-    )
-    .expect("miss");
-    assert_eq!(field(&miss, "success"), Value::Bool(false));
+    );
+    assert!(miss.is_err(), "{miss:?}");
     assert_eq!(
         journal::entries().len(),
         1,

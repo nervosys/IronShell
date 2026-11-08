@@ -64,6 +64,20 @@ fn field(v: &Value, key: &str) -> Value {
     }
 }
 
+/// The refusal a batch gets when one of its patterns is not in the file.
+fn refusal(s: &Session, file: &str, patches: Vec<Value>) -> iron_shell::safety::SafetyError {
+    let mut env = iron_shell::env::Env::new();
+    let err = iron_shell::builtins::call(
+        "file_patch",
+        vec![Value::Str(s.path(file)), Value::Array(patches)],
+        &mut env,
+    )
+    .expect_err("a batch with a pattern the file does not contain is an error");
+    err.downcast_ref::<iron_shell::safety::SafetyError>()
+        .expect("a structured refusal")
+        .clone()
+}
+
 fn run_patch(s: &Session, file: &str, patches: Vec<Value>) -> Value {
     call(
         "file_patch",
@@ -79,18 +93,16 @@ fn a_batch_with_one_missing_patch_writes_nothing() {
     let p = s.path("p.txt");
     std::fs::write(&p, "a1 b2\n").expect("seed");
 
-    let r = run_patch(&s, "p.txt", vec![patch("a1", "A1"), patch("zz9", "Z")]);
+    let se = refusal(&s, "p.txt", vec![patch("a1", "A1"), patch("zz9", "Z")]);
 
     assert_eq!(
         std::fs::read_to_string(&p).expect("read"),
         "a1 b2\n",
         "the first patch must not be written when the second does not apply"
     );
-    assert_eq!(field(&r, "success"), Value::Bool(false));
-    assert_eq!(field(&r, "written"), Value::Bool(false));
-    assert_eq!(field(&r, "failed_patch"), Value::Int(1));
-    assert_eq!(field(&r, "applied"), Value::Array(vec![]));
-    assert_eq!(field(&r, "patches_applied"), Value::Int(0));
+    assert_eq!(se.code, iron_shell::safety::ErrorCode::NotFound);
+    assert_eq!(se.code.as_str(), "E_NOT_FOUND");
+    assert!(se.hint.contains("patch 1"), "{}", se.hint);
 }
 
 #[test]
@@ -99,7 +111,7 @@ fn a_failed_batch_records_no_journal_entry() {
     let s = Session::new("journal");
     std::fs::write(s.path("p.txt"), "a1 b2\n").expect("seed");
 
-    let _ = run_patch(&s, "p.txt", vec![patch("a1", "A1"), patch("zz9", "Z")]);
+    let _ = refusal(&s, "p.txt", vec![patch("a1", "A1"), patch("zz9", "Z")]);
 
     assert_eq!(
         journal::entries().len(),
@@ -115,14 +127,15 @@ fn the_first_failing_patch_is_the_one_reported() {
     let p = s.path("p.txt");
     std::fs::write(&p, "a1 b2\n").expect("seed");
 
-    let r = run_patch(
+    let se = refusal(
         &s,
         "p.txt",
         vec![patch("a1", "A1"), patch("zz9", "Z"), patch("b2", "B2")],
     );
 
     assert_eq!(std::fs::read_to_string(&p).expect("read"), "a1 b2\n");
-    assert_eq!(field(&r, "failed_patch"), Value::Int(1));
+    assert!(se.hint.contains("patch 1"), "{}", se.hint);
+    assert!(se.hint.contains("zz9"), "{}", se.hint);
 }
 
 #[test]
@@ -132,11 +145,11 @@ fn a_single_patch_that_does_not_apply_writes_nothing() {
     let p = s.path("p.txt");
     std::fs::write(&p, "a1 b2\n").expect("seed");
 
-    let r = run_patch(&s, "p.txt", vec![patch("zz9", "Z")]);
+    let se = refusal(&s, "p.txt", vec![patch("zz9", "Z")]);
 
     assert_eq!(std::fs::read_to_string(&p).expect("read"), "a1 b2\n");
-    assert_eq!(field(&r, "success"), Value::Bool(false));
-    assert_eq!(field(&r, "failed_patch"), Value::Int(0));
+    assert_eq!(se.code.as_str(), "E_NOT_FOUND");
+    assert!(se.hint.contains("patch 0"), "{}", se.hint);
 }
 
 #[test]

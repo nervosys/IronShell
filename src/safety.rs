@@ -2627,6 +2627,23 @@ pub fn integer_overflow(operator: &str) -> anyhow::Error {
     })
 }
 
+/// An edit whose pattern or anchor is not in the file (`E_NOT_FOUND`). Nothing
+/// was written, so the caller can fix the pattern and run the edit again. An
+/// edit that finds nothing is a failure, not a success with a flag in it.
+pub fn edit_not_found(builtin: &str, message: String, hint: &str) -> anyhow::Error {
+    anyhow::Error::new(SafetyError {
+        code: ErrorCode::NotFound,
+        message,
+        builtin: builtin.to_string(),
+        hint: hint.to_string(),
+        approval: None,
+        did_you_mean: Vec::new(),
+        expected: "the pattern to occur in the file".to_string(),
+        got: "not in the file".to_string(),
+        extra: serde_json::Map::new(),
+    })
+}
+
 /// A conversion's operand that has no value of the target type, such as
 /// `int("1.5")` or `int(NaN)`. The operand has the right type; its value cannot
 /// be represented. It is `E_BAD_VALUE`, which is the wire name `ErrorCode::Overflow`

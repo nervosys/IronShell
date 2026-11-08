@@ -1028,7 +1028,9 @@ fn malformed_patches_are_refused_before_any_file_is_changed() {
 fn missing_unicode_patch_text_does_not_panic_or_corrupt_the_file() {
     let fixture = FileFixture::new();
     std::fs::write(fixture.directory.join("x"), "hello").unwrap();
-    let result = call(
+    // A pattern that is not in the file is an error now, not a success=false
+    // record; the point of this test is that it does not panic or corrupt.
+    let error = call(
         "file_replace",
         vec![
             fixture.path("x"),
@@ -1037,11 +1039,8 @@ fn missing_unicode_patch_text_does_not_panic_or_corrupt_the_file() {
         ],
         &mut Env::new(),
     )
-    .unwrap();
-    let Value::Record(result) = result else {
-        panic!("expected patch report")
-    };
-    assert_eq!(result["success"], Value::Bool(false));
+    .unwrap_err();
+    assert!(error.to_string().contains("E_NOT_FOUND"), "{error}");
     assert_eq!(
         std::fs::read_to_string(fixture.directory.join("x")).unwrap(),
         "hello"
