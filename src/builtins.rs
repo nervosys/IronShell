@@ -43126,7 +43126,31 @@ fn algo_param(builtin: &str, params: &[Value], default: &str) -> Result<String> 
     }
 }
 
+/// The algorithm names `digest_hex` accepts, as `crypto_hash` spells them.
+fn is_hash_algorithm(name: &str) -> bool {
+    matches!(
+        name.to_ascii_lowercase().as_str(),
+        "md5" | "sha1" | "sha-1" | "sha256" | "sha-256" | "sha384" | "sha-384" | "sha512" | "sha-512"
+    )
+}
+
 fn bi_crypto_hash(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
+    // `crypto.hash("sha256", data)`, the algorithm first, as AGENTS.md writes it.
+    // Read as (data, algorithm) it was E_BAD_ARG "expected algorithm ..., got
+    // \"abc\"". It is taken this way only when the first argument names an
+    // algorithm and the second does not, so a call that already worked keeps
+    // its meaning: `crypto_hash("md5", "sha256")` still hashes the text "md5".
+    if input.is_none() {
+        if let [Value::Str(first), Value::Str(second)] = args.as_slice() {
+            if is_hash_algorithm(first) && !is_hash_algorithm(second) {
+                return Ok(Value::Str(digest_hex(
+                    "crypto_hash",
+                    first,
+                    second.as_bytes(),
+                )?));
+            }
+        }
+    }
     let (data, params) = subject_and_params("crypto_hash", &args, input)?;
     let algo = algo_param("crypto_hash", &params, "sha256")?;
     Ok(Value::Str(digest_hex(

@@ -8548,12 +8548,13 @@ pub static SIGNATURES: &[Signature] = &[
         subject_required: false,
         aliases: &["hash"],
         subject: Some(Ty::Str),
-        params: &[opt("algorithm", Ty::Str, "md5, sha1, sha256 (default), sha384 or sha512")],
+        params: &[opt("data", Ty::Str, "text to hash; omit when piping it in"), opt("algorithm", Ty::Str, "md5, sha1, sha256 (default), sha384 or sha512")],
         returns: "String",
-        doc: "Hex digest of a string. An unknown algorithm is refused, never substituted.",
+        doc: "Hex digest of a string. An unknown algorithm is refused, never substituted. Called with two arguments, `crypto.hash(\"sha256\", data)` names the algorithm first.",
         examples: &[
             (r#"crypto_hash("hello")"#, r#"2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"#),
             (r#"crypto_hash("hello", "md5")"#, r#"5d41402abc4b2a76b9719d911017c592"#),
+            (r#"crypto_hash("sha256", "hello")"#, r#"2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"#),
         ],
     },
     Signature {
