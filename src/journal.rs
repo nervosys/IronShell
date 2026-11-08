@@ -930,20 +930,133 @@ pub fn clear() {
 /// a later process and may hold the contents of overwritten files, so a caller
 /// that tells someone the steps are gone has to know.
 pub fn try_clear() -> Result<(), (PathBuf, std::io::Error)> {
-    {
-        let mut s = STATE.lock().unwrap_or_else(|e| e.into_inner());
-        s.journal.clear();
-        s.redo.clear();
-    }
+    // The lock is held through the removal. A step recorded on another thread
+    // persists into this directory only while it holds the same lock, so none
+    // can create a file in the directory while it is being emptied.
+    let mut s = STATE.lock().unwrap_or_else(|e| e.into_inner());
+    s.journal.clear();
+    s.redo.clear();
     if let Some(dir) = session_dir() {
-        remove_if_present(std::fs::remove_dir_all(&dir)).map_err(|err| (dir, err))?;
+        // Windows reports a directory as Access denied while another process
+        // holds one of its files (a virus scanner, the indexer) or a delete is
+        // still pending. Retry briefly there; elsewhere one attempt is enough.
+        let attempts = if cfg!(windows) { REMOVE_ATTEMPTS } else { 1 };
+        let removed = remove_dir_retrying(
+            &dir,
+            attempts,
+            |d| std::fs::remove_dir_all(d),
+            std::thread::sleep,
+        );
+        remove_if_present(removed).map_err(|err| (dir, err))?;
     }
     Ok(())
+}
+
+/// How many times [`try_clear`] tries to remove the journal directory on
+/// Windows, with [`REMOVE_PAUSES`] between tries: at most half a second.
+const REMOVE_ATTEMPTS: u32 = 5;
+const REMOVE_PAUSES: [std::time::Duration; 4] = [
+    std::time::Duration::from_millis(50),
+    std::time::Duration::from_millis(100),
+    std::time::Duration::from_millis(150),
+    std::time::Duration::from_millis(200),
+];
+
+/// Run `remove` on `dir`, up to `attempts` times, pausing between tries, while
+/// it fails with a refusal that another process can cause and that goes away
+/// (Access denied, or a sharing violation). Any other error is returned at
+/// once, as is the last one when every attempt fails.
+fn remove_dir_retrying(
+    dir: &Path,
+    attempts: u32,
+    mut remove: impl FnMut(&Path) -> std::io::Result<()>,
+    mut pause: impl FnMut(std::time::Duration),
+) -> std::io::Result<()> {
+    let mut tries = 1;
+    loop {
+        match remove(dir) {
+            Ok(()) => return Ok(()),
+            Err(e)
+                if tries < attempts
+                    && (e.kind() == std::io::ErrorKind::PermissionDenied
+                        || e.raw_os_error() == Some(32)) =>
+            {
+                let wait = REMOVE_PAUSES[(tries as usize - 1).min(REMOVE_PAUSES.len() - 1)];
+                pause(wait);
+                tries += 1;
+            }
+            Err(e) => return Err(e),
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn access_denied() -> std::io::Error {
+        std::io::Error::new(std::io::ErrorKind::PermissionDenied, "Access is denied.")
+    }
+
+    #[test]
+    fn a_refusal_to_remove_that_goes_away_is_retried() {
+        // Windows: a file still held by another process for two tries.
+        let mut calls = 0;
+        let mut pauses = Vec::new();
+        let r = remove_dir_retrying(
+            Path::new("journal"),
+            REMOVE_ATTEMPTS,
+            |_| {
+                calls += 1;
+                if calls < 3 {
+                    Err(access_denied())
+                } else {
+                    Ok(())
+                }
+            },
+            |p| pauses.push(p),
+        );
+        assert!(r.is_ok());
+        assert_eq!(calls, 3);
+        assert_eq!(pauses.len(), 2);
+    }
+
+    #[test]
+    fn a_refusal_that_persists_is_reported_within_half_a_second() {
+        let mut calls = 0;
+        let mut waited = std::time::Duration::ZERO;
+        let r = remove_dir_retrying(
+            Path::new("journal"),
+            REMOVE_ATTEMPTS,
+            |_| {
+                calls += 1;
+                Err(access_denied())
+            },
+            |p| waited += p,
+        );
+        assert_eq!(r.unwrap_err().kind(), std::io::ErrorKind::PermissionDenied);
+        assert_eq!(calls, REMOVE_ATTEMPTS);
+        assert!(
+            waited <= std::time::Duration::from_millis(500),
+            "{waited:?}"
+        );
+    }
+
+    #[test]
+    fn an_error_that_is_not_a_transient_refusal_is_not_retried() {
+        let mut calls = 0;
+        let r = remove_dir_retrying(
+            Path::new("journal"),
+            REMOVE_ATTEMPTS,
+            |_| {
+                calls += 1;
+                Err(std::io::Error::other("disk on fire"))
+            },
+            |_| panic!("paused before a non-transient error"),
+        );
+        assert!(r.is_err());
+        assert_eq!(calls, 1);
+    }
 
     #[test]
     fn an_oversized_file_is_recorded_as_irreversible_not_skipped() {
