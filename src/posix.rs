@@ -1113,7 +1113,7 @@ impl Sink {
     fn ewrite(&mut self, b: &[u8]) {
         match self.err_mode {
             ErrMode::Real => {
-                let _ = std::io::stderr().write_all(b);
+                let _ = std::io::stderr().write_all(&redacted(b));
             }
             ErrMode::Null => {}
             ErrMode::Merge => self.out.extend_from_slice(b),
@@ -2554,6 +2554,24 @@ fn expand_pattern(
 /// The refusal for a utility's read of `path` outside the workspace jail, as
 /// the JSON error every refusal uses. `None` when the jail lets the read
 /// through, which it always does outside agent mode with no workspace set.
+/// The bytes a utility prints, with secret shapes redacted when ish redacts
+/// builtin output (`safety::redaction_enabled`), as `file.read` output is. Bytes
+/// that are not UTF-8 are passed through: the redaction works on text.
+fn redacted(bytes: &[u8]) -> std::borrow::Cow<'_, [u8]> {
+    if !crate::safety::redaction_enabled() {
+        return std::borrow::Cow::Borrowed(bytes);
+    }
+    let Ok(text) = std::str::from_utf8(bytes) else {
+        return std::borrow::Cow::Borrowed(bytes);
+    };
+    let (out, _) = crate::safety::redact_str(text);
+    if out == text {
+        std::borrow::Cow::Borrowed(bytes)
+    } else {
+        std::borrow::Cow::Owned(out.into_bytes())
+    }
+}
+
 fn jail_refusal(tool: &str, path: &str) -> Option<String> {
     crate::security::outside_read_jail(path)
         .then(|| crate::safety::outside_workspace(tool, path).to_string())
@@ -4748,7 +4766,7 @@ pub fn run(src: &str) -> Option<i32> {
         // is not reported: nobody is reading, as before.
         let mut write_failed = false;
         let written = std::io::stdout()
-            .write_all(&sink.out)
+            .write_all(&redacted(&sink.out))
             .and_then(|()| std::io::stdout().flush());
         if let Err(e) = written {
             if e.kind() != std::io::ErrorKind::BrokenPipe {
