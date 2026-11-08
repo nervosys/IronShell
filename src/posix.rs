@@ -1467,6 +1467,11 @@ impl Shell {
             match r {
                 Redir::In(w) => {
                     let path = self.expand(w, stdin).join(" ");
+                    if let Some(refusal) = jail_refusal(SHELL_NAME, &path) {
+                        sink.eline(&refusal);
+                        self.last = 1;
+                        return Flow::Next(1);
+                    }
                     match std::fs::read(&path) {
                         Ok(d) => local_in = Some(Input::buf(d)),
                         Err(e) => {
@@ -2432,6 +2437,11 @@ fn expand_pattern(
         if globstar && *comp == "**" {
             // Zero or more directories: each base, and everything below it.
             for base in &bases {
+                // A base outside the workspace jail is never walked (`/**` would
+                // list the whole disk).
+                if crate::security::outside_read_jail(base) {
+                    continue;
+                }
                 next.push(base.clone());
                 descendant_dirs(base, &mut next);
                 if next.over {
@@ -2453,7 +2463,10 @@ fn expand_pattern(
                             if !n.starts_with('.')
                                 && e.file_type().map(|t| !t.is_dir()).unwrap_or(false)
                             {
-                                next.push(if d.is_empty() { n } else { format!("{d}/{n}") });
+                                let p = if d.is_empty() { n } else { format!("{d}/{n}") };
+                                if !crate::security::outside_read_jail(&p) {
+                                    next.push(p);
+                                }
                             }
                         }
                     }
@@ -2485,6 +2498,11 @@ fn expand_pattern(
             };
             if !has_meta {
                 let p = join(comp);
+                // The jail is judged before the path is probed, so the answer does
+                // not say whether an outside path exists.
+                if crate::security::outside_read_jail(&p) {
+                    continue;
+                }
                 let path = Path::new(&p);
                 if (last && path.exists()) || (!last && path.is_dir()) {
                     next.push(p);
@@ -2492,6 +2510,9 @@ fn expand_pattern(
                 continue;
             }
             let dir = if base.is_empty() { "." } else { base.as_str() };
+            if crate::security::outside_read_jail(dir) {
+                continue;
+            }
             let Ok(rd) = std::fs::read_dir(dir) else {
                 continue;
             };
@@ -2504,6 +2525,10 @@ fn expand_pattern(
             names.sort_by(&order);
             for n in names {
                 let p = join(&n);
+                // A link inside the workspace can name a target outside it.
+                if false && crate::security::outside_read_jail(&p) {
+                    continue;
+                }
                 if last || Path::new(&p).is_dir() {
                     next.push(p);
                 }
@@ -2526,6 +2551,14 @@ fn expand_pattern(
 
 /// Read a utility's inputs: each operand in turn (`-` is stdin), or stdin
 /// when there are none. Missing files are reported the GNU way and skipped.
+/// The refusal for a utility's read of `path` outside the workspace jail, as
+/// the JSON error every refusal uses. `None` when the jail lets the read
+/// through, which it always does outside agent mode with no workspace set.
+fn jail_refusal(tool: &str, path: &str) -> Option<String> {
+    crate::security::outside_read_jail(path)
+        .then(|| crate::safety::outside_workspace(tool, path).to_string())
+}
+
 fn read_inputs(
     tool: &str,
     files: &[String],
@@ -2540,6 +2573,11 @@ fn read_inputs(
     for f in files {
         if f == "-" {
             out.push(("(standard input)".into(), stdin.read_all()));
+            continue;
+        }
+        if let Some(refusal) = jail_refusal(tool, f) {
+            sink.eline(&refusal);
+            *status = 1;
             continue;
         }
         match std::fs::read(f) {
@@ -2957,15 +2995,27 @@ fn test(args: &[String], sink: &mut Sink) -> i32 {
             [] => Ok(false),
             [x] => Ok(!x.is_empty()),
             [bang, rest @ ..] if bang == "!" => Ok(!eval(rest, sink)?),
-            [op, x] => match unary(op, x) {
-                Some(v) => Ok(v),
-                None => {
-                    sink.eline(&format!(
-                        "{SHELL_NAME}: test: {op}: unary operator expected"
-                    ));
-                    Err(2)
+            [op, x] => {
+                // A file test on a path outside the jail is refused, not answered:
+                // the answer would say whether the path exists outside.
+                let file_test = matches!(
+                    op.as_str(),
+                    "-e" | "-f" | "-d" | "-s" | "-r" | "-w" | "-x" | "-L" | "-h"
+                );
+                if let Some(refusal) = file_test.then(|| jail_refusal("test", x)).flatten() {
+                    sink.eline(&refusal);
+                    return Err(2);
                 }
-            },
+                match unary(op, x) {
+                    Some(v) => Ok(v),
+                    None => {
+                        sink.eline(&format!(
+                            "{SHELL_NAME}: test: {op}: unary operator expected"
+                        ));
+                        Err(2)
+                    }
+                }
+            }
             [x, op, y] => match binary(x, op, y) {
                 Some(Ok(v)) => Ok(v),
                 Some(Err(m)) => {
@@ -3027,7 +3077,10 @@ fn read_inputs_dirs(
 ) -> Vec<(String, Vec<u8>)> {
     let mut ok = Vec::new();
     for f in files {
-        if Path::new(f).is_dir() {
+        if let Some(refusal) = jail_refusal(tool, f) {
+            sink.eline(&refusal);
+            *status = 1;
+        } else if Path::new(f).is_dir() {
             sink.eline(&format!("{tool}: {f}: Is a directory"));
             *status = 1;
         } else {
@@ -3346,6 +3399,10 @@ fn grep(args: &[String], stdin: &mut Input, sink: &mut Sink) -> Util {
     let mut targets: Vec<(String, Option<String>)> = Vec::new();
     if ops.is_empty() {
         if recursive {
+            if let Some(refusal) = jail_refusal("grep", ".") {
+                sink.eline(&refusal);
+                return Util::Done(2);
+            }
             walk_files(".", "", &mut targets, true);
         } else {
             targets.push(("(standard input)".into(), None));
@@ -3355,6 +3412,11 @@ fn grep(args: &[String], stdin: &mut Input, sink: &mut Sink) -> Util {
             let p = Path::new(op);
             if op == "-" {
                 targets.push(("(standard input)".into(), None));
+            } else if let Some(refusal) = jail_refusal("grep", op) {
+                // Refused before the operand is looked at, so an outside directory
+                // is not walked and an outside file is not stat'd.
+                sink.eline(&refusal);
+                status_err = true;
             } else if p.is_dir() {
                 if recursive {
                     walk_files(op, op, &mut targets, false);
@@ -3709,6 +3771,11 @@ fn sort(args: &[String], stdin: &mut Input, sink: &mut Sink) -> Util {
     for f in &spec.files {
         if f == "-" {
             inputs.push(stdin.read_all());
+            continue;
+        }
+        if let Some(refusal) = jail_refusal("sort", f) {
+            sink.eline(&refusal);
+            status = 2;
             continue;
         }
         match std::fs::read(f) {
@@ -4258,6 +4325,11 @@ fn ls(args: &[String], sink: &mut Sink) -> Util {
     let mut files = Vec::new();
     let mut dirs = Vec::new();
     for op in &ops {
+        if let Some(refusal) = jail_refusal("ls", op) {
+            sink.eline(&refusal);
+            status = 2;
+            continue;
+        }
         let md = if long {
             std::fs::symlink_metadata(op)
         } else {
@@ -4610,6 +4682,11 @@ fn find(args: &[String], sink: &mut Sink) -> Util {
         }
     }
     for s in &starts {
+        if let Some(refusal) = jail_refusal("find", s) {
+            sink.eline(&refusal);
+            status = 1;
+            continue;
+        }
         visit(
             s,
             0,
