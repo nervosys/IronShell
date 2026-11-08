@@ -70,6 +70,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - A hyphenated pipeline stage such as `from-csv` or `to-csv` is an E_PARSE whose hint names the underscore builtin (`from_csv`).
 - `tar_extract` creates a missing destination directory, as `zip_extract` does, after the workspace check.
 - `sql`'s hint for a file it cannot read names `.jsonl`, which it reads, alongside `.json` and `.csv`.
+- A `let` type annotation is checked when the value is bound: `let x: Int = "s"` is E_BAD_ARG naming the variable and both types, where it bound the string and `x + 1` gave `"s1"`. Int, Float, String, Bool, Array, Record and Null are checked; an Int is refused where Float is declared (write `1.0`).
+- A caught error exposes `code`, `message`, `hint`, `retryable` and `builtin` at the top level (`catch e { e.code }`), with `e.error` still working, and `is_error(e)` is true for it; a division by zero names `operator Div` as its builtin.
+- A name a module defines without `pub` is reported as "defined in mathlib.ish but not exported; mark it `pub`", instead of `unknown builtin`.
+- Double-quoted strings accept `\xHH` and `\u{H..H}` escapes.
+- String literals and nested interpolation work inside `${ ... }`: `"x ${"b"} c"` is `x b c`.
+- A lambda called with the wrong number of arguments says "f takes 2 arguments (a, b), got 1", with a hint about lambdas rather than builtins.
+- Lambda parameter defaults (`fn(a, b = 10)`) and type annotations (`fn(x: Int)`) get parse hints saying they are not supported, instead of the `==` hint.
+- `while`, `for` and `loop` are E_PARSE with a hint to iterate with `map`, `where` or `reduce` over a list or `arr.range(n)`, or to recurse; a braced block with statements says a block holds one expression, instead of "expected ':' after key".
 
 ## [14.0.0] - 2026-11-06
 
