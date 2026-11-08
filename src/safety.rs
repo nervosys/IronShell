@@ -2860,12 +2860,24 @@ impl SafetyError {
     }
 
     /// The structured JSON form an agent reads programmatically.
+    ///
+    /// The prose fields name paths and echo the arguments of the failed call, so
+    /// a secret-shaped name (`AWS_SECRET_ACCESS_KEY=AKIA….txt`) reaches them
+    /// verbatim. They get the same redaction as the output of a successful call,
+    /// when redaction is on.
     pub fn to_json(&self) -> Json {
+        let scrub = |s: &str| {
+            if redaction_enabled() {
+                redact_str(s).0
+            } else {
+                s.to_string()
+            }
+        };
         let mut err = json!({
             "code": self.code.as_str(),
-            "message": self.message,
+            "message": scrub(&self.message),
             "builtin": self.builtin,
-            "hint": self.hint,
+            "hint": scrub(&self.hint),
             "retryable": self.is_retryable(),
         });
         if let Some(a) = &self.approval {
@@ -2877,8 +2889,8 @@ impl SafetyError {
         // Emitted only as a pair, and only when populated — a lone `expected` tells
         // an agent nothing it cannot already read in `hint`, and costs tokens.
         if !self.expected.is_empty() && !self.got.is_empty() {
-            err["expected"] = Json::String(self.expected.clone());
-            err["got"] = Json::String(self.got.clone());
+            err["expected"] = Json::String(scrub(&self.expected));
+            err["got"] = Json::String(scrub(&self.got));
         }
         json!({ "error": err })
     }
