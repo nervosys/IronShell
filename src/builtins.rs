@@ -47518,11 +47518,14 @@ fn bi_file_patch(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
 
     let mut applied = Vec::new();
     let mut failed = Vec::new();
+    // The patch index of each entry in `failed`, in the same order.
+    let mut failed_at: Vec<usize> = Vec::new();
 
     for (i, patch) in patches.iter().enumerate() {
         let record = match patch {
             Value::Record(r) => r,
             _ => {
+                failed_at.push(i);
                 failed.push(Value::Str(format!("patch {}: not a record", i)));
                 continue;
             }
@@ -47535,6 +47538,7 @@ fn bi_file_patch(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
         {
             Some(Value::Str(s)) => s.clone(),
             _ => {
+                failed_at.push(i);
                 failed.push(Value::Str(format!("patch {}: missing 'find' string", i)));
                 continue;
             }
@@ -47547,6 +47551,7 @@ fn bi_file_patch(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
         {
             Some(Value::Str(s)) => s.clone(),
             _ => {
+                failed_at.push(i);
                 failed.push(Value::Str(format!("patch {}: missing 'replace' string", i)));
                 continue;
             }
@@ -47562,6 +47567,7 @@ fn bi_file_patch(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
             patch_result.insert("count".to_string(), Value::Int(count as i64));
             applied.push(Value::Record(patch_result));
         } else {
+            failed_at.push(i);
             failed.push(Value::Str(format!(
                 "patch {}: '{}' not found",
                 i,
@@ -47574,21 +47580,36 @@ fn bi_file_patch(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
         }
     }
 
-    // Nothing matched, so the file is left as it is: no write, and the journal
-    // step recorded for this call is dropped by the dispatcher.
-    if applied.is_empty() {
-        crate::journal::report_no_change();
-    } else {
+    // All or nothing: the batch is written only when every patch applied. A
+    // patch that did not match used to leave the earlier ones written, so the
+    // file changed while the record said success=false. Nothing is written
+    // otherwise, and the journal step recorded for this call is dropped by the
+    // dispatcher.
+    let written = failed.is_empty() && !applied.is_empty();
+    if written {
         // Write back atomically
         crate::tx::snapshot(&path); // record pre-patch state if a transaction is active
         write_file_atomically("file_patch", &path, content.as_bytes())?;
+    } else {
+        crate::journal::report_no_change();
     }
+    // Nothing was written when a patch failed, so none of them was applied.
+    let applied = if written { applied } else { Vec::new() };
 
     let mut result = BTreeMap::new();
     result.insert("path".to_string(), Value::Str(path));
     result.insert("applied".to_string(), Value::Array(applied.clone()));
     result.insert("failed".to_string(), Value::Array(failed.clone()));
     result.insert("success".to_string(), Value::Bool(failed.is_empty()));
+    result.insert("written".to_string(), Value::Bool(written));
+    // The first patch that did not apply, by its index in the batch; null when
+    // every patch applied. The batch is refused as a whole when it is set.
+    result.insert(
+        "failed_patch".to_string(),
+        failed_at
+            .first()
+            .map_or(Value::Null, |i| Value::Int(*i as i64)),
+    );
     result.insert(
         "patches_applied".to_string(),
         Value::Int(applied.len() as i64),
