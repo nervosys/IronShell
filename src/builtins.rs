@@ -34249,6 +34249,11 @@ mod archive_test_cap_tests {
 
     #[test]
     fn an_archive_past_the_cap_is_budget_exceeded_not_false() {
+        // Writes under the temp dir. An agent-mode test in this binary can set
+        // the workspace jail to its own temp dir, so the shared lock is held.
+        let _env = crate::safety::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let dir = std::env::temp_dir().join(format!("ae-archcap-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("zeros.gz");
