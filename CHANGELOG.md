@@ -13,12 +13,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `error(message, extra)` refuses extra fields named like the standard error keys (`code`, `message`, `hint`, ...) with E_BAD_ARG; `{code: 7}` was silently replaced by `E_USER`.
 - `file_insert` refuses a line past the end of the file (E_BAD_ARG naming the line that appends) instead of appending silently.
 - `ish agent schema` lists the underscore spelling of each builtin only; hyphenated names (`to-csv`), which a program cannot write, are no longer advertised.
+- **Breaking:** `len` of a String counts characters, not UTF-8 bytes (`len("日本語")` is 3, was 9).
+- **Breaking:** `slice` takes negative indices from the end, Python-style, for strings and arrays (`"hello" | slice(0, -1)` is `hell`); they were ignored.
+- `undo` refuses to restore a file that changed after the step it would undo (E_BAD_STATE); `undo({force: true})` restores it anyway. Steps recorded before this release keep the old behaviour.
+- `first` and `last` of an empty array return null, not `[]`. `error("")` is refused. `file_insert` refuses a line below 1.
+- `to_csv` writes a nested Record or Array cell as JSON text instead of a placeholder.
+- `--explain` and `explain_effects` report `sh(...)` as denied when agent mode would refuse it.
+- `from_csv`, `to_csv`, `from_yaml`, `to_yaml`, `from_json`, `to_json`, `select`, `measure` and `foreach` are declared and catalogued by their callable names; the hyphenated and PowerShell spellings remain aliases.
 
 ### Added
 
 - `ish -b` scripts can use `"$@"`, `$@`, `"$*"`, `$*` and `$#`, and `ish -b -c 'cmd' a b` gives `a` and `b` as `$1` and `$2`.
 - A module member without parentheses is a pipe stage: `| arr.len` is `| arr.len()`.
 - `|.field` on a piped Record reads the field (`[{a: {b: 5}}] | first | .a.b` is 5).
+- String regex: `regex_match`, `regex_find`, `regex_find_all` (records with `match`, `groups`, `start`, `end` in characters) and `regex_replace`, also as `str.*` members.
+- `pad_left` and `pad_right` (also `str.pad_left` / `str.pad_right`).
+- Dates: `date_parse`, `date_diff`, `date_format` and `date_add` over ISO 8601 strings.
+- `to_toml` and `from_toml`.
+- `\uHHHH` string escapes (four hex digits), alongside `\u{...}`.
+- `ish -b`: `$0` is the script path, and `set -- a b` replaces the positional parameters.
+- `import` is described by `agent schema` and `ontology_describe("import")`.
 
 ### Fixed
 
@@ -28,6 +42,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Clearer errors: a method-style call on a String names the call that works (`contains(l, "bet")`); a wrong-type argument names the types the signature declares; an assignment in a lambda body says a body is one expression; indexing an empty `args()` says how to pass arguments; a missing module member (`str.pad_right`) is E_UNKNOWN_BUILTIN with suggestions; a projection error no longer names a `map` that was not written; `now_iso` names the zone it was given; `$((...))` in `-b` says where to compute instead.
 - `help()` lists `grep <pattern> [file]`, the order grep takes; suggestion lists no longer repeat a name; `date`, `datetime`, `raise`, `throw` and `fail` suggest `now_iso` and `error`; `map` and `where` document that a two-parameter lambda receives the index.
 - The undo journal records absolute paths for every entry.
+- `file.replace`, `file_patch`, `file_insert` and `sed_replace` refuse an empty text to find (E_BAD_ARG); `file.replace(f, "", "x")` inserted `x` between every character of the file and reported success.
+- A print that is the last value of a block or lambda (`if c { print(x) }`, `f(3)` where `f` prints) is no longer echoed a second time.
+- A runtime error in a script names the line of the statement that failed (`at line 15`, or `line` in JSON), and an unclosed `(` is reported at the line it was opened on.
+- An exported module function can call a private helper defined after it, and module functions can call each other.
+- Suggestions: `date` and `raise` suggest `now_iso` and `error` for a bare name too; a missing module member suggests that module's members before unrelated builtins; `ontology_describe("to-csv")` finds `to_csv`.
+- Clearer errors: no internal `__` name in a projection error; `ish -c '...' x y` warns that the arguments are ignored and an empty `args()` under `-c` says to use a script; `file.replace` on a directory names `file_replace`; a path containing a tab or newline (from a backslash escape) gets a hint to use forward slashes; an import cycle names the import that closes it; a missing module names the directory paths are relative to; `sql("select 1")` says how to give it rows.
 
 
 ## [14.0.1] - 2026-11-08
