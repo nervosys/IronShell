@@ -14665,6 +14665,15 @@ pub fn validate(name: &str, args: &[Value], input: Option<&Value>) -> anyhow::Re
                 "to test membership, pipe the value to in: `\"bug\" | in([\"bug\", \"x\"])`",
             ));
         }
+        // `sql("select 1")` reads as complete; what it lacks is rows.
+        if name == "sql" {
+            return Err(crate::safety::bad_arg_with_hint(
+                name,
+                &sig.render(),
+                &format!("{supplied} of {required} required"),
+                "sql runs over piped rows ([{a: 1}] | sql(\"select * from t\")) or a file (sql_value(\"data.csv\", \"select ...\"))",
+            ));
+        }
         // `expected` is the signature alone, with no "— missing x" tail. The
         // tail read well and cost twice: `diagnose` carries the signature in
         // its own field, generated from this same declaration, so a restated

@@ -258,7 +258,7 @@ fn load(source: &str) -> Result<(PathBuf, Exports)> {
     }
 
     let loading_now = LOADING.with(|l| l.borrow().clone());
-    if loading_now.iter().any(|p| *p == path) {
+    if loading_now.contains(&path) {
         // The file being loaded last is the one whose import closes the cycle.
         let importer = loading_now.last().map(|p| display(p)).unwrap_or_default();
         return Err(safety::bad_arg(

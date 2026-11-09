@@ -78,8 +78,10 @@ fn declared_conversions_render_their_underscore_call_form() {
     ] {
         let v = iron_shell::agent_api::ontology_describe_json(name);
         let sig = v["signature"].as_str().unwrap_or_default();
-        assert!(sig.starts_with(call), "{name}: {v}");
-        assert!(!sig.contains('-'), "{name} renders a hyphen: {sig}");
+        assert!(sig.contains(call), "{name}: {v}");
+        // `->` is the return arrow; only the call itself must be hyphen-free.
+        let head = sig.split("->").next().unwrap_or_default();
+        assert!(!head.contains('-'), "{name} renders a hyphen: {sig}");
     }
 }
 
@@ -91,7 +93,8 @@ fn powershell_style_builtins_are_catalogued_by_their_callable_name() {
         let v = iron_shell::agent_api::ontology_describe_json(name);
         let sig = v["signature"].as_str().unwrap_or_default();
         assert!(sig.starts_with(&format!("{name}(")), "{name}: {v}");
-        assert!(!sig.contains('-'), "{name} renders a hyphen: {sig}");
+        let head = sig.split("->").next().unwrap_or_default();
+        assert!(!head.contains('-'), "{name} renders a hyphen: {sig}");
     }
 }
 

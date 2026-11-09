@@ -48018,17 +48018,19 @@ fn file_insert_past_end(path: &str, line: usize, count: usize) -> anyhow::Error 
     )
 }
 
+thread_local! {
+    /// The builtin `bi_file_patch` reports its errors under; see bi_file_replace.
+    static PATCH_CALLER: std::cell::Cell<&'static str> = const { std::cell::Cell::new("file_patch") };
+}
+
 /// file_patch(path, patches) - Apply multiple search/replace operations atomically
 /// Patches is an array of records: [{find: "old", replace: "new"}, ...]
 /// Usage: file_patch("config.txt", [{find: "DEBUG=0", replace: "DEBUG=1"}])
 fn bi_file_patch(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
-    file_patch_for("file_patch", args, input)
-}
-
-/// The body of `file_patch`, reporting every error under `builtin`. `file_replace`
-/// delegates here with its own name, so a directory or an unreadable file is
-/// reported as the builtin the caller invoked.
-fn file_patch_for(builtin: &str, args: Vec<Value>, input: Option<Value>) -> Result<Value> {
+    // Every error is reported under the builtin the caller invoked: `file_replace`
+    // runs through here and sets PATCH_CALLER, so a directory or an unreadable
+    // file is reported as file_replace, not file_patch.
+    let builtin: &str = PATCH_CALLER.with(|c| c.get());
     if args.is_empty() {
         return Err(crate::safety::arg_err(format!(
             "{builtin} requires a file path"
@@ -48279,14 +48281,16 @@ fn bi_file_replace(args: Vec<Value>, _input: Option<Value>) -> Result<Value> {
 
     // The one-patch batch reports its miss as `file_patch`; a caller who asked
     // for file_replace is told about file_replace.
-    match file_patch_for(
-        "file_replace",
+    let caller = PATCH_CALLER.with(|c| c.replace("file_replace"));
+    let result = bi_file_patch(
         vec![
             Value::Str(path.clone()),
             Value::Array(vec![Value::Record(patch)]),
         ],
         None,
-    ) {
+    );
+    PATCH_CALLER.with(|c| c.set(caller));
+    match result {
         Err(e)
             if matches!(
                 e.downcast_ref::<crate::safety::SafetyError>(),
