@@ -3853,7 +3853,11 @@ pub fn did_you_mean(name: &str) -> Vec<String> {
             vec!["int".to_string(), "float".to_string()]
         }
         // Date and time names have no builtin of their own; the clock one is.
-        "date_iso" | "iso_date" | "today" => vec!["now_iso".to_string()],
+        "date_iso" | "iso_date" | "today" | "date" | "datetime" | "timestamp_iso" => {
+            vec!["now_iso".to_string()]
+        }
+        // Raising an error is `error(message)`; there is no raise or throw.
+        "raise" | "throw" | "fail" => vec!["error".to_string()],
         _ => Vec::new(),
     };
     // The module spelling comes next. `file_read` is not a builtin, but
@@ -3861,8 +3865,9 @@ pub fn did_you_mean(name: &str) -> Vec<String> {
     // (`file_rename`) is a worse answer than that one. It is offered only when
     // the module really has that member.
     if let Some((module, func)) = name.split_once('_') {
-        if crate::modules::is_module_member(module, func) {
-            out.push(format!("{module}.{func}"));
+        let spelled = format!("{module}.{func}");
+        if crate::modules::is_module_member(module, func) && !out.contains(&spelled) {
+            out.push(spelled);
         }
     }
     for near in nearest_names(name, BUILTIN_LOOKUP.keys().copied()) {
@@ -3899,6 +3904,9 @@ pub fn nearest_names<'a>(name: &str, candidates: impl Iterator<Item = &'a str>) 
     // Deterministic: distance first, then name, so the same typo always yields
     // the same suggestions (an agent replaying a repair must see stable output).
     scored.sort_unstable_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.cmp(b.1)));
+    // A name offered by two sources (a bound variable and a builtin both called
+    // `yq`) is one candidate. Equal names sort together, so they are adjacent.
+    scored.dedup_by(|a, b| a.1 == b.1);
     scored.truncate(3);
     scored.into_iter().map(|(_, n)| n.to_string()).collect()
 }
@@ -4797,7 +4805,7 @@ File system:
 - head       <file> [n]                     # first n lines
 - tail       <file> [n]                     # last n lines
 - find       <path> [pattern]               # find files
-- grep       <file|array> <pattern>         # search lines
+- grep       <pattern> [file]               # search lines (of file, or of piped text)
 - wc         <file|array>                   # count lines
 
 HTTP:
@@ -14249,6 +14257,13 @@ fn bi_now_iso(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
         [] => false,
         [Value::Str(zone)] if zone.as_str() == "utc" => false,
         [Value::Str(zone)] if zone.as_str() == "local" => true,
+        [Value::Str(zone)] => {
+            return Err(crate::safety::bad_arg_in(
+                "now_iso",
+                format!("now_iso: expected \"utc\" or \"local\", got {zone:?}"),
+                "only utc and local are supported",
+            ))
+        }
         [other] => {
             return Err(crate::safety::bad_arg(
                 "now_iso",
@@ -47860,6 +47875,26 @@ fn bi_file_append(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
     Ok(Value::Record(result))
 }
 
+/// An edit whose target file does not exist is E_NOT_FOUND, named as such,
+/// before any pattern is looked for. A remote-share name is not probed (the
+/// probe would open the share); the read that follows checks it.
+fn require_edit_target(builtin: &str, path: &str) -> Result<()> {
+    if crate::safety::names_a_remote_share(path) || std::path::Path::new(path).exists() {
+        return Ok(());
+    }
+    Err(crate::safety::no_file_at(builtin, path))
+}
+
+/// A file_insert line past the end: a file of `count` lines takes lines 1 to
+/// count + 1, where count + 1 appends. Anything later used to append silently.
+fn file_insert_past_end(path: &str, line: usize, count: usize) -> anyhow::Error {
+    crate::safety::bad_arg_in(
+        "file_insert",
+        format!("file_insert: line {line} is past the end of {path} ({count} lines)"),
+        &format!("use line {} to append", count + 1),
+    )
+}
+
 /// file_patch(path, patches) - Apply multiple search/replace operations atomically
 /// Patches is an array of records: [{find: "old", replace: "new"}, ...]
 /// Usage: file_patch("config.txt", [{find: "DEBUG=0", replace: "DEBUG=1"}])
@@ -47881,6 +47916,7 @@ fn bi_file_patch(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
     // Classified `ReadLocal` while the body wrote the file back in place.
     // `WriteLocal` is what the jail keys on, so this path went uncontained.
     let path = guard_local_write("file_patch", &path)?;
+    require_edit_target("file_patch", &path)?;
 
     let patches = if args.len() > 1 {
         match &args[1] {
@@ -48102,6 +48138,9 @@ fn bi_file_replace(args: Vec<Value>, _input: Option<Value>) -> Result<Value> {
         }
     };
 
+    // A missing file is named as missing, not as a pattern that is not in it.
+    require_edit_target("file_replace", &crate::safety::resolve_path_str(&path))?;
+
     let mut patch = BTreeMap::new();
     patch.insert("find".to_string(), Value::Str(old_text));
     patch.insert("replace".to_string(), Value::Str(new_text));
@@ -48156,6 +48195,7 @@ fn bi_file_insert(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
     // Classified `ReadLocal` while the body wrote the file back in place.
     // `WriteLocal` is what the jail keys on, so this path went uncontained.
     let path = guard_local_write("file_insert", &path)?;
+    require_edit_target("file_insert", &path)?;
 
     let content = if args.len() > 2 {
         match &args[2] {
@@ -48200,7 +48240,10 @@ fn bi_file_insert(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
     match &args[1] {
         Value::Int(line_num) => {
             let line = (*line_num).max(1) as usize;
-            insert_pos = (line - 1).min(lines.len());
+            if line > lines.len() + 1 {
+                return Err(file_insert_past_end(&path, line, lines.len()));
+            }
+            insert_pos = line - 1;
         }
         Value::Str(pos) => match pos.as_str() {
             "start" | "beginning" | "top" => insert_pos = 0,
@@ -48230,7 +48273,11 @@ fn bi_file_insert(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
                     insert_pos = 0;
                 }
             } else if let Some(Value::Int(line)) = r.get("line") {
-                insert_pos = ((*line).max(1) as usize - 1).min(lines.len());
+                let line = (*line).max(1) as usize;
+                if line > lines.len() + 1 {
+                    return Err(file_insert_past_end(&path, line, lines.len()));
+                }
+                insert_pos = line - 1;
             } else {
                 return Err(crate::safety::arg_err(
                     "file_insert: position record must have 'after', 'before', or 'line' key",

@@ -2121,6 +2121,29 @@ pub fn not_found(builtin: &str, kind: &str, name: &str) -> anyhow::Error {
     })
 }
 
+/// A file edit whose target does not exist: E_NOT_FOUND, checked before any
+/// pattern is looked for, so a missing file is not reported as a missing
+/// pattern.
+pub fn no_file_at(builtin: &str, path: &str) -> anyhow::Error {
+    let here = std::env::current_dir()
+        .map(|d| d.display().to_string())
+        .unwrap_or_else(|_| "the current directory".to_string());
+    anyhow::Error::new(SafetyError {
+        code: ErrorCode::NotFound,
+        message: format!("{builtin}: no file at {path}"),
+        builtin: builtin.to_string(),
+        hint: format!(
+            "no file at this path; a relative path is resolved against {here}, so check \
+             the spelling and that directory, or create the file with file.write first"
+        ),
+        approval: None,
+        did_you_mean: Vec::new(),
+        expected: "an existing file".to_string(),
+        got: path.to_string(),
+        extra: serde_json::Map::new(),
+    })
+}
+
 /// The `IRONSHELL_*` settings that bound a shell. A descendant keeps them: any
 /// child may start `ish`, directly or through a script, and that `ish` must be
 /// held by the same workspace, policy and limits as this one. None of them is a
