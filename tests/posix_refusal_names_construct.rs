@@ -76,6 +76,17 @@ fn arithmetic_expansion_is_named_on_a_later_line() {
 }
 
 #[test]
+fn arithmetic_refusal_says_where_to_compute() {
+    let out = run("arith_hint", "echo $((1+2))\n", false);
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(out.status.code(), Some(77), "{err:?}");
+    assert!(
+        err.contains("arithmetic is not in the subset; compute in ish (ish -c) or set IRONSHELL_ALLOW_SH=true"),
+        "{err:?}"
+    );
+}
+
+#[test]
 fn a_here_document_is_named_with_its_line() {
     refused(
         "heredoc",
