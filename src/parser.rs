@@ -298,6 +298,12 @@ pub struct Parser {
 /// Parse a program, returning statements and any errors encountered.
 /// Uses error recovery to report multiple errors when possible.
 pub fn parse_program(src: &str) -> Result<Vec<Stmt>> {
+    parse_program_with_lines(src).map(|(stmts, _)| stmts)
+}
+
+/// [`parse_program`], also returning the line each top-level statement starts
+/// on, in the same order. A runtime error from a statement is reported at it.
+pub fn parse_program_with_lines(src: &str) -> Result<(Vec<Stmt>, Vec<usize>)> {
     let (toks, glued_brackets) = lex_marked(src).map_err(lex_error)?;
     let mut p = Parser {
         toks,
@@ -311,6 +317,7 @@ pub fn parse_program(src: &str) -> Result<Vec<Stmt>> {
     };
 
     let mut stmts = Vec::new();
+    let mut lines = Vec::new();
     let mut errors = Vec::new();
 
     while !p.check(Tok::Eof) {
@@ -319,8 +326,12 @@ pub fn parse_program(src: &str) -> Result<Vec<Stmt>> {
         if p.check(Tok::Eof) {
             break;
         }
+        let line = p.peek().line;
         match p.parse_stmt() {
-            Ok(s) => stmts.push(s),
+            Ok(s) => {
+                stmts.push(s);
+                lines.push(line);
+            }
             Err(e) => {
                 errors.push(e);
                 // Try to recover by synchronizing to a safe point
@@ -349,7 +360,7 @@ pub fn parse_program(src: &str) -> Result<Vec<Stmt>> {
         return Err(anyhow::Error::new(parse_error));
     }
 
-    Ok(stmts)
+    Ok((stmts, lines))
 }
 
 /// Parse a program without error recovery (stops at first error).
@@ -1242,7 +1253,7 @@ fn interp_string_end(chars: &[char], start: usize) -> Option<usize> {
     None
 }
 
-/// The scalar named by a `\xHH` or `\u{H..H}` escape whose `x` or `u` is at
+/// The scalar named by a `\xHH`, `\uHHHH` or `\u{H..H}` escape whose `x` or `u` is at
 /// `at`, and how many source characters after `at` the escape spans. `None` when
 /// the escape is malformed, or names no Unicode scalar value.
 fn hex_escape(chars: &[char], at: usize, kind: char) -> Option<(char, usize)> {
@@ -1255,7 +1266,13 @@ fn hex_escape(chars: &[char], at: usize, kind: char) -> Option<(char, usize)> {
         return Some((char::from_u32(value)?, 2));
     }
     if chars.get(at) != Some(&'{') {
-        return None;
+        // `\uHHHH`: exactly four hex digits, with no braces.
+        let hex: String = chars.get(at..at + 4)?.iter().collect();
+        if !hex.chars().all(|c| c.is_ascii_hexdigit()) {
+            return None;
+        }
+        let value = u32::from_str_radix(&hex, 16).ok()?;
+        return Some((char::from_u32(value)?, 4));
     }
     let close = (at + 1..chars.len().min(at + 9)).find(|&k| chars[k] == '}')?;
     let hex: String = chars[at + 1..close].iter().collect();
@@ -2921,6 +2938,22 @@ impl Parser {
     /// Generate error message with possible suggestion
     fn error_with_suggestion(&self, base_msg: &str) -> anyhow::Error {
         let tok = self.peek();
+        // A `(` still open where a `)` was expected is the real problem, and it
+        // is named where it was opened: the line the input ran out on says
+        // nothing about where the missing `)` belonged.
+        if base_msg.starts_with("expected ')'") {
+            if let Some(open) = self.innermost_open_before(self.i) {
+                if open.kind == Tok::LParen {
+                    return anyhow!(
+                        "'(' opened at line {} is not closed; {} at line {}, column {}",
+                        open.line,
+                        base_msg,
+                        tok.line,
+                        tok.col
+                    );
+                }
+            }
+        }
         let mut msg = format!("{} at line {}, column {}", base_msg, tok.line, tok.col);
 
         // Add suggestion based on context
@@ -2929,6 +2962,21 @@ impl Parser {
         }
 
         anyhow!(msg)
+    }
+
+    /// The innermost bracket opened before token `end` and not closed before it.
+    fn innermost_open_before(&self, end: usize) -> Option<&Spanned> {
+        let mut open: Vec<&Spanned> = Vec::new();
+        for t in self.toks.iter().take(end) {
+            match t.kind {
+                Tok::LParen | Tok::LBracket | Tok::LBrace => open.push(t),
+                Tok::RParen | Tok::RBracket | Tok::RBrace => {
+                    open.pop();
+                }
+                _ => {}
+            }
+        }
+        open.pop()
     }
 
     /// Get a suggestion based on the current parser state and token

@@ -1662,6 +1662,52 @@ fn capture_free_vars(
     captured
 }
 
+/// Complete the captures of a lambda a module exports, from the module's final
+/// bindings.
+///
+/// A lambda captures, when it is written, only the names that exist then. A name
+/// defined later in the module (a private helper, or the other half of a mutual
+/// recursion) was not captured, so the export could not reach it once another
+/// file called it. Every module-level name the export reaches, directly or
+/// through other module-level lambdas, is captured now with its final value. A
+/// name already captured keeps its captured value, which is the final one, since
+/// an immutable binding cannot change.
+pub(crate) fn complete_module_capture(lam: &mut crate::value::Lambda, module: &Env) {
+    let mut pending: Vec<String> = lambda_free_names(&lam.params, &lam.body)
+        .into_iter()
+        .collect();
+    let mut seen = std::collections::BTreeSet::new();
+    while let Some(name) = pending.pop() {
+        if !seen.insert(name.clone()) {
+            continue;
+        }
+        #[cfg(feature = "native")]
+        if crate::modules::is_module_name(&name) {
+            continue;
+        }
+        if module.is_declared_mutable(&name) {
+            continue;
+        }
+        let Some(value) = module.get_var(&name) else {
+            continue;
+        };
+        if let Value::Lambda(inner) = value {
+            pending.extend(lambda_free_names(&inner.params, &inner.body));
+        }
+        if !lam.captured.contains_key(&name) {
+            lam.captured.insert(name, value.clone());
+        }
+    }
+}
+
+/// The names a lambda with these parameters reads from outside itself.
+fn lambda_free_names(params: &[String], body: &Expr) -> std::collections::BTreeSet<String> {
+    let mut bound: Vec<String> = params.to_vec();
+    let mut free = std::collections::BTreeSet::new();
+    free_idents(body, &mut bound, &mut free);
+    free
+}
+
 /// Install a lambda's captured free variables into `env`, returning what was
 /// displaced so the caller can put it back.
 ///

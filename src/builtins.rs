@@ -4255,8 +4255,10 @@ fn call_with_input_inner(
         // entry, and `undo()` answered `complete: false` about an operation that
         // never ran. A call that succeeded but reported no change (a `file_patch`
         // whose pattern was not found) is the same case: its step is dropped too.
-        if result.is_err() || (journal_on && crate::journal::take_no_change()) {
-            crate::journal::rollback_to(journal_mark);
+        // A successful call has its steps sealed with the state it left; a failed
+        // one, or one that reported no change, leaves no step (see journal::settle).
+        if journal_on {
+            crate::journal::settle(journal_mark, result.is_ok());
         }
         return result;
     }
@@ -4266,14 +4268,16 @@ fn call_with_input_inner(
     // that bridge has to know which kind of runtime it was called from.
     if crate::workflow_builtins::serves(name) {
         let result = crate::workflow_builtins::dispatch(name, args, input);
-        if result.is_err() {
-            crate::journal::rollback_to(journal_mark);
+        if journal_on {
+            crate::journal::settle(journal_mark, result.is_ok());
         }
         return result;
     }
 
-    // Fall back to the comprehensive match for functions not in fast lookup
-    match name {
+    // Fall back to the comprehensive match for functions not in fast lookup.
+    // Its result is settled the same way as the fast table's, so a fallback
+    // writer (file_insert, for one) leaves a sealed step, or none on failure.
+    let result = match name {
         // PowerShell-style cmdlets (not in fast lookup)
         "Get-Files" | "get-files" => bi_get_files(args, input),
         "Get-Content" | "get-content" => bi_get_content(args, input),
@@ -4391,7 +4395,11 @@ fn call_with_input_inner(
             did_you_mean(name),
             crate::module_loader::unexported_hint(name),
         )),
+    };
+    if journal_on {
+        crate::journal::settle(journal_mark, result.is_ok());
     }
+    result
 }
 
 // --------------- Helpers: type extraction ---------------
@@ -4957,8 +4965,32 @@ fn bi_print(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
 
     // Return behavior: always return the pretty inline display (ANSI stripped)
     // as a `Str`. This keeps the REPL and tests consistent regardless of
-    // whether the input was a bare string or another value.
-    Ok(Value::Str(strip_ansi(&pretty)))
+    // whether the input was a bare string or another value. The runner
+    // compares a final value with this text to tell an echo from a print.
+    let printed = strip_ansi(&pretty);
+    record_print(&printed);
+    Ok(Value::Str(printed))
+}
+
+thread_local! {
+    /// How many print calls have run on this thread, and the text the last one
+    /// returned. The runner reads both around its final statement: a value that
+    /// is exactly the text a print of that statement returned is not echoed.
+    static PRINTS: std::cell::RefCell<(usize, String)> =
+        const { std::cell::RefCell::new((0, String::new())) };
+}
+
+fn record_print(text: &str) {
+    PRINTS.with(|p| {
+        let mut p = p.borrow_mut();
+        p.0 += 1;
+        p.1 = text.to_string();
+    });
+}
+
+/// The print count on this thread, and the text the last print returned.
+pub fn print_mark() -> (usize, String) {
+    PRINTS.with(|p| p.borrow().clone())
 }
 
 /// http_get — fetch one http(s) URL. Usage: http_get(url) or url | http_get.
@@ -6091,7 +6123,8 @@ fn bi_len(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
     let length = match val {
         Value::Array(ref v) => v.len(),
         Value::Record(ref m) => m.len(),
-        Value::Str(ref s) => s.len(),
+        // Characters, not bytes: len("日本語") is 3, as slice counts them.
+        Value::Str(ref s) => s.chars().count(),
         _ => {
             return Err(crate::safety::arg_err(format!(
                 "len: requires Array, Record, or String, got {:?}",
@@ -13567,14 +13600,27 @@ fn bi_reverse(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
     }
 }
 
+/// A slice index as Python reads one: a negative index counts from the end, and
+/// the result is clamped to `0..=len`. `-3` of a length-5 sequence is 2.
+fn slice_index(index: i64, len: usize) -> usize {
+    let len = len as i64;
+    let resolved = if index < 0 {
+        index.saturating_add(len)
+    } else {
+        index
+    };
+    resolved.clamp(0, len) as usize
+}
+
 /// slice(start, end?) - Extract slice of array or string
 /// Args:
-///   - start: Int - Start index (inclusive)
-///   - end: Int (optional) - End index (exclusive)
-/// Returns: Array or String - Sliced input
+///   - start: Int - Start index (inclusive); negative counts from the end
+///   - end: Int (optional) - End index (exclusive); negative counts from the end
+/// Returns: Array or String - Sliced input; empty when start is not before end
 ///
 /// Example:
 ///   [1,2,3,4,5] | slice(1, 3)     # Returns [2,3]
+///   [1,2,3,4,5] | slice(-2)       # Returns [4,5]
 ///   slice([1,2,3,4,5], 1, 3)      # Also works as function call
 fn bi_slice(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
     // Determine input and index arguments
@@ -13587,7 +13633,7 @@ fn bi_slice(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
                 "slice requires at least start index",
             ));
         }
-        let start = expect_int("slice", &args[0])? as usize;
+        let start = expect_int("slice", &args[0])?;
         let end = args.get(1);
         (inp, start, end)
     } else {
@@ -13598,34 +13644,29 @@ fn bi_slice(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
             ));
         }
         let arr = args[0].clone();
-        let start = expect_int("slice", &args[1])? as usize;
+        let start = expect_int("slice", &args[1])?;
         let end = args.get(2);
         (arr, start, end)
     };
 
     match input_val {
         Value::Array(arr) => {
-            let end = if let Some(e) = end_arg {
-                expect_int("slice", e)? as usize
-            } else {
-                arr.len()
+            let end = match end_arg {
+                Some(e) => slice_index(expect_int("slice", e)?, arr.len()),
+                None => arr.len(),
             };
-
-            let end = end.min(arr.len());
-            let start = start_idx.min(end);
+            let start = slice_index(start_idx, arr.len()).min(end);
 
             Ok(Value::Array(arr[start..end].to_vec()))
         }
         Value::Str(s) => {
+            // Counted by character, as len counts them.
             let chars: Vec<char> = s.chars().collect();
-            let end = if let Some(e) = end_arg {
-                expect_int("slice", e)? as usize
-            } else {
-                chars.len()
+            let end = match end_arg {
+                Some(e) => slice_index(expect_int("slice", e)?, chars.len()),
+                None => chars.len(),
             };
-
-            let end = end.min(chars.len());
-            let start = start_idx.min(end);
+            let start = slice_index(start_idx, chars.len()).min(end);
 
             Ok(Value::Str(chars[start..end].iter().collect()))
         }
@@ -20822,18 +20863,65 @@ pub fn render_agent(v: &Value, budget: Option<usize>) -> Option<String> {
 // tests/fallback_dispatch.rs reads the arms as `name => bi_fn(..)` pairs.
 fn bi_undo(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
     refuse_pipeline_input("undo", &input)?;
-    let n = match args.first() {
+    let n = match args.iter().find(|v| !matches!(v, Value::Record(_))) {
         None => 1,
+        Some(Value::Int(n)) if *n < 0 => {
+            return Err(crate::safety::bad_arg(
+                "undo",
+                "a step count from 0",
+                &n.to_string(),
+            ))
+        }
         Some(v) => v
             .as_int()
             .map_err(|_| crate::safety::bad_arg("undo", "a step count", "a non-integer"))?
             .max(0) as usize,
     };
+    let force = undo_force("undo", &args)?;
     refuse_unless_recording("undo")?;
-    Ok(Value::Record(rewind_record(
-        &crate::journal::undo(n),
-        "restored",
-    )))
+    undo_record("undo", n, force)
+}
+
+/// The `force` option of undo and session_undo: `undo({force: true})`, or the
+/// same record after a step count. Restores a file a hand edit changed after
+/// its step, which the undo would otherwise refuse.
+fn undo_force(builtin: &str, args: &[Value]) -> Result<bool> {
+    let mut force = false;
+    for arg in args {
+        if let Value::Record(options) = arg {
+            for (key, value) in options {
+                match (key.as_str(), value) {
+                    ("force", Value::Bool(flag)) => force = *flag,
+                    ("force", other) => {
+                        return Err(crate::safety::bad_arg(
+                            builtin,
+                            "force: Bool",
+                            other.type_name(),
+                        ))
+                    }
+                    _ => {
+                        return Err(crate::safety::arg_err(format!(
+                            "{builtin} unknown option {key}"
+                        )))
+                    }
+                }
+            }
+        }
+    }
+    Ok(force)
+}
+
+/// Undo `n` steps and render the record. A refused first step is an error that
+/// names the file and the way past the refusal; nothing was undone.
+fn undo_record(builtin: &str, n: usize, force: bool) -> Result<Value> {
+    let outcomes = crate::journal::undo(n, force).map_err(|path| {
+        crate::safety::bad_state_with_hint(
+            builtin,
+            &format!("{path} changed after this step; undoing would discard those changes"),
+            &format!("read the file, or {builtin}({{force: true}}) to restore it anyway"),
+        )
+    })?;
+    Ok(Value::Record(rewind_record(&outcomes, "restored")))
 }
 
 /// Refuse an undo or a redo when the journal is not recording in this session.
@@ -47900,6 +47988,20 @@ fn bi_file_append(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
     Ok(Value::Record(result))
 }
 
+/// An empty string to find matches at every character boundary, so a
+/// replacement with it writes new text between every character of the file.
+/// Refused by the edit builtins before anything is read or written.
+fn refuse_empty_find(builtin: &str, find: &str) -> Result<()> {
+    if !find.is_empty() {
+        return Ok(());
+    }
+    Err(crate::safety::bad_arg_in(
+        builtin,
+        format!("{builtin}: the text to find is empty"),
+        "pass the exact text to find; an empty string matches between every character, so nothing was written",
+    ))
+}
+
 /// An edit whose target file does not exist is E_NOT_FOUND, named as such,
 /// before any pattern is looked for. A remote-share name is not probed (the
 /// probe would open the share); the read that follows checks it.
@@ -47995,6 +48097,14 @@ fn bi_file_patch(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
                     names[0]
                 )));
             }
+        }
+        // An empty find matches between every character: refused, not applied.
+        if let Some(Value::Str(find)) = record
+            .get("find")
+            .or(record.get("old"))
+            .or(record.get("search"))
+        {
+            refuse_empty_find("file_patch", find)?;
         }
     }
 
@@ -48163,6 +48273,10 @@ fn bi_file_replace(args: Vec<Value>, _input: Option<Value>) -> Result<Value> {
         }
     };
 
+    // An empty find string matches between every character, so it would insert
+    // new_text everywhere. Refused before the file is read or written.
+    refuse_empty_find("file_replace", &old_text)?;
+
     // A missing file is named as missing, not as a pattern that is not in it.
     require_edit_target("file_replace", &crate::safety::resolve_path_str(&path))?;
 
@@ -48221,6 +48335,23 @@ fn bi_file_insert(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
     // `WriteLocal` is what the jail keys on, so this path went uncontained.
     let path = guard_local_write("file_insert", &path)?;
     require_edit_target("file_insert", &path)?;
+
+    // An empty anchor is contained by every line, so the insert would land at
+    // the first line. Refused as an empty find.
+    let empty_anchor = match &args[1] {
+        Value::Str(pos) => pos.is_empty(),
+        Value::Record(r) => {
+            matches!(r.get("after").or(r.get("before")), Some(Value::Str(t)) if t.is_empty())
+        }
+        _ => false,
+    };
+    if empty_anchor {
+        return Err(crate::safety::bad_arg_in(
+            "file_insert",
+            "file_insert: the text to find is empty",
+            "pass an anchor line's exact text, a line number, or a keyword (start, end); an empty anchor matches every line, so nothing was written",
+        ));
+    }
 
     let content = if args.len() > 2 {
         match &args[2] {
@@ -48411,6 +48542,11 @@ fn bi_file_delete_lines(args: Vec<Value>, input: Option<Value>) -> Result<Value>
                     "file_delete_lines pattern must be String",
                 ));
             };
+            // An empty pattern is contained by every line: it would delete the file.
+            // (An exact empty match is blank lines, which is a real selection.)
+            if key != "exact" {
+                refuse_empty_find("file_delete_lines", &pattern)?;
+            }
             Selection::Pattern(pattern, key == "exact")
         }
         _ => {
@@ -52467,12 +52603,15 @@ fn bi_session_history(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
 
 /// `session_undo(n = 1)` — the same record `undo(n)` returns.
 fn bi_session_undo(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
-    let n = step_count_arg("session_undo", &args, &input)?;
+    let counts: Vec<Value> = args
+        .iter()
+        .filter(|v| !matches!(v, Value::Record(_)))
+        .cloned()
+        .collect();
+    let n = step_count_arg("session_undo", &counts, &input)?;
+    let force = undo_force("session_undo", &args)?;
     refuse_unless_recording("session_undo")?;
-    Ok(Value::Record(rewind_record(
-        &crate::journal::undo(n),
-        "restored",
-    )))
+    undo_record("session_undo", n, force)
 }
 
 /// `session_redo(n = 1)` — re-apply the last `n` undone steps.
@@ -69597,6 +69736,11 @@ fn bi_sed_replace(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
             };
             *slot = flag;
         }
+    }
+    // In file mode an empty pattern matches at every position and rewrites the
+    // whole file; refused before the file is read.
+    if file_mode {
+        refuse_empty_find("sed_replace", &pattern)?;
     }
     let re = regex::Regex::new(&pattern)
         .map_err(|e| crate::safety::arg_err(format!("sed invalid regex: {e}")))?;

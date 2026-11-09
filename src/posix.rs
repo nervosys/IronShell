@@ -2171,9 +2171,7 @@ fn write_file(path: &str, data: &[u8], append: bool) -> Result<(), String> {
     } else {
         std::fs::write(&resolved, data)
     };
-    if res.is_err() {
-        crate::journal::rollback_to(mark);
-    }
+    crate::journal::settle(mark, res.is_ok());
     res.map_err(|e| format!("{SHELL_NAME}: {path}: {}", io_reason(&e)))
 }
 

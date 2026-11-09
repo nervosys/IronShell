@@ -56,6 +56,74 @@ pub enum Before {
     Irreversible(String),
 }
 
+/// The state a path was left in by a step: the SHA-256 of its bytes, or nothing
+/// there. Recorded once the step has run, so that [`undo`] can tell whether the
+/// file has been changed since, outside the journal.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Fingerprint {
+    /// The path did not exist.
+    Absent,
+    /// The SHA-256 of the file's bytes, in lowercase hex.
+    Digest(String),
+}
+
+impl Fingerprint {
+    /// The text form kept on disk: `absent`, or the hex digest.
+    fn encode(&self) -> String {
+        match self {
+            Fingerprint::Absent => "absent".to_string(),
+            Fingerprint::Digest(hex) => hex.clone(),
+        }
+    }
+
+    fn decode(text: &str) -> Fingerprint {
+        if text == "absent" {
+            Fingerprint::Absent
+        } else {
+            Fingerprint::Digest(text.to_string())
+        }
+    }
+
+    /// The state a step leaves its path in, when the step's `before` is what
+    /// the path is written with (a redo). None when it is not known.
+    fn of_before(before: &Before) -> Option<Fingerprint> {
+        match before {
+            Before::Contents(bytes) => {
+                use ironcrypto::core_types::traits::Digest;
+                let digest = ironcrypto::hash::Sha256::digest(bytes.as_slice()).ok()?;
+                Some(Fingerprint::Digest(hex::encode(digest)))
+            }
+            Before::Absent => Some(Fingerprint::Absent),
+            Before::Irreversible(_) => None,
+        }
+    }
+
+    /// The state of `path` now, read in chunks. None for a directory, which no
+    /// step's undo is checked against.
+    fn of_path(path: &str) -> Option<Fingerprint> {
+        use ironcrypto::core_types::traits::Digest;
+        use std::io::Read;
+        let p = Path::new(path);
+        if !p.exists() {
+            return Some(Fingerprint::Absent);
+        }
+        if !p.is_file() {
+            return None;
+        }
+        let mut file = std::fs::File::open(p).ok()?;
+        let mut hasher = ironcrypto::hash::Sha256::new();
+        let mut buf = vec![0u8; 1 << 20];
+        loop {
+            let n = file.read(&mut buf).ok()?;
+            if n == 0 {
+                break;
+            }
+            hasher.update(&buf[..n]);
+        }
+        Some(Fingerprint::Digest(hex::encode(hasher.finalize().ok()?)))
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct Entry {
     pub seq: usize,
@@ -63,6 +131,10 @@ pub struct Entry {
     pub effect: String,
     pub path: String,
     pub before: Before,
+    /// The state the step left `path` in, once the step has run. None for a
+    /// step recorded before this was kept (its undo is not checked against
+    /// later hand edits), and for a step that was never sealed.
+    pub after: Option<Fingerprint>,
 }
 
 impl Entry {
@@ -136,6 +208,10 @@ struct StoredEntry {
     contents: Option<Vec<u8>>,
     /// Set when the step could not be captured, with the reason.
     irreversible: Option<String>,
+    /// The state the step left the path in: `absent` or a hex digest. Absent
+    /// from entries an earlier version wrote, which keep the old undo.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    after: Option<String>,
 }
 
 impl From<&Entry> for StoredEntry {
@@ -152,6 +228,7 @@ impl From<&Entry> for StoredEntry {
             path: e.path.clone(),
             contents,
             irreversible,
+            after: e.after.as_ref().map(Fingerprint::encode),
         }
     }
 }
@@ -169,6 +246,7 @@ impl From<StoredEntry> for Entry {
             effect: s.effect,
             path: s.path,
             before,
+            after: s.after.as_deref().map(Fingerprint::decode),
         }
     }
 }
@@ -317,6 +395,7 @@ fn redo_as_entry(r: &RedoEntry) -> Entry {
         effect: r.effect.clone(),
         path: r.path.clone(),
         before: r.after.clone(),
+        after: None,
     }
 }
 
@@ -567,6 +646,7 @@ pub fn record_before(builtin: &str, effect: Effect, args: &[Value]) {
             effect: effect.as_str().to_string(),
             path,
             before,
+            after: None,
         };
         persist(&entry);
         s.journal.push(entry);
@@ -607,9 +687,37 @@ pub fn record_irreversible(builtin: &str, effect: Effect, why: &str) {
         effect: effect.as_str().to_string(),
         path: String::new(),
         before: Before::Irreversible(why.to_string()),
+        after: None,
     };
     persist(&entry);
     s.journal.push(entry);
+}
+
+/// Once a journalled call has run: a call that failed, or that reported no
+/// change, leaves no step; a call that succeeded has its new steps sealed with
+/// the state they left. `mark` is the journal length before the call.
+pub fn settle(mark: usize, ok: bool) {
+    if !ok || take_no_change() {
+        rollback_to(mark);
+    } else {
+        seal_since(mark);
+    }
+}
+
+/// Record the state that each step recorded after `mark` left its path in.
+/// A step that is already sealed (an inner call of the same operation) keeps
+/// its seal, since the state it was sealed in is the state it left.
+fn seal_since(mark: usize) {
+    let mut s = state();
+    for e in s.journal.iter_mut().skip(mark) {
+        if e.after.is_some() || e.path.is_empty() || !e.reversible() {
+            continue;
+        }
+        if let Some(after) = Fingerprint::of_path(&e.path) {
+            e.after = Some(after);
+            persist(e);
+        }
+    }
 }
 
 /// Forget the redo stack, in memory and on disk.
@@ -653,7 +761,13 @@ pub enum Outcome {
 /// as a version over the capture limit, is left alone and the undo stops there:
 /// it may have changed since the step, and overwriting it would lose that
 /// version for good. Moving the file away lets the step be undone.
-pub fn undo(n: usize) -> Vec<Outcome> {
+///
+/// A step that recorded the state it left its file in is refused when the file
+/// has changed since, unless `force` is set: those changes would be discarded.
+/// When the first step in line is refused nothing has been undone, and the
+/// path is returned as the error. A later step's refusal is an outcome, as the
+/// others are, and ends the undo.
+pub fn undo(n: usize, force: bool) -> Result<Vec<Outcome>, String> {
     let mut s = state();
     let mut out = Vec::new();
     for _ in 0..n {
@@ -683,6 +797,27 @@ pub fn undo(n: usize) -> Vec<Outcome> {
         } else {
             entry.path.clone()
         };
+        // The file is not restored over what a later hand edit (or a step the
+        // journal did not see) put there. Nothing is undone when that is the
+        // first step; otherwise the refusal ends the undo as an outcome.
+        // A path that is now absent holds nothing to discard, so it is not a
+        // change: a file removed by hand is restored, as before.
+        if let (false, Some(sealed)) = (force, &entry.after) {
+            let changed = match Fingerprint::of_path(&entry.path) {
+                Some(Fingerprint::Absent) => false,
+                now => now.as_ref() != Some(sealed),
+            };
+            if changed {
+                if out.is_empty() {
+                    return Err(entry.path.clone());
+                }
+                out.push(Outcome::Skipped {
+                    what,
+                    why: CHANGED_SINCE_STEP.to_string(),
+                });
+                break;
+            }
+        }
         let after = capture(&entry.path, used);
         // As in redo: a file is not overwritten or removed unless what it holds
         // now is first kept. A path that is not a file is not touched by this
@@ -747,8 +882,11 @@ pub fn undo(n: usize) -> Vec<Outcome> {
         forget_persisted(entry.seq);
         out.push(outcome);
     }
-    out
+    Ok(out)
 }
+
+/// Why undo leaves a file alone that changed after its step.
+const CHANGED_SINCE_STEP: &str = "changed after this step, so undoing would discard those changes; left as it is. Read the file, or undo({force: true}) to restore it anyway";
 
 /// Push the state an undone step produced onto the redo stack. Pushes nothing
 /// when that state could not be captured or would exceed the budget: the undo
@@ -860,6 +998,9 @@ pub fn redo(n: usize) -> Vec<Outcome> {
                 effect: r.effect,
                 path: r.path,
                 before: current,
+                // The state this re-apply wrote, so a later undo of it is
+                // checked the same way as any other step.
+                after: Fingerprint::of_before(&r.after),
             };
             persist(&entry);
             s.journal.push(entry);
@@ -1084,6 +1225,7 @@ mod tests {
             effect: "write_local".into(),
             path: "big.bin".into(),
             before: Before::Irreversible("too big".into()),
+            after: None,
         };
         assert!(!e.reversible());
     }
@@ -1096,6 +1238,7 @@ mod tests {
             effect: "destructive".into(),
             path: ".".into(),
             before: Before::Irreversible("path is a directory; trees are not captured".into()),
+            after: None,
         };
         assert!(!e.reversible());
     }
@@ -1132,6 +1275,7 @@ mod tests {
             effect: "write_local".into(),
             path: "secret.txt".into(),
             before: Before::Contents(b"secret".to_vec()),
+            after: None,
         };
         persist_in(Some(dir.clone()), &e);
 

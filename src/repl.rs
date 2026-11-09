@@ -161,7 +161,11 @@ pub fn run(env: &mut Env) -> Result<()> {
         history.push(code.to_string());
 
         let started = std::time::Instant::now();
-        let (result, prints_itself) = eval_line_noting_print(env, code);
+        let LineOutcome {
+            result,
+            prints_itself,
+            ..
+        } = eval_line_noting_print(env, code);
         last_duration_ms = started.elapsed().as_millis() as u64;
         crate::record::note(
             crate::record::Surface::Repl,
@@ -242,7 +246,11 @@ pub fn run_one(env: &mut Env, code: &str) -> Result<i32> {
 /// [`run_one`] for a given surface, which only the recorder reads.
 pub fn run_one_as(env: &mut Env, code: &str, surface: crate::record::Surface) -> Result<i32> {
     let started = std::time::Instant::now();
-    let (result, prints_itself) = eval_line_noting_print(env, code);
+    let LineOutcome {
+        result,
+        prints_itself,
+        failed_line,
+    } = eval_line_noting_print(env, code);
     crate::record::note(surface, code, &result, started.elapsed());
     match result {
         Ok(_) if prints_itself => Ok(0),
@@ -296,7 +304,10 @@ pub fn run_one_as(env: &mut Env, code: &str, surface: crate::record::Surface) ->
             Ok(0)
         }
         Err(e) => {
-            print_eval_error(&e, colors_enabled_stderr());
+            // A one-line `-c` has no line to name: its only line is the one the
+            // user typed.
+            let failed_line = failed_line.filter(|_| code.contains('\n'));
+            print_eval_error(&e, colors_enabled_stderr(), failed_line);
             Ok(exit_status_for(&e))
         }
     }
@@ -325,7 +336,7 @@ pub fn exit_status_for(e: &anyhow::Error) -> i32 {
 /// Render an error the way the REPL renders an uncaught one, for a refusal made
 /// outside the REPL (`ish -b` before it runs anything).
 pub fn report_error(e: &anyhow::Error) {
-    print_eval_error(e, crate::config::colors_enabled_stderr());
+    print_eval_error(e, crate::config::colors_enabled_stderr(), None);
 }
 
 /// Render an uncaught evaluation error.
@@ -336,14 +347,29 @@ pub fn report_error(e: &anyhow::Error) {
 /// the exact re-run incantation. **Agent mode keeps the raw JSON** so the
 /// structured `code`/`hint`/`approval` survive for programmatic self-correction.
 /// Non-safety errors print as plain prose in both modes.
-fn print_eval_error(e: &anyhow::Error, color: bool) {
+///
+/// `line` is the line of the top-level statement that failed, when there is one.
+/// It is added to the structured form as `line`, and to the prose as "at line".
+fn print_eval_error(e: &anyhow::Error, color: bool, line: Option<usize>) {
     use crate::safety::{current_mode, Mode, SafetyError};
 
     if current_mode() == Mode::Agent {
-        // Structured form is what an agent reads — emit it verbatim.
-        eprintln!("{e}");
+        // Structured form is what an agent reads — emit it verbatim, with the
+        // line of the failing statement in the error object.
+        match (e.downcast_ref::<SafetyError>(), line) {
+            (Some(se), Some(n)) => {
+                let mut json = se.to_json();
+                if let Some(err) = json.get_mut("error").and_then(|v| v.as_object_mut()) {
+                    err.insert("line".to_string(), serde_json::Value::from(n));
+                }
+                eprintln!("{json}");
+            }
+            (_, Some(n)) => eprintln!("{e} (at line {n})"),
+            (_, None) => eprintln!("{e}"),
+        }
         return;
     }
+    let at = line.map(|n| format!("  at line {n}"));
 
     // A parse failure is a `ParseError` rather than a `SafetyError`, because
     // the parser is built for wasm too and `safety` is not. It carries the same
@@ -376,6 +402,9 @@ fn print_eval_error(e: &anyhow::Error, color: bool) {
                 "]:".red().bold(),
                 se.message
             );
+            if let Some(at) = &at {
+                eprintln!("{at}");
+            }
             if !se.hint.is_empty() {
                 eprintln!("  {} {}", "hint:".yellow().bold(), se.hint);
             }
@@ -390,6 +419,9 @@ fn print_eval_error(e: &anyhow::Error, color: bool) {
             }
         } else {
             eprintln!("error[{code}]: {}", se.message);
+            if let Some(at) = &at {
+                eprintln!("{at}");
+            }
             if !se.hint.is_empty() {
                 eprintln!("  hint: {}", se.hint);
             }
@@ -408,6 +440,9 @@ fn print_eval_error(e: &anyhow::Error, color: bool) {
         eprintln!("{} {e}", "error:".red().bold());
     } else {
         eprintln!("error: {e}");
+    }
+    if let Some(at) = &at {
+        eprintln!("{at}");
     }
 }
 
@@ -434,38 +469,62 @@ pub fn eval_line(env: &mut Env, code: &str) -> Result<Value> {
     eval_program(&stmts, env)
 }
 
-/// [`eval_line`], also reporting whether the program's final statement is a
-/// `print(...)` call. Such a call writes its own output and returns the same
-/// text, so the caller must not echo that value a second time.
-fn eval_line_noting_print(env: &mut Env, code: &str) -> (Result<Value>, bool) {
-    let stmts = match parser::parse_program(code) {
-        Ok(stmts) => stmts,
-        Err(e) => return (Err(e), false),
-    };
-    let prints_itself = ends_in_print(&stmts);
-    (eval_program(&stmts, env), prints_itself)
+/// The outcome of one line of code, as [`eval_line_noting_print`] reports it.
+struct LineOutcome {
+    result: Result<Value>,
+    /// The final statement wrote its own output with `print` and produced
+    /// exactly that text as its value; the caller must not echo it again.
+    prints_itself: bool,
+    /// The line the top-level statement that failed starts on, when one failed
+    /// at run time (a parse error is not a run-time failure, so has none).
+    failed_line: Option<usize>,
 }
 
-/// Is the last statement a call to `print` or `println`, bare or on the right of
-/// a pipe (`x | print()`)? `echo` is not one: it only renders its text.
-fn ends_in_print(stmts: &[crate::ast::Stmt]) -> bool {
-    use crate::ast::{Expr, Stmt};
-    let is_print = |name: &str| name == "print" || name == "println";
-    // `print(x)` or `print "x"` as a call, and `x | print` as a pipe stage.
-    let stage_is_print = |stage: &Expr| match stage {
-        Expr::Ident(name) => is_print(name.as_str()),
-        Expr::Call { callee, .. } => {
-            matches!(callee.as_ref(), Expr::Ident(name) if is_print(name.as_str()))
+/// [`eval_line`], also reporting whether the program's final statement wrote
+/// its own output with `print` and produced exactly that text as its value. The
+/// caller must not echo such a value a second time.
+///
+/// Each top-level statement runs on its own, so the prints before the final one
+/// are not counted, and a failure can be given the line its statement starts on.
+/// A print anywhere inside the final statement counts: `print(1)` bare,
+/// `if c { print(1) }`, a `try` body, or a lambda that prints and is called last.
+fn eval_line_noting_print(env: &mut Env, code: &str) -> LineOutcome {
+    let (stmts, lines) = match parser::parse_program_with_lines(code) {
+        Ok(parsed) => parsed,
+        Err(e) => {
+            return LineOutcome {
+                result: Err(e),
+                prints_itself: false,
+                failed_line: None,
+            }
         }
-        _ => false,
     };
-    let Some(Stmt::Expr(e)) = stmts.last() else {
-        return false;
-    };
-    match e {
-        Expr::Pipe { right, .. } => stage_is_print(right.as_ref()),
-        Expr::Call { .. } => stage_is_print(e),
-        _ => false,
+    let mut last = Value::Null;
+    let mut prints_itself = false;
+    for (index, stmt) in stmts.iter().enumerate() {
+        let (before, _) = crate::builtins::print_mark();
+        match eval_program(std::slice::from_ref(stmt), env) {
+            Ok(value) => {
+                if index + 1 == stmts.len() {
+                    let (after, printed) = crate::builtins::print_mark();
+                    prints_itself =
+                        after > before && matches!(&value, Value::Str(text) if *text == printed);
+                }
+                last = value;
+            }
+            Err(e) => {
+                return LineOutcome {
+                    result: Err(e),
+                    prints_itself: false,
+                    failed_line: lines.get(index).copied(),
+                }
+            }
+        }
+    }
+    LineOutcome {
+        result: Ok(last),
+        prints_itself,
+        failed_line: None,
     }
 }
 
