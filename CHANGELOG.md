@@ -7,6 +7,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- `print` writes a String as its text: `print("x")` wrote `"x"` with the quotes, and returned the quoted form.
+- `error(message, extra)` refuses extra fields named like the standard error keys (`code`, `message`, `hint`, ...) with E_BAD_ARG; `{code: 7}` was silently replaced by `E_USER`.
+- `file_insert` refuses a line past the end of the file (E_BAD_ARG naming the line that appends) instead of appending silently.
+- `ish agent schema` lists the underscore spelling of each builtin only; hyphenated names (`to-csv`), which a program cannot write, are no longer advertised.
+
+### Added
+
+- `ish -b` scripts can use `"$@"`, `$@`, `"$*"`, `$*` and `$#`, and `ish -b -c 'cmd' a b` gives `a` and `b` as `$1` and `$2`.
+- A module member without parentheses is a pipe stage: `| arr.len` is `| arr.len()`.
+- `|.field` on a piped Record reads the field (`[{a: {b: 5}}] | first | .a.b` is 5).
+
+### Fixed
+
+- A script or `-c` ending in `print(...)` printed its text twice; the final value is no longer echoed after a print.
+- An uncaught `error(...)` prints its extra fields after the hint, as the JSON report already did.
+- `file_replace`, `file_patch` and `file_insert` on a missing file say "no file at <path>", not "pattern not found".
+- Clearer errors: a method-style call on a String names the call that works (`contains(l, "bet")`); a wrong-type argument names the types the signature declares; an assignment in a lambda body says a body is one expression; indexing an empty `args()` says how to pass arguments; a missing module member (`str.pad_right`) is E_UNKNOWN_BUILTIN with suggestions; a projection error no longer names a `map` that was not written; `now_iso` names the zone it was given; `$((...))` in `-b` says where to compute instead.
+- `help()` lists `grep <pattern> [file]`, the order grep takes; suggestion lists no longer repeat a name; `date`, `datetime`, `raise`, `throw` and `fail` suggest `now_iso` and `error`; `map` and `where` document that a two-parameter lambda receives the index.
+- The undo journal records absolute paths for every entry.
+
+
 ## [14.0.1] - 2026-11-08
 
 ### Changed
