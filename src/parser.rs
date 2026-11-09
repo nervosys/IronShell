@@ -1076,7 +1076,7 @@ fn lex_marked(src: &str) -> Result<(Vec<Spanned>, std::collections::HashSet<usiz
                                 't' => s.push('\t'),
                                 '\\' => s.push('\\'),
                                 '"' => s.push('"'),
-                                '$' => s.push('$'),
+                                '$' => s.push(ESCAPED_DOLLAR),
                                 'x' | 'u' => match hex_escape(&chars, pos, esc) {
                                     Some((scalar, width)) => {
                                         for _ in 0..width {
@@ -1305,6 +1305,11 @@ fn is_ident_start(c: char) -> bool {
 fn is_ident_part(c: char) -> bool {
     c.is_ascii_alphanumeric() || c == '_'
 }
+
+/// What a `\$` escape leaves in a string literal's text. The evaluator turns it
+/// back into `$` after interpolation, so `"\${x}"` is the text `${x}` and does
+/// not interpolate. A private-use character, so it does not occur in real text.
+pub const ESCAPED_DOLLAR: char = '\u{E000}';
 
 /// The index just past the `}` that closes an interpolation hole whose body
 /// starts at `start` (the index just after its `{`). String literals inside the

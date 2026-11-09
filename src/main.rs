@@ -250,7 +250,8 @@ enum AgentApiCommands {
         /// JSON request (reads from stdin if not provided)
         request: Option<String>,
     },
-    /// Get the language schema for AI agents
+    /// Get the language schema for AI agents. The full schema is large: pass
+    /// --module <name> for one module's builtins (`ish agent schema --module file`).
     Schema {
         /// Output format: openai, azure, claude, gemini, llama, mistral, cohere, grok,
         /// deepseek, bedrock, qwen, ollama, vllm, huggingface, openrouter,
