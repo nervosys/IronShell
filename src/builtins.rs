@@ -15453,8 +15453,18 @@ fn bi_json_parse(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
         expect_string("json_parse", &args[0])?.to_string()
     };
 
-    let json_val: serde_json::Value = serde_json::from_str(&json_str)
-        .map_err(|e| crate::safety::bad_arg("json_parse", "valid JSON", &e.to_string()))?;
+    let json_val: serde_json::Value = serde_json::from_str(&json_str).map_err(|e| {
+        crate::safety::value_not_representable(
+            "json_parse",
+            format!("json_parse: the text is not JSON: {e}"),
+            &format!(
+                "fix the JSON at line {}, column {}: {}",
+                e.line(),
+                e.column(),
+                json_message(&e)
+            ),
+        )
+    })?;
 
     Ok(json_to_value(json_val))
 }
@@ -29128,9 +29138,10 @@ fn toml_failure_hint(text: &str, err: &toml::de::Error) -> String {
 }
 
 /// The refusal for a data file that will not parse. The file is the input, so
-/// the same call fails again until the file changes: not retryable.
+/// the same call fails again until the file changes: not retryable. It is the
+/// E_BAD_VALUE that from_toml gives for the same text, not E_BAD_ARG.
 fn unparsed_data(path: &str, kind: &str, message: &str, hint: String) -> anyhow::Error {
-    crate::safety::bad_value_in(
+    crate::safety::value_not_representable(
         "open",
         format!("open: {path} is not valid {kind}: {message}"),
         &hint,

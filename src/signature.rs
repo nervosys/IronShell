@@ -1733,8 +1733,8 @@ pub static SIGNATURES: &[Signature] = &[
     Signature {
         name: "json_parse", category: None, subject_required: false, aliases: &[],
         subject: Some(Ty::Str), params: &[], returns: "Any",
-        doc: "Parse a JSON string into a typed value.",
-        examples: &[(r#"json_parse("{\"n\":7}").n"#, "7"), (r#""[1,2]" | json_parse | len"#, "2")],
+        doc: "Parse a JSON string into a typed value. Text that is not JSON is E_BAD_VALUE, not retryable, and its hint gives the line and column.",
+        examples: &[(r#"json_parse("{\"n\":7}").n"#, "7"), (r#""[1,2]" | json_parse | len"#, "2"), (r#"(try { json_parse("{") } catch e { e.error.code })"#, "E_BAD_VALUE")],
     },
     Signature {
         name: "from_csv", category: None, subject_required: true, aliases: &["from-csv"],
@@ -3018,7 +3018,7 @@ pub static SIGNATURES: &[Signature] = &[
         subject: None,
         params: &[req("path", Ty::Str, "a file; .json, .jsonl, .toml, .yaml/.yml and .csv are parsed")],
         returns: "Any",
-        doc: "Read a file and parse it by extension (JSON, JSON lines, TOML, YAML, CSV), or return its text.",
+        doc: "Read a file and parse it by extension (JSON, JSON lines, TOML, YAML, CSV), or return its text. A file that does not parse is E_BAD_VALUE, not retryable, and its hint gives the line and column.",
         examples: &[
             (r#"open("Cargo.toml").package.name"#, r#""iron-shell""#),
             (r#"typeof(open("README.md"))"#, "String"),
