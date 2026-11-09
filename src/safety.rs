@@ -3314,7 +3314,16 @@ impl std::error::Error for SafetyError {}
 /// that by setting the variable once, at startup, in agent mode.
 pub fn workspace_root() -> PathBuf {
     if let Ok(w) = std::env::var("IRONSHELL_WORKSPACE") {
-        PathBuf::from(w)
+        // Always absolute. A relative root (`--workspace proj`) made
+        // `resolve_path_str` return a relative path that the jail then joined to
+        // the root a second time: `../x` was judged as `proj/x` and written as
+        // `x`, outside the workspace.
+        let w = PathBuf::from(w);
+        if w.is_absolute() {
+            w
+        } else {
+            std::path::absolute(&w).unwrap_or(w)
+        }
     } else if let Ok(pinned) = std::env::var(PINNED_ROOT_ENV) {
         PathBuf::from(pinned)
     } else {

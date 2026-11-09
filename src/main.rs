@@ -332,6 +332,10 @@ fn run(cli: Cli) -> Result<()> {
         std::env::set_var("IRONSHELL_MODE", "agent");
     }
     if let Some(ws) = &cli.workspace {
+        // Fixed as an absolute path now, so a later `cd` does not move the jail
+        // and a child `ish` inherits the same root.
+        let ws = std::path::Path::new(ws);
+        let ws = std::path::absolute(ws).unwrap_or_else(|_| ws.to_path_buf());
         std::env::set_var("IRONSHELL_WORKSPACE", ws);
     }
     // `ish agent serve` and `ish mcp serve` exist for one purpose: to let an AI
