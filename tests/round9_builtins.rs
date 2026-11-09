@@ -174,7 +174,7 @@ fn regex_replace_expands_numbered_and_named_groups() {
 
 #[test]
 fn regex_replace_replaces_every_match_in_both_forms() {
-    assert_eq!(run(r#""a1" | regex_replace("[0-9]", "#")"#), text("a#"));
+    assert_eq!(run(r##""a1" | regex_replace("[0-9]", "#")"##), text("a#"));
     assert_eq!(
         run(r#"regex_replace("1 2 3", "[0-9]", "x")"#),
         text("x x x")
@@ -193,7 +193,10 @@ fn regex_replace_refuses_an_invalid_pattern_and_a_missing_replacement() {
 #[test]
 fn the_str_module_names_the_regex_and_padding_builtins() {
     assert_eq!(run(r#"str.regex_match("abc", "b")"#), Value::Bool(true));
-    assert_eq!(run(r#"str.regex_replace("a1", "[0-9]", "#")"#), text("a#"));
+    assert_eq!(
+        run(r##"str.regex_replace("a1", "[0-9]", "#")"##),
+        text("a#")
+    );
     assert_eq!(run(r#"str.pad_left("7", 3, "0")"#), text("007"));
     assert_eq!(run(r#"str.pad_right("7", 3, "0")"#), text("700"));
 }
