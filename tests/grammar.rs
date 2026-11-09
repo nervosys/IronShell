@@ -129,8 +129,9 @@ fn unknown_escape_keeps_its_backslash() {
         eval_str(r#"x = "C:\Users\adamm"; [x, len(x)]"#),
         Value::Array(vec![Value::Str("C:\\Users\\adamm".into()), Value::Int(14)])
     );
-    // `\d`, `\e` and `\u` are not escapes either: all three stay literal.
-    assert_eq!(eval_str(r#""\d\e\u""#), Value::Str("\\d\\e\\u".into()));
+    // `\d`, `\e` and `\q` are not escapes either: all three stay literal. (A
+    // malformed `\u` is refused, so it is not used here.)
+    assert_eq!(eval_str(r#""\d\e\q""#), Value::Str("\\d\\e\\q".into()));
 }
 
 #[test]

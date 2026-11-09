@@ -43,12 +43,94 @@ fn eval_cfg_condition(condition: &CfgCondition) -> Result<bool> {
     }
 }
 
+/// Where a top-level statement starts: its line, and the module file it was read
+/// from (None for the script being run). Runtime errors name it.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Site {
+    pub line: usize,
+    pub file: Option<String>,
+}
+
+thread_local! {
+    /// The top-level statement now running, when a caller that knows its line
+    /// has set one (the script runner and module loader do; others leave None).
+    static STATEMENT: std::cell::RefCell<Option<Site>> = const { std::cell::RefCell::new(None) };
+    /// Named lambdas bound by a top-level `name = fn ...` statement, and where.
+    static LAMBDA_SITES: std::cell::RefCell<BTreeMap<String, Site>> =
+        std::cell::RefCell::new(BTreeMap::new());
+    /// The lambda a failing call came out of, outermost-first kept: the first
+    /// one recorded is the innermost, which is where the failure is.
+    static FAILED_IN: std::cell::RefCell<Option<(String, Site)>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Set the statement now running, returning the one it replaces. Clears the
+/// record of a failed lambda call, which belongs to the statement before.
+pub fn set_statement_site(site: Option<Site>) -> Option<Site> {
+    FAILED_IN.with(|f| *f.borrow_mut() = None);
+    STATEMENT.with(|s| std::mem::replace(&mut *s.borrow_mut(), site))
+}
+
+/// Forget a failed lambda call that was caught: a `try` handled it.
+pub fn clear_failed_lambda() {
+    FAILED_IN.with(|f| *f.borrow_mut() = None);
+}
+
+/// The note for the failing statement's error: which lambda it came out of and
+/// where that lambda was written, when that is another statement or a module
+/// file. Taken, so one error is noted once.
+pub fn take_failed_lambda_note() -> Option<String> {
+    let (name, site) = FAILED_IN.with(|f| f.borrow_mut().take())?;
+    Some(match site.file {
+        None => format!("(in `{name}`, defined at line {})", site.line),
+        Some(file) => format!("(in `{name}`, defined at {file} line {})", site.line),
+    })
+}
+
+/// A top-level `name = fn ...` statement that just ran: remember where it was
+/// written, so a call that fails inside it can say so.
+fn note_lambda_binding(stmt: &Stmt) {
+    let Stmt::Let {
+        name,
+        value: Expr::Lambda { .. },
+        ..
+    } = stmt
+    else {
+        return;
+    };
+    if let Some(site) = STATEMENT.with(|s| s.borrow().clone()) {
+        LAMBDA_SITES.with(|m| m.borrow_mut().insert(name.clone(), site));
+    }
+}
+
+/// A call through the name `name` failed. When the lambda it names was written
+/// somewhere other than the statement now running, record it, unless a deeper
+/// lambda already is the record.
+fn note_failed_lambda_call(name: &str) {
+    let Some(site) = LAMBDA_SITES.with(|m| m.borrow().get(name).cloned()) else {
+        return;
+    };
+    let Some(here) = STATEMENT.with(|s| s.borrow().clone()) else {
+        return;
+    };
+    if site == here {
+        return;
+    }
+    FAILED_IN.with(|f| {
+        let mut f = f.borrow_mut();
+        if f.is_none() {
+            *f = Some((name.to_string(), site));
+        }
+    });
+}
+
 pub fn eval_program(stmts: &[Stmt], env: &mut Env) -> Result<Value> {
     let mut last = Value::Null;
     for s in stmts {
         // Clear any pipe input between statements to prevent leakage
         env.set_input(None);
         last = eval_stmt(s, env)?;
+        note_lambda_binding(s);
         // An error value that a statement *produces* and nothing binds or
         // catches is an uncaught error. `throw` and `assert` produce error
         // values rather than unwinding, so without this `throw "x"` was
@@ -654,7 +736,10 @@ pub fn eval_expr(expr: &Expr, env: &mut Env) -> Result<Value> {
                 Err(e) => {
                     // Runtime error - catch it. Safety refusals carry structured
                     // data, and the catch variable is bound to their record (see
-                    // `caught_error_record`). Other errors stay as strings.
+                    // `caught_error_record`). Other errors stay as strings. A
+                    // failed lambda call that is caught is not the statement's
+                    // failure, so its note is dropped.
+                    clear_failed_lambda();
                     let caught = match e.downcast_ref::<crate::safety::SafetyError>() {
                         Some(se) => Value::from_json(&caught_error_record(&se.to_json())),
                         None => Value::Str(e.to_string()),
@@ -1031,6 +1116,20 @@ fn method_on_non_record(
     if !builtins::is_dispatched(field) {
         return None;
     }
+    // `time.now()`: `time` is a builtin, not a module, so it has no members. An
+    // unbound builtin name reads as Null, and the generic error did not say why.
+    if let Expr::Ident(name) = object {
+        if name != "__" && env.get_var(name).is_none() && builtins::is_dispatched(name) {
+            return Some(crate::safety::bad_arg_with_hint(
+                &format!("{name}.{field}"),
+                "a Record (or a module)",
+                "Null",
+                &format!(
+                    "`{name}` is a builtin, not a module: call {name}() (or {field}(), the builtin itself)"
+                ),
+            ));
+        }
+    }
     let receiver = match borrowed_member(object, env)? {
         Ok(Value::Record(_)) | Ok(Value::Null) | Err(_) => return None,
         Ok(value) => value,
@@ -1284,6 +1383,21 @@ pub(crate) fn call_value_with_pipe(
 /// [`call_value_with_pipe`], naming the variable the value was called through,
 /// so an arity error can say `f takes 2 arguments` rather than `lambda takes`.
 pub(crate) fn call_value_named(
+    name: Option<&str>,
+    f: Value,
+    pin: Option<Value>,
+    args: Vec<Value>,
+    env: &mut Env,
+) -> Result<Value> {
+    let is_lambda = matches!(f, Value::Lambda(_));
+    let result = call_value_named_inner(name, f, pin, args, env);
+    if let (true, Err(_), Some(name)) = (is_lambda, &result, name) {
+        note_failed_lambda_call(name);
+    }
+    result
+}
+
+fn call_value_named_inner(
     name: Option<&str>,
     f: Value,
     pin: Option<Value>,

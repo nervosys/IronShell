@@ -25,6 +25,11 @@ pub struct ParseError {
     pub message: String,
     /// What to do about it.
     pub hint: String,
+    /// The line of the first `at line N, column M` in the message, when it has
+    /// one. The JSON form carries it as `line`, so an agent can locate the fault.
+    pub line: Option<usize>,
+    /// The column that goes with `line`.
+    pub column: Option<usize>,
 }
 
 impl ParseError {
@@ -32,13 +37,45 @@ impl ParseError {
     pub const CODE: &'static str = "E_PARSE";
 
     pub fn new(message: impl Into<String>) -> Self {
+        Self::with_hint(
+            message,
+            "fix the syntax at the reported line and column; the source \
+             never reached the evaluator, so nothing ran",
+        )
+    }
+
+    /// A parse error with its own hint. Its position is read from the message.
+    pub fn with_hint(message: impl Into<String>, hint: impl Into<String>) -> Self {
+        let message = message.into();
+        let (line, column) = match position_in(&message) {
+            Some((line, column)) => (Some(line), Some(column)),
+            None => (None, None),
+        };
         Self {
-            message: message.into(),
-            hint: "fix the syntax at the reported line and column; the source \
-                   never reached the evaluator, so nothing ran"
-                .to_string(),
+            message,
+            hint: hint.into(),
+            line,
+            column,
         }
     }
+}
+
+/// The first `at line N, column M` in a diagnostic, as its line and column.
+fn position_in(message: &str) -> Option<(usize, usize)> {
+    const AT: &str = "at line ";
+    let mut rest = message;
+    while let Some(i) = rest.find(AT) {
+        let after = &rest[i + AT.len()..];
+        let line: String = after.chars().take_while(|c| c.is_ascii_digit()).collect();
+        if let Some(tail) = after[line.len()..].strip_prefix(", column ") {
+            let column: String = tail.chars().take_while(|c| c.is_ascii_digit()).collect();
+            if let (Ok(line), Ok(column)) = (line.parse(), column.parse()) {
+                return Some((line, column));
+            }
+        }
+        rest = after;
+    }
+    None
 }
 
 /// A syntax error with a specific hint, carried so `parse_program` can give it
@@ -69,6 +106,12 @@ const SLICE_HINT: &str = "IronShell has no slice syntax, so a[start:end] is not 
 const BLOCK_HINT: &str = "a braced `{ ... }` holds one expression, not statements: \
      `name = value` and `let` are statements, and a record field is written \
      `{name: value}`. Put one expression in the braces, or move the statements out.";
+
+/// The hint for a `;` or a second statement inside an `if`, `else`, `try`,
+/// `catch`, match-arm or lambda block. A block holds one expression, so the
+/// values it needs are bound before it.
+const ONE_EXPR_HINT: &str =
+    "a block holds one expression; bind values before it (x = 1, then if c { x + 1 })";
 
 /// The hint for `while`, `for` and `loop`, which IronShell does not have.
 const LOOP_HINT: &str = "IronShell has no loop statements; iterate with map/where/reduce \
@@ -106,12 +149,18 @@ impl std::fmt::Display for ParseError {
                     acc
                 })
         };
+        let position = match (self.line, self.column) {
+            (Some(line), Some(column)) => format!(r#","line":{line},"column":{column}"#),
+            (Some(line), None) => format!(r#","line":{line}"#),
+            _ => String::new(),
+        };
         write!(
             f,
-            r#"{{"error":{{"code":"{}","message":"{}","hint":"{}","retryable":true}}}}"#,
+            r#"{{"error":{{"code":"{}","message":"{}","hint":"{}"{},"retryable":true}}}}"#,
             Self::CODE,
             esc(&self.message),
-            esc(&self.hint)
+            esc(&self.hint),
+            position
         )
     }
 }
@@ -394,12 +443,39 @@ fn lex(src: &str) -> Result<Vec<Spanned>> {
 /// A string literal with no closing quote. Reported at the opening quote,
 /// because that is where the literal starts and where the fix goes.
 fn unterminated_string(line: usize, col: usize) -> anyhow::Error {
-    anyhow::Error::new(ParseError {
-        message: format!("unterminated string at line {}, column {}", line, col),
-        hint: "close the string with the same quote character it opened with, \
-               or escape the quote inside it"
-            .to_string(),
-    })
+    anyhow::Error::new(ParseError::with_hint(
+        format!("unterminated string at line {}, column {}", line, col),
+        "close the string with the same quote character it opened with, \
+         or escape the quote inside it",
+    ))
+}
+
+/// A `\u` escape that is not `\uHHHH` or `\u{H..H}` naming a scalar value. `at`
+/// is the index just after the `u`; the message quotes the escape as written,
+/// up to the closing quote, a newline, or its own end.
+fn invalid_unicode_escape(line: usize, col: usize, chars: &[char], at: usize) -> anyhow::Error {
+    let mut escape = String::from("\\u");
+    let braced = chars.get(at) == Some(&'{');
+    let mut k = at;
+    while k < chars.len() && escape.chars().count() < 12 {
+        let c = chars[k];
+        if c == '"' || c == '\n' {
+            break;
+        }
+        escape.push(c);
+        k += 1;
+        if braced {
+            if c == '}' {
+                break;
+            }
+        } else if k - at == 4 {
+            break;
+        }
+    }
+    anyhow::Error::new(ParseError::with_hint(
+        format!("invalid unicode escape `{escape}` at line {line}, column {col}"),
+        "write \\uHHHH with four hex digits or \\u{H..H} for a code point up to 10FFFF (not a surrogate)",
+    ))
 }
 
 /// Whether the text after a `//` that follows an operand is an integer-division
@@ -704,6 +780,18 @@ fn lex_marked(src: &str) -> Result<(Vec<Spanned>, std::collections::HashSet<usiz
                 });
             }
             '?' => {
+                // `??` is the null-coalescing spelling of other languages. It is
+                // not an operator here, and read as two terse-match prefixes it
+                // failed far from its cause, so it is named where it is written.
+                if peek(&chars, pos + 1) == Some('?') {
+                    return Err(anyhow::Error::new(ParseError::with_hint(
+                        format!(
+                            "`??` at line {}, column {} is not an operator",
+                            start_line, start_col
+                        ),
+                        "there is no ?? operator; write match x { null => 1, v => v } or if x == null { 1 } else { x }",
+                    )));
+                }
                 advance(&chars, &mut pos, &mut line, &mut col);
                 out.push(Spanned {
                     kind: Tok::Question,
@@ -918,13 +1006,13 @@ fn lex_marked(src: &str) -> Result<(Vec<Spanned>, std::collections::HashSet<usiz
                     });
                     let operand_next = division_spelling(&chars[pos + 1..]);
                     if after_operand && operand_next {
-                        return Err(anyhow::Error::new(ParseError {
-                            message: format!(
+                        return Err(anyhow::Error::new(ParseError::with_hint(
+                            format!(
                                 "`//` at line {}, column {} follows an operand",
                                 start_line, start_col
                             ),
-                            hint: "`//` starts a comment in IronShell; there is no integer-division operator: use math.floor(a / b)".to_string(),
-                        }));
+                            "`//` starts a comment in IronShell; there is no integer-division operator: use math.floor(a / b)",
+                        )));
                     }
                     advance(&chars, &mut pos, &mut line, &mut col); // consume second /
                                                                     // Skip until end of line
@@ -978,6 +1066,8 @@ fn lex_marked(src: &str) -> Result<(Vec<Spanned>, std::collections::HashSet<usiz
                         }
                     }
                     if ch == '\\' {
+                        // Where the backslash is, for a malformed `\u` report.
+                        let (escape_line, escape_col) = (line, col.saturating_sub(1));
                         if let Some(esc) = peek(&chars, pos) {
                             advance(&chars, &mut pos, &mut line, &mut col);
                             match esc {
@@ -994,7 +1084,17 @@ fn lex_marked(src: &str) -> Result<(Vec<Spanned>, std::collections::HashSet<usiz
                                         }
                                         s.push(scalar);
                                     }
-                                    // A malformed escape keeps its backslash, as
+                                    // A malformed `\u` is refused: it used to print
+                                    // literally and nobody noticed.
+                                    None if esc == 'u' => {
+                                        return Err(invalid_unicode_escape(
+                                            escape_line,
+                                            escape_col,
+                                            &chars,
+                                            pos,
+                                        ));
+                                    }
+                                    // A malformed `\x` keeps its backslash, as
                                     // any unknown escape does.
                                     None => {
                                         s.push('\\');
@@ -2276,6 +2376,20 @@ impl Parser {
                             hint: BLOCK_HINT.to_string(),
                         }));
                     }
+                    // `fn() => { print("s"); 42 }`: a call or a `;` after the
+                    // first word is a block of statements, not a record.
+                    if !self.check(Tok::Colon)
+                        && (self.check(Tok::LParen) || self.check(Tok::Semicolon))
+                    {
+                        let at = self.peek();
+                        return Err(anyhow::Error::new(HintedSyntax {
+                            msg: format!(
+                                "expected ':' after key at line {}, column {}",
+                                at.line, at.col
+                            ),
+                            hint: ONE_EXPR_HINT.to_string(),
+                        }));
+                    }
                     self.need(Tok::Colon, "expected ':' after key")?;
                     let val = self.parse_expr()?;
                     kvs.push((key, val));
@@ -2771,17 +2885,19 @@ impl Parser {
         // A `(` left open on an earlier line is the real problem: name the line
         // it was opened on, not only the line the parser gave up on, and do not
         // offer a spelling hint about whatever token followed.
-        if msg.starts_with("expected ')'") {
-            if let Some(open) = self.innermost_open_before(self.i) {
-                if open.kind == Tok::LParen && open.line != tok.line {
-                    return anyhow!(
-                        "'(' opened at line {} is not closed; {} at line {}, column {}",
-                        open.line,
-                        msg,
-                        tok.line,
-                        tok.col
-                    );
-                }
+        // A second statement in a block is not an unclosed bracket: its hint wins.
+        let block_statement = self.spelling_hint() == Some(ONE_EXPR_HINT);
+        if let (false, Some((open_line, open_char))) = (block_statement, self.unclosed_opener(msg))
+        {
+            if open_line != tok.line {
+                return anyhow!(
+                    "'{}' opened at line {} is not closed; {} at line {}, column {}",
+                    open_char,
+                    open_line,
+                    msg,
+                    tok.line,
+                    tok.col
+                );
             }
         }
         let text = format!("{} at line {}, column {}", msg, tok.line, tok.col);
@@ -2847,6 +2963,25 @@ impl Parser {
     fn spelling_hint(&self) -> Option<&'static str> {
         let cur = self.peek().kind;
         let prev = self.i.checked_sub(1).and_then(|j| self.toks.get(j));
+        // A `;` inside braces, or `name = value` right after an opening brace,
+        // is a second statement in a block that holds one expression.
+        if matches!(cur, Tok::Semicolon)
+            && self
+                .innermost_open_before(self.i)
+                .is_some_and(|open| open.kind == Tok::LBrace)
+        {
+            return Some(ONE_EXPR_HINT);
+        }
+        if matches!(cur, Tok::Equal)
+            && self.i >= 2
+            && self
+                .toks
+                .get(self.i - 2)
+                .is_some_and(|t| t.kind == Tok::LBrace)
+            && prev.is_some_and(|p| p.kind == Tok::Ident)
+        {
+            return Some(ONE_EXPR_HINT);
+        }
         // `=` is a comparison's spelling only directly after an operand, as in
         // `r.state = "open"`. After an operator or an opening bracket it is
         // not one, and the hint would name a comparison that was never written.
@@ -2957,18 +3092,15 @@ impl Parser {
         // A `(` still open where a `)` was expected is the real problem, and it
         // is named where it was opened: the line the input ran out on says
         // nothing about where the missing `)` belonged.
-        if base_msg.starts_with("expected ')'") {
-            if let Some(open) = self.innermost_open_before(self.i) {
-                if open.kind == Tok::LParen {
-                    return anyhow!(
-                        "'(' opened at line {} is not closed; {} at line {}, column {}",
-                        open.line,
-                        base_msg,
-                        tok.line,
-                        tok.col
-                    );
-                }
-            }
+        if let Some((open_line, open_char)) = self.unclosed_opener(base_msg) {
+            return anyhow!(
+                "'{}' opened at line {} is not closed; {} at line {}, column {}",
+                open_char,
+                open_line,
+                base_msg,
+                tok.line,
+                tok.col
+            );
         }
         let mut msg = format!("{} at line {}, column {}", base_msg, tok.line, tok.col);
 
@@ -2978,6 +3110,24 @@ impl Parser {
         }
 
         anyhow!(msg)
+    }
+
+    /// For a message that wants a closer (`)`, `]` or `}`), the line and the
+    /// character of the innermost bracket still open there, when it is the
+    /// bracket that wants that closer. The error names it, not only the place
+    /// where the input ran out.
+    fn unclosed_opener(&self, msg: &str) -> Option<(usize, char)> {
+        let (wanted, open_char) = if msg.starts_with("expected ')'") {
+            (Tok::LParen, '(')
+        } else if msg.starts_with("expected ']'") {
+            (Tok::LBracket, '[')
+        } else if msg.starts_with("expected '}'") {
+            (Tok::LBrace, '{')
+        } else {
+            return None;
+        };
+        let open = self.innermost_open_before(self.i)?;
+        (open.kind == wanted).then_some((open.line, open_char))
     }
 
     /// The innermost bracket opened before token `end` and not closed before it.

@@ -21655,12 +21655,20 @@ fn undo_force(builtin: &str, args: &[Value]) -> Result<bool> {
 /// Undo `n` steps and render the record. A refused first step is an error that
 /// names the file and the way past the refusal; nothing was undone.
 fn undo_record(builtin: &str, n: usize, force: bool) -> Result<Value> {
-    let outcomes = crate::journal::undo(n, force).map_err(|path| {
-        crate::safety::bad_state_with_hint(
-            builtin,
-            &format!("{path} changed after this step; undoing would discard those changes"),
-            &format!("read the file, or {builtin}({{force: true}}) to restore it anyway"),
-        )
+    let outcomes = crate::journal::undo(n, force).map_err(|(path, removed)| {
+        if removed {
+            crate::safety::bad_state_with_hint(
+                builtin,
+                &format!("{path} was removed after this step; undoing would recreate it"),
+                &format!("{builtin}({{force: true}}) recreates it anyway"),
+            )
+        } else {
+            crate::safety::bad_state_with_hint(
+                builtin,
+                &format!("{path} changed after this step; undoing would discard those changes"),
+                &format!("read the file, or {builtin}({{force: true}}) to restore it anyway"),
+            )
+        }
     })?;
     Ok(Value::Record(rewind_record(&outcomes, "restored")))
 }
@@ -48743,6 +48751,22 @@ fn refuse_empty_find(builtin: &str, find: &str) -> Result<()> {
     ))
 }
 
+/// A regex that matches empty text (`x*`, `(?:)`) finds a match between every
+/// character of a file, so a file edit with it would insert the replacement
+/// everywhere. Refused before the file is read or written.
+fn refuse_empty_matching_regex(builtin: &str, pattern: &str, re: &regex::Regex) -> Result<()> {
+    if !re.is_match("") {
+        return Ok(());
+    }
+    Err(crate::safety::bad_arg_in(
+        builtin,
+        format!(
+            "{builtin}: the pattern `{pattern}` matches empty text, which would insert the replacement between every character"
+        ),
+        "use a pattern that must match at least one character, such as `x+` for `x*`; nothing was written",
+    ))
+}
+
 /// An edit whose target file does not exist is E_NOT_FOUND, named as such,
 /// before any pattern is looked for. A remote-share name is not probed (the
 /// probe would open the share); the read that follows checks it.
@@ -49140,6 +49164,16 @@ fn bi_file_insert(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
             }
         }
     };
+
+    // Empty content inserts no line, yet the write below would still add a
+    // trailing newline: refused before the file is read or written.
+    if content.is_empty() {
+        return Err(crate::safety::bad_arg_in(
+            "file_insert",
+            "file_insert: nothing to insert",
+            "pass the text to insert; empty content would change nothing, so the file was left as it was",
+        ));
+    }
 
     let mut file_content = read_text_capped("file_insert", &path)?;
 
@@ -70495,10 +70529,13 @@ fn bi_sed_replace(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
     // In file mode an empty pattern matches at every position and rewrites the
     // whole file; refused before the file is read.
     if file_mode {
-        refuse_empty_find("sed_replace", &pattern)?;
+        refuse_empty_find("sed", &pattern)?;
     }
     let re = regex::Regex::new(&pattern)
         .map_err(|e| crate::safety::arg_err(format!("sed invalid regex: {e}")))?;
+    if file_mode {
+        refuse_empty_matching_regex("sed", &pattern, &re)?;
+    }
     let file = if file_mode {
         Some((text.clone(), crate::safety::resolve_path_str(&text)))
     } else {

@@ -283,7 +283,7 @@ fn load(source: &str) -> Result<(PathBuf, Exports)> {
     }
 
     let source_text = read_module(&path)?;
-    let stmts = crate::parser::parse_program(&source_text)
+    let (stmts, lines) = crate::parser::parse_program_with_lines(&source_text)
         .map_err(|e| in_module(&path, anyhow!("{e:#}")))?;
 
     let private: Vec<String> = stmts
@@ -295,7 +295,7 @@ fn load(source: &str) -> Result<(PathBuf, Exports)> {
             _ => None,
         })
         .collect();
-    let exports = evaluate(&path, &stmts).map_err(|e| in_module(&path, e))?;
+    let exports = evaluate(&path, &stmts, &lines).map_err(|e| in_module(&path, e))?;
     remember_facts(source, private, exports.keys().cloned().collect());
 
     cache()
@@ -305,7 +305,7 @@ fn load(source: &str) -> Result<(PathBuf, Exports)> {
     Ok((path, exports))
 }
 
-fn evaluate(path: &Path, stmts: &[crate::ast::Stmt]) -> Result<Exports> {
+fn evaluate(path: &Path, stmts: &[crate::ast::Stmt], lines: &[usize]) -> Result<Exports> {
     let dir = path
         .parent()
         .map(Path::to_path_buf)
@@ -315,7 +315,24 @@ fn evaluate(path: &Path, stmts: &[crate::ast::Stmt]) -> Result<Exports> {
     let _frame = LoadFrame;
 
     let mut module_env = fresh_module_env();
-    crate::eval::eval_program(stmts, &mut module_env)?;
+    // Each statement runs with its line and file set, so a lambda it binds and
+    // a failure inside one can name where they were written. The statement that
+    // imported this module gets its own site back afterwards.
+    let file = site_label(path);
+    let outer = crate::eval::set_statement_site(None);
+    let run = (|| -> Result<()> {
+        for (index, stmt) in stmts.iter().enumerate() {
+            let site = lines.get(index).map(|&line| crate::eval::Site {
+                line,
+                file: Some(file.clone()),
+            });
+            crate::eval::set_statement_site(site);
+            crate::eval::eval_program(std::slice::from_ref(stmt), &mut module_env)?;
+        }
+        Ok(())
+    })();
+    crate::eval::set_statement_site(outer);
+    run?;
     // An exported lambda was written before some of the names it reads were
     // defined; it now captures those names' final values, so calling it from the
     // importer reaches a private helper defined after it.
@@ -479,6 +496,17 @@ fn in_module(path: &Path, err: anyhow::Error) -> anyhow::Error {
 }
 
 /// A path for messages: the `\\?\` prefix Windows canonicalization adds is noise.
+/// A module file as an error note names it: relative to the working directory
+/// when it is under it (`lib/bad.ish`), otherwise as displayed.
+fn site_label(path: &Path) -> String {
+    if let Ok(cwd) = std::env::current_dir() {
+        if let Ok(relative) = path.strip_prefix(&cwd) {
+            return relative.display().to_string();
+        }
+    }
+    display(path)
+}
+
 fn display(path: &Path) -> String {
     let s = path.display().to_string();
     s.strip_prefix(r"\\?\").map(str::to_string).unwrap_or(s)

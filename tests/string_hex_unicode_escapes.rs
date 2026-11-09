@@ -1,6 +1,7 @@
 //! `\xHH` and `\u{H..H}` escapes in double-quoted strings, run through the real
 //! binary. Before this, both were kept verbatim (`"\x41"` printed `\x41`). A
-//! malformed escape keeps its backslash, as any unknown escape does.
+//! malformed `\x` keeps its backslash, as any unknown escape does; a malformed
+//! `\u` is E_PARSE.
 //!
 //! `\uHHHH` (without braces) is not an escape the lexer knows, and it is not
 //! added here: `"A"` still prints `A`.
@@ -44,22 +45,30 @@ fn a_two_digit_hex_escape_names_its_code_point() {
 
 #[test]
 fn a_braced_unicode_escape_takes_one_to_six_hex_digits() {
-    let (out, err, code) = run_script("uni", "\"\\u{41}\\u{1F600}\\u{0000000041}x\"\n");
+    let (out, err, code) = run_script("uni", "\"\\u{41}\\u{1F600}x\"\n");
     assert_eq!(code, 0, "{err}");
-    // The six-digit form is over six digits here (ten), so it is malformed and
-    // keeps its backslash; only the first two escapes decode.
-    assert_eq!(out, "A\u{1F600}\\u{0000000041}x", "stdout was {out:?}");
+    assert_eq!(out, "A\u{1F600}x", "stdout was {out:?}");
 }
 
 #[test]
-fn an_escape_that_names_no_scalar_keeps_its_backslash() {
-    // 0x110000 is past U+10FFFF, and a surrogate is not a scalar value.
-    let (out, err, code) = run_script("bad", "\"\\u{110000}|\\u{D800}|\\xZZ|\\x4|\\u{}\"\n");
-    assert_eq!(code, 0, "{err}");
-    assert_eq!(
-        out, "\\u{110000}|\\u{D800}|\\xZZ|\\x4|\\u{}",
-        "stdout was {out:?}"
+fn a_malformed_unicode_escape_is_refused_with_its_position() {
+    // The six-digit form is over six digits here (ten): malformed, so refused
+    // as E_PARSE naming the escape, rather than printed with its backslash.
+    let (_out, err, code) = run_script("long", "\"\\u{0000000041}x\"\n");
+    assert_ne!(code, 0, "{err}");
+    assert!(err.contains("E_PARSE"), "{err}");
+    assert!(
+        err.contains("invalid unicode escape `\\u{0000000041}` at line 1, column 2"),
+        "{err}"
     );
+}
+
+#[test]
+fn an_unknown_hex_escape_still_keeps_its_backslash() {
+    // \x is not refused; only a malformed \u is. Neither decodes here.
+    let (out, err, code) = run_script("bad", "\"\\xZZ|\\x4\"\n");
+    assert_eq!(code, 0, "{err}");
+    assert_eq!(out, "\\xZZ|\\x4", "stdout was {out:?}");
 }
 
 #[test]

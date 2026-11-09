@@ -122,8 +122,9 @@ fn an_undo_with_no_hand_edit_still_restores() {
 }
 
 #[test]
-fn a_file_removed_by_hand_after_its_step_is_restored_not_refused() {
-    // Nothing is there to discard, so the restore loses nothing.
+fn a_file_removed_by_hand_after_its_step_is_refused_until_forced() {
+    // The step left the file in place, so its removal since is a change: undo
+    // would recreate a file the user deleted.
     let _g = LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let session = Session::new("removed_by_hand");
     let p = session.path("gone.txt");
@@ -131,9 +132,68 @@ fn a_file_removed_by_hand_after_its_step_is_restored_not_refused() {
     call("file_replace", vec![s(&p), s("v1"), s("v2")]).expect("replace");
     std::fs::remove_file(&p).expect("remove by hand");
 
+    let refused = call("undo", vec![Value::Int(1)]).expect_err("undo must refuse");
+    assert!(
+        refused.contains("was removed after this step; undoing would recreate it"),
+        "{refused}"
+    );
+    assert!(refused.contains("E_BAD_STATE"), "{refused}");
+    assert!(!std::path::Path::new(&p).exists(), "not recreated");
+    assert_eq!(journal::entries().len(), 1, "the step stays journalled");
+
+    let forced = forced_undo().expect("forced undo");
+    assert_eq!(field(&forced, "restored"), Value::Int(1));
+    assert_eq!(std::fs::read_to_string(&p).unwrap(), "v1");
+}
+
+#[test]
+fn a_step_that_removed_a_file_is_still_undone_while_it_stays_absent() {
+    // The step itself deleted the file, so absent is the state it left: the
+    // normal undo, not a removal by hand.
+    let _g = LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let session = Session::new("step_removed");
+    let p = session.path("rm.txt");
+    std::fs::write(&p, "keep").expect("seed");
+    call("rm", vec![s(&p)]).expect("delete");
+    assert!(!std::path::Path::new(&p).exists());
+
     let undone = call("undo", vec![Value::Int(1)]).expect("undo");
     assert_eq!(field(&undone, "restored"), Value::Int(1));
-    assert_eq!(std::fs::read_to_string(&p).unwrap(), "v1");
+    assert_eq!(std::fs::read_to_string(&p).unwrap(), "keep");
+}
+
+#[test]
+fn a_later_step_whose_file_was_removed_by_hand_ends_the_undo_as_an_outcome() {
+    let _g = LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let session = Session::new("removed_second");
+    let a = session.path("a.txt");
+    let b = session.path("b.txt");
+    std::fs::write(&a, "a0").expect("seed a");
+    std::fs::write(&b, "b0").expect("seed b");
+    call("file_replace", vec![s(&a), s("a0"), s("a1")]).expect("replace a");
+    call("file_replace", vec![s(&b), s("b0"), s("b1")]).expect("replace b");
+    std::fs::remove_file(&b).expect("remove b by hand");
+
+    let report = call("undo", vec![Value::Int(2)]).expect("the refusal is an outcome");
+    assert_eq!(field(&report, "restored"), Value::Int(0));
+    assert_eq!(field(&report, "complete"), Value::Bool(false));
+    assert!(!std::path::Path::new(&b).exists());
+    assert_eq!(std::fs::read_to_string(&a).unwrap(), "a1");
+}
+
+#[test]
+fn undoing_a_creation_whose_file_was_removed_by_hand_recreates_nothing() {
+    // The step created the file, so undoing it removes nothing; with the file
+    // already gone there is nothing to refuse and nothing to recreate.
+    let _g = LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let session = Session::new("created_then_removed");
+    let p = session.path("made_then_gone.txt");
+    call("file_write", vec![s(&p), s("step")]).expect("write");
+    std::fs::remove_file(&p).expect("remove by hand");
+
+    let undone = call("undo", vec![Value::Int(1)]).expect("undo is not refused");
+    assert_eq!(field(&undone, "restored"), Value::Int(0));
+    assert!(!std::path::Path::new(&p).exists(), "not recreated");
 }
 
 #[test]

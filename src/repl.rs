@@ -250,6 +250,7 @@ pub fn run_one_as(env: &mut Env, code: &str, surface: crate::record::Surface) ->
         result,
         prints_itself,
         failed_line,
+        failed_in,
     } = eval_line_noting_print(env, code);
     crate::record::note(surface, code, &result, started.elapsed());
     match result {
@@ -307,7 +308,8 @@ pub fn run_one_as(env: &mut Env, code: &str, surface: crate::record::Surface) ->
             // A one-line `-c` has no line to name: its only line is the one the
             // user typed.
             let failed_line = failed_line.filter(|_| code.contains('\n'));
-            print_eval_error(&e, colors_enabled_stderr(), failed_line);
+            let failed_in = failed_in.filter(|_| failed_line.is_some());
+            print_eval_error(&e, colors_enabled_stderr(), failed_line, failed_in);
             Ok(exit_status_for(&e))
         }
     }
@@ -336,7 +338,7 @@ pub fn exit_status_for(e: &anyhow::Error) -> i32 {
 /// Render an error the way the REPL renders an uncaught one, for a refusal made
 /// outside the REPL (`ish -b` before it runs anything).
 pub fn report_error(e: &anyhow::Error) {
-    print_eval_error(e, crate::config::colors_enabled_stderr(), None);
+    print_eval_error(e, crate::config::colors_enabled_stderr(), None, None);
 }
 
 /// Render an uncaught evaluation error.
@@ -350,7 +352,7 @@ pub fn report_error(e: &anyhow::Error) {
 ///
 /// `line` is the line of the top-level statement that failed, when there is one.
 /// It is added to the structured form as `line`, and to the prose as "at line".
-fn print_eval_error(e: &anyhow::Error, color: bool, line: Option<usize>) {
+fn print_eval_error(e: &anyhow::Error, color: bool, line: Option<usize>, note: Option<String>) {
     use crate::safety::{current_mode, Mode, SafetyError};
 
     if current_mode() == Mode::Agent {
@@ -364,12 +366,18 @@ fn print_eval_error(e: &anyhow::Error, color: bool, line: Option<usize>) {
                 }
                 eprintln!("{json}");
             }
-            (_, Some(n)) => eprintln!("{e} (at line {n})"),
+            (_, Some(n)) => match &note {
+                Some(t) => eprintln!("{e} (at line {n} {t})"),
+                None => eprintln!("{e} (at line {n})"),
+            },
             (_, None) => eprintln!("{e}"),
         }
         return;
     }
-    let at = line.map(|n| format!("  at line {n}"));
+    let at = line.map(|n| match &note {
+        Some(t) => format!("  at line {n} {t}"),
+        None => format!("  at line {n}"),
+    });
 
     // A parse failure is a `ParseError` rather than a `SafetyError`, because
     // the parser is built for wasm too and `safety` is not. It carries the same
@@ -478,6 +486,9 @@ struct LineOutcome {
     /// The line the top-level statement that failed starts on, when one failed
     /// at run time (a parse error is not a run-time failure, so has none).
     failed_line: Option<usize>,
+    /// Where the lambda that the failing call came out of was written, when that
+    /// is another statement or a module file: `(in `bad`, defined at line 3)`.
+    failed_in: Option<String>,
 }
 
 /// [`eval_line`], also reporting whether the program's final statement wrote
@@ -496,12 +507,19 @@ fn eval_line_noting_print(env: &mut Env, code: &str) -> LineOutcome {
                 result: Err(e),
                 prints_itself: false,
                 failed_line: None,
+                failed_in: None,
             }
         }
     };
     let mut last = Value::Null;
     let mut prints_itself = false;
     for (index, stmt) in stmts.iter().enumerate() {
+        // The statement's line is what a failed lambda call is compared with.
+        crate::eval::set_statement_site(
+            lines
+                .get(index)
+                .map(|&line| crate::eval::Site { line, file: None }),
+        );
         let (before, _) = crate::builtins::print_mark();
         match eval_program(std::slice::from_ref(stmt), env) {
             Ok(value) => {
@@ -513,18 +531,23 @@ fn eval_line_noting_print(env: &mut Env, code: &str) -> LineOutcome {
                 last = value;
             }
             Err(e) => {
+                let failed_in = crate::eval::take_failed_lambda_note();
+                crate::eval::set_statement_site(None);
                 return LineOutcome {
                     result: Err(e),
                     prints_itself: false,
                     failed_line: lines.get(index).copied(),
-                }
+                    failed_in,
+                };
             }
         }
     }
+    crate::eval::set_statement_site(None);
     LineOutcome {
         result: Ok(last),
         prints_itself,
         failed_line: None,
+        failed_in: None,
     }
 }
 

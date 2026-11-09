@@ -765,9 +765,9 @@ pub enum Outcome {
 /// A step that recorded the state it left its file in is refused when the file
 /// has changed since, unless `force` is set: those changes would be discarded.
 /// When the first step in line is refused nothing has been undone, and the
-/// path is returned as the error. A later step's refusal is an outcome, as the
-/// others are, and ends the undo.
-pub fn undo(n: usize, force: bool) -> Result<Vec<Outcome>, String> {
+/// path and whether it was removed since the step are returned as the error. A
+/// later step's refusal is an outcome, as the others are, and ends the undo.
+pub fn undo(n: usize, force: bool) -> Result<Vec<Outcome>, (String, bool)> {
     let mut s = state();
     let mut out = Vec::new();
     for _ in 0..n {
@@ -800,20 +800,33 @@ pub fn undo(n: usize, force: bool) -> Result<Vec<Outcome>, String> {
         // The file is not restored over what a later hand edit (or a step the
         // journal did not see) put there. Nothing is undone when that is the
         // first step; otherwise the refusal ends the undo as an outcome.
-        // A path that is now absent holds nothing to discard, so it is not a
-        // change: a file removed by hand is restored, as before.
+        // A file the step left in place that is now absent was removed since:
+        // undoing would recreate it, so that is a change too. A step that
+        // removed the file (sealed absent) and finds it still absent is the
+        // ordinary undo, and is not refused.
         if let (false, Some(sealed)) = (force, &entry.after) {
-            let changed = match Fingerprint::of_path(&entry.path) {
-                Some(Fingerprint::Absent) => false,
-                now => now.as_ref() != Some(sealed),
+            let now = Fingerprint::of_path(&entry.path);
+            // Only an undo that writes the file back recreates it. Undoing a step
+            // that created the file removes nothing, and nothing is recreated.
+            let restores = matches!(entry.before, Before::Contents(_));
+            let removed =
+                restores && now == Some(Fingerprint::Absent) && *sealed != Fingerprint::Absent;
+            let changed = if now == Some(Fingerprint::Absent) {
+                removed
+            } else {
+                now.as_ref() != Some(sealed)
             };
             if changed {
                 if out.is_empty() {
-                    return Err(entry.path.clone());
+                    return Err((entry.path.clone(), removed));
                 }
                 out.push(Outcome::Skipped {
                     what,
-                    why: CHANGED_SINCE_STEP.to_string(),
+                    why: if removed {
+                        REMOVED_SINCE_STEP.to_string()
+                    } else {
+                        CHANGED_SINCE_STEP.to_string()
+                    },
                 });
                 break;
             }
@@ -887,6 +900,9 @@ pub fn undo(n: usize, force: bool) -> Result<Vec<Outcome>, String> {
 
 /// Why undo leaves a file alone that changed after its step.
 const CHANGED_SINCE_STEP: &str = "changed after this step, so undoing would discard those changes; left as it is. Read the file, or undo({force: true}) to restore it anyway";
+
+/// Why undo leaves a path alone that was removed after its step.
+const REMOVED_SINCE_STEP: &str = "was removed after this step; undoing would recreate it; left as it is. undo({force: true}) recreates it";
 
 /// Push the state an undone step produced onto the redo stack. Pushes nothing
 /// when that state could not be captured or would exceed the budget: the undo
