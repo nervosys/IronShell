@@ -2056,10 +2056,10 @@ pub static SIGNATURES: &[Signature] = &[
         ],
     },
     Signature {
-        name: "foreach-object",
+        name: "foreach",
         category: None,
         subject_required: false,
-        aliases: &["ForEach-Object", "foreach"],
+        aliases: &["ForEach-Object", "foreach-object"],
         subject: Some(Ty::Array),
         params: &[req(
             "transform",
@@ -2074,10 +2074,10 @@ pub static SIGNATURES: &[Signature] = &[
         ],
     },
     Signature {
-        name: "select-object",
+        name: "select",
         category: None,
         subject_required: true,
-        aliases: &["Select-Object", "select"],
+        aliases: &["Select-Object", "select-object"],
         subject: None,
         params: &[opt_rest(
             "property",
@@ -2092,10 +2092,10 @@ pub static SIGNATURES: &[Signature] = &[
         ],
     },
     Signature {
-        name: "measure-object",
+        name: "measure",
         category: None,
         subject_required: true,
-        aliases: &["Measure-Object", "measure"],
+        aliases: &["Measure-Object", "measure-object"],
         subject: None,
         params: &[opt(
             "property",

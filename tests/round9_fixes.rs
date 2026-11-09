@@ -84,10 +84,14 @@ fn declared_conversions_render_their_underscore_call_form() {
 }
 
 #[test]
-fn powershell_names_with_no_underscore_form_are_not_catalogued() {
-    for name in ["select-object", "measure-object", "foreach-object"] {
+fn powershell_style_builtins_are_catalogued_by_their_callable_name() {
+    // `select`, `measure` and `foreach` are callable; their PowerShell
+    // spellings are aliases, so the catalogue renders no hyphen for them.
+    for name in ["select", "measure", "foreach"] {
         let v = iron_shell::agent_api::ontology_describe_json(name);
-        assert!(v.get("signature").is_none(), "{name} described: {v}");
+        let sig = v["signature"].as_str().unwrap_or_default();
+        assert!(sig.starts_with(&format!("{name}(")), "{name}: {v}");
+        assert!(!sig.contains('-'), "{name} renders a hyphen: {sig}");
     }
 }
 
