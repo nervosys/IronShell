@@ -316,7 +316,16 @@ fn evaluate(path: &Path, stmts: &[crate::ast::Stmt]) -> Result<Exports> {
 
     let mut module_env = fresh_module_env();
     crate::eval::eval_program(stmts, &mut module_env)?;
-    Ok(module_env.exported_vars())
+    // An exported lambda was written before some of the names it reads were
+    // defined; it now captures those names' final values, so calling it from the
+    // importer reaches a private helper defined after it.
+    let mut exports = module_env.exported_vars();
+    for value in exports.values_mut() {
+        if let crate::value::Value::Lambda(lam) = value {
+            crate::eval::complete_module_capture(lam, &module_env);
+        }
+    }
+    Ok(exports)
 }
 
 #[cfg(feature = "native")]

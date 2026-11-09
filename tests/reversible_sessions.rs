@@ -50,6 +50,13 @@ fn call(name: &str, args: Vec<Value>) -> Result<Value, String> {
     iron_shell::builtins::call(name, args, &mut env).map_err(|e| e.to_string())
 }
 
+/// `undo(1, {force: true})`: restores a file changed since its step.
+fn forced_undo() -> Result<Value, String> {
+    let mut options = std::collections::BTreeMap::new();
+    options.insert("force".to_string(), Value::Bool(true));
+    call("undo", vec![Value::Int(1), Value::Record(options)])
+}
+
 fn field(v: &Value, key: &str) -> Value {
     match v {
         Value::Record(m) => m.get(key).cloned().unwrap_or(Value::Null),
@@ -402,7 +409,7 @@ fn a_failed_undo_keeps_the_step_so_it_can_be_retried() {
     std::fs::remove_file(&p).expect("remove the file");
     std::fs::create_dir(&p).expect("make a directory at the same path");
 
-    let failed = call("undo", vec![Value::Int(1)]).expect("undo");
+    let failed = forced_undo().expect("undo");
     assert_eq!(field(&failed, "failed"), Value::Int(1));
     assert_eq!(field(&failed, "restored"), Value::Int(0));
     assert_eq!(field(&failed, "complete"), Value::Bool(false));
@@ -444,7 +451,8 @@ fn undo_leaves_a_newer_file_it_cannot_keep() {
     let newer = vec![b'n'; 9 * 1024 * 1024];
     std::fs::write(&p, &newer).expect("a later change, too large to capture");
 
-    let refused = call("undo", vec![Value::Int(1)]).expect("undo");
+    // Forced past the hand-edit check, so the capture limit is what refuses.
+    let refused = forced_undo().expect("undo");
     assert_eq!(field(&refused, "restored"), Value::Int(0));
     assert_eq!(field(&refused, "complete"), Value::Bool(false));
     assert!(
@@ -478,7 +486,7 @@ fn undo_does_not_remove_a_created_file_it_cannot_keep() {
     let newer = vec![b'n'; 9 * 1024 * 1024];
     std::fs::write(&p, &newer).expect("a later change, too large to capture");
 
-    let refused = call("undo", vec![Value::Int(1)]).expect("undo");
+    let refused = forced_undo().expect("undo");
     assert_eq!(field(&refused, "complete"), Value::Bool(false));
     assert!(
         std::fs::read(&p).unwrap() == newer,
@@ -511,9 +519,13 @@ fn a_failed_undo_does_not_undo_older_steps_past_it() {
     std::fs::remove_file(&b).expect("remove b");
     std::fs::create_dir(&b).expect("make a directory at b");
 
-    let result = call("undo", vec![Value::Int(2)]).expect("undo 2");
-    assert_eq!(field(&result, "failed"), Value::Int(1));
-    assert_eq!(field(&result, "restored"), Value::Int(0));
+    // b was replaced after its step, so undo refuses at that newest step
+    // rather than discarding the change; the older step must not run either.
+    let refused = call("undo", vec![Value::Int(2)]).expect_err("b changed after its step");
+    assert!(
+        refused.to_string().contains("changed after this step"),
+        "{refused}"
+    );
     assert_eq!(
         std::fs::read_to_string(&a).unwrap(),
         "a1",

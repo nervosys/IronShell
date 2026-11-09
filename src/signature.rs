@@ -3058,15 +3058,17 @@ pub static SIGNATURES: &[Signature] = &[
         aliases: &[],
         subject: Some(Ty::Any),
         params: &[
-            req("start", Ty::Int, "first index to keep, counting from zero"),
-            opt("end", Ty::Int, "index to stop before; omit to run to the end"),
+            req("start", Ty::Int, "first index to keep, counting from zero; a negative index counts from the end"),
+            opt("end", Ty::Int, "index to stop before, counting from zero or, when negative, from the end; omit to run to the end"),
         ],
         returns: "Any",
-        doc: "A sub-range of an array or a string.",
+        doc: "A sub-range of an array or a string, with Python's indices: slice(-3) is the last three, slice(0, -1) drops the last, and each index is clamped to the length. Strings are sliced by character. A start at or past the end gives an empty result.",
         examples: &[
             ("[1, 2, 3, 4, 5] | slice(1, 3) | len", "2"),
             ("[1, 2, 3, 4, 5] | slice(2) | len", "3"),
+            ("[1, 2, 3, 4, 5] | slice(-2) | len", "2"),
             (r#""abcdef" | slice(1, 3)"#, r#""bc""#),
+            (r#""hello" | slice(-3)"#, r#""llo""#),
         ],
     },
     Signature {
@@ -6364,15 +6366,16 @@ pub static SIGNATURES: &[Signature] = &[
         aliases: &[],
         subject: None,
         params: &[opt(
-            "n",
-            Ty::Int,
-            "steps to undo, from 1 to 10000; default 1",
-        )],
+            "n_or_options",
+            Ty::Any,
+            "steps to undo, from 1 to 10000, default 1; or {force: Bool}",
+        ), opt("options", Ty::Record, "{force: Bool}: put a file back even though it changed after its step (default false)")],
         returns: "Record",
         doc: "Put back the last n recorded file writes, most recent first; the same record as undo(n), with restored, removed, skipped, failed, steps and complete. Covers local file contents only: a network call, a process or a directory tree is reported as skipped, never restored. Journalling is on in agent mode or with IRONSHELL_JOURNAL=on. Each undone step is kept so session_redo() can re-apply it, until a new recorded write discards that redo stack (a write that is recorded and then refused still discards it). Redo is itself journaled, so session_undo() reverses it. The journal persists per session directory and is bounded to 8 MiB per file and 64 MiB in total, shared with the redo stack.",
         examples: &[
             (r#"typeof(session_undo())"#, r#"Record"#),
             (r#"typeof(session_undo(2))"#, r#"Record"#),
+            (r#"(try { session_undo(0, {force: true}) } catch e { e.error.code })"#, "E_BAD_ARG"),
         ],
     },
     Signature {
@@ -13648,13 +13651,14 @@ pub static SIGNATURES: &[Signature] = &[
         subject_required: false,
         aliases: &["rewind"],
         subject: None,
-        params: &[opt_range("steps", Ty::Int, 0, i64::MAX, "how many of the most recent recorded steps to put back, default 1")],
+        params: &[opt("steps_or_options", Ty::Any, "how many of the most recent recorded steps to put back, default 1; or {force: Bool}"), opt("options", Ty::Record, "{force: Bool}: put a file back even though it changed after its step (default false)")],
         returns: "Record",
-        doc: "Put back what the last steps overwrote, reporting each step and whether all of them were restored. Steps that cannot be reversed are listed, not hidden. A step whose restore fails stays in the journal and stops the undo, so it can be retried. Writes are recorded only in agent mode (--agent, or IRONSHELL_MODE=agent) or with IRONSHELL_JOURNAL=on; in a human session undo is refused with E_BAD_STATE, because nothing was recorded to put back.",
+        doc: "Put back what the last steps overwrote, reporting each step and whether all of them were restored. Steps that cannot be reversed are listed, not hidden. A step whose restore fails stays in the journal and stops the undo, so it can be retried. A file changed after its step (by a hand edit, say) is not overwritten: the undo is E_BAD_STATE and names the file, unless force is set, which restores it and discards those changes. Writes are recorded only in agent mode (--agent, or IRONSHELL_MODE=agent) or with IRONSHELL_JOURNAL=on; in a human session undo is refused with E_BAD_STATE, because nothing was recorded to put back.",
         examples: &[
             (r#"(try { undo("x") } catch e { e.error.code })"#, "E_BAD_ARG"),
             (r#"(try { undo(-1) } catch e { e.error.code })"#, "E_BAD_ARG"),
             (r#"typeof(undo(0))"#, "Record"),
+            (r#"typeof(undo(0, {force: true}))"#, "Record"),
         ],
     },
     Signature {
