@@ -8847,7 +8847,10 @@ fn capped_read_not_found(e: &anyhow::Error) -> bool {
 fn line_read(builtin: &str, path: &str) -> Result<String> {
     use std::io::Read;
     const MAX_BYTES: u64 = 64 * 1024 * 1024;
-    let path = validate_read_path(path)?;
+    // The jail names this builtin, as every builtin's refusal does; a name-less
+    // refusal read ": `path` is outside the workspace".
+    crate::security::check_read_jail(builtin, path)?;
+    let path = crate::security::validate_safe_path(path)?;
     let metadata = fs::metadata(&path).map_err(|e| crate::safety::fs_error(builtin, &path, &e))?;
     if metadata.len() > MAX_BYTES {
         return Err(crate::safety::budget_exceeded(

@@ -262,7 +262,7 @@ fn a_path_with_a_tab_says_how_backslashes_were_read() {
     let out = s.ish(&["-c", "file.read(\"C:\\temp\\new\")"]);
     assert!(!out.status.success());
     assert!(
-        stderr(&out).contains("the path contains a tab or newline"),
+        stderr(&out).contains("the path contains a tab, newline or carriage return"),
         "{}",
         stderr(&out)
     );

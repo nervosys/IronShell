@@ -538,9 +538,10 @@ pub fn validate_safe_path(path: &str) -> Result<PathBuf> {
         // most important thing for an agent to branch on, was the least
         // legible thing the shell said. The structured error carries only the
         // path the caller already named, so there is one arm.
-        return Err(crate::safety::outside_workspace(
+        return Err(crate::safety::outside_workspace_shown(
             "",
             &sanitize_path_in_error(path),
+            path,
         ));
     }
 
@@ -602,9 +603,10 @@ pub fn audit_read_refusal(builtin: &str, path: &str) {
 pub fn check_read_jail(builtin: &str, path: &str) -> Result<()> {
     if outside_read_jail(path) {
         audit_read_refusal(builtin, path);
-        return Err(crate::safety::outside_workspace(
+        return Err(crate::safety::outside_workspace_shown(
             builtin,
             &sanitize_path_in_error(path),
+            path,
         ));
     }
     Ok(())

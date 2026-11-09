@@ -2091,7 +2091,7 @@ pub fn lock_poisoned(builtin: &str, what: &str) -> anyhow::Error {
 /// other path.
 pub fn control_char_path_hint(path: &str) -> Option<&'static str> {
     path.chars().any(|c| matches!(c, '\t' | '\n' | '\r')).then_some(
-        "the path contains a tab or newline: in a double-quoted string a backslash starts an escape (\\t, \\n); write forward slashes (C:/temp/new) or double the backslashes",
+        "the path contains a tab, newline or carriage return: in a double-quoted string a backslash starts an escape (\\t, \\n, \\r); write forward slashes (C:/temp/new) or double the backslashes",
     )
 }
 
@@ -2473,15 +2473,24 @@ pub fn crypto_failed(
 /// boundary is the single most important thing for an agent to be able to
 /// branch on, and it was the least legible.
 pub fn outside_workspace(builtin: &str, path: &str) -> anyhow::Error {
+    outside_workspace_shown(builtin, path, path)
+}
+
+/// [`outside_workspace`] for a path shown in a shortened form. `raw` is the path
+/// as the caller wrote it: its control characters, which the shortened form may
+/// have dropped, decide the hint.
+pub fn outside_workspace_shown(builtin: &str, shown: &str, raw: &str) -> anyhow::Error {
     anyhow::Error::new(SafetyError {
         code: ErrorCode::OutsideWorkspace,
-        message: format!("{builtin}: `{path}` is outside the workspace"),
+        message: format!("{builtin}: `{shown}` is outside the workspace"),
         builtin: builtin.to_string(),
-        hint: outside_workspace_hint(),
+        hint: control_char_path_hint(raw)
+            .map(str::to_string)
+            .unwrap_or_else(outside_workspace_hint),
         approval: None,
         did_you_mean: Vec::new(),
         expected: "a path inside the workspace".to_string(),
-        got: path.to_string(),
+        got: shown.to_string(),
         extra: serde_json::Map::new(),
     })
 }
@@ -2515,7 +2524,9 @@ pub fn fs_error(
     path: impl AsRef<std::path::Path>,
     e: &std::io::Error,
 ) -> anyhow::Error {
-    let path = path.as_ref().display().to_string();
+    // A canonicalised path carries the `\\?\` verbatim prefix on Windows. The
+    // message shows the ordinary form, as the other builtins' paths do.
+    let path = strip_verbatim_prefix(path.as_ref()).display().to_string();
     let path = path.as_str();
     match e.kind() {
         std::io::ErrorKind::NotFound => not_found(builtin, "file", path),
@@ -2537,9 +2548,15 @@ pub fn fs_error(
             code: ErrorCode::Io,
             message: format!("{builtin}: cannot read `{path}`: {e}"),
             builtin: builtin.to_string(),
-            hint: "a filesystem failure that is neither absence nor a \
-                   permission refusal; the message names the condition"
-                .to_string(),
+            // Windows refuses a control character in a name with an invalid-name
+            // error, not "not found"; the escape is the likely cause, so say so.
+            hint: control_char_path_hint(path)
+                .map(str::to_string)
+                .unwrap_or_else(|| {
+                    "a filesystem failure that is neither absence nor a \
+                     permission refusal; the message names the condition"
+                        .to_string()
+                }),
             approval: None,
             did_you_mean: Vec::new(),
             expected: format!("`{path}` to be readable"),
