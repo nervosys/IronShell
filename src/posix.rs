@@ -1204,6 +1204,19 @@ impl Shell {
         let mut have = false;
         let tilde =
             matches!(w.first(), Some(Part::Lit(s, false)) if s == "~" || s.starts_with("~/"));
+        // `"$@"` with no arguments is no word at all, even though the quotes
+        // around it would otherwise make an empty one.
+        if self.positional.is_empty()
+            && w.iter()
+                .any(|p| matches!(p, Part::Var(name, None, true) if name == "@"))
+            && w.iter().all(|p| match p {
+                Part::Var(name, None, true) => name == "@",
+                Part::Lit(s, true) => s.is_empty(),
+                _ => false,
+            })
+        {
+            return Vec::new();
+        }
 
         for (idx, part) in w.iter().enumerate() {
             match part {
@@ -1250,7 +1263,13 @@ impl Shell {
                 // expansion.
                 Part::Var(name, None, false) if name == "@" || name == "*" => {
                     let args = self.positional.clone();
-                    for arg in &args {
+                    for (k, arg) in args.iter().enumerate() {
+                        // Each argument ends the field before it: `$* x` with
+                        // arguments a and b is three words, not `ab x`.
+                        if k > 0 && have {
+                            fields.push((std::mem::take(&mut cur), std::mem::take(&mut mask)));
+                            have = false;
+                        }
                         self.splice(arg, false, &mut fields, &mut cur, &mut mask, &mut have);
                     }
                 }
