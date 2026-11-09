@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security
+
+- A relative workspace root (`--workspace proj` or `IRONSHELL_WORKSPACE=proj`) no longer lets a write escape it: `file_write("../x", ...)` was judged as `proj/x` and written as `x`, outside the workspace, while reads of the same path were refused. The root is now always absolute, and `--workspace` is fixed at startup.
+
 ### Changed
 
 - `print` writes a String as its text: `print("x")` wrote `"x"` with the quotes, and returned the quoted form.
@@ -25,6 +29,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Invalid TOML, JSON or YAML given to `open` or `from_toml` is E_BAD_VALUE (not retryable), with the line and column in the hint.
 - A malformed `\u` escape is E_PARSE naming the escape and its position, instead of being kept with its backslash.
 - `??` is refused by the lexer with a hint that IronShell has no such operator.
+- `ish -b` refuses, before anything runs, shell builtins the subset does not run (`getopts`, `eval`, `source`, `trap`, `local`, `set` with options such as `set -e`, and others); they were run as missing programs and the script went on with the wrong result. `IRONSHELL_ALLOW_SH` still hands them to the transpiler.
+- `open` and `json.parse` report text that does not parse as E_BAD_VALUE (not retryable), like `from_toml`, keeping the line and column in the hint.
+- `error(msg, extra)` accepts `hint`, `expected` and `got` as extra fields; a refusal of `error()`'s own arguments is not retryable.
+- `sed` in file mode reports `status: "unchanged"` and leaves the file alone when nothing matched.
+- A pipeline whose later stage names no builtin fails before its first stage runs; `file.write(...) | nosuchfn()` wrote the file first.
+- `to_json`, `from_csv` and `to_csv` take the value as an argument when nothing is piped.
 
 ### Added
 
@@ -41,6 +51,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `regex_find` and `regex_find_all` matches carry `named`, the named groups (`(?P<d>...)`) by name, null where a group did not take part.
 - `"\${"` writes a literal `${` in a string.
 - `date_parse` without a format accepts `YYYY-MM-DD HH:MM:SS` and `YYYY-MM-DDTHH:MM:SS` as UTC; with a format, a mismatch names the format.
+- `ish -b`: `shift` and `shift N`.
+- `ontology_describe("redo")` and other session verbs describe their builtin; an alias such as `delete_lines` names the builtin that implements it, and `ish agent schema --module file` lists `delete_lines`. `file_insert` documents its `{after: text}` anchor.
 
 ### Fixed
 
@@ -59,6 +71,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - A regex refusal quotes at most 60 characters of the pattern and states the 1 MiB size cap; it no longer repeats a huge pattern in full.
 - An unclosed `[` or `{` is reported at the line it was opened on, and E_PARSE JSON carries `line` and `column`. An error inside a lambda names where the lambda was defined.
 - Hints: a block of several statements where one expression is expected; an unknown name inside `${...}` suggests `\${` for a literal; `time.now()` and `str.slice`-style members that are top-level builtins say how to call them; did-you-mean covers date, regex, padding and TOML spellings; `file_insert` at line 0 and `slice(null, 1)` say what is wrong; `ish agent schema --help` names `--module`.
+- An approval token from a refused `delete_lines` call approves the same call when retried with `IRONSHELL_APPROVE`; the refusal and the check judged different builtin names and paths.
+- `int("99999999999999999999")` says the number does not fit in a 64-bit Int, instead of calling it not a whole number.
+- A block with two statements is one parse error carrying the one-expression hint, not five.
+- Suggestions: library spellings (`json.loads`, `toml.parse`, `re.findall`, `regex.match`, `filter`) suggest the IronShell builtin they mean; the unknown-name hint shows `x = ...`.
+- Messages: missing-file and outside-workspace errors drop the `\\?\` prefix and name the builtin; a carriage return in a path gets the forward-slash hint; two hints lost a run of spaces; the division-by-zero hint is reworded; `date_diff` states what its default unit counts.
 
 
 ## [14.0.1] - 2026-11-08
