@@ -70738,13 +70738,21 @@ fn bi_sed_replace(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
     } else {
         text
     };
+    let before = file.as_ref().map(|_| source.clone());
     let result = regex_substitute(&re, &replacement, source, global);
     if let Some((original, path)) = file {
-        crate::tx::snapshot(&path);
-        write_file_atomically("sed", &path, result.as_bytes())?;
+        // The pattern matched nothing, or only text it replaced with itself: the
+        // file is left as it is, unwritten and unjournalled.
+        let status = if before.as_deref() == Some(result.as_str()) {
+            "unchanged"
+        } else {
+            crate::tx::snapshot(&path);
+            write_file_atomically("sed", &path, result.as_bytes())?;
+            "modified"
+        };
         Ok(Value::Record(BTreeMap::from([
             ("file".into(), Value::Str(original)),
-            ("status".into(), Value::Str("modified".into())),
+            ("status".into(), Value::Str(status.into())),
         ])))
     } else {
         Ok(Value::Str(result))
