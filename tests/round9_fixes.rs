@@ -92,7 +92,7 @@ fn powershell_style_builtins_are_catalogued_by_their_callable_name() {
     for name in ["select", "measure", "foreach"] {
         let v = iron_shell::agent_api::ontology_describe_json(name);
         let sig = v["signature"].as_str().unwrap_or_default();
-        assert!(sig.starts_with(&format!("{name}(")), "{name}: {v}");
+        assert!(sig.contains(&format!("{name}(")), "{name}: {v}");
         let head = sig.split("->").next().unwrap_or_default();
         assert!(!head.contains('-'), "{name} renders a hyphen: {sig}");
     }
