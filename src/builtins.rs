@@ -13677,7 +13677,7 @@ fn bi_contains(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
             "contains",
             "a string",
             "Array",
-            "contains searches a string for a substring; to test whether an array              holds a value, pipe the value to in: `value | in(array)`",
+            "contains searches a string for a substring; to test whether an array holds a value, pipe the value to in: `value | in(array)`",
         ));
     }
     let text = expect_string("contains", &input_val)?;

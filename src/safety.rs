@@ -2846,7 +2846,7 @@ pub fn unknown_builtin_hinted(
 /// value they never had.
 pub fn unknown_module(name: &str, candidates: Vec<String>) -> anyhow::Error {
     let hint = if candidates.is_empty() {
-        "no module has a similar name; call ontology_manifest() to list the          available categories"
+        "no module has a similar name; call ontology_manifest() to list the available categories"
             .to_string()
     } else {
         format!("did you mean: {}", candidates.join(", "))
