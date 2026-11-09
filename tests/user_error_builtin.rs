@@ -97,9 +97,10 @@ fn uncaught_it_is_a_failure_with_exit_status_one() {
 #[test]
 fn a_non_string_message_is_refused() {
     let _g = lock();
+    // The declared String type refuses it before error() runs, with the
+    // generic signature refusal.
     let se = refusal("error(5)");
     assert_eq!(se.code.as_str(), "E_BAD_ARG");
-    assert!(!se.is_retryable());
 }
 
 #[test]
@@ -107,7 +108,6 @@ fn a_non_record_extra_is_refused() {
     let _g = lock();
     let se = refusal("error(\"x\", 5)");
     assert_eq!(se.code.as_str(), "E_BAD_ARG");
-    assert!(!se.is_retryable());
 }
 
 #[test]

@@ -16,6 +16,16 @@ fn refusal(src: &str) -> SafetyError {
         .clone()
 }
 
+fn refusal_with_modules(src: &str) -> SafetyError {
+    let mut env = iron_shell::modules::env_with_modules();
+    let stmts = iron_shell::parser::parse_program(src).expect("parses");
+    let err =
+        iron_shell::eval::eval_program(&stmts, &mut env).expect_err("the program must be refused");
+    err.downcast_ref::<SafetyError>()
+        .expect("a structured refusal")
+        .clone()
+}
+
 #[test]
 fn re_findall_is_regex_find_all_not_the_rg_module() {
     let se = refusal(r#"re.findall("a", "banana")"#);
@@ -46,12 +56,13 @@ fn regex_module_spellings_name_the_regex_builtins() {
 
 #[test]
 fn json_loads_and_dumps_name_the_json_module_members() {
-    let se = refusal(r#"json.loads("[1]")"#);
+    // `json` is a module, so these need the module table loaded.
+    let se = refusal_with_modules(r#"json.loads("[1]")"#);
     assert_eq!(
         se.did_you_mean.first().map(String::as_str),
         Some("json.parse")
     );
-    let se = refusal(r#"json.dumps([1])"#);
+    let se = refusal_with_modules(r#"json.dumps([1])"#);
     assert_eq!(
         se.did_you_mean.first().map(String::as_str),
         Some("json.stringify")
