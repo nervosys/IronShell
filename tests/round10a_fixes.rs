@@ -135,8 +135,7 @@ fn sed_file_mode_may_prefix_every_line_with_an_anchored_empty_match() {
     // `(?m)^` matches empty text, but only at line starts: prefixing lines is
     // an ordinary sed edit, not the between-every-character corruption.
     let dir = Scratch::new("sed_prefix");
-    let p = dir.file("t4.txt", "one
-two");
+    let p = dir.file("t4.txt", "one\ntwo");
     call("sed", vec![s("(?m)^"), s("> "), s(&p), file_mode()]).expect("edits");
     let text = std::fs::read_to_string(&p).unwrap();
     assert!(text.lines().all(|l| l.starts_with("> ")), "{text:?}");
