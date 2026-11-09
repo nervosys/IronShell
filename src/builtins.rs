@@ -48755,7 +48755,14 @@ fn refuse_empty_find(builtin: &str, find: &str) -> Result<()> {
 /// character of a file, so a file edit with it would insert the replacement
 /// everywhere. Refused before the file is read or written.
 fn refuse_empty_matching_regex(builtin: &str, pattern: &str, re: &regex::Regex) -> Result<()> {
-    if !re.is_match("") {
+    // What corrupts a file is an empty match *between two characters*: `x*` or
+    // `(?:)` inserts the replacement everywhere. An empty match only at a line
+    // start or end (`(?m)^`, `$`) or at a boundary is an ordinary sed edit, such
+    // as prefixing every line, so it is allowed.
+    let between = re
+        .find_at("ab", 1)
+        .is_some_and(|m| m.start() == 1 && m.is_empty());
+    if !between {
         return Ok(());
     }
     Err(crate::safety::bad_arg_in(

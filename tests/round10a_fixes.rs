@@ -130,6 +130,19 @@ fn sed_file_mode_still_edits_with_a_pattern_that_needs_text() {
     assert_eq!(std::fs::read_to_string(&p).unwrap(), "x");
 }
 
+#[test]
+fn sed_file_mode_may_prefix_every_line_with_an_anchored_empty_match() {
+    // `(?m)^` matches empty text, but only at line starts: prefixing lines is
+    // an ordinary sed edit, not the between-every-character corruption.
+    let dir = Scratch::new("sed_prefix");
+    let p = dir.file("t4.txt", "one
+two");
+    call("sed", vec![s("(?m)^"), s("> "), s(&p), file_mode()]).expect("edits");
+    let text = std::fs::read_to_string(&p).unwrap();
+    assert!(text.lines().all(|l| l.starts_with("> ")), "{text:?}");
+    assert!(text.contains("one") && text.contains("two"), "{text:?}");
+}
+
 // ---- 3. An empty file_insert is refused ----
 
 #[test]
