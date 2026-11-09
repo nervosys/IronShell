@@ -6293,45 +6293,53 @@ fn bi_len(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
 ///   try { error("boom") } catch e { e.message }                 # "boom"
 ///   try { error("bad", {field: "age"}) } catch e { e.field }   # "age"
 fn bi_error(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
+    // Every refusal of error()'s own arguments is not retryable: the same
+    // arguments are refused again. It is bad_value_in, which keeps the wire
+    // code E_BAD_ARG that these refusals have always had.
     let message = match args.first().or(input.as_ref()) {
         Some(Value::Str(s)) => s.clone(),
         Some(other) => {
-            return Err(crate::safety::bad_arg(
+            return Err(crate::safety::bad_value_in(
                 "error",
-                "a message String",
-                other.type_name(),
+                format!(
+                    "error: the message is {}, expected a String",
+                    other.type_name()
+                ),
+                "give the reason as text, e.g. error(\"what went wrong\")",
             ))
         }
         None => {
-            return Err(crate::safety::bad_arg(
+            return Err(crate::safety::bad_value_in(
                 "error",
-                "a message String",
-                "nothing",
+                "error: the message is nothing, expected a String",
+                "give the reason as text, e.g. error(\"what went wrong\")",
             ))
         }
     };
     // An error with no reason is not one an agent can act on, and it reads as
     // a failure with nothing wrong in it.
     if message.is_empty() {
-        return Err(crate::safety::bad_arg_in(
+        return Err(crate::safety::bad_value_in(
             "error",
             "error: the message is empty",
             "give the reason as text, e.g. error(\"what went wrong\")",
         ));
     }
     let mut extra = serde_json::Map::new();
+    let mut hint = None;
     match args.get(1) {
         None => {}
         Some(Value::Record(fields)) => {
             // A field named like a standard error key would be dropped without
             // a word (`to_json` keeps the standard value), so refuse it here.
+            // These refusals are not retryable: the same arguments fail again.
             let clashes: Vec<String> = fields
                 .iter()
                 .filter(|(key, _)| crate::safety::ERROR_RESERVED_KEYS.contains(&key.as_str()))
                 .map(|(key, _)| format!("`{key}`"))
                 .collect();
             if !clashes.is_empty() {
-                return Err(crate::safety::bad_arg_in(
+                return Err(crate::safety::bad_value_in(
                     "error",
                     format!(
                         "error: extra field {} is reserved: the standard error fields are {}",
@@ -6342,18 +6350,37 @@ fn bi_error(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
                 ));
             }
             for (key, value) in fields {
+                // A script's `hint` is the advice its caller reads, so it
+                // replaces the default hint rather than sitting beside it.
+                if key == "hint" {
+                    let Value::Str(text) = value else {
+                        return Err(crate::safety::bad_value_in(
+                            "error",
+                            format!(
+                                "error: extra field `hint` is {}, expected a String",
+                                value.type_name()
+                            ),
+                            "give the advice as text, e.g. {hint: \"retry after the sync\"}",
+                        ));
+                    };
+                    hint = Some(text.clone());
+                    continue;
+                }
                 extra.insert(key.clone(), value.to_json());
             }
         }
         Some(other) => {
-            return Err(crate::safety::bad_arg(
+            return Err(crate::safety::bad_value_in(
                 "error",
-                "a Record of extra fields, or nothing",
-                other.type_name(),
+                format!(
+                    "error: the extra fields are {}, expected a Record or nothing",
+                    other.type_name()
+                ),
+                "pass the extra fields as a Record, e.g. error(\"bad\", {field: \"age\"})",
             ))
         }
     }
-    Err(crate::safety::user_error(message, extra))
+    Err(crate::safety::user_error(message, extra, hint))
 }
 
 /// `str(v)` — render a value as the string a user would see.

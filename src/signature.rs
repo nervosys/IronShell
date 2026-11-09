@@ -7225,7 +7225,7 @@ pub static SIGNATURES: &[Signature] = &[
         subject: None,
         params: &[
             opt("message", Ty::Str, "the message the caught error carries, as given; omitted, it is the pipeline input"),
-            opt("extra", Ty::Record, "fields added to the caught error record, such as {field: \"age\"}; they never replace code, message or hint"),
+            opt("extra", Ty::Record, "fields added to the caught error record, such as {field: \"age\"}; code, message, retryable, builtin, error, did_you_mean and approval cannot be set; hint replaces the default hint, and expected and got are shown"),
         ],
         returns: "Null",
         doc: "Raise an error the script chose. It is E_USER with the message as given, and it does not return. A Record extra adds its fields to the caught error, so a script can name the bad field without parsing the message. Catch it with try/catch; uncaught, the script stops with a non-zero status. With no argument it takes the message from pipeline input.",

@@ -97,11 +97,53 @@ fn uncaught_it_is_a_failure_with_exit_status_one() {
 #[test]
 fn a_non_string_message_is_refused() {
     let _g = lock();
-    assert_eq!(refusal("error(5)").code, ErrorCode::BadArg);
+    let se = refusal("error(5)");
+    assert_eq!(se.code.as_str(), "E_BAD_ARG");
+    assert!(!se.is_retryable());
 }
 
 #[test]
 fn a_non_record_extra_is_refused() {
     let _g = lock();
-    assert_eq!(refusal("error(\"x\", 5)").code, ErrorCode::BadArg);
+    let se = refusal("error(\"x\", 5)");
+    assert_eq!(se.code.as_str(), "E_BAD_ARG");
+    assert!(!se.is_retryable());
+}
+
+#[test]
+fn hint_expected_and_got_are_allowed_and_reach_the_caller() {
+    let _g = lock();
+    assert_eq!(
+        run("try { error(\"bad\", {hint: \"retry after the sync\"}) } catch e { e.hint }").unwrap(),
+        Value::Str("retry after the sync".to_string())
+    );
+    assert_eq!(
+        run("try { error(\"bad\", {expected: \"a date\", got: \"noon\"}) } catch e { e.got }")
+            .unwrap(),
+        Value::Str("noon".to_string())
+    );
+    assert_eq!(
+        run("try { error(\"bad\", {expected: \"a date\", got: \"noon\"}) } catch e { e.expected }")
+            .unwrap(),
+        Value::Str("a date".to_string())
+    );
+}
+
+#[test]
+fn a_refused_hint_is_not_retryable() {
+    let _g = lock();
+    let se = refusal("error(\"bad\", {hint: 5})");
+    assert_eq!(se.code.as_str(), "E_BAD_ARG");
+    assert!(!se.is_retryable());
+    assert!(se.message.contains("`hint`"), "{}", se.message);
+}
+
+#[test]
+fn the_still_reserved_keys_are_refused_and_not_retryable() {
+    let _g = lock();
+    for key in ["code", "retryable", "approval", "did_you_mean"] {
+        let se = refusal(&format!("error(\"bad\", {{{key}: 1}})"));
+        assert_eq!(se.code.as_str(), "E_BAD_ARG", "{key}");
+        assert!(!se.is_retryable(), "{key}");
+    }
 }

@@ -2631,33 +2631,36 @@ pub fn os_denied(
 
 /// The keys of the standard error record. A script's `error(message, extra)`
 /// field with one of these names would never reach the caller, so `error`
-/// refuses it. Keep in step with the keys [`SafetyError::to_json`] emits.
+/// refuses it. `hint`, `expected` and `got` are not here: a script may set them,
+/// and they reach the caller (`hint` replaces the default hint). Keep in step
+/// with the keys [`SafetyError::to_json`] emits.
 pub const ERROR_RESERVED_KEYS: &[&str] = &[
     "code",
     "message",
-    "hint",
     "retryable",
     "builtin",
     "error",
-    "expected",
-    "got",
     "did_you_mean",
     "approval",
 ];
 
 /// The error a script raises with `error(message[, extra])` (`E_USER`). `extra`
-/// is merged into the caught record by [`SafetyError::to_json`].
+/// is merged into the caught record by [`SafetyError::to_json`]. A `hint` the
+/// script gives replaces the default one.
 pub fn user_error(
     message: String,
     extra: serde_json::Map<String, serde_json::Value>,
+    hint: Option<String>,
 ) -> anyhow::Error {
     anyhow::Error::new(SafetyError {
         code: ErrorCode::User,
         message,
         builtin: "error".to_string(),
-        hint: "raised by error() in the script; catch it with try { } catch e { ... }, \
-               or fix the step that raised it"
-            .to_string(),
+        hint: hint.unwrap_or_else(|| {
+            "raised by error() in the script; catch it with try { } catch e { ... }, \
+             or fix the step that raised it"
+                .to_string()
+        }),
         approval: None,
         did_you_mean: Vec::new(),
         expected: String::new(),
