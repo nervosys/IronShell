@@ -3843,6 +3843,15 @@ fn edit_distance_within(a: &str, b: &str, max: usize) -> Option<usize> {
 /// result is empty. The budget scales with name length (1 for very short names,
 /// where every neighbour is a different command; up to 3 for long dotted ones).
 pub fn did_you_mean(name: &str) -> Vec<String> {
+    did_you_mean_among(name, std::iter::empty())
+}
+
+/// `did_you_mean` for a bare name that may also be a bound variable: `extra`
+/// are the variable names, searched alongside the builtins. The mapped
+/// spellings (`date` -> `now_iso`, `raise` -> `error`) come first in both the
+/// builtin and the unknown-name paths, so they are never pushed out by a
+/// nearby but unrelated name.
+pub fn did_you_mean_among<'a>(name: &str, extra: impl Iterator<Item = &'a str>) -> Vec<String> {
     // The conversion spellings of other languages come first. `to_int` is four
     // edits from `int`, past the edit budget, so the nearest-name search would
     // never find them; they are named outright.
@@ -3870,7 +3879,7 @@ pub fn did_you_mean(name: &str) -> Vec<String> {
             out.push(spelled);
         }
     }
-    for near in nearest_names(name, BUILTIN_LOOKUP.keys().copied()) {
+    for near in nearest_names(name, extra.chain(BUILTIN_LOOKUP.keys().copied())) {
         if out.len() == 3 {
             break;
         }
@@ -3881,6 +3890,17 @@ pub fn did_you_mean(name: &str) -> Vec<String> {
     out
 }
 
+/// The edit budget for a suggestion to `name`. Budget scales with length: for a
+/// very short name every neighbour is a different command, so only an
+/// exact-ish match is a real suggestion.
+fn edit_budget(name: &str) -> usize {
+    match name.chars().count() {
+        0..=3 => 1,
+        4..=7 => 2,
+        _ => 3,
+    }
+}
+
 /// The nearest names to `name` from an arbitrary candidate set, closest first
 /// (at most 3), or empty when nothing is within the edit budget.
 ///
@@ -3888,13 +3908,7 @@ pub fn did_you_mean(name: &str) -> Vec<String> {
 /// builtins and misspelled *record fields* — which is how module functions
 /// (`file.read`) resolve, and therefore how most agent typos actually present.
 pub fn nearest_names<'a>(name: &str, candidates: impl Iterator<Item = &'a str>) -> Vec<String> {
-    // Budget scales with length: for a very short name every neighbour is a
-    // different command, so only an exact-ish match is a real suggestion.
-    let budget = match name.chars().count() {
-        0..=3 => 1,
-        4..=7 => 2,
-        _ => 3,
-    };
+    let budget = edit_budget(name);
     let lower = name.to_lowercase();
     let mut scored: Vec<(usize, &'a str)> = candidates
         .filter_map(|cand| {
@@ -3909,6 +3923,60 @@ pub fn nearest_names<'a>(name: &str, candidates: impl Iterator<Item = &'a str>) 
     scored.dedup_by(|a, b| a.1 == b.1);
     scored.truncate(3);
     scored.into_iter().map(|(_, n)| n.to_string()).collect()
+}
+
+/// Suggestions for `module.field` where the module has no such member.
+///
+/// The module's own members come first, nearest first. A global builtin is
+/// added only when its name contains the typed member or the reverse, or it is
+/// one edit away: an unrelated global (`str.padd` -> `pwd`) is worse than no
+/// suggestion. At most three in all.
+pub fn module_member_candidates(module: &str, field: &str, members: &[&str]) -> Vec<String> {
+    // A member is near when its whole name or one of its `_` parts is: `padd`
+    // and `lpad` both reach `pad_left` through its `pad` part.
+    let typed = field.to_lowercase();
+    let budget = edit_budget(field);
+    let mut near: Vec<(usize, &str)> = members
+        .iter()
+        .filter_map(|m| {
+            std::iter::once(*m)
+                .chain(m.split('_'))
+                .filter_map(|part| edit_distance_within(&typed, &part.to_lowercase(), budget))
+                .min()
+                .map(|d| (d, *m))
+        })
+        .collect();
+    near.sort_unstable_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.cmp(b.1)));
+    near.dedup_by(|a, b| a.1 == b.1);
+    let mut out: Vec<String> = near
+        .into_iter()
+        .take(3)
+        .map(|(_, m)| format!("{module}.{m}"))
+        .collect();
+    let mut globals: Vec<(usize, &str)> = BUILTIN_LOOKUP
+        .keys()
+        .copied()
+        .filter_map(|g| {
+            let lower = g.to_lowercase();
+            let related = lower.contains(&typed) || typed.contains(&lower);
+            let distance = edit_distance_within(
+                &typed,
+                &lower,
+                typed.chars().count() + lower.chars().count(),
+            )?;
+            (related || distance <= 1).then_some((distance, g))
+        })
+        .collect();
+    globals.sort_unstable_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.cmp(b.1)));
+    for (_, global) in globals {
+        if out.len() == 3 {
+            break;
+        }
+        if !out.iter().any(|o| o == global) {
+            out.push(global.to_string());
+        }
+    }
+    out
 }
 
 pub fn call(name: &str, args: Vec<Value>, env: &mut Env) -> Result<Value> {
@@ -6131,6 +6199,15 @@ fn bi_error(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
             ))
         }
     };
+    // An error with no reason is not one an agent can act on, and it reads as
+    // a failure with nothing wrong in it.
+    if message.is_empty() {
+        return Err(crate::safety::bad_arg_in(
+            "error",
+            "error: the message is empty",
+            "give the reason as text, e.g. error(\"what went wrong\")",
+        ));
+    }
     let mut extra = serde_json::Map::new();
     match args.get(1) {
         None => {}
@@ -10045,6 +10122,12 @@ fn bi_to_csv(_args: Vec<Value>, input: Option<Value>) -> Result<Value> {
                                 .map(|v| match v {
                                     // An empty CSV field, not "<null>".
                                     Value::Null => String::new(),
+                                    // A nested record or array is written as its
+                                    // compact JSON, not a "{…}" or "[len=1]" placeholder
+                                    // that loses the data.
+                                    Value::Record(_) | Value::Array(_) => {
+                                        csv_escape(&value_to_json(v.clone()).to_string())
+                                    }
                                     v => csv_escape(&value_to_string(v)),
                                 })
                                 .unwrap_or_default()
@@ -13058,10 +13141,11 @@ fn bi_first(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
 
     // Fast path for the bare call (most common case). An explicit count of 1
     // is an Array like every other count: `first(1) | map(...)` must map over
-    // a list, not a scalar.
+    // a list, not a scalar. The bare call names one element, and an empty
+    // array has none: null, not an empty array.
     if count == 1 && count_arg.is_none() {
         return if arr.is_empty() {
-            Ok(Value::Array(vec![]))
+            Ok(Value::Null)
         } else {
             Ok(arr[0].clone())
         };
@@ -13106,10 +13190,11 @@ fn bi_last(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
     }
 
     // Fast path for the bare call (most common case). An explicit count of 1
-    // is an Array like every other count, as in `first`.
+    // is an Array like every other count, as in `first`; the bare call on an
+    // empty array is null, as `first` is.
     if count == 1 && count_arg.is_none() {
         return if arr.is_empty() {
-            Ok(Value::Array(vec![]))
+            Ok(Value::Null)
         } else {
             Ok(arr[arr.len() - 1].clone())
         };
@@ -14120,6 +14205,19 @@ static SCRIPT_ARGS: std::sync::OnceLock<Vec<String>> = std::sync::OnceLock::new(
 /// Record the arguments of the script about to run. Only the first call counts.
 pub fn set_script_args(args: Vec<String>) {
     let _ = SCRIPT_ARGS.set(args);
+}
+
+/// Set when the program came from `ish -c`, where `args()` is always empty.
+static RUN_UNDER_C: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Record that the program is a `-c` one-liner. Called once by `main`.
+pub fn set_run_under_c() {
+    RUN_UNDER_C.store(true, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// Whether the program came from `ish -c` (no script file, so no `args()`).
+pub fn run_under_c() -> bool {
+    RUN_UNDER_C.load(std::sync::atomic::Ordering::Relaxed)
 }
 
 /// The script's arguments in order: what `args()` returns and what `$1`..`$9`
@@ -47924,15 +48022,24 @@ fn file_insert_past_end(path: &str, line: usize, count: usize) -> anyhow::Error 
 /// Patches is an array of records: [{find: "old", replace: "new"}, ...]
 /// Usage: file_patch("config.txt", [{find: "DEBUG=0", replace: "DEBUG=1"}])
 fn bi_file_patch(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
+    file_patch_for("file_patch", args, input)
+}
+
+/// The body of `file_patch`, reporting every error under `builtin`. `file_replace`
+/// delegates here with its own name, so a directory or an unreadable file is
+/// reported as the builtin the caller invoked.
+fn file_patch_for(builtin: &str, args: Vec<Value>, input: Option<Value>) -> Result<Value> {
     if args.is_empty() {
-        return Err(crate::safety::arg_err("file_patch requires a file path"));
+        return Err(crate::safety::arg_err(format!(
+            "{builtin} requires a file path"
+        )));
     }
 
     let path = match &args[0] {
         Value::Str(s) => s.clone(),
         other => {
             return Err(crate::safety::bad_arg(
-                "file_patch",
+                builtin,
                 "path: String",
                 other.type_name(),
             ))
@@ -47940,17 +48047,17 @@ fn bi_file_patch(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
     };
     // Classified `ReadLocal` while the body wrote the file back in place.
     // `WriteLocal` is what the jail keys on, so this path went uncontained.
-    let path = guard_local_write("file_patch", &path)?;
-    require_edit_target("file_patch", &path)?;
+    let path = guard_local_write(builtin, &path)?;
+    require_edit_target(builtin, &path)?;
 
     let patches = if args.len() > 1 {
         match &args[1] {
             Value::Array(arr) => arr.clone(),
             Value::Record(r) => vec![Value::Record(r.clone())],
             _ => {
-                return Err(crate::safety::arg_err(
-                    "file_patch: patches must be an array of records",
-                ))
+                return Err(crate::safety::arg_err(format!(
+                    "{builtin}: patches must be an array of records"
+                )))
             }
         }
     } else {
@@ -47958,9 +48065,9 @@ fn bi_file_patch(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
             Some(Value::Array(arr)) => arr,
             Some(Value::Record(r)) => vec![Value::Record(r)],
             _ => {
-                return Err(crate::safety::arg_err(
-                    "file_patch: patches must be provided",
-                ))
+                return Err(crate::safety::arg_err(format!(
+                    "{builtin}: patches must be provided"
+                )))
             }
         }
     };
@@ -47969,7 +48076,7 @@ fn bi_file_patch(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
     // file_edit caps its own.
     if patches.len() > 10_000 {
         return Err(crate::safety::budget_exceeded(
-            "file_patch",
+            builtin,
             "batch exceeds 10000 patches".into(),
             "use a smaller batch",
         ));
@@ -47979,7 +48086,7 @@ fn bi_file_patch(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
     for (index, patch) in patches.iter().enumerate() {
         let Value::Record(record) = patch else {
             return Err(crate::safety::arg_err(format!(
-                "file_patch: patch {index} must be a record"
+                "{builtin}: patch {index} must be a record"
             )));
         };
         for names in [["find", "old", "search"], ["replace", "new", "with"]] {
@@ -47991,7 +48098,7 @@ fn bi_file_patch(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
                 Some(Value::Str(_))
             ) {
                 return Err(crate::safety::arg_err(format!(
-                    "file_patch: patch {index} requires a {} string",
+                    "{builtin}: patch {index} requires a {} string",
                     names[0]
                 )));
             }
@@ -47999,7 +48106,7 @@ fn bi_file_patch(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
     }
 
     // Read current content
-    let mut content = read_text_capped("file_patch", &path)?;
+    let mut content = read_text_capped(builtin, &path)?;
 
     let mut applied = Vec::new();
     let mut failed = Vec::new();
@@ -48075,8 +48182,8 @@ fn bi_file_patch(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
     if let Some(&first) = failed_at.first() {
         let find = failed_find.first().cloned().unwrap_or_default();
         return Err(crate::safety::edit_not_found(
-            "file_patch",
-            format!("file_patch: pattern not found in {path}"),
+            builtin,
+            format!("{builtin}: pattern not found in {path}"),
             &format!(
                 "patch {first} looks for {find:?}, which is not in the file as written. \
                  Nothing was written. Read the file first and copy the exact text: a \
@@ -48088,7 +48195,7 @@ fn bi_file_patch(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
     if written {
         // Write back atomically
         crate::tx::snapshot(&path); // record pre-patch state if a transaction is active
-        write_file_atomically("file_patch", &path, content.as_bytes())?;
+        write_file_atomically(builtin, &path, content.as_bytes())?;
     } else {
         crate::journal::report_no_change();
     }
@@ -48172,7 +48279,8 @@ fn bi_file_replace(args: Vec<Value>, _input: Option<Value>) -> Result<Value> {
 
     // The one-patch batch reports its miss as `file_patch`; a caller who asked
     // for file_replace is told about file_replace.
-    match bi_file_patch(
+    match file_patch_for(
+        "file_replace",
         vec![
             Value::Str(path.clone()),
             Value::Array(vec![Value::Record(patch)]),
@@ -48264,7 +48372,12 @@ fn bi_file_insert(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
 
     match &args[1] {
         Value::Int(line_num) => {
-            let line = (*line_num).max(1) as usize;
+            if *line_num < 1 {
+                return Err(crate::safety::arg_err(
+                    "file_insert: lines are numbered from 1",
+                ));
+            }
+            let line = *line_num as usize;
             if line > lines.len() + 1 {
                 return Err(file_insert_past_end(&path, line, lines.len()));
             }

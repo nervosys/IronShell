@@ -545,10 +545,9 @@ fn connect(
                 bad(
                     builtin,
                     "no rows to query".to_string(),
-                    format!(
-                        "pipe rows in (`rows | {builtin}(\"select … from t\")`), or name a \
-                         source: {builtin}(\"data.json\", query)"
-                    ),
+                    "sql runs over piped rows ([{a: 1}] | sql(\"select * from t\")) or a file \
+                     (sql_value(\"data.csv\", \"select ...\"))"
+                        .to_string(),
                     "piped rows, or a source argument",
                     "nothing".to_string(),
                 )

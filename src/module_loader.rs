@@ -258,13 +258,16 @@ fn load(source: &str) -> Result<(PathBuf, Exports)> {
     }
 
     let loading_now = LOADING.with(|l| l.borrow().clone());
-    if let Some(start) = loading_now.iter().position(|p| *p == path) {
-        let mut chain: Vec<String> = loading_now[start..].iter().map(|p| display(p)).collect();
-        chain.push(display(&path));
+    if loading_now.iter().any(|p| *p == path) {
+        // The file being loaded last is the one whose import closes the cycle.
+        let importer = loading_now.last().map(|p| display(p)).unwrap_or_default();
         return Err(safety::bad_arg(
             "import",
             "an acyclic import graph",
-            &format!("a cycle: {}", chain.join(" -> ")),
+            &format!(
+                "{importer} imports {}, which is already being loaded; remove one of the two imports",
+                display(&path)
+            ),
         ));
     }
     if loading_now.len() >= MAX_IMPORT_DEPTH {
@@ -387,7 +390,26 @@ fn resolve(source: &str) -> Result<PathBuf> {
     }
 
     if !target.exists() {
-        return Err(safety::not_found("import", "module", source));
+        // The path was resolved against the importing file's folder, so that is
+        // the folder the hint names; a file imported from nowhere uses the
+        // working directory.
+        let dir = BASE_DIRS
+            .with(|b| b.borrow().last().cloned())
+            .unwrap_or_else(|| PathBuf::from("."));
+        return Err(anyhow::Error::new(SafetyError {
+            code: ErrorCode::NotFound,
+            message: format!("import: no module named '{source}'"),
+            builtin: "import".to_string(),
+            hint: format!(
+                "paths are relative to the importing file: {}",
+                display(&dir)
+            ),
+            approval: None,
+            did_you_mean: Vec::new(),
+            expected: "an existing module file".to_string(),
+            got: source.to_string(),
+            extra: serde_json::Map::new(),
+        }));
     }
     if target.is_dir() {
         return Err(safety::bad_arg(

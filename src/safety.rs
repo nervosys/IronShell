@@ -2085,6 +2085,16 @@ pub fn lock_poisoned(builtin: &str, what: &str) -> anyhow::Error {
 ///
 /// `kind` is what was being looked up ("job", "key"), `name` the identifier
 /// that missed. Retryable, because a different identifier may well exist.
+/// The hint for a path with a tab, newline or carriage return in it. In a
+/// double-quoted string a backslash starts an escape, so `"C:\temp\new"` is not
+/// the path that was written: `\t` is a tab and `\n` a newline. `None` for any
+/// other path.
+pub fn control_char_path_hint(path: &str) -> Option<&'static str> {
+    path.chars().any(|c| matches!(c, '\t' | '\n' | '\r')).then_some(
+        "the path contains a tab or newline: in a double-quoted string a backslash starts an escape (\\t, \\n); write forward slashes (C:/temp/new) or double the backslashes",
+    )
+}
+
 pub fn not_found(builtin: &str, kind: &str, name: &str) -> anyhow::Error {
     // A path is not an identifier. For a file or directory the useful facts are
     // where a relative path was resolved and how to look, not a list to choose
@@ -2093,10 +2103,14 @@ pub fn not_found(builtin: &str, kind: &str, name: &str) -> anyhow::Error {
         let here = std::env::current_dir()
             .map(|d| d.display().to_string())
             .unwrap_or_else(|_| "the current directory".to_string());
-        format!(
-            "no {kind} at this path; a relative path is resolved against {here}, so \
-             check the spelling and that directory, or list it with ls() first"
-        )
+        control_char_path_hint(name)
+            .map(str::to_string)
+            .unwrap_or_else(|| {
+                format!(
+                    "no {kind} at this path; a relative path is resolved against {here}, so \
+                     check the spelling and that directory, or list it with ls() first"
+                )
+            })
     } else {
         format!(
             "list the available {kind}{} and use an identifier from it",
@@ -2132,10 +2146,14 @@ pub fn no_file_at(builtin: &str, path: &str) -> anyhow::Error {
         code: ErrorCode::NotFound,
         message: format!("{builtin}: no file at {path}"),
         builtin: builtin.to_string(),
-        hint: format!(
-            "no file at this path; a relative path is resolved against {here}, so check \
-             the spelling and that directory, or create the file with file.write first"
-        ),
+        hint: control_char_path_hint(path)
+            .map(str::to_string)
+            .unwrap_or_else(|| {
+                format!(
+                    "no file at this path; a relative path is resolved against {here}, so check \
+                 the spelling and that directory, or create the file with file.write first"
+                )
+            }),
         approval: None,
         did_you_mean: Vec::new(),
         expected: "an existing file".to_string(),
@@ -2756,7 +2774,10 @@ pub fn bad_value(message: impl Into<String>, hint: &str) -> anyhow::Error {
 /// without a second call. `from_args` says the Array is the script's `args()`,
 /// which is empty when the script was run with no arguments.
 pub fn index_out_of_range(kind: &str, index: i64, len: usize, from_args: bool) -> anyhow::Error {
-    let hint = if len == 0 && from_args {
+    let hint = if len == 0 && from_args && crate::builtins::run_under_c() {
+        "-c takes no script arguments; put the code in a .ish file and run ish file.ish <arg>"
+            .to_string()
+    } else if len == 0 && from_args {
         "the script was run with no arguments: ish script.ish <arg>".to_string()
     } else if len == 0 {
         format!("the {kind} is empty; check len(x) > 0 first")
