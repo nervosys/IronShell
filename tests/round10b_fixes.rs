@@ -7,7 +7,7 @@
 use iron_shell::safety::SafetyError;
 use iron_shell::value::Value;
 use std::collections::BTreeMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
 fn run(src: &str) -> Value {
@@ -197,7 +197,7 @@ fn scratch(tag: &str) -> PathBuf {
     root
 }
 
-fn ish_in(root: &PathBuf, src: &str) -> Output {
+fn ish_in(root: &Path, src: &str) -> Output {
     Command::new(env!("CARGO_BIN_EXE_ish"))
         .args(["-c", src])
         .current_dir(root.join("cwd"))

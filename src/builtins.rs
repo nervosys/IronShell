@@ -14651,12 +14651,23 @@ fn text_regex(builtin: &str, pattern: &str) -> Result<regex::Regex> {
             crate::safety::bad_arg_in(
                 builtin,
                 format!(
-                    "{builtin}: invalid regex {}: {e}",
-                    quoted_pattern(pattern)
+                    "{builtin}: invalid regex {}: {}",
+                    quoted_pattern(pattern),
+                    regex_error_detail(&e)
                 ),
                 "write the pattern in Rust regex syntax; escape a literal . ( ) [ ] * + ? with a backslash; compiled patterns are limited to 1 MiB",
             )
         })
+}
+
+/// The reason a regex was refused, without the copy of the whole pattern that
+/// the regex crate's syntax error prints above it: its `error:` line alone.
+fn regex_error_detail(e: &regex::Error) -> String {
+    let full = e.to_string();
+    full.lines()
+        .find_map(|l| l.trim().strip_prefix("error: "))
+        .map(str::to_string)
+        .unwrap_or(full)
 }
 
 /// A regex pattern as an error quotes it: at most its first 60 characters,
