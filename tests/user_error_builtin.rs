@@ -60,16 +60,19 @@ fn an_extra_record_adds_fields_to_the_caught_error() {
 }
 
 #[test]
-fn an_extra_field_cannot_replace_a_standard_one() {
+fn an_extra_field_named_like_a_standard_one_is_refused() {
     let _g = lock();
-    assert_eq!(
-        run("try { error(\"bad\", {code: \"MINE\", message: \"x\"}) } catch e { e.code }").unwrap(),
-        Value::Str("E_USER".to_string())
-    );
-    assert_eq!(
-        run("try { error(\"bad\", {code: \"MINE\"}) } catch e { e.message }").unwrap(),
-        Value::Str("bad".to_string())
-    );
+    for src in [
+        "error(\"bad\", {code: \"MINE\", message: \"x\"})",
+        "error(\"bad\", {code: \"MINE\"})",
+    ] {
+        let msg = run(src).unwrap_err().to_string();
+        assert!(msg.contains("E_BAD_ARG"), "{src}: {msg}");
+        assert!(
+            msg.contains("rename the field, e.g. {user_code: 7}"),
+            "{src}: {msg}"
+        );
+    }
 }
 
 #[test]

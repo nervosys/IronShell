@@ -81,7 +81,11 @@ fn an_out_of_range_index_is_bad_arg_and_names_the_length() {
         assert_eq!(e.code, ErrorCode::BadValue, "{src}");
         assert_eq!(e.code.as_str(), "E_BAD_ARG", "{src}");
         assert!(e.message.contains("out of range"), "{src}: {}", e.message);
-        assert!(e.hint.contains("length"), "{src}: {}", e.hint);
+        assert!(
+            e.hint.contains("length") || e.hint.contains("len(x) > 0"),
+            "{src}: {}",
+            e.hint
+        );
     }
     let e = coded("a = [1, 2, 3]; a[5]");
     assert!(e.message.contains("length 3"), "{}", e.message);

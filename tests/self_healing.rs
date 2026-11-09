@@ -204,7 +204,10 @@ fn every_suggestion_names_a_builtin_that_exists() {
 fn a_misspelled_module_function_suggests_the_real_field() {
     let _l = LOCK.lock().unwrap_or_else(|e| e.into_inner());
     reset();
-    for (code, want) in [("file.raed(\"x\")", "read"), ("str.uppr(\"x\")", "upper")] {
+    for (code, want) in [
+        ("file.raed(\"x\")", "file.read"),
+        ("str.uppr(\"x\")", "str.upper"),
+    ] {
         let mut env = iron_shell::env::Env::new();
         for (name, module) in iron_shell::modules::all_modules() {
             let _ = env.set_var(name.to_string(), module);
@@ -214,7 +217,9 @@ fn a_misspelled_module_function_suggests_the_real_field() {
         let se = e
             .downcast_ref::<iron_shell::safety::SafetyError>()
             .unwrap_or_else(|| panic!("{code}: no structured error: {e}"));
-        assert_eq!(se.code.as_str(), "E_UNKNOWN_FIELD", "{code}");
+        // A module has no such member: the member is a builtin that does not
+        // exist, so it is an unknown builtin with the module's members as candidates.
+        assert_eq!(se.code.as_str(), "E_UNKNOWN_BUILTIN", "{code}");
         assert!(se.code.retryable(), "{code}: a typo is worth retrying");
         assert!(
             se.did_you_mean.iter().any(|c| c == want),

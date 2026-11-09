@@ -1684,13 +1684,19 @@ impl Parser {
     }
 
     /// `module.member(` as a pipeline stage: the callee chain when the tokens ahead
-    /// are `ident (. ident)+` followed by `(`. Consumes them only on a match, so
-    /// `x | a.b` without a call is still refused where it was.
-    fn take_module_member_callee(&mut self) -> Option<Expr> {
+    /// are `ident (. ident)+`. Consumes them only on a match. Returns the callee and
+    /// whether an argument list follows it. A module member with no list
+    /// (`| arr.sum`) is a stage too, the same as `| sum`; any other dotted name
+    /// without a list (`x | a.b` where `a` is not a module) is left to the caller.
+    fn take_module_member_callee(&mut self) -> Option<(Expr, bool)> {
         let head = self.toks.get(self.i)?;
         if head.kind != Tok::Ident {
             return None;
         }
+        #[cfg(feature = "native")]
+        let module_head = crate::modules::is_module_name(&head.text);
+        #[cfg(not(feature = "native"))]
+        let module_head = false;
         let mut k = self.i + 1;
         let mut members = Vec::new();
         while self.toks.get(k).map(|t| t.kind) == Some(Tok::Dot) {
@@ -1701,7 +1707,8 @@ impl Parser {
             members.push(member.text.clone());
             k += 2;
         }
-        if members.is_empty() || self.toks.get(k).map(|t| t.kind) != Some(Tok::LParen) {
+        let parens = self.toks.get(k).map(|t| t.kind) == Some(Tok::LParen);
+        if members.is_empty() || (!parens && !module_head) {
             return None;
         }
         let mut callee = Expr::Ident(head.text.clone());
@@ -1713,7 +1720,7 @@ impl Parser {
                 field: member,
             };
         }
-        Some(callee)
+        Some((callee, parens))
     }
 
     /// Word-call support: if the rhs begins with an identifier, slurp a sequence of
@@ -1725,7 +1732,14 @@ impl Parser {
         if self.check(Tok::Async) {
             return self.parse_async_lambda();
         }
-        if let Some(callee) = self.take_module_member_callee() {
+        if let Some((callee, parens)) = self.take_module_member_callee() {
+            if !parens {
+                return Ok(Expr::Call {
+                    callee: Box::new(callee),
+                    args: Vec::new(),
+                    named: Vec::new(),
+                });
+            }
             let args = self.parse_paren_call_args()?;
             return Ok(Expr::Call {
                 callee: Box::new(callee),
@@ -2820,6 +2834,18 @@ impl Parser {
                 )
             })
         {
+            // `fn(x) => y = x * 2`: the body is `y`, and `=` assigns, which a
+            // lambda body cannot do. The hint must say what to write instead.
+            let after_arrow = self
+                .i
+                .checked_sub(2)
+                .and_then(|j| self.toks.get(j))
+                .is_some_and(|p| matches!(p.kind, Tok::FatArrow));
+            if after_arrow {
+                return Some(
+                    "a lambda body is one expression: fn(x) => x * 2; bind values outside the lambda or use match",
+                );
+            }
             return Some("use `==` to compare; `=` assigns");
         }
         if matches!(cur, Tok::Star) && prev.is_some_and(|p| matches!(p.kind, Tok::Star)) {

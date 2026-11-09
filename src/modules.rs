@@ -1514,6 +1514,31 @@ pub fn is_module_member(module: &str, func: &str) -> bool {
     })
 }
 
+/// Whether `map` is the registered namespace `module` itself, with the same
+/// members. A lambda parameter or a variable named like a module is not, and a
+/// missing field on it keeps its record error.
+pub fn is_module_record(module: &str, map: &std::collections::BTreeMap<String, Value>) -> bool {
+    module_table().iter().any(|(m, v)| {
+        *m == module && matches!(v, Value::Record(members) if members.keys().eq(map.keys()))
+    })
+}
+
+/// The member names of the registered module `module`, in key order.
+pub fn module_member_names(module: &str) -> Vec<&'static str> {
+    module_table()
+        .iter()
+        .find_map(|(m, v)| match v {
+            Value::Record(members) if *m == module => Some(
+                members
+                    .keys()
+                    .map(|k| k.as_str())
+                    .collect::<Vec<&'static str>>(),
+            ),
+            _ => None,
+        })
+        .unwrap_or_default()
+}
+
 /// The builtin a module member calls, so `file.replace` resolves to
 /// `file_replace`. `None` when the module has no such member.
 pub fn builtin_for_member(module: &str, func: &str) -> Option<String> {

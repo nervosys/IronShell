@@ -730,6 +730,11 @@ pub fn eval_expr(expr: &Expr, env: &mut Env) -> Result<Value> {
             }
 
             // 2) Otherwise evaluate callee and dispatch
+            if let Expr::MemberAccess { object, field } = &**callee {
+                if let Some(e) = method_on_non_record(object, field, &vals, env) {
+                    return Err(e);
+                }
+            }
             let f = eval_expr(callee, env)?;
             call_value_with_pipe(f, pin, vals, env)
         }
@@ -737,6 +742,24 @@ pub fn eval_expr(expr: &Expr, env: &mut Env) -> Result<Value> {
         // ---------- pipeline ----------
         Expr::Pipe { left, right } => {
             let left_val = eval_expr(left, env)?;
+
+            // `|.a.b` is parsed as `| map(fn(__) => __.a.b)`. A Record is one
+            // row, so the stage reads the field from it; an Array keeps the map
+            // path below. Anything else is named as the projection, not as map.
+            if let Some((lambda, path)) = projection_stage(right) {
+                if env.get_var("map").is_none() && !matches!(left_val, Value::Array(_)) {
+                    if let Value::Record(_) = left_val {
+                        let f = eval_expr(lambda, env)?;
+                        return call_value_with_pipe(f, None, vec![left_val], env);
+                    }
+                    return Err(crate::safety::bad_arg_with_hint(
+                        &path,
+                        "an Array or a Record as the piped subject",
+                        left_val.type_name(),
+                        "a `|.field` stage reads a field of each row of an Array, or of one Record",
+                    ));
+                }
+            }
 
             // If RHS is an identifier: prefer calling a bound lambda with the
             // entire left value as an explicit arg; if not bound, treat as
@@ -927,6 +950,24 @@ fn module_field_error(
     map: &std::collections::BTreeMap<String, Value>,
     object: &Expr,
 ) -> anyhow::Error {
+    // `str.pad_right` on the `str` module: the member is a builtin that does
+    // not exist, named as such, with the module's own members as candidates.
+    if let Expr::Ident(name) = object {
+        if crate::modules::is_module_record(name, map) {
+            let members = crate::modules::module_member_names(name);
+            let mut candidates: Vec<String> =
+                builtins::nearest_names(field, members.iter().copied())
+                    .into_iter()
+                    .map(|m| format!("{name}.{m}"))
+                    .collect();
+            for global in builtins::nearest_names(field, builtins::BUILTIN_LOOKUP.keys().copied()) {
+                if !candidates.contains(&global) {
+                    candidates.push(global);
+                }
+            }
+            return crate::safety::unknown_module_member(name, field, candidates);
+        }
+    }
     let candidates = crate::builtins::nearest_names(field, map.keys().map(|k| k.as_str()));
     let specific = crate::module_loader::unexported_hint(field).or_else(|| match object {
         Expr::Ident(name) => crate::module_loader::empty_module_hint(name),
@@ -987,6 +1028,91 @@ fn borrowed_member<'a>(expr: &Expr, env: &'a Env) -> Option<Result<&'a Value>> {
     }
 }
 
+/// `receiver.name(args)` where the receiver is a value that is not a Record and
+/// `name` is a builtin. Such values have no methods; the hint names the call
+/// that works, with the receiver's own name and the arguments as written
+/// (`call contains(l, "bet") or l | contains("bet")`). `None` for anything
+/// else, which keeps the ordinary member-access error.
+fn method_on_non_record(
+    object: &Expr,
+    field: &str,
+    args: &[Value],
+    env: &Env,
+) -> Option<anyhow::Error> {
+    if !builtins::is_dispatched(field) {
+        return None;
+    }
+    let receiver = match borrowed_member(object, env)? {
+        Ok(Value::Record(_)) | Ok(Value::Null) | Err(_) => return None,
+        Ok(value) => value,
+    };
+    let recv = match object {
+        Expr::Ident(name) => name.as_str(),
+        _ => "value",
+    };
+    let ty = receiver.type_name();
+    let article = if matches!(ty.chars().next(), Some('A' | 'E' | 'I' | 'O' | 'U')) {
+        "an"
+    } else {
+        "a"
+    };
+    let rest: Vec<String> = args.iter().map(method_arg_text).collect();
+    let with_recv = std::iter::once(recv.to_string())
+        .chain(rest.iter().cloned())
+        .collect::<Vec<_>>()
+        .join(", ");
+    let hint = format!(
+        "{article} {ty} has no methods; call {field}({with_recv}) or {recv} | {field}({})",
+        rest.join(", ")
+    );
+    Some(crate::safety::bad_arg_with_hint(
+        &format!("{recv}.{field}"),
+        "a Record (or a module)",
+        ty,
+        &hint,
+    ))
+}
+
+/// The row lambda and the `.a.b` path of a `|.a.b` stage. The parser writes
+/// that stage as `map(fn(__) => __.a.b)`, so the shape identifies it.
+fn projection_stage(right: &Expr) -> Option<(&Expr, String)> {
+    let Expr::Call {
+        callee,
+        args,
+        named,
+    } = right
+    else {
+        return None;
+    };
+    let (Expr::Ident(name), [lambda], true) = (callee.as_ref(), args.as_slice(), named.is_empty())
+    else {
+        return None;
+    };
+    let Expr::Lambda { params, body } = lambda else {
+        return None;
+    };
+    let mut fields: Vec<&str> = Vec::new();
+    let mut root = body.as_ref();
+    while let Expr::MemberAccess { object, field } = root {
+        fields.push(field.as_str());
+        root = object.as_ref();
+    }
+    let rooted = !fields.is_empty() && matches!(root, Expr::Ident(n) if n == "__");
+    if name != "map" || params.len() != 1 || params[0] != "__" || !rooted {
+        return None;
+    }
+    fields.reverse();
+    Some((lambda, format!(".{}", fields.join("."))))
+}
+
+/// A method argument as the script wrote it, for a hint: a String quoted.
+fn method_arg_text(v: &Value) -> String {
+    match v {
+        Value::Str(s) => format!("{s:?}"),
+        other => other.to_display_string(),
+    }
+}
+
 /// `object[index]` on an evaluated value. Arrays and Strings take an Int (a
 /// negative index counts from the end, and a String yields one character),
 /// Records take a String key. Anything else, and any other index type, is an
@@ -998,12 +1124,17 @@ fn index_value(target: &Value, idx: &Value, object: &Expr) -> Result<Value> {
     };
     match (target, idx) {
         (Value::Array(items), Value::Int(i)) => {
-            let pos = resolve_index(*i, items.len(), "Array")?;
+            let from_args = matches!(
+                object,
+                Expr::Call { callee, .. }
+                    if matches!(callee.as_ref(), Expr::Ident(name) if name == "args")
+            );
+            let pos = resolve_index(*i, items.len(), "Array", from_args)?;
             Ok(items[pos].clone())
         }
         (Value::Str(s), Value::Int(i)) => {
             let chars: Vec<char> = s.chars().collect();
-            let pos = resolve_index(*i, chars.len(), "String")?;
+            let pos = resolve_index(*i, chars.len(), "String", false)?;
             Ok(Value::Str(chars[pos].to_string()))
         }
         (Value::Record(map), Value::Str(key)) => map.get(key).cloned().ok_or_else(|| {
@@ -1032,11 +1163,13 @@ fn index_value(target: &Value, idx: &Value, object: &Expr) -> Result<Value> {
 
 /// Turn a possibly negative index into a position in `0..len`, or an
 /// out-of-range error that states the length.
-fn resolve_index(index: i64, len: usize, kind: &str) -> Result<usize> {
+fn resolve_index(index: i64, len: usize, kind: &str, from_args: bool) -> Result<usize> {
     let n = len as i64;
     let pos = if index < 0 { n + index } else { index };
     if pos < 0 || pos >= n {
-        return Err(crate::safety::index_out_of_range(kind, index, len));
+        return Err(crate::safety::index_out_of_range(
+            kind, index, len, from_args,
+        ));
     }
     Ok(pos as usize)
 }

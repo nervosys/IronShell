@@ -161,7 +161,7 @@ pub fn run(env: &mut Env) -> Result<()> {
         history.push(code.to_string());
 
         let started = std::time::Instant::now();
-        let result = eval_line(env, code);
+        let (result, prints_itself) = eval_line_noting_print(env, code);
         last_duration_ms = started.elapsed().as_millis() as u64;
         crate::record::note(
             crate::record::Surface::Repl,
@@ -171,6 +171,9 @@ pub fn run(env: &mut Env) -> Result<()> {
         );
 
         match result {
+            Ok(_) if prints_itself => {
+                last_status = 0;
+            }
             Ok(v) => {
                 last_status = 0;
                 if let Some(out) = render_for_repl(&v) {
@@ -239,9 +242,10 @@ pub fn run_one(env: &mut Env, code: &str) -> Result<i32> {
 /// [`run_one`] for a given surface, which only the recorder reads.
 pub fn run_one_as(env: &mut Env, code: &str, surface: crate::record::Surface) -> Result<i32> {
     let started = std::time::Instant::now();
-    let result = eval_line(env, code);
+    let (result, prints_itself) = eval_line_noting_print(env, code);
     crate::record::note(surface, code, &result, started.elapsed());
     match result {
+        Ok(_) if prints_itself => Ok(0),
         Ok(v) => {
             let budget = std::env::var("IRONSHELL_TOKEN_BUDGET")
                 .ok()
@@ -375,6 +379,7 @@ fn print_eval_error(e: &anyhow::Error, color: bool) {
             if !se.hint.is_empty() {
                 eprintln!("  {} {}", "hint:".yellow().bold(), se.hint);
             }
+            print_extra_fields(se);
             if let Some(a) = &se.approval {
                 eprintln!(
                     "  {} re-run with IRONSHELL_APPROVE={}  (or call approve(\"{}\"))",
@@ -388,6 +393,7 @@ fn print_eval_error(e: &anyhow::Error, color: bool) {
             if !se.hint.is_empty() {
                 eprintln!("  hint: {}", se.hint);
             }
+            print_extra_fields(se);
             if let Some(a) = &se.approval {
                 eprintln!(
                     "  approve: re-run with IRONSHELL_APPROVE={}  (or call approve(\"{}\"))",
@@ -405,9 +411,62 @@ fn print_eval_error(e: &anyhow::Error, color: bool) {
     }
 }
 
+/// The fields a script added with `error(message, extra)`, one per line after
+/// the hint, so the text report carries what the JSON form carries. Redacted as
+/// the JSON form is.
+fn print_extra_fields(se: &crate::safety::SafetyError) {
+    for (key, value) in &se.extra {
+        let shown = match value {
+            serde_json::Value::String(s) => s.clone(),
+            other => other.to_string(),
+        };
+        let shown = if crate::safety::redaction_enabled() {
+            crate::safety::redact_str(&shown).0
+        } else {
+            shown
+        };
+        eprintln!("  {key}: {shown}");
+    }
+}
+
 pub fn eval_line(env: &mut Env, code: &str) -> Result<Value> {
     let stmts = parser::parse_program(code)?;
     eval_program(&stmts, env)
+}
+
+/// [`eval_line`], also reporting whether the program's final statement is a
+/// `print(...)` call. Such a call writes its own output and returns the same
+/// text, so the caller must not echo that value a second time.
+fn eval_line_noting_print(env: &mut Env, code: &str) -> (Result<Value>, bool) {
+    let stmts = match parser::parse_program(code) {
+        Ok(stmts) => stmts,
+        Err(e) => return (Err(e), false),
+    };
+    let prints_itself = ends_in_print(&stmts);
+    (eval_program(&stmts, env), prints_itself)
+}
+
+/// Is the last statement a call to `print` or `println`, bare or on the right of
+/// a pipe (`x | print()`)? `echo` is not one: it only renders its text.
+fn ends_in_print(stmts: &[crate::ast::Stmt]) -> bool {
+    use crate::ast::{Expr, Stmt};
+    let is_print = |name: &str| name == "print" || name == "println";
+    // `print(x)` or `print "x"` as a call, and `x | print` as a pipe stage.
+    let stage_is_print = |stage: &Expr| match stage {
+        Expr::Ident(name) => is_print(name.as_str()),
+        Expr::Call { callee, .. } => {
+            matches!(callee.as_ref(), Expr::Ident(name) if is_print(name.as_str()))
+        }
+        _ => false,
+    };
+    let Some(Stmt::Expr(e)) = stmts.last() else {
+        return false;
+    };
+    match e {
+        Expr::Pipe { right, .. } => stage_is_print(right.as_ref()),
+        Expr::Call { .. } => stage_is_print(e),
+        _ => false,
+    }
 }
 
 /// Should rendered values carry ANSI colour?

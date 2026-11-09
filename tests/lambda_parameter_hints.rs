@@ -67,12 +67,12 @@ fn a_parameter_type_annotation_is_not_called_a_comparison() {
 }
 
 #[test]
-fn an_equals_sign_in_a_comparison_still_gets_the_comparison_hint() {
+fn an_equals_sign_in_a_lambda_body_gets_the_lambda_hint() {
     let (_, err, code) = run_script("cmp", "[1, 2] | filter(fn(r) => r = 1)\n");
     assert_ne!(code, 0);
     assert!(
-        err.contains("use `==` to compare; `=` assigns"),
-        "no comparison hint: {err}"
+        err.contains("a lambda body is one expression: fn(x) => x * 2"),
+        "no lambda hint: {err}"
     );
 }
 

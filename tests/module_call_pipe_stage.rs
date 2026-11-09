@@ -4,8 +4,8 @@
 //! were E_PARSE "unexpected token Dot", because a pipe stage was parsed as a bare
 //! name and a call. The underscore builtin spelling of the same stage works, so
 //! the module spelling now parses the same way. Without a call (`"abc" | str.upper`)
-//! the stage stays refused. A script echoes its last value, so each one ends in
-//! a bare expression.
+//! it is the same stage as `str.upper()`. A script echoes its last value, so each
+//! one ends in a bare expression.
 
 use std::path::PathBuf;
 use std::process::Command;
@@ -72,10 +72,8 @@ fn the_underscore_builtin_stage_it_matches_still_works() {
 }
 
 #[test]
-fn a_module_member_without_a_call_is_still_refused() {
-    let (out, err, code) = run_script("nocall", "\"abc\" | str.upper\n");
-    assert_ne!(code, 0, "ran; stdout {out:?}");
-    assert!(err.contains("E_PARSE"), "{err}");
+fn a_module_member_without_a_call_is_a_pipe_stage() {
+    assert_prints("nocall", "\"abc\" | str.upper\n", "ABC");
 }
 
 #[test]

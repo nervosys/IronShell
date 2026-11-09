@@ -6120,6 +6120,24 @@ fn bi_error(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
     match args.get(1) {
         None => {}
         Some(Value::Record(fields)) => {
+            // A field named like a standard error key would be dropped without
+            // a word (`to_json` keeps the standard value), so refuse it here.
+            let clashes: Vec<String> = fields
+                .iter()
+                .filter(|(key, _)| crate::safety::ERROR_RESERVED_KEYS.contains(&key.as_str()))
+                .map(|(key, _)| format!("`{key}`"))
+                .collect();
+            if !clashes.is_empty() {
+                return Err(crate::safety::bad_arg_in(
+                    "error",
+                    format!(
+                        "error: extra field {} is reserved: the standard error fields are {}",
+                        clashes.join(", "),
+                        crate::safety::ERROR_RESERVED_KEYS.join(", ")
+                    ),
+                    "rename the field, e.g. {user_code: 7}",
+                ));
+            }
             for (key, value) in fields {
                 extra.insert(key.clone(), value.to_json());
             }

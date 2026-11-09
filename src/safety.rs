@@ -2588,6 +2588,22 @@ pub fn os_denied(
     })
 }
 
+/// The keys of the standard error record. A script's `error(message, extra)`
+/// field with one of these names would never reach the caller, so `error`
+/// refuses it. Keep in step with the keys [`SafetyError::to_json`] emits.
+pub const ERROR_RESERVED_KEYS: &[&str] = &[
+    "code",
+    "message",
+    "hint",
+    "retryable",
+    "builtin",
+    "error",
+    "expected",
+    "got",
+    "did_you_mean",
+    "approval",
+];
+
 /// The error a script raises with `error(message[, extra])` (`E_USER`). `extra`
 /// is merged into the caught record by [`SafetyError::to_json`].
 pub fn user_error(
@@ -2714,10 +2730,13 @@ pub fn bad_value(message: impl Into<String>, hint: &str) -> anyhow::Error {
 
 /// The `E_BAD_ARG` (not retryable) for an index past either end of an Array or
 /// String. The hint names the length, so the caller can pick a valid index
-/// without a second call.
-pub fn index_out_of_range(kind: &str, index: i64, len: usize) -> anyhow::Error {
-    let hint = if len == 0 {
-        format!("the {kind} is empty, so no index is valid; check its length first")
+/// without a second call. `from_args` says the Array is the script's `args()`,
+/// which is empty when the script was run with no arguments.
+pub fn index_out_of_range(kind: &str, index: i64, len: usize, from_args: bool) -> anyhow::Error {
+    let hint = if len == 0 && from_args {
+        "the script was run with no arguments: ish script.ish <arg>".to_string()
+    } else if len == 0 {
+        format!("the {kind} is empty; check len(x) > 0 first")
     } else {
         format!(
             "the {kind} has length {len}: valid indices are 0 to {} (or -1 to -{len} from the end)",
@@ -2789,6 +2808,29 @@ pub fn unknown_module(name: &str, candidates: Vec<String>) -> anyhow::Error {
         code: ErrorCode::UnknownBuiltin,
         message: format!("unknown module: {}", name),
         builtin: name.to_string(),
+        hint,
+        approval: None,
+        did_you_mean: candidates,
+        expected: String::new(),
+        got: String::new(),
+        extra: serde_json::Map::new(),
+    })
+}
+
+/// Build the error for `module.member` where `module` is a known module that has
+/// no such member (`E_UNKNOWN_BUILTIN`). The member is a builtin that does not
+/// exist, so it is named as one; `candidates` are the nearest real names.
+pub fn unknown_module_member(module: &str, member: &str, candidates: Vec<String>) -> anyhow::Error {
+    let hint = if candidates.is_empty() {
+        "no member of this module has a similar name; call ontology_manifest() to list the available builtins"
+            .to_string()
+    } else {
+        format!("did you mean: {}", candidates.join(", "))
+    };
+    anyhow::Error::new(SafetyError {
+        code: ErrorCode::UnknownBuiltin,
+        message: format!("module `{module}` has no member `{member}`"),
+        builtin: format!("{module}.{member}"),
         hint,
         approval: None,
         did_you_mean: candidates,
@@ -2933,9 +2975,19 @@ pub fn ensure_structured(builtin: &str, e: anyhow::Error) -> anyhow::Error {
         // place that knows the name being called, so fill it in here rather
         // than editing hundreds of call sites. Without this, `diagnose` cannot
         // look up the signature for the majority of E_BAD_ARG failures.
-        if se.builtin.is_empty() && !builtin.is_empty() {
+        // The same boundary replaces the generic `arg_err` hint with what the
+        // builtin's declaration says it takes.
+        let generic = matches!(se.code, ErrorCode::BadArg) && se.hint == ARG_ERR_HINT;
+        if !builtin.is_empty() && (se.builtin.is_empty() || generic) {
             let mut filled = se.clone();
-            filled.builtin = builtin.to_string();
+            if filled.builtin.is_empty() {
+                filled.builtin = builtin.to_string();
+            }
+            if generic {
+                if let Some(sig) = crate::signature::signature_of(builtin) {
+                    filled.hint = signature_arg_hint(builtin, sig);
+                }
+            }
             return anyhow::Error::new(filled);
         }
         return e;
@@ -2971,6 +3023,35 @@ pub fn ensure_structured(builtin: &str, e: anyhow::Error) -> anyhow::Error {
     })
 }
 
+/// The hint [`arg_err`] carries when the caller has nothing more specific. At the
+/// dispatch boundary ([`ensure_structured`]) it is replaced by the parameter
+/// types from the builtin's declared signature, when it has one.
+pub const ARG_ERR_HINT: &str = "check this builtin's required argument count and types";
+
+/// The hint for a bad argument to `name`, from its declared signature: the
+/// types its subject and parameters take. A builtin whose declaration gives no
+/// type (every one is `Any`) is described by its own doc line instead.
+fn signature_arg_hint(name: &str, sig: &crate::signature::Signature) -> String {
+    use crate::signature::Ty;
+    let mut types: Vec<&str> = Vec::new();
+    if let Some(t) = sig.subject {
+        if t != Ty::Any {
+            types.push(t.as_str());
+        }
+    }
+    types.extend(
+        sig.params
+            .iter()
+            .filter(|p| p.ty != Ty::Any)
+            .map(|p| p.ty.as_str()),
+    );
+    match types.split_last() {
+        None => format!("{name}: {}", sig.doc),
+        Some((last, [])) => format!("{name} takes {last}"),
+        Some((last, init)) => format!("{name} takes {} or {last}", init.join(", ")),
+    }
+}
+
 /// Build a structured argument error (`E_BAD_ARG`) from a free-form arity/usage
 /// message that already names the builtin and what it needs (e.g.
 /// `"map requires a lambda"`). The missing/extra-argument counterpart to
@@ -2983,7 +3064,7 @@ pub fn arg_err(message: impl Into<String>) -> anyhow::Error {
         code: ErrorCode::BadArg,
         message: message.into(),
         builtin: String::new(),
-        hint: "check this builtin's required argument count and types".to_string(),
+        hint: ARG_ERR_HINT.to_string(),
         approval: None,
         did_you_mean: Vec::new(),
         expected: String::new(),
@@ -3136,7 +3217,8 @@ impl SafetyError {
             err["got"] = Json::String(scrub(&self.got));
         }
         // A script's own fields go in after the standard ones and never replace
-        // them: `error("x", {code: "mine"})` still has the code E_USER.
+        // them. `error` refuses such a field before it gets here (E_BAD_ARG), so
+        // this guard only holds for an extra built some other way.
         if let Some(object) = err.as_object_mut() {
             for (key, value) in &self.extra {
                 if object.contains_key(key) {
