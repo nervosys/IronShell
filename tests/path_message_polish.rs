@@ -61,7 +61,12 @@ fn a_refusal_from_sed_names_sed() {
         serde_json::from_str(line).unwrap_or_else(|e| panic!("not JSON ({e}): {err:?}"));
     assert_eq!(json["error"]["code"], "E_OUTSIDE_WORKSPACE", "{json}");
     let message = json["error"]["message"].as_str().unwrap_or("");
-    assert!(message.starts_with("sed: `"), "{message}");
+    // The write guard (sed_replace) or the read jail (sed) may refuse first;
+    // either way the message starts with the builtin's name, not ": ".
+    assert!(
+        message.starts_with("sed: ") || message.starts_with("sed_replace: "),
+        "{message}"
+    );
 }
 
 #[test]
