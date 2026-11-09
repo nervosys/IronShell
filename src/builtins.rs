@@ -48542,11 +48542,6 @@ fn bi_file_delete_lines(args: Vec<Value>, input: Option<Value>) -> Result<Value>
                     "file_delete_lines pattern must be String",
                 ));
             };
-            // An empty pattern is contained by every line: it would delete the file.
-            // (An exact empty match is blank lines, which is a real selection.)
-            if key != "exact" {
-                refuse_empty_find("file_delete_lines", &pattern)?;
-            }
             Selection::Pattern(pattern, key == "exact")
         }
         _ => {

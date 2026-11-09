@@ -2768,6 +2768,22 @@ impl Parser {
     /// Create an error message with line/column information at current token
     fn error_at_current(&self, msg: &str) -> anyhow::Error {
         let tok = self.peek();
+        // A `(` left open on an earlier line is the real problem: name the line
+        // it was opened on, not only the line the parser gave up on, and do not
+        // offer a spelling hint about whatever token followed.
+        if msg.starts_with("expected ')'") {
+            if let Some(open) = self.innermost_open_before(self.i) {
+                if open.kind == Tok::LParen && open.line != tok.line {
+                    return anyhow!(
+                        "'(' opened at line {} is not closed; {} at line {}, column {}",
+                        open.line,
+                        msg,
+                        tok.line,
+                        tok.col
+                    );
+                }
+            }
+        }
         let text = format!("{} at line {}, column {}", msg, tok.line, tok.col);
         match self.spelling_hint() {
             Some(hint) => anyhow::Error::new(HintedSyntax {

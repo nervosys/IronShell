@@ -1694,9 +1694,7 @@ pub(crate) fn complete_module_capture(lam: &mut crate::value::Lambda, module: &E
         if let Value::Lambda(inner) = value {
             pending.extend(lambda_free_names(&inner.params, &inner.body));
         }
-        if !lam.captured.contains_key(&name) {
-            lam.captured.insert(name, value.clone());
-        }
+        lam.captured.entry(name).or_insert_with(|| value.clone());
     }
 }
 

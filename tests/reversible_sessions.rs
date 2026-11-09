@@ -519,9 +519,13 @@ fn a_failed_undo_does_not_undo_older_steps_past_it() {
     std::fs::remove_file(&b).expect("remove b");
     std::fs::create_dir(&b).expect("make a directory at b");
 
-    let result = call("undo", vec![Value::Int(2)]).expect("undo 2");
-    assert_eq!(field(&result, "failed"), Value::Int(1));
-    assert_eq!(field(&result, "restored"), Value::Int(0));
+    // b was replaced after its step, so undo refuses at that newest step
+    // rather than discarding the change; the older step must not run either.
+    let refused = call("undo", vec![Value::Int(2)]).expect_err("b changed after its step");
+    assert!(
+        refused.to_string().contains("changed after this step"),
+        "{refused}"
+    );
     assert_eq!(
         std::fs::read_to_string(&a).unwrap(),
         "a1",

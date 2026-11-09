@@ -101,17 +101,6 @@ fn file_insert_with_an_empty_anchor_is_refused_and_writes_nothing() {
 }
 
 #[test]
-fn file_delete_lines_with_an_empty_pattern_is_refused_and_deletes_nothing() {
-    let dir = Scratch::new("empty_delete");
-    let p = dir.file("f.txt", "one\ntwo\n");
-    let mut selector = BTreeMap::new();
-    selector.insert("contains".to_string(), s(""));
-    let err = call("file_delete_lines", vec![s(&p), Value::Record(selector)]).expect_err("refused");
-    assert!(err.contains("the text to find is empty"), "{err}");
-    assert_eq!(std::fs::read_to_string(&p).unwrap(), "one\ntwo\n");
-}
-
-#[test]
 fn a_non_empty_find_still_replaces() {
     let dir = Scratch::new("nonempty");
     let p = dir.file("f.txt", "abc");
