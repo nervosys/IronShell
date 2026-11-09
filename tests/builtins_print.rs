@@ -12,10 +12,10 @@ fn eval_code(code: &str) -> Value {
 fn print_function() {
     let code = r#"print("hi")"#;
     let out = eval_code(code);
-    // The returned Value should be a Str whose contents are the pretty
-    // inline display of the original target (including surrounding quotes).
+    // The returned Value is the text print wrote: a String's own text, not
+    // its quoted display.
     match out {
-        Value::Str(s) => assert_eq!(s, "\"hi\""),
+        Value::Str(s) => assert_eq!(s, "hi"),
         other => panic!("expected Str, got {:?}", other),
     }
 }
@@ -25,7 +25,7 @@ fn print_spaced() {
     let code = r#"print "hi""#;
     let out = eval_code(code);
     match out {
-        Value::Str(s) => assert_eq!(s, "\"hi\""),
+        Value::Str(s) => assert_eq!(s, "hi"),
         other => panic!("expected Str, got {:?}", other),
     }
 }
@@ -35,7 +35,7 @@ fn print_piped() {
     let code = r#""hi" | print"#;
     let out = eval_code(code);
     match out {
-        Value::Str(s) => assert_eq!(s, "\"hi\""),
+        Value::Str(s) => assert_eq!(s, "hi"),
         other => panic!("expected Str, got {:?}", other),
     }
 }
