@@ -2874,10 +2874,18 @@ fn get_all_builtin_definitions() -> Vec<BuiltinDefinition> {
         enriched.iter().map(|b| b.name.clone()).collect();
 
     // Determine the "canonical" name for each index (shortest non-alias name)
+    // A hyphenated spelling is never the canonical one: `to-csv` and `to_csv`
+    // share an index and are the same length, and `-` sorts before `_`, so
+    // without this the hyphen was chosen and the underscore lost.
     let mut canonical: HashMap<usize, String> = HashMap::new();
     for (idx, names) in &index_to_names {
         let mut sorted = names.clone();
-        sorted.sort_by(|a, b| a.len().cmp(&b.len()).then(a.cmp(b)));
+        sorted.sort_by(|a, b| {
+            a.contains('-')
+                .cmp(&b.contains('-'))
+                .then(a.len().cmp(&b.len()))
+                .then(a.cmp(b))
+        });
         canonical.insert(*idx, sorted[0].clone());
     }
 
@@ -2976,7 +2984,12 @@ fn get_all_builtin_definitions() -> Vec<BuiltinDefinition> {
         by_callee.entry(callee).or_default().push(name);
     }
     for (_, mut names) in by_callee {
-        names.sort_by(|a, b| a.len().cmp(&b.len()).then(a.cmp(b)));
+        names.sort_by(|a, b| {
+            a.contains('-')
+                .cmp(&b.contains('-'))
+                .then(a.len().cmp(&b.len()))
+                .then(a.cmp(b))
+        });
         let primary = names[0];
         if seen_names.contains(primary) {
             continue;
@@ -3000,6 +3013,20 @@ fn get_all_builtin_definitions() -> Vec<BuiltinDefinition> {
             aliases: (!aliases.is_empty()).then_some(aliases),
             json_schema: json!({ "type": "object", "properties": {} }),
         });
+    }
+
+    // The parser reads a name as an identifier, so a hyphenated name such as
+    // `to-csv` cannot be written in a program. The catalogue advertises the
+    // underscore form only. A hyphenated spelling stays callable wherever it
+    // already was, but is not listed, here or as an alias.
+    all.retain(|d| !d.name.contains('-'));
+    for d in &mut all {
+        if let Some(aliases) = d.aliases.as_mut() {
+            aliases.retain(|a| !a.contains('-'));
+        }
+        if d.aliases.as_ref().is_some_and(|a| a.is_empty()) {
+            d.aliases = None;
+        }
     }
 
     // Sort by category then name for consistent output
