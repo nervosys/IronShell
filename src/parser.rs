@@ -457,7 +457,7 @@ fn invalid_unicode_escape(line: usize, col: usize, chars: &[char], at: usize) ->
     let mut escape = String::from("\\u");
     let braced = chars.get(at) == Some(&'{');
     let mut k = at;
-    while k < chars.len() && escape.chars().count() < 12 {
+    while k < chars.len() && escape.chars().count() < 24 {
         let c = chars[k];
         if c == '"' || c == '\n' {
             break;

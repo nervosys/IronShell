@@ -57,7 +57,7 @@ thread_local! {
     static STATEMENT: std::cell::RefCell<Option<Site>> = const { std::cell::RefCell::new(None) };
     /// Named lambdas bound by a top-level `name = fn ...` statement, and where.
     static LAMBDA_SITES: std::cell::RefCell<BTreeMap<String, Site>> =
-        std::cell::RefCell::new(BTreeMap::new());
+        const { std::cell::RefCell::new(BTreeMap::new()) };
     /// The lambda a failing call came out of, outermost-first kept: the first
     /// one recorded is the innermost, which is where the failure is.
     static FAILED_IN: std::cell::RefCell<Option<(String, Site)>> =

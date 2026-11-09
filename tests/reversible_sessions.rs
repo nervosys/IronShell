@@ -419,8 +419,10 @@ fn a_failed_undo_keeps_the_step_so_it_can_be_retried() {
         "a failed restore must leave the step journalled"
     );
 
+    // The file is now absent, which a plain undo refuses to fill (it was
+    // removed after the step); the retry is forced, as the hint says.
     std::fs::remove_dir(&p).expect("clear the obstacle");
-    let retried = call("undo", vec![Value::Int(1)]).expect("retry");
+    let retried = forced_undo().expect("retry");
     assert_eq!(field(&retried, "restored"), Value::Int(1));
     assert_eq!(field(&retried, "complete"), Value::Bool(true));
     assert_eq!(
@@ -464,7 +466,7 @@ fn undo_leaves_a_newer_file_it_cannot_keep() {
     // The way through that the refusal names: move the file, then undo.
     let moved = s.path("data.moved");
     std::fs::rename(&p, &moved).expect("move away");
-    let retried = call("undo", vec![Value::Int(1)]).expect("retry");
+    let retried = forced_undo().expect("retry");
     assert_eq!(field(&retried, "restored"), Value::Int(1));
     assert_eq!(std::fs::read_to_string(&p).unwrap(), "original");
     assert!(std::fs::read(&moved).unwrap() == newer);

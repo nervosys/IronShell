@@ -163,7 +163,7 @@ fn a_step_that_removed_a_file_is_still_undone_while_it_stays_absent() {
 }
 
 #[test]
-fn a_later_step_whose_file_was_removed_by_hand_ends_the_undo_as_an_outcome() {
+fn a_newest_step_whose_file_was_removed_by_hand_is_refused() {
     let _g = LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let session = Session::new("removed_second");
     let a = session.path("a.txt");
@@ -174,9 +174,11 @@ fn a_later_step_whose_file_was_removed_by_hand_ends_the_undo_as_an_outcome() {
     call("file_replace", vec![s(&b), s("b0"), s("b1")]).expect("replace b");
     std::fs::remove_file(&b).expect("remove b by hand");
 
-    let report = call("undo", vec![Value::Int(2)]).expect("the refusal is an outcome");
-    assert_eq!(field(&report, "restored"), Value::Int(0));
-    assert_eq!(field(&report, "complete"), Value::Bool(false));
+    // b's step is undone first, so its refusal comes before anything was
+    // undone: an error, as for a file changed by hand.
+    let refused = call("undo", vec![Value::Int(2)]).expect_err("undo must refuse");
+    assert!(refused.contains("was removed after this step"), "{refused}");
+    assert!(refused.contains("E_BAD_STATE"), "{refused}");
     assert!(!std::path::Path::new(&b).exists());
     assert_eq!(std::fs::read_to_string(&a).unwrap(), "a1");
 }
