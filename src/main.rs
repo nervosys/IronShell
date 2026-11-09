@@ -372,6 +372,10 @@ fn run(cli: Cli) -> Result<()> {
     // arguments. Under -c there is no script, so the words after -c are not
     // arguments, and the REPL has none either.
     let mut file_and_args = cli.file_and_args;
+    // Under -c the words are the command's positional parameters for `-b`
+    // (`ish -b -c 'echo $1' a` prints a), so keep a copy before the first word
+    // is taken as the file.
+    let c_args = file_and_args.clone();
     let file = (!file_and_args.is_empty()).then(|| file_and_args.remove(0));
     let script_args = if cli.command.is_some() {
         Vec::new()
@@ -473,7 +477,7 @@ fn run(cli: Cli) -> Result<()> {
     // Handle -c/--command flag
     if let Some(cmd) = cli.command {
         let code = if cli.bash {
-            run_posix_or_fall_back(&cmd, &[]);
+            run_posix_or_fall_back(&cmd, &c_args);
             transpile::bash::transpile_bash_to_ae(&cmd)?
         } else if cli.zsh {
             transpile::zsh::transpile_zsh_to_ae(&cmd)?
@@ -1239,7 +1243,7 @@ fn run_posix_or_fall_back(src: &str, args: &[String]) {
                     "{} at line {}, column {} is not in the in-process POSIX subset, so nothing in this script was run",
                     r.construct, r.line, r.column
                 ),
-                "run the supported parts on their own, or set IRONSHELL_ALLOW_SH=true to run the unsupported parts through bash -lc, outside the effect gate",
+                iron_shell::posix::refusal_hint(&r.construct),
             );
             iron_shell::repl::report_error(&e);
             std::process::exit(iron_shell::repl::exit_status_for(&e));

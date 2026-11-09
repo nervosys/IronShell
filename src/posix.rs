@@ -594,7 +594,9 @@ impl<'a> Lexer<'a> {
             }
             Some(c @ ('?' | '$' | '#' | '0'..='9' | '@' | '*' | '!' | '-')) => {
                 self.i += 1;
-                if matches!(c, '@' | '*' | '!' | '-') {
+                // `$@` and `$*` are the positional parameters; `$!` and `$-`
+                // are not in the subset.
+                if matches!(c, '!' | '-') {
                     return unsupported("special parameter");
                 }
                 parts.push(Part::Var(c.to_string(), None, quoted));
@@ -1225,6 +1227,32 @@ impl Shell {
                         mask.push(false);
                     }
                     have = true;
+                }
+                // `"$*"` is one field, the arguments joined by a space.
+                Part::Var(name, None, true) if name == "*" => {
+                    let joined = self.positional.join(" ");
+                    self.splice(&joined, true, &mut fields, &mut cur, &mut mask, &mut have);
+                }
+                // `"$@"` is each argument as its own field, and no field at all
+                // when there are none.
+                Part::Var(name, None, true) if name == "@" => {
+                    let args = self.positional.clone();
+                    for (k, arg) in args.iter().enumerate() {
+                        if k > 0 {
+                            fields.push((std::mem::take(&mut cur), std::mem::take(&mut mask)));
+                        }
+                        cur.push_str(arg);
+                        mask.extend(std::iter::repeat_n(false, arg.chars().count()));
+                        have = true;
+                    }
+                }
+                // Unquoted `$@` and `$*` split each argument like any unquoted
+                // expansion.
+                Part::Var(name, None, false) if name == "@" || name == "*" => {
+                    let args = self.positional.clone();
+                    for arg in &args {
+                        self.splice(arg, false, &mut fields, &mut cur, &mut mask, &mut have);
+                    }
                 }
                 Part::Var(name, op, quoted) => {
                     let value = self.param(name, op, stdin);
@@ -4838,6 +4866,15 @@ pub fn refusal(src: &str) -> Option<Refusal> {
         line,
         column,
     })
+}
+
+/// The hint that goes with a refusal of `construct`: what to do instead.
+pub fn refusal_hint(construct: &str) -> &'static str {
+    if construct.starts_with("arithmetic expansion") {
+        "arithmetic is not in the subset; compute in ish (ish -c) or set IRONSHELL_ALLOW_SH=true to run the unsupported parts through bash -lc, outside the effect gate"
+    } else {
+        "run the supported parts on their own, or set IRONSHELL_ALLOW_SH=true to run the unsupported parts through bash -lc, outside the effect gate"
+    }
 }
 
 /// See [`refusal`].
