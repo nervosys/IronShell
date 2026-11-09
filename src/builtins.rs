@@ -4914,8 +4914,15 @@ fn bi_print(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
     // Print the pretty display to stdout. `display_full`, not
     // `display_inline`: the latter caps at 80 characters, which silently threw
     // away the tail of anything longer that a script tried to print.
-    let pretty =
-        crate::value::pretty::display_full(&target, &crate::value::pretty::Theme::for_stdout());
+    // A String is written as its text. The pretty display quotes it, which is
+    // right for showing a value and wrong for printing one: `print("x")` wrote
+    // `"x"`, and a newline escape in the text was shown, not written.
+    let pretty = match &target {
+        Value::Str(s) => s.clone(),
+        other => {
+            crate::value::pretty::display_full(other, &crate::value::pretty::Theme::for_stdout())
+        }
+    };
     println!("{}", pretty);
 
     // Helper to strip ANSI color sequences from a string
