@@ -3876,23 +3876,7 @@ pub fn did_you_mean(name: &str) -> Vec<String> {
 /// builtin and the unknown-name paths, so they are never pushed out by a
 /// nearby but unrelated name.
 pub fn did_you_mean_among<'a>(name: &str, extra: impl Iterator<Item = &'a str>) -> Vec<String> {
-    // The conversion spellings of other languages come first. `to_int` is four
-    // edits from `int`, past the edit budget, so the nearest-name search would
-    // never find them; they are named outright.
-    let mut out: Vec<String> = match name {
-        "to_int" | "parse_int" | "as_int" => vec!["int".to_string()],
-        "to_float" | "parse_float" | "as_float" => vec!["float".to_string()],
-        "number" | "to_number" | "parse_number" => {
-            vec!["int".to_string(), "float".to_string()]
-        }
-        // Date and time names have no builtin of their own; the clock one is.
-        "date_iso" | "iso_date" | "today" | "date" | "datetime" | "timestamp_iso" => {
-            vec!["now_iso".to_string()]
-        }
-        // Raising an error is `error(message)`; there is no raise or throw.
-        "raise" | "throw" | "fail" => vec!["error".to_string()],
-        _ => Vec::new(),
-    };
+    let mut out: Vec<String> = mapped_spelling(name);
     // The module spelling comes next. `file_read` is not a builtin, but
     // `file.read` is the call an agent meant, and an edit-distance guess
     // (`file_rename`) is a worse answer than that one. It is offered only when
@@ -3912,6 +3896,40 @@ pub fn did_you_mean_among<'a>(name: &str, extra: impl Iterator<Item = &'a str>) 
         }
     }
     out
+}
+
+/// The builtins a misspelt name is named for outright, from other languages
+/// and other shells: a spelling the edit-distance search cannot reach, such as
+/// `to_int` (four edits from `int`), is listed here instead.
+fn mapped_spelling(name: &str) -> Vec<String> {
+    match name {
+        "to_int" | "parse_int" | "as_int" => vec!["int".to_string()],
+        "to_float" | "parse_float" | "as_float" => vec!["float".to_string()],
+        "number" | "to_number" | "parse_number" => {
+            vec!["int".to_string(), "float".to_string()]
+        }
+        // Date and time names have no builtin of their own; the clock one is.
+        "date_iso" | "iso_date" | "today" | "date" | "datetime" | "timestamp_iso" => {
+            vec!["now_iso".to_string()]
+        }
+        // Raising an error is `error(message)`, or the `throw` statement.
+        "raise" | "fail" => vec!["error".to_string(), "throw".to_string()],
+        "throw" => vec!["error".to_string()],
+        // Dates: parse and format are date_parse and date_format.
+        "parse_date" | "strptime" => vec!["date_parse".to_string()],
+        "strftime" => vec!["date_format".to_string()],
+        // Regular expressions: regex_find, and regex_match for a yes or no.
+        "re_find" | "re_search" | "regex_search" => vec!["regex_find".to_string()],
+        "re_match" => vec!["regex_match".to_string()],
+        // Padding: pad_left and pad_right, which take a width and a fill.
+        "lpad" | "rjust" => vec!["pad_left".to_string()],
+        "rpad" | "ljust" => vec!["pad_right".to_string()],
+        "center" => vec!["pad_left".to_string(), "pad_right".to_string()],
+        // TOML: from_toml reads a document and to_toml writes one.
+        "toml" => vec!["from_toml".to_string(), "to_toml".to_string()],
+        "parse_toml" => vec!["from_toml".to_string()],
+        _ => Vec::new(),
+    }
 }
 
 /// The edit budget for a suggestion to `name`. Budget scales with length: for a
@@ -3972,11 +3990,18 @@ pub fn module_member_candidates(module: &str, field: &str, members: &[&str]) -> 
         .collect();
     near.sort_unstable_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.cmp(b.1)));
     near.dedup_by(|a, b| a.1 == b.1);
-    let mut out: Vec<String> = near
-        .into_iter()
-        .take(3)
-        .map(|(_, m)| format!("{module}.{m}"))
-        .collect();
+    // A spelling another language uses for a builtin here (`str.rjust` is
+    // pad_right) comes first, as it does for a bare name.
+    let mut out: Vec<String> = mapped_spelling(field);
+    for (_, m) in near {
+        if out.len() == 3 {
+            break;
+        }
+        let spelled = format!("{module}.{m}");
+        if !out.contains(&spelled) {
+            out.push(spelled);
+        }
+    }
     let mut globals: Vec<(usize, &str)> = BUILTIN_LOOKUP
         .keys()
         .copied()
@@ -13779,8 +13804,13 @@ fn bi_slice(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
 
             Ok(Value::Str(chars[start..end].iter().collect()))
         }
-        _ => Err(crate::safety::arg_err(
-            "slice requires array or string input",
+        other => Err(crate::safety::bad_arg_in(
+            "slice",
+            format!(
+                "slice takes a String or Array and Int indices; got {}",
+                other.type_name()
+            ),
+            "pass the text or the array first: slice(x, start, end?), or x | slice(start, end?)",
         )),
     }
 }
@@ -14620,10 +14650,25 @@ fn text_regex(builtin: &str, pattern: &str) -> Result<regex::Regex> {
         .map_err(|e| {
             crate::safety::bad_arg_in(
                 builtin,
-                format!("{builtin}: invalid regex {pattern:?}: {e}"),
-                "write the pattern in Rust regex syntax; escape a literal . ( ) [ ] * + ? with a backslash",
+                format!(
+                    "{builtin}: invalid regex {}: {e}",
+                    quoted_pattern(pattern)
+                ),
+                "write the pattern in Rust regex syntax; escape a literal . ( ) [ ] * + ? with a backslash; compiled patterns are limited to 1 MiB",
             )
         })
+}
+
+/// A regex pattern as an error quotes it: at most its first 60 characters,
+/// then the length in characters, so a huge pattern does not fill the error.
+fn quoted_pattern(pattern: &str) -> String {
+    const SHOWN: usize = 60;
+    let total = pattern.chars().count();
+    if total <= SHOWN {
+        return format!("{pattern:?}");
+    }
+    let head: String = pattern.chars().take(SHOWN).collect();
+    format!("{head:?}… ({total} characters)")
 }
 
 /// A character offset for a byte offset a regex reported.
@@ -14632,8 +14677,9 @@ fn char_offset(text: &str, byte: usize) -> i64 {
 }
 
 /// A regex match as a Record: its text, its capture groups (null for a group
-/// that did not take part), and where it sits, in characters.
-fn match_record(text: &str, caps: &regex::Captures<'_>) -> Value {
+/// that did not take part), where it sits in characters, and its named groups
+/// as a Record of name to String or null (empty when the pattern names none).
+fn match_record(re: &regex::Regex, text: &str, caps: &regex::Captures<'_>) -> Value {
     let (matched, start, end) = match caps.get(0) {
         Some(m) => (
             m.as_str().to_string(),
@@ -14642,17 +14688,24 @@ fn match_record(text: &str, caps: &regex::Captures<'_>) -> Value {
         ),
         None => (String::new(), 0, 0),
     };
-    let groups = caps
-        .iter()
-        .skip(1)
-        .map(|group| match group {
+    fn group_value(group: Option<regex::Match<'_>>) -> Value {
+        match group {
             Some(g) => Value::Str(g.as_str().to_string()),
             None => Value::Null,
+        }
+    }
+    let groups = caps.iter().skip(1).map(group_value).collect();
+    let named: BTreeMap<String, Value> = re
+        .capture_names()
+        .enumerate()
+        .filter_map(|(index, name)| {
+            name.map(|name| (name.to_string(), group_value(caps.get(index))))
         })
         .collect();
     let mut record = BTreeMap::new();
     record.insert("match".to_string(), Value::Str(matched));
     record.insert("groups".to_string(), Value::Array(groups));
+    record.insert("named".to_string(), Value::Record(named));
     record.insert("start".to_string(), Value::Int(start));
     record.insert("end".to_string(), Value::Int(end));
     Value::Record(record)
@@ -14680,14 +14733,17 @@ fn bi_regex_match(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
 /// Args:
 ///   - text: String (or the piped text)
 ///   - pattern: String - a Rust regex pattern
-/// Returns: Record {match: String, groups: Array, start: Int, end: Int}, or null
+/// Returns: Record {match: String, groups: Array, named: Record, start: Int, end: Int}, or null
 ///
 /// groups holds each capture group as a String, or null for a group that did
-/// not take part. start and end are character offsets, end exclusive.
+/// not take part. named holds each named group (?P<name>...) as a String or
+/// null, and is an empty Record when the pattern names no group. start and end
+/// are character offsets, end exclusive.
 ///
 /// Example:
 ///   regex_find("a1b22", "[0-9]+").start   # 1
 ///   regex_find("ab", "b").end             # 2
+///   regex_find("2024-02", "(?P<y>[0-9]+)-(?P<m>[0-9]+)").named.m   # "02"
 ///   regex_find("abc", "z")                # null
 fn bi_regex_find(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
     const B: &str = "regex_find";
@@ -14697,7 +14753,7 @@ fn bi_regex_find(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
     };
     let re = text_regex(B, string_arg(B, "a String pattern", pattern)?)?;
     Ok(match re.captures(&text) {
-        Some(caps) => match_record(&text, &caps),
+        Some(caps) => match_record(&re, &text, &caps),
         None => Value::Null,
     })
 }
@@ -14719,7 +14775,7 @@ fn bi_regex_find_all(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
     let re = text_regex(B, string_arg(B, "a String pattern", pattern)?)?;
     Ok(Value::Array(
         re.captures_iter(&text)
-            .map(|caps| match_record(&text, &caps))
+            .map(|caps| match_record(&re, &text, &caps))
             .collect(),
     ))
 }
@@ -14764,6 +14820,12 @@ fn unit_seconds(builtin: &str, unit: &str) -> Result<i64> {
 fn iso_instant(text: &str) -> Option<(chrono::DateTime<chrono::Utc>, bool)> {
     if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(text) {
         return Some((dt.with_timezone(&chrono::Utc), false));
+    }
+    // A datetime with a space or a T and no zone is UTC, as the RFC 3339 form is.
+    let naive = chrono::NaiveDateTime::parse_from_str(text, "%Y-%m-%d %H:%M:%S")
+        .or_else(|_| chrono::NaiveDateTime::parse_from_str(text, "%Y-%m-%dT%H:%M:%S"));
+    if let Ok(naive) = naive {
+        return Some((naive.and_utc(), false));
     }
     let date = chrono::NaiveDate::parse_from_str(text, "%Y-%m-%d").ok()?;
     Some((date.and_hms_opt(0, 0, 0)?.and_utc(), true))
@@ -14821,7 +14883,13 @@ fn parse_with_layout(builtin: &str, text: &str, layout: &str) -> Result<Value> {
     {
         return Ok(Value::Str(iso_text(midnight.and_utc(), true)));
     }
-    Err(not_a_date(builtin, text))
+    // With a format the format is what failed: naming the text as "not a date"
+    // sent the agent to the ISO forms when its layout was the problem.
+    Err(crate::safety::value_not_representable(
+        builtin,
+        format!("{builtin}: `{text}` does not match the format `{layout}`"),
+        "the format is a chrono strftime layout: %Y year, %m month, %d day, %B month name, %H:%M:%S time, %z offset; every part of the text must be matched, so a layout with only %Y does not read a full date. Leave the format out to read ISO 8601",
+    ))
 }
 
 /// date_parse(text, format?) - Read a date or datetime and answer it as ISO 8601.
@@ -15087,8 +15155,8 @@ fn bi_from_toml(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
     let parsed: toml::Value = toml::from_str(&text).map_err(|e| {
         crate::safety::value_not_representable(
             B,
-            format!("{B}: the text is not TOML: {e}"),
-            "pass a TOML document, such as a = 1",
+            format!("{B}: the text is not TOML: {}", e.message()),
+            &toml_failure_hint(&text, &e),
         )
     })?;
     Ok(crate::plugins::toml_to_value(parsed))
@@ -28940,6 +29008,77 @@ fn bi_lines(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
 /// open(path): read a file and parse it by its extension -- .json, .jsonl,
 /// .toml, .yaml/.yml, .csv -- or return its text. Borrowed from nushell,
 /// where `open Cargo.toml | get package.version` is the whole task.
+/// The line and column (both from 1) of a byte offset in a text.
+fn line_column(text: &str, byte: usize) -> (usize, usize) {
+    let before = text.get(..byte).unwrap_or(text);
+    let line = before.matches('\n').count() + 1;
+    let column = before.rsplit('\n').next().map_or(0, |s| s.chars().count()) + 1;
+    (line, column)
+}
+
+/// The first integer line of a TOML text whose value is past the 64-bit range.
+/// Returns its line (from 1) and its literal.
+fn oversized_toml_integer(text: &str) -> Option<(usize, String)> {
+    for (index, line) in text.lines().enumerate() {
+        let Some((_, value)) = line.split_once('=') else {
+            continue;
+        };
+        let token = value
+            .trim()
+            .split(|c: char| c.is_whitespace() || c == '#')
+            .next()
+            .unwrap_or("");
+        let unsigned = token.trim_start_matches(['+', '-']);
+        let integer_shaped = unsigned.starts_with(|c: char| c.is_ascii_digit())
+            && unsigned.chars().all(|c| c.is_ascii_digit() || c == '_');
+        if integer_shaped && token.replace('_', "").parse::<i64>().is_err() {
+            return Some((index + 1, token.to_string()));
+        }
+    }
+    None
+}
+
+/// The hint for a TOML text that will not read. An integer past the 64-bit
+/// range is named as such, since the parser's own message does not say which
+/// value it is; otherwise the hint gives the line and column of the error.
+fn toml_failure_hint(text: &str, err: &toml::de::Error) -> String {
+    if let Some((line, literal)) = oversized_toml_integer(text) {
+        return format!(
+            "the integer {literal} at line {line} is out of the 64-bit range (-9223372036854775808 to 9223372036854775807); write it as a float or a string"
+        );
+    }
+    match err.span() {
+        Some(span) => {
+            let (line, column) = line_column(text, span.start);
+            format!(
+                "fix the TOML at line {line}, column {column}: {}",
+                err.message()
+            )
+        }
+        None => format!("fix the TOML: {}", err.message()),
+    }
+}
+
+/// The refusal for a data file that will not parse. The file is the input, so
+/// the same call fails again until the file changes: not retryable.
+fn unparsed_data(path: &str, kind: &str, message: &str, hint: String) -> anyhow::Error {
+    crate::safety::bad_value_in(
+        "open",
+        format!("open: {path} is not valid {kind}: {message}"),
+        &hint,
+    )
+}
+
+/// A serde_json error's message without its position, which the hint states
+/// as a line and a column.
+fn json_message(e: &serde_json::Error) -> String {
+    let text = e.to_string();
+    text.split(" at line ")
+        .next()
+        .unwrap_or_default()
+        .to_string()
+}
+
 fn bi_open(args: Vec<Value>, _input: Option<Value>) -> Result<Value> {
     let path = match args.first() {
         Some(Value::Str(s)) => s.clone(),
@@ -28964,29 +29103,53 @@ fn bi_open(args: Vec<Value>, _input: Option<Value>) -> Result<Value> {
         .extension()
         .map(|e| e.to_string_lossy().to_ascii_lowercase())
         .unwrap_or_default();
-    let bad = |kind: &str, e: String| {
-        crate::safety::bad_arg("open", &format!("valid {kind} in {path}"), &e)
-    };
     match ext.as_str() {
         "json" => {
-            let j: serde_json::Value =
-                serde_json::from_str(&text).map_err(|e| bad("JSON", e.to_string()))?;
+            let j: serde_json::Value = serde_json::from_str(&text).map_err(|e| {
+                unparsed_data(
+                    &path,
+                    "JSON",
+                    &e.to_string(),
+                    format!(
+                        "fix the JSON at line {}, column {}: {}",
+                        e.line(),
+                        e.column(),
+                        json_message(&e)
+                    ),
+                )
+            })?;
             Ok(Value::from_json(&j))
         }
         "jsonl" | "ndjson" => {
             let mut rows = Vec::new();
             for line in text.lines().filter(|l| !l.trim().is_empty()) {
-                let j: serde_json::Value =
-                    serde_json::from_str(line).map_err(|e| bad("JSON lines", e.to_string()))?;
+                let j: serde_json::Value = serde_json::from_str(line).map_err(|e| {
+                    unparsed_data(
+                        &path,
+                        "JSON lines",
+                        &e.to_string(),
+                        format!("fix the line of JSON that fails: {}", json_message(&e)),
+                    )
+                })?;
                 rows.push(Value::from_json(&j));
             }
             Ok(Value::Array(rows))
         }
         "toml" => {
-            let t: toml::Value = toml::from_str(&text).map_err(|e| bad("TOML", e.to_string()))?;
+            let t: toml::Value = toml::from_str(&text).map_err(|e| {
+                unparsed_data(&path, "TOML", e.message(), toml_failure_hint(&text, &e))
+            })?;
             Ok(crate::plugins::toml_to_value(t))
         }
-        "yaml" | "yml" => crate::yaml::parse(&text).map_err(|e| bad("YAML", e.to_string())),
+        "yaml" | "yml" => crate::yaml::parse(&text).map_err(|e| {
+            // The YAML parser's messages already start with `line N:`.
+            unparsed_data(
+                &path,
+                "YAML",
+                &e.to_string(),
+                format!("fix the YAML at {e}"),
+            )
+        }),
         "csv" => bi_from_csv(vec![], Some(Value::Str(text))),
         _ => Ok(Value::Str(text)),
     }
@@ -49151,8 +49314,10 @@ fn bi_file_insert(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
     match &args[1] {
         Value::Int(line_num) => {
             if *line_num < 1 {
-                return Err(crate::safety::arg_err(
-                    "file_insert: lines are numbered from 1",
+                return Err(crate::safety::bad_arg_in(
+                    "file_insert",
+                    format!("file_insert: lines are numbered from 1, got {line_num}"),
+                    "use 1 to insert before the first line, or the keyword start; nothing was written",
                 ));
             }
             let line = *line_num as usize;

@@ -559,7 +559,12 @@ fn interpolate_string(s: &str, env: &mut Env) -> Result<String, String> {
                 result.push_str(&format_value(&val));
             }
         } else {
-            result.push(c);
+            // A `\$` escape the lexer left as a marker is a plain `$` here.
+            result.push(if c == crate::parser::ESCAPED_DOLLAR {
+                '$'
+            } else {
+                c
+            });
         }
     }
     Ok(result)

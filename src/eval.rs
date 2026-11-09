@@ -540,7 +540,7 @@ pub fn eval_expr(expr: &Expr, env: &mut Env) -> Result<Value> {
             if s.contains("${") {
                 interpolate_string(s, env)
             } else {
-                Ok(Value::Str(s.clone()))
+                Ok(Value::Str(s.replace(crate::parser::ESCAPED_DOLLAR, "$")))
             }
         }
         Expr::LitBool(b) => Ok(Value::Bool(*b)),
@@ -957,6 +957,19 @@ fn module_field_error(
         if crate::modules::is_module_record(name, map) {
             let members = crate::modules::module_member_names(name);
             let candidates = builtins::module_member_candidates(name, field, &members);
+            // `str.slice` names a builtin that is top-level, not a member: say
+            // how to call it, since "did you mean: slice" does not.
+            if builtins::is_dispatched(field) {
+                let specific = format!(
+                    "`{field}` is a top-level builtin, not a member of {name}: call {field}(s, ...) or s | {field}(...)"
+                );
+                return crate::safety::unknown_module_member_hinted(
+                    name,
+                    field,
+                    candidates,
+                    Some(specific),
+                );
+            }
             return crate::safety::unknown_module_member(name, field, candidates);
         }
     }
@@ -2144,6 +2157,19 @@ fn check_declared_type(name: &str, declared: &str, value: &Value) -> Result<()> 
     ))
 }
 
+/// An unknown name that came from inside a `${...}` hole. The hint says what
+/// the hole is, since `"${d}"` is interpolation and not a regex group: the way
+/// to write the literal text is `\${`.
+fn interpolation_name_error(e: anyhow::Error) -> anyhow::Error {
+    match e.downcast::<crate::safety::SafetyError>() {
+        Ok(mut se) => {
+            se.hint = "${...} interpolates in strings; write \\${ for a literal ${".to_string();
+            anyhow::Error::new(se)
+        }
+        Err(other) => other,
+    }
+}
+
 /// Interpolate ${expr} patterns in a string
 fn interpolate_string(s: &str, env: &mut Env) -> Result<Value> {
     let mut result = String::new();
@@ -2181,7 +2207,7 @@ fn interpolate_string(s: &str, env: &mut Env) -> Result<Value> {
                                 if crate::safety::code_of(&e)
                                     == crate::safety::ErrorCode::UnknownName =>
                             {
-                                return Err(e);
+                                return Err(interpolation_name_error(e));
                             }
                             Err(e) => {
                                 // On error, keep the ${expr} literal
@@ -2203,7 +2229,11 @@ fn interpolate_string(s: &str, env: &mut Env) -> Result<Value> {
                 }
             }
         } else {
-            result.push(chars[i]);
+            result.push(if chars[i] == crate::parser::ESCAPED_DOLLAR {
+                '$'
+            } else {
+                chars[i]
+            });
             i += 1;
         }
     }

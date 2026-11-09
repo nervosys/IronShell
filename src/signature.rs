@@ -7312,10 +7312,11 @@ pub static SIGNATURES: &[Signature] = &[
         subject: Some(Ty::Str),
         params: &[req("pattern", Ty::Str, "a Rust regex pattern")],
         returns: "Record|Null",
-        doc: "The first match of a Rust regex in a String, as a Record {match, groups, start, end}, or null when nothing matches. groups is an Array of the capture groups as Strings, null for a group that did not take part. start and end are character offsets, end exclusive. Direct regex_find(text, pattern) or text | regex_find(pattern).",
+        doc: "The first match of a Rust regex in a String, as a Record {match, groups, named, start, end}, or null when nothing matches. groups is an Array of the capture groups as Strings, null for a group that did not take part. named is a Record of the named groups (?P<name>...) as Strings, null for a group that did not take part, and an empty Record when the pattern names no group. start and end are character offsets, end exclusive. An invalid pattern, or one over the size cap (compiled patterns are limited to 1 MiB), is E_BAD_ARG. Direct regex_find(text, pattern) or text | regex_find(pattern).",
         examples: &[
             (r#"regex_find("a1b22", "[0-9]+").start"#, "1"),
             (r#"regex_find("ab", "b").end"#, "2"),
+            (r#"regex_find("2024-02", "(?P<y>[0-9]+)-(?P<m>[0-9]+)").named.m"#, r#""02""#),
             (r#"regex_find("abc", "z")"#, "null"),
         ],
     },
@@ -7327,7 +7328,7 @@ pub static SIGNATURES: &[Signature] = &[
         subject: Some(Ty::Str),
         params: &[req("pattern", Ty::Str, "a Rust regex pattern")],
         returns: "Array",
-        doc: "Every match of a Rust regex in a String, left to right, as an Array of the records regex_find returns. An empty Array when nothing matches. Direct regex_find_all(text, pattern) or text | regex_find_all(pattern).",
+        doc: "Every match of a Rust regex in a String, left to right, as an Array of the records regex_find returns, each with match, groups, named, start and end. An empty Array when nothing matches. An invalid pattern, or one over the size cap (compiled patterns are limited to 1 MiB), is E_BAD_ARG. Direct regex_find_all(text, pattern) or text | regex_find_all(pattern).",
         examples: &[
             (r#"regex_find_all("a1b22", "[0-9]+") | len"#, "2"),
             (r#"regex_find_all("abc", "z") | len"#, "0"),
@@ -7339,12 +7340,13 @@ pub static SIGNATURES: &[Signature] = &[
         subject_required: false,
         aliases: &[],
         subject: Some(Ty::Str),
-        params: &[req("pattern", Ty::Str, "a Rust regex pattern"), req("replacement", Ty::Str, "replacement text; $1, ${name} and $$ expand as the regex crate expands them")],
+        params: &[req("pattern", Ty::Str, "a Rust regex pattern"), req("replacement", Ty::Str, "replacement text; $1, $name and $$ expand as the regex crate expands them; write a named group as \\${name}, since ${name} interpolates")],
         returns: "String",
-        doc: "Replace every match of a Rust regex in a String. The replacement expands $1, $name, ${name} and $$ as the regex crate does. Direct regex_replace(text, pattern, replacement) or text | regex_replace(pattern, replacement).",
+        doc: "Replace every match of a Rust regex in a String. The replacement expands $1, $name, ${name} and $$ as the regex crate does. In a double-quoted string ${name} is interpolation, so write \\${name} to pass ${name} to the regex: regex_replace(\"2024-02\", \"(?P<y>[0-9]+)-(?P<m>[0-9]+)\", \"\\${m}/\\${y}\") is \"02/2024\". An invalid pattern, or one over the size cap (compiled patterns are limited to 1 MiB), is E_BAD_ARG. Direct regex_replace(text, pattern, replacement) or text | regex_replace(pattern, replacement).",
         examples: &[
             (r#"regex_replace("a1b2", "([0-9])", "<$1>")"#, r#""a<1>b<2>""#),
             (r##""a1" | regex_replace("[0-9]", "#")"##, r#""a#""#),
+            (r#"regex_replace("2024-02", "(?P<y>[0-9]+)-(?P<m>[0-9]+)", "\${m}/\${y}")"#, r#""02/2024""#),
         ],
     },
     Signature {

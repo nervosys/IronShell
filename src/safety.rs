@@ -2865,7 +2865,20 @@ pub fn unknown_module(name: &str, candidates: Vec<String>) -> anyhow::Error {
 /// no such member (`E_UNKNOWN_BUILTIN`). The member is a builtin that does not
 /// exist, so it is named as one; `candidates` are the nearest real names.
 pub fn unknown_module_member(module: &str, member: &str, candidates: Vec<String>) -> anyhow::Error {
-    let hint = if candidates.is_empty() {
+    unknown_module_member_hinted(module, member, candidates, None)
+}
+
+/// [`unknown_module_member`] whose hint is `specific` when given, in place of
+/// the candidate list.
+pub fn unknown_module_member_hinted(
+    module: &str,
+    member: &str,
+    candidates: Vec<String>,
+    specific: Option<String>,
+) -> anyhow::Error {
+    let hint = if let Some(specific) = specific {
+        specific
+    } else if candidates.is_empty() {
         "no member of this module has a similar name; call ontology_manifest() to list the available builtins"
             .to_string()
     } else {
@@ -3077,18 +3090,20 @@ pub const ARG_ERR_HINT: &str = "check this builtin's required argument count and
 /// type (every one is `Any`) is described by its own doc line instead.
 fn signature_arg_hint(name: &str, sig: &crate::signature::Signature) -> String {
     use crate::signature::Ty;
+    // Each type once, in declaration order: `slice(start, end)` takes Int, not
+    // "Int or Int".
     let mut types: Vec<&str> = Vec::new();
-    if let Some(t) = sig.subject {
-        if t != Ty::Any {
-            types.push(t.as_str());
+    let subject = sig.subject.filter(|t| *t != Ty::Any);
+    let parameters = sig
+        .params
+        .iter()
+        .filter(|p| p.ty != Ty::Any)
+        .map(|p| p.ty.as_str());
+    for t in subject.into_iter().map(Ty::as_str).chain(parameters) {
+        if !types.contains(&t) {
+            types.push(t);
         }
     }
-    types.extend(
-        sig.params
-            .iter()
-            .filter(|p| p.ty != Ty::Any)
-            .map(|p| p.ty.as_str()),
-    );
     match types.split_last() {
         None => format!("{name}: {}", sig.doc),
         Some((last, [])) => format!("{name} takes {last}"),
