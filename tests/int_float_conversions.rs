@@ -90,6 +90,29 @@ fn int_refuses_text_that_is_not_a_whole_number() {
 }
 
 #[test]
+fn int_names_a_whole_number_too_large_for_an_int() {
+    let _g = lock();
+    for text in ["99999999999999999999", "-99999999999999999999"] {
+        let src = format!("int(\"{text}\")");
+        let se = refusal(&src);
+        assert_eq!(se.code.as_str(), "E_BAD_VALUE", "{src}");
+        assert!(
+            se.message.contains("does not fit in a 64-bit Int"),
+            "{src}: {}",
+            se.message
+        );
+        assert!(
+            se.message
+                .contains("-9223372036854775808 to 9223372036854775807"),
+            "{src}: {}",
+            se.message
+        );
+        assert!(se.hint.contains("float("), "{src}: {}", se.hint);
+        assert!(!se.is_retryable(), "{src}");
+    }
+}
+
+#[test]
 fn int_refuses_a_float_with_no_int_value() {
     let _g = lock();
     // 1e19 is past the 64-bit Int range; a truncation would wrap or saturate.

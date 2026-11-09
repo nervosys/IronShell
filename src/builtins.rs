@@ -14412,6 +14412,24 @@ fn bi_int(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
         }
         Value::Str(text) => match text.trim().parse::<i64>() {
             Ok(n) => Ok(Value::Int(n)),
+            // A whole number too large for an Int is named as such, not as
+            // "not a whole number", which it is.
+            Err(e)
+                if matches!(
+                    e.kind(),
+                    std::num::IntErrorKind::PosOverflow | std::num::IntErrorKind::NegOverflow
+                ) =>
+            {
+                Err(crate::safety::value_not_representable(
+                    "int",
+                    format!(
+                        "int: {text:?} does not fit in a 64-bit Int (-9223372036854775808 to 9223372036854775807)"
+                    ),
+                    &format!(
+                        "float({text:?}) reads it as a Float instead, which is approximate for a number this large"
+                    ),
+                ))
+            }
             Err(_) => Err(crate::safety::value_not_representable(
                 "int",
                 format!("int: {text:?} is not a whole number"),
