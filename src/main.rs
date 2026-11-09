@@ -383,6 +383,16 @@ fn run(cli: Cli) -> Result<()> {
         file_and_args
     };
     iron_shell::builtins::set_script_args(script_args);
+    if cli.command.is_some() {
+        iron_shell::builtins::set_run_under_c();
+        // Under -b the words are positional parameters; under plain -c nothing
+        // reads them, so say so instead of dropping them without a word.
+        if !cli.bash && !c_args.is_empty() {
+            eprintln!(
+                "ish: arguments after -c are ignored (args() is empty under -c); use a script file"
+            );
+        }
+    }
 
     // Handle subcommands
     if let Some(cmd) = cli.subcommand {
@@ -414,7 +424,7 @@ fn run(cli: Cli) -> Result<()> {
     if cli.bash && file.is_none() && cli.command.is_none() {
         let mut buf = String::new();
         io::stdin().read_to_string(&mut buf)?;
-        run_posix_or_fall_back(&buf, &[]);
+        run_posix_or_fall_back(&buf, None, &[]);
         let code = transpile::bash::transpile_bash_to_ae(&buf)?;
         return run_code(&code);
     }
@@ -477,7 +487,7 @@ fn run(cli: Cli) -> Result<()> {
     // Handle -c/--command flag
     if let Some(cmd) = cli.command {
         let code = if cli.bash {
-            run_posix_or_fall_back(&cmd, &c_args);
+            run_posix_or_fall_back(&cmd, None, &c_args);
             transpile::bash::transpile_bash_to_ae(&cmd)?
         } else if cli.zsh {
             transpile::zsh::transpile_zsh_to_ae(&cmd)?
@@ -1190,7 +1200,7 @@ fn run_file(path: &str, explicit_mode: Option<TranspileMode>) -> Result<()> {
     if let Some(m) = mode {
         code = match m {
             TranspileMode::Bash => {
-                run_posix_or_fall_back(&code, iron_shell::builtins::script_args());
+                run_posix_or_fall_back(&code, Some(path), iron_shell::builtins::script_args());
                 transpile::bash::transpile_bash_to_ae(&code).with_context(|| {
                     format!("bash\u{2192}ironshell transpile failed for {}", path)
                 })?
@@ -1218,9 +1228,15 @@ fn run_file(path: &str, explicit_mode: Option<TranspileMode>) -> Result<()> {
 /// outside the subset, before anything has run, so the caller falls back to
 /// the transpiler exactly as it did before the subset existed. `args` are the
 /// script's arguments, which become its positional parameters `$1`..`$9`.
-fn run_posix_or_fall_back(src: &str, args: &[String]) {
+/// Run `src` in the POSIX subset. `script` is the file's path, which is `$0`;
+/// `None` (stdin, `-c`) makes `$0` `ish`.
+fn run_posix_or_fall_back(src: &str, script: Option<&str>, args: &[String]) {
     let started = std::time::Instant::now();
-    if let Some(status) = iron_shell::posix::run_with_args(src, args) {
+    let ran = match script {
+        Some(path) => iron_shell::posix::run_script(src, path, args),
+        None => iron_shell::posix::run_with_args(src, args),
+    };
+    if let Some(status) = ran {
         iron_shell::record::note_status(
             iron_shell::record::Surface::Sh,
             src,

@@ -161,6 +161,24 @@ fn agent_decision(effect: Effect) -> &'static str {
     }
 }
 
+/// A builtin the run refuses outright, before anything executes, unless an
+/// opt-in is set: `sh` runs an arbitrary command, and the call checks
+/// `validate_sh_allowed` first. Its decision is `deny` with the run's own hint,
+/// not the `approve` its effect would get. `None` for any other builtin, and
+/// for `sh` once the opt-in is set.
+fn refused_outright(builtin: &str) -> Option<String> {
+    if builtin != "sh" {
+        return None;
+    }
+    let refusal = crate::security::validate_sh_allowed().err()?;
+    Some(
+        refusal
+            .downcast_ref::<crate::safety::SafetyError>()
+            .map(|se| se.hint.clone())
+            .unwrap_or_default(),
+    )
+}
+
 fn rank(decision: &str) -> u8 {
     match decision {
         "allow" => 0,
@@ -200,7 +218,12 @@ pub fn explain(code: &str) -> Result<Value> {
         match builtin {
             Some(b) => {
                 let effect = effect_of(b);
-                let decision = agent_decision(effect);
+                let refused = refused_outright(b);
+                let decision = if refused.is_some() {
+                    "deny"
+                } else {
+                    agent_decision(effect)
+                };
                 effects.insert(effect as u8, effect.as_str());
                 if rank(decision) > rank(verdict) {
                     verdict = decision;
@@ -211,6 +234,9 @@ pub fn explain(code: &str) -> Result<Value> {
                     Value::Str(effect.as_str().to_string()),
                 );
                 r.insert("decision".to_string(), Value::Str(decision.to_string()));
+                if let Some(hint) = refused {
+                    r.insert("hint".to_string(), Value::Str(hint));
+                }
             }
             None => {
                 if !unresolved.contains(shown) {

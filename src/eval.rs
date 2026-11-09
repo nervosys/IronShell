@@ -857,7 +857,8 @@ pub fn eval_expr(expr: &Expr, env: &mut Env) -> Result<Value> {
                 // commonest cause.
                 other => Err(crate::safety::bad_arg(
                     &match object.as_ref() {
-                        Expr::Ident(name) => format!("{name}.{field}"),
+                        // `__` is the implicit row of `.field`; it is not written.
+                        Expr::Ident(name) if name != "__" => format!("{name}.{field}"),
                         _ => format!(".{field}"),
                     },
                     "a Record (or a module)",
@@ -955,16 +956,7 @@ fn module_field_error(
     if let Expr::Ident(name) = object {
         if crate::modules::is_module_record(name, map) {
             let members = crate::modules::module_member_names(name);
-            let mut candidates: Vec<String> =
-                builtins::nearest_names(field, members.iter().copied())
-                    .into_iter()
-                    .map(|m| format!("{name}.{m}"))
-                    .collect();
-            for global in builtins::nearest_names(field, builtins::BUILTIN_LOOKUP.keys().copied()) {
-                if !candidates.contains(&global) {
-                    candidates.push(global);
-                }
-            }
+            let candidates = builtins::module_member_candidates(name, field, &members);
             return crate::safety::unknown_module_member(name, field, candidates);
         }
     }
@@ -979,13 +971,9 @@ fn module_field_error(
 /// The error for a bare name that nothing binds. Its candidates are the nearest
 /// bound variables and builtins, so a misspelt variable names its own fix.
 fn unknown_name_error(name: &str, env: &Env) -> anyhow::Error {
-    let candidates = builtins::nearest_names(
-        name,
-        env.vars()
-            .keys()
-            .map(|k| k.as_str())
-            .chain(builtins::BUILTIN_LOOKUP.keys().copied()),
-    );
+    // The same suggestions as a misspelt builtin (`date` -> `now_iso` first),
+    // with the bound variables added to the candidates.
+    let candidates = builtins::did_you_mean_among(name, env.vars().keys().map(|k| k.as_str()));
     crate::safety::unknown_name(name, candidates)
 }
 
@@ -1015,7 +1003,8 @@ fn borrowed_member<'a>(expr: &Expr, env: &'a Env) -> Option<Result<&'a Value>> {
                         .ok_or_else(|| module_field_error(field, map, object)),
                     other => Err(crate::safety::bad_arg(
                         &match object.as_ref() {
-                            Expr::Ident(name) => format!("{name}.{field}"),
+                            // `__` is the implicit row of `.field`; it is not written.
+                            Expr::Ident(name) if name != "__" => format!("{name}.{field}"),
                             _ => format!(".{field}"),
                         },
                         "a Record (or a module)",
@@ -1046,8 +1035,9 @@ fn method_on_non_record(
         Ok(Value::Record(_)) | Ok(Value::Null) | Err(_) => return None,
         Ok(value) => value,
     };
+    // `__` is the implicit row of `.field`: it is named as the value it is.
     let recv = match object {
-        Expr::Ident(name) => name.as_str(),
+        Expr::Ident(name) if name != "__" => name.as_str(),
         _ => "value",
     };
     let ty = receiver.type_name();
@@ -1066,7 +1056,11 @@ fn method_on_non_record(
         rest.join(", ")
     );
     Some(crate::safety::bad_arg_with_hint(
-        &format!("{recv}.{field}"),
+        &if matches!(object, Expr::Ident(n) if n == "__") {
+            format!(".{field}")
+        } else {
+            format!("{recv}.{field}")
+        },
         "a Record (or a module)",
         ty,
         &hint,

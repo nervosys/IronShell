@@ -1737,25 +1737,25 @@ pub static SIGNATURES: &[Signature] = &[
         examples: &[(r#"json_parse("{\"n\":7}").n"#, "7"), (r#""[1,2]" | json_parse | len"#, "2")],
     },
     Signature {
-        name: "from-csv", category: None, subject_required: true, aliases: &["from_csv"],
+        name: "from_csv", category: None, subject_required: true, aliases: &["from-csv"],
         subject: Some(Ty::Str), params: &[], returns: "Array",
         doc: "Parse a piped CSV string with headers, inferring numeric and boolean cells.",
         examples: &[(r#"("n\n7\n" | from_csv | first).n"#, "7")],
     },
     Signature {
-        name: "to-csv", category: None, subject_required: true, aliases: &["to_csv"],
+        name: "to_csv", category: None, subject_required: true, aliases: &["to-csv"],
         subject: Some(Ty::Array), params: &[], returns: "String",
         doc: "Serialize a piped array of records to CSV using the first record's columns.",
         examples: &[(r#"[{n: 7}] | to_csv | from_csv | len"#, "1")],
     },
     Signature {
-        name: "from-yaml", category: None, subject_required: false, aliases: &["from_yaml"],
+        name: "from_yaml", category: None, subject_required: false, aliases: &["from-yaml"],
         subject: Some(Ty::Str), params: &[], returns: "Any",
         doc: "Parse the supported YAML subset into a typed value.",
         examples: &[(r#"from_yaml("n: 7").n"#, "7"), (r#"("n: 7" | from_yaml).n"#, "7")],
     },
     Signature {
-        name: "to-yaml", category: None, subject_required: false, aliases: &["to_yaml"],
+        name: "to_yaml", category: None, subject_required: false, aliases: &["to-yaml"],
         subject: Some(Ty::Any), params: &[], returns: "String",
         doc: "Serialize a typed value as YAML with round-trip-safe quoting.",
         examples: &[("({n: 7} | to_yaml | from_yaml).n", "7"), ("from_yaml(to_yaml({n: 7})).n", "7")],
@@ -2056,10 +2056,10 @@ pub static SIGNATURES: &[Signature] = &[
         ],
     },
     Signature {
-        name: "foreach-object",
+        name: "foreach",
         category: None,
         subject_required: false,
-        aliases: &["ForEach-Object", "foreach"],
+        aliases: &["ForEach-Object", "foreach-object"],
         subject: Some(Ty::Array),
         params: &[req(
             "transform",
@@ -2074,10 +2074,10 @@ pub static SIGNATURES: &[Signature] = &[
         ],
     },
     Signature {
-        name: "select-object",
+        name: "select",
         category: None,
         subject_required: true,
-        aliases: &["Select-Object", "select"],
+        aliases: &["Select-Object", "select-object"],
         subject: None,
         params: &[opt_rest(
             "property",
@@ -2092,10 +2092,10 @@ pub static SIGNATURES: &[Signature] = &[
         ],
     },
     Signature {
-        name: "measure-object",
+        name: "measure",
         category: None,
         subject_required: true,
-        aliases: &["Measure-Object", "measure"],
+        aliases: &["Measure-Object", "measure-object"],
         subject: None,
         params: &[opt(
             "property",
@@ -2165,10 +2165,10 @@ pub static SIGNATURES: &[Signature] = &[
     // make the IronShell arm lose for a fixable reason rather than a
     // fundamental one, so it lands before that experiment runs.
     Signature {
-        name: "from-json",
+        name: "from_json",
         category: None,
         subject_required: false,
-        aliases: &["from_json"],
+        aliases: &["from-json"],
         subject: Some(Ty::Str),
         params: &[],
         returns: "Any",
@@ -2715,10 +2715,10 @@ pub static SIGNATURES: &[Signature] = &[
         ],
     },
     Signature {
-        name: "to-json",
+        name: "to_json",
         category: None,
         subject_required: false,
-        aliases: &["to_json"],
+        aliases: &["to-json"],
         subject: Some(Ty::Any),
         params: &[],
         returns: "String",
@@ -14838,6 +14838,15 @@ pub fn validate(name: &str, args: &[Value], input: Option<&Value>) -> anyhow::Re
                 &sig.render(),
                 &format!("{supplied} of {required} required"),
                 "to test membership, pipe the value to in: `\"bug\" | in([\"bug\", \"x\"])`",
+            ));
+        }
+        // `sql("select 1")` reads as complete; what it lacks is rows.
+        if name == "sql" {
+            return Err(crate::safety::bad_arg_with_hint(
+                name,
+                &sig.render(),
+                &format!("{supplied} of {required} required"),
+                "sql runs over piped rows ([{a: 1}] | sql(\"select * from t\")) or a file (sql_value(\"data.csv\", \"select ...\"))",
             ));
         }
         // `expected` is the signature alone, with no "— missing x" tail. The

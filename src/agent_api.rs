@@ -3019,7 +3019,14 @@ fn get_all_builtin_definitions() -> Vec<BuiltinDefinition> {
     // `to-csv` cannot be written in a program. The catalogue advertises the
     // underscore form only. A hyphenated spelling stays callable wherever it
     // already was, but is not listed, here or as an alias.
-    all.retain(|d| !d.name.contains('-'));
+    // A declared PowerShell name with no underscore form (`measure-object`,
+    // `foreach-object`, `select-object`) is not callable from ish syntax, so
+    // its declaration renders a call form nobody can write. Its entry is
+    // dropped where the catalogue is built, whatever name the entry took.
+    all.retain(|d| {
+        let call_head = d.signature.split('(').next().unwrap_or("");
+        !d.name.contains('-') && !call_head.contains('-')
+    });
     for d in &mut all {
         if let Some(aliases) = d.aliases.as_mut() {
             aliases.retain(|a| !a.contains('-'));
@@ -3132,6 +3139,11 @@ pub fn builtin_tool_specs() -> Vec<JsonValue> {
 /// Expand one slice of the ontology: a builtin name → full definition (with
 /// effect, params, examples); a category name → its builtins (name, signature,
 /// effect). Case-insensitive. Returns an `{error, hint}` record when unknown.
+/// The `import` statement, as the schema's syntax section and
+/// `ontology_describe("import")` state it.
+const IMPORT_SYNTAX: &str =
+    "import \"lib/x.ish\"  (the path is relative to the importing file; only pub names are visible)";
+
 pub fn ontology_describe_json(query: &str) -> JsonValue {
     let defs = get_all_builtin_definitions();
     // `file.replace` names the builtin that the call runs (`file_replace`), so
@@ -3140,7 +3152,10 @@ pub fn ontology_describe_json(query: &str) -> JsonValue {
         .trim()
         .split_once('.')
         .and_then(|(m, f)| crate::modules::builtin_for_member(m, f));
-    let q = resolved.as_deref().unwrap_or(query.trim());
+    // A hyphenated spelling names the underscore builtin: `to-csv` is `to_csv`.
+    // Categories have no hyphens, so the rewrite cannot shadow one.
+    let underscored = query.trim().replace('-', "_");
+    let q = resolved.as_deref().unwrap_or(&underscored);
 
     // An exact, case-sensitive category name wins. Categories are capitalised
     // ("Platform") and builtins are not ("platform"), but the builtin lookup
@@ -3158,6 +3173,16 @@ pub fn ontology_describe_json(query: &str) -> JsonValue {
         .collect();
     if !exact_cat.is_empty() {
         return json!({ "category": q, "builtins": exact_cat });
+    }
+
+    // `import` is a statement, not a builtin, so the catalogue has no entry for
+    // it. It is answered from the same text the schema's syntax section gives.
+    if q == "import" {
+        return json!({
+            "syntax": "import",
+            "form": IMPORT_SYNTAX,
+            "description": "Loads another IronShell file. The path is resolved relative to the importing file, not the working directory. Only names marked `pub` in that file are visible to the importer.",
+        });
     }
 
     // Resolve by alias as well as by canonical name. Every entry already
@@ -3664,7 +3689,8 @@ fn build_compact_ontology(ontology: &LanguageOntology) -> JsonValue {
             "rec": "{k: v}",
             "arr": "[a, b]",
             "if": "if cond then a else b",
-            "match": "match x { p => r }"
+            "match": "match x { p => r }",
+            "import": IMPORT_SYNTAX
         },
         "modules": modules_compact,
         "builtins": builtins_compact,

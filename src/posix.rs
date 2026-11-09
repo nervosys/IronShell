@@ -1152,6 +1152,8 @@ struct Shell {
     /// The script's arguments: `$1`..`$9` and `$#`. Empty unless the script was
     /// run with arguments (`ish -b script.sh a b`).
     positional: Vec<String>,
+    /// `$0`: the script's path, or `ish` when there is no script file (`-c`).
+    script_name: String,
 }
 
 const SHELL_NAME: &str = "ish";
@@ -1162,7 +1164,7 @@ impl Shell {
             "?" => return Some(self.last.to_string()),
             "$" => return Some(std::process::id().to_string()),
             "#" => return Some(self.positional.len().to_string()),
-            "0" => return Some(SHELL_NAME.into()),
+            "0" => return Some(self.script_name.clone()),
             _ => {}
         }
         if name.chars().all(|c| c.is_ascii_digit()) {
@@ -1787,6 +1789,13 @@ impl Shell {
                     self.vars.remove(a);
                     self.exported.remove(a);
                 }
+                return Flow::Next(0);
+            }
+            // `set -- a b` replaces the positional parameters, `set --` clears
+            // them. Other `set` options are not in the subset and keep their
+            // behaviour (a program named `set`, which is not found).
+            "set" if args.first().map(String::as_str) == Some("--") => {
+                self.positional = args[1..].to_vec();
                 return Flow::Next(0);
             }
             "cd" => {
@@ -4811,6 +4820,15 @@ pub fn run(src: &str) -> Option<i32> {
 
 /// [`run`] with the script's arguments, which become `$1`..`$9` and `$#`.
 pub fn run_with_args(src: &str, args: &[String]) -> Option<i32> {
+    run_named(src, SHELL_NAME, args)
+}
+
+/// [`run_with_args`] for a script file: `$0` is `script` (its path), not `ish`.
+pub fn run_script(src: &str, script: &str, args: &[String]) -> Option<i32> {
+    run_named(src, script, args)
+}
+
+fn run_named(src: &str, script_name: &str, args: &[String]) -> Option<i32> {
     let list = parse(src).ok()?;
     let mut sh = Shell {
         vars: HashMap::new(),
@@ -4818,6 +4836,7 @@ pub fn run_with_args(src: &str, args: &[String]) -> Option<i32> {
         last: 0,
         glob_refused: None,
         positional: args.to_vec(),
+        script_name: script_name.to_string(),
     };
     let mut stdin = Input::real();
     let mut sink = Sink::new(ErrMode::Real);
@@ -4981,6 +5000,7 @@ mod tests {
             last: 0,
             glob_refused: None,
             positional: Vec::new(),
+            script_name: SHELL_NAME.to_string(),
         };
         let mut stdin = Input::buf(Vec::new());
         let mut sink = Sink::new(ErrMode::Null);

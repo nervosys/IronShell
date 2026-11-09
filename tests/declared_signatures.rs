@@ -733,7 +733,7 @@ fn a_declaration_is_found_by_every_spelling_that_dispatches() {
     // on one spelling would enforce nothing for the other and would leave the
     // catalogue describing it by name-splitting.
     for (canonical, alias) in [
-        ("from-json", "from_json"),
+        ("from_json", "from-json"),
         ("group", "group_by"),
         ("avg", "mean"),
         ("str", "to_string"),
