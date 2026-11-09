@@ -4263,7 +4263,7 @@ pub fn is_dispatched(name: &str) -> bool {
 /// Whether some implementation answers a call to `name`: the dispatcher's own
 /// tables, the workflow engine, or a plugin's manifest builtin. Asked before a
 /// call is classified, so a name nothing serves is unknown rather than gated.
-fn is_served(name: &str) -> bool {
+pub fn is_served(name: &str) -> bool {
     is_dispatched(name)
         || crate::workflow_builtins::serves(name)
         || crate::plugins::is_manifest_builtin(name)
