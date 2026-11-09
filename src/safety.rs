@@ -7616,6 +7616,15 @@ fn without_credentials(
 }
 
 pub fn guard_dispatch(builtin: &str, args: &[crate::value::Value]) -> Result<(), SafetyError> {
+    // `delete_lines` is an alias of `file_delete_lines`, one implementation whose
+    // body guards itself (the guard names the resolved path, reversible). Judged
+    // here under the alias name too, the call was refused for a token whose
+    // builtin, target and reversible differed from the one the body then
+    // demanded, so the approval named could never admit the retry.
+    let builtin = match builtin {
+        "delete_lines" => "file_delete_lines",
+        other => other,
+    };
     let effect = effect_of(builtin);
     // `Pure` and `ReadLocal` are neither centrally enforced nor audited, so
     // every path below ends in `Ok(())` for them. They are most calls, and
