@@ -924,7 +924,7 @@ pub fn eval_expr(expr: &Expr, env: &mut Env) -> Result<Value> {
             if let Some(value) = borrowed_member(expr, env) {
                 return value.cloned();
             }
-            if let Some(e) = unbound_receiver_error(object, env) {
+            if let Some(e) = unbound_receiver_error(object, field, env) {
                 return Err(e);
             }
             let obj = eval_expr(object, env)?;
@@ -1005,7 +1005,7 @@ pub fn eval_expr(expr: &Expr, env: &mut Env) -> Result<Value> {
 /// The unknown-module error for `name.member` when `name` is an unbound
 /// identifier that is neither a module nor a builtin. Without it the access
 /// reached the record check with Null and was refused as "expected a Record".
-fn unbound_receiver_error(object: &Expr, env: &Env) -> Option<anyhow::Error> {
+fn unbound_receiver_error(object: &Expr, field: &str, env: &Env) -> Option<anyhow::Error> {
     #[cfg(feature = "native")]
     {
         let Expr::Ident(name) = object else {
@@ -1017,13 +1017,19 @@ fn unbound_receiver_error(object: &Expr, env: &Env) -> Option<anyhow::Error> {
         {
             return None;
         }
-        let candidates =
-            builtins::nearest_names(name, crate::modules::all_modules().iter().map(|(m, _)| *m));
+        // A library's spelling (`re.findall`) names the builtin it means; the
+        // nearest module names are only a guess for a misspelt module.
+        let mapped = builtins::mapped_module_spelling(name, field);
+        let candidates = if mapped.is_empty() {
+            builtins::nearest_names(name, crate::modules::all_modules().iter().map(|(m, _)| *m))
+        } else {
+            mapped
+        };
         Some(crate::safety::unknown_module(name, candidates))
     }
     #[cfg(not(feature = "native"))]
     {
-        let _ = (object, env);
+        let _ = (object, field, env);
         None
     }
 }
@@ -1089,7 +1095,7 @@ fn borrowed_member<'a>(expr: &Expr, env: &'a Env) -> Option<Result<&'a Value>> {
             )
         }
         Expr::MemberAccess { object, field } => {
-            if let Some(e) = unbound_receiver_error(object, env) {
+            if let Some(e) = unbound_receiver_error(object, field, env) {
                 return Some(Err(e));
             }
             let value = borrowed_member(object, env)?;

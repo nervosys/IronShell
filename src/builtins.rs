@@ -3928,8 +3928,31 @@ fn mapped_spelling(name: &str) -> Vec<String> {
         // TOML: from_toml reads a document and to_toml writes one.
         "toml" => vec!["from_toml".to_string(), "to_toml".to_string()],
         "parse_toml" => vec!["from_toml".to_string()],
+        // A filter is where: the rows that pass the test.
+        "filter" => vec!["where".to_string()],
         _ => Vec::new(),
     }
+}
+
+/// The spellings another library uses for a member of a module, such as
+/// `json.loads` or `re.findall`, that name IronShell's own builtin. Empty when
+/// there is none. Used both for a module that exists (`json`) and for a module
+/// that does not (`re`, `regex`, `toml`), where it replaces the nearest-name
+/// guess: `re` is one edit from the `rg` and `rl` modules, which are not what
+/// `re.findall` means.
+pub fn mapped_module_spelling(module: &str, member: &str) -> Vec<String> {
+    let names: &[&str] = match (module, member) {
+        ("json", "loads") => &["json.parse"],
+        ("json", "dumps") => &["json.stringify"],
+        ("toml", "parse" | "loads") => &["from_toml"],
+        ("toml", "dumps") => &["to_toml"],
+        ("regex" | "re", "match") => &["regex_match"],
+        ("regex" | "re", "search") => &["regex_find"],
+        ("regex" | "re", "findall" | "find_all") => &["regex_find_all"],
+        ("regex" | "re", "sub") => &["regex_replace"],
+        _ => &[],
+    };
+    names.iter().map(|name| name.to_string()).collect()
 }
 
 /// The edit budget for a suggestion to `name`. Budget scales with length: for a
@@ -3992,7 +4015,13 @@ pub fn module_member_candidates(module: &str, field: &str, members: &[&str]) -> 
     near.dedup_by(|a, b| a.1 == b.1);
     // A spelling another language uses for a builtin here (`str.rjust` is
     // pad_right) comes first, as it does for a bare name.
-    let mut out: Vec<String> = mapped_spelling(field);
+    // `json.loads` is `json.parse`, from another library, and is named first.
+    let mut out: Vec<String> = mapped_module_spelling(module, field);
+    for spelled in mapped_spelling(field) {
+        if !out.contains(&spelled) {
+            out.push(spelled);
+        }
+    }
     for (_, m) in near {
         if out.len() == 3 {
             break;
