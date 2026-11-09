@@ -7400,13 +7400,15 @@ pub static SIGNATURES: &[Signature] = &[
         subject_required: false,
         aliases: &[],
         subject: Some(Ty::Str),
-        params: &[req("b", Ty::Str, "the later ISO date or datetime"), opt("unit", Ty::Str, "days (the default), hours, minutes or seconds")],
+        params: &[req("b", Ty::Str, "the later ISO date or datetime"), opt("unit", Ty::Str, "days (the default: whole 24-hour periods), hours, minutes or seconds")],
         returns: "Int",
-        doc: "The time from the first date to the second, b minus a, in whole units, truncated toward zero. Dates are ISO strings as date_parse answers them; a date alone is midnight UTC. Direct date_diff(a, b, unit?) or text | date_diff(b, unit?).",
+        doc: "The time from the first date to the second, b minus a, as a count of whole units truncated toward zero, so the sign is kept. The default unit, days, counts whole 24-hour periods of elapsed time: a partial day is dropped, so 23:00 to 01:00 the next day is 0 days. Hours, minutes and seconds count whole elapsed units. Dates are ISO strings as date_parse answers them; a date alone is midnight UTC, so two dates count calendar days. A bad unit is E_BAD_ARG. Direct date_diff(a, b, unit?) or text | date_diff(b, unit?).",
         examples: &[
             (r#"date_diff("2024-02-29", "2026-11-09")"#, "984"),
             (r#"date_diff("2024-02-29", "2026-11-09", "hours")"#, "23616"),
             (r#""2024-02-29" | date_diff("2024-03-01")"#, "1"),
+            (r#"date_diff("2026-11-01T23:00:00Z", "2026-11-02T01:00:00Z")"#, "0"),
+            (r#"date_diff("2026-11-01T23:00:00Z", "2026-11-02T01:00:00Z", "hours")"#, "2"),
         ],
     },
     Signature {

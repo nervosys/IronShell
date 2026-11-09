@@ -14938,12 +14938,14 @@ fn bi_date_parse(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
 /// Args:
 ///   - a: String (or the piped text) - an ISO date or datetime, as date_parse answers
 ///   - b: String - the later date, in the same form
-///   - unit: String (optional) - "days" (the default), "hours", "minutes" or "seconds"
-/// Returns: Int - b minus a, truncated toward zero
+///   - unit: String (optional) - "days" (the default: whole 24-hour periods of elapsed time), "hours", "minutes" or "seconds"
+/// Returns: Int - b minus a, in whole units, truncated toward zero
 ///
 /// Example:
-///   date_diff("2024-02-29", "2026-11-09")             # 984
-///   date_diff("2024-02-29", "2026-11-09", "hours")    # 23616
+///   date_diff("2024-02-29", "2026-11-09")                                # 984
+///   date_diff("2024-02-29", "2026-11-09", "hours")                       # 23616
+///   date_diff("2026-11-01T23:00:00Z", "2026-11-02T01:00:00Z")            # 0
+///   date_diff("2026-11-01T23:00:00Z", "2026-11-02T01:00:00Z", "hours")   # 2
 fn bi_date_diff(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
     const B: &str = "date_diff";
     let (first, rest) = text_subject(B, args, input)?;

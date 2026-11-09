@@ -336,6 +336,22 @@ fn date_diff_counts_hours_minutes_and_seconds() {
 }
 
 #[test]
+fn date_diff_default_drops_a_partial_day_but_hours_count_it() {
+    assert_eq!(
+        run(r#"date_diff("2026-11-01T23:00:00Z", "2026-11-02T01:00:00Z")"#),
+        Value::Int(0)
+    );
+    assert_eq!(
+        run(r#"date_diff("2026-11-01T23:00:00Z", "2026-11-02T01:00:00Z", "hours")"#),
+        Value::Int(2)
+    );
+    assert_eq!(
+        run(r#"date_diff("2026-11-02T01:00:00Z", "2026-11-01T23:00:00Z", "hours")"#),
+        Value::Int(-2)
+    );
+}
+
+#[test]
 fn date_diff_truncates_a_partial_day_toward_zero() {
     assert_eq!(
         run(r#"date_diff("2024-02-29T00:00:00Z", "2024-03-01T12:00:00Z")"#),
