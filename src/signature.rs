@@ -879,13 +879,13 @@ pub static SIGNATURES: &[Signature] = &[
     Signature {
         name: "file_replace", category: None, subject_required: false, aliases: &["str_replace_in_file", "text_replace"],
         subject: None, params: &[req("path", Ty::Str, "file to edit"), req("old_text", Ty::Str, "text to replace"), req("new_text", Ty::Str, "replacement text")], returns: "Record",
-        doc: "Replace all occurrences of text in a file and return the patch result. Text that is not in the file is an E_NOT_FOUND error and nothing is written.",
+        doc: "Replace all occurrences of text in a file and return the patch result. Text that is not in the file is an E_NOT_FOUND error and nothing is written. A file that does not exist is also E_NOT_FOUND, reported as a missing file before any text is looked for.",
         examples: &[(r#"let d = fs_tempdir("ae_replace"); let f = d + "/x"; file_write(f, "hello"); let result = file_replace(f, "hello", "hi"); rmdir(d, true); result.success"#, "true")],
     },
     Signature {
         name: "file_insert", category: None, subject_required: false, aliases: &["insert_lines"],
         subject: None, params: &[req("path", Ty::Str, "file to edit"), req("position", Ty::Any, "1-based line, named position, text pattern, or after/before/line record"), opt("content", Ty::Any, "lines to insert; omitted uses pipeline input")], returns: "Record",
-        doc: "Insert lines at a position or pattern, returning the insertion location. An anchor that no line contains is an E_NOT_FOUND error and nothing is written.",
+        doc: "Insert lines at a position or pattern, returning the insertion location. A line number is 1-based, and line count + 1 appends; a later line is E_BAD_ARG and nothing is written. A text anchor inserts AFTER the first line that contains it; the record {before: text} inserts before that line instead. An anchor that no line contains is an E_NOT_FOUND error and nothing is written.",
         examples: &[
             (r#"let d = fs_tempdir("ae_insert"); let f = d + "/x"; file_write(f, "a"); let result = file_insert(f, 1, "b"); rmdir(d, true); result.at_line"#, "1"),
             (r#"let d = fs_tempdir("ae_insert"); let f = d + "/x"; file_write(f, "a"); let result = "b" | file_insert(f, "end"); rmdir(d, true); result.at_line"#, "2"),
@@ -2046,12 +2046,13 @@ pub static SIGNATURES: &[Signature] = &[
             "fn(element) -> Bool, or fn(element, index)",
         )],
         returns: "Array",
-        doc: "Keep the elements for which the predicate returns true.",
+        doc: "Keep the elements for which the predicate returns true. A predicate with two parameters also receives the element's index, as fn(element, index): [10, 20] | where(fn(x, i) => i > 0) is [20].",
         examples: &[
             ("[1, 2, 3] | where(fn(x) => x > 1)", "[2, 3]"),
             // The subject may also be passed directly, which is the form the
             // hand-written catalogue entry used to advertise.
             ("where([1, 2, 3], fn(x) => x > 1)", "[2, 3]"),
+            ("[10, 20] | where(fn(x, i) => i > 0)", "[20]"),
         ],
     },
     Signature {
@@ -2122,10 +2123,11 @@ pub static SIGNATURES: &[Signature] = &[
             "fn(element) -> Any, or fn(element, index)",
         )],
         returns: "Array",
-        doc: "Apply a transform to every element.",
+        doc: "Apply a transform to every element. A lambda with two parameters also receives the element's index, as fn(element, index): [10, 20] | map(fn(x, i) => i) is [0, 1].",
         examples: &[
             ("[1, 2, 3] | map(fn(x) => x * 2)", "[2, 4, 6]"),
             ("map([1, 2, 3], fn(x) => x * 2)", "[2, 4, 6]"),
+            ("[10, 20] | map(fn(x, i) => i)", "[0, 1]"),
         ],
     },
     Signature {
@@ -4307,7 +4309,7 @@ pub static SIGNATURES: &[Signature] = &[
         subject: None,
         params: &[],
         returns: "Int",
-        doc: "The current Unix time in seconds.",
+        doc: "The current Unix time in seconds. For an ISO 8601 string of the time, use now_iso().",
         examples: &[("typeof(now())", "Int")],
     },
     Signature {
@@ -4346,7 +4348,7 @@ pub static SIGNATURES: &[Signature] = &[
         subject: None,
         params: &[],
         returns: "Int",
-        doc: "The current Unix time in seconds.",
+        doc: "The current Unix time in seconds. For an ISO 8601 string of the time, use now_iso().",
         examples: &[("typeof(time())", "Int")],
     },
     Signature {

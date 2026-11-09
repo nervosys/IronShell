@@ -451,11 +451,26 @@ fn written_path_candidates(builtin: &str, args: &[Value]) -> Option<Vec<String>>
                 && !s.contains('\0')
                 && !crate::safety::names_a_remote_share(s) =>
         {
-            vec![crate::safety::resolve_path_str(s)]
+            vec![absolute_path(&crate::safety::resolve_path_str(s))]
         }
         _ => Vec::new(),
     };
     Some(out)
+}
+
+/// `path` as an absolute path, joined to the working directory when it is
+/// relative. Journal entries record this form, so `config.txt` and
+/// `C:\...\src\main.txt` in one journal name the same file the same way. Undo
+/// restores the same file either way; only the recorded spelling changes.
+fn absolute_path(path: &str) -> String {
+    let p = Path::new(path);
+    if p.is_absolute() {
+        return path.to_string();
+    }
+    match std::env::current_dir() {
+        Ok(cwd) => cwd.join(p).display().to_string(),
+        Err(_) => path.to_string(),
+    }
 }
 
 /// A string argument that plausibly names a file this call could write.
@@ -485,8 +500,9 @@ fn candidate_paths(builtin: &str, args: &[Value]) -> Vec<String> {
                 || p.parent()
                     .map(|d| !d.as_os_str().is_empty() && d.is_dir())
                     .unwrap_or(false);
-            if plausible && !out.contains(s) {
-                out.push(s.clone());
+            let absolute = absolute_path(s);
+            if plausible && !out.contains(&absolute) {
+                out.push(absolute);
             }
         }
     }

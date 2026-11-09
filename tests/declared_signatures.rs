@@ -621,6 +621,12 @@ fn the_catalogue_entry_comes_from_the_declaration_not_a_second_one() {
     // descriptions of one builtin is the defect this work removes, so a
     // declaration must outrank the hand-written entry rather than sit beside it.
     for sig in SIGNATURES {
+        // A hyphenated spelling (`from-csv`) is declared so that it is typed
+        // where it is still callable, but the catalogue lists only the
+        // underscore form, which the parser can read.
+        if sig.name.contains('-') {
+            continue;
+        }
         let def = iron_shell::agent_api::ontology_describe_json(sig.name);
         let advertised = def
             .get("signature")
