@@ -74,7 +74,7 @@ fn an_earlier_print_does_not_suppress_the_final_value() {
 // ---- 7. A runtime error names the line of its statement ----
 
 /// A 30-line script whose line 15 opens a missing file.
-fn script_with_missing_file(dir: &PathBuf) -> PathBuf {
+fn script_with_missing_file(dir: &std::path::Path) -> PathBuf {
     let mut lines: Vec<String> = (1..=30).map(|n| format!("x_{n} = {n}")).collect();
     lines[14] = "cfg = open(\"missing_r9a.yaml\")".to_string();
     let path = dir.join("script.ish");
