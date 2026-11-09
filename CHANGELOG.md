@@ -20,6 +20,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `to_csv` writes a nested Record or Array cell as JSON text instead of a placeholder.
 - `--explain` and `explain_effects` report `sh(...)` as denied when agent mode would refuse it.
 - `from_csv`, `to_csv`, `from_yaml`, `to_yaml`, `from_json`, `to_json`, `select`, `measure` and `foreach` are declared and catalogued by their callable names; the hyphenated and PowerShell spellings remain aliases.
+- `undo` also refuses to recreate a file that was removed by hand after the step it would undo (E_BAD_STATE); `undo({force: true})` recreates it.
+- `sed` in file mode refuses a regex that matches the empty text between characters (E_BAD_ARG), which would have inserted the replacement everywhere; an anchored `^` or `$` is still allowed. `file_insert` refuses empty content.
+- Invalid TOML, JSON or YAML given to `open` or `from_toml` is E_BAD_VALUE (not retryable), with the line and column in the hint.
+- A malformed `\u` escape is E_PARSE naming the escape and its position, instead of being kept with its backslash.
+- `??` is refused by the lexer with a hint that IronShell has no such operator.
 
 ### Added
 
@@ -33,6 +38,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `\uHHHH` string escapes (four hex digits), alongside `\u{...}`.
 - `ish -b`: `$0` is the script path, and `set -- a b` replaces the positional parameters.
 - `import` is described by `agent schema` and `ontology_describe("import")`.
+- `regex_find` and `regex_find_all` matches carry `named`, the named groups (`(?P<d>...)`) by name, null where a group did not take part.
+- `"\${"` writes a literal `${` in a string.
+- `date_parse` without a format accepts `YYYY-MM-DD HH:MM:SS` and `YYYY-MM-DDTHH:MM:SS` as UTC; with a format, a mismatch names the format.
 
 ### Fixed
 
@@ -48,6 +56,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - An exported module function can call a private helper defined after it, and module functions can call each other.
 - Suggestions: `date` and `raise` suggest `now_iso` and `error` for a bare name too; a missing module member suggests that module's members before unrelated builtins; `ontology_describe("to-csv")` finds `to_csv`.
 - Clearer errors: no internal `__` name in a projection error; `ish -c '...' x y` warns that the arguments are ignored and an empty `args()` under `-c` says to use a script; `file.replace` on a directory names `file_replace`; a path containing a tab or newline (from a backslash escape) gets a hint to use forward slashes; an import cycle names the import that closes it; a missing module names the directory paths are relative to; `sql("select 1")` says how to give it rows.
+- A regex refusal quotes at most 60 characters of the pattern and states the 1 MiB size cap; it no longer repeats a huge pattern in full.
+- An unclosed `[` or `{` is reported at the line it was opened on, and E_PARSE JSON carries `line` and `column`. An error inside a lambda names where the lambda was defined.
+- Hints: a block of several statements where one expression is expected; an unknown name inside `${...}` suggests `\${` for a literal; `time.now()` and `str.slice`-style members that are top-level builtins say how to call them; did-you-mean covers date, regex, padding and TOML spellings; `file_insert` at line 0 and `slice(null, 1)` say what is wrong; `ish agent schema --help` names `--module`.
 
 
 ## [14.0.1] - 2026-11-08
