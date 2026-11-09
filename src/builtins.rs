@@ -3928,8 +3928,31 @@ fn mapped_spelling(name: &str) -> Vec<String> {
         // TOML: from_toml reads a document and to_toml writes one.
         "toml" => vec!["from_toml".to_string(), "to_toml".to_string()],
         "parse_toml" => vec!["from_toml".to_string()],
+        // A filter is where: the rows that pass the test.
+        "filter" => vec!["where".to_string()],
         _ => Vec::new(),
     }
+}
+
+/// The spellings another library uses for a member of a module, such as
+/// `json.loads` or `re.findall`, that name IronShell's own builtin. Empty when
+/// there is none. Used both for a module that exists (`json`) and for a module
+/// that does not (`re`, `regex`, `toml`), where it replaces the nearest-name
+/// guess: `re` is one edit from the `rg` and `rl` modules, which are not what
+/// `re.findall` means.
+pub fn mapped_module_spelling(module: &str, member: &str) -> Vec<String> {
+    let names: &[&str] = match (module, member) {
+        ("json", "loads") => &["json.parse"],
+        ("json", "dumps") => &["json.stringify"],
+        ("toml", "parse" | "loads") => &["from_toml"],
+        ("toml", "dumps") => &["to_toml"],
+        ("regex" | "re", "match") => &["regex_match"],
+        ("regex" | "re", "search") => &["regex_find"],
+        ("regex" | "re", "findall" | "find_all") => &["regex_find_all"],
+        ("regex" | "re", "sub") => &["regex_replace"],
+        _ => &[],
+    };
+    names.iter().map(|name| name.to_string()).collect()
 }
 
 /// The edit budget for a suggestion to `name`. Budget scales with length: for a
@@ -3992,7 +4015,13 @@ pub fn module_member_candidates(module: &str, field: &str, members: &[&str]) -> 
     near.dedup_by(|a, b| a.1 == b.1);
     // A spelling another language uses for a builtin here (`str.rjust` is
     // pad_right) comes first, as it does for a bare name.
-    let mut out: Vec<String> = mapped_spelling(field);
+    // `json.loads` is `json.parse`, from another library, and is named first.
+    let mut out: Vec<String> = mapped_module_spelling(module, field);
+    for spelled in mapped_spelling(field) {
+        if !out.contains(&spelled) {
+            out.push(spelled);
+        }
+    }
     for (_, m) in near {
         if out.len() == 3 {
             break;
@@ -6264,45 +6293,53 @@ fn bi_len(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
 ///   try { error("boom") } catch e { e.message }                 # "boom"
 ///   try { error("bad", {field: "age"}) } catch e { e.field }   # "age"
 fn bi_error(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
+    // Every refusal of error()'s own arguments is not retryable: the same
+    // arguments are refused again. It is bad_value_in, which keeps the wire
+    // code E_BAD_ARG that these refusals have always had.
     let message = match args.first().or(input.as_ref()) {
         Some(Value::Str(s)) => s.clone(),
         Some(other) => {
-            return Err(crate::safety::bad_arg(
+            return Err(crate::safety::bad_value_in(
                 "error",
-                "a message String",
-                other.type_name(),
+                format!(
+                    "error: the message is {}, expected a String",
+                    other.type_name()
+                ),
+                "give the reason as text, e.g. error(\"what went wrong\")",
             ))
         }
         None => {
-            return Err(crate::safety::bad_arg(
+            return Err(crate::safety::bad_value_in(
                 "error",
-                "a message String",
-                "nothing",
+                "error: the message is nothing, expected a String",
+                "give the reason as text, e.g. error(\"what went wrong\")",
             ))
         }
     };
     // An error with no reason is not one an agent can act on, and it reads as
     // a failure with nothing wrong in it.
     if message.is_empty() {
-        return Err(crate::safety::bad_arg_in(
+        return Err(crate::safety::bad_value_in(
             "error",
             "error: the message is empty",
             "give the reason as text, e.g. error(\"what went wrong\")",
         ));
     }
     let mut extra = serde_json::Map::new();
+    let mut hint = None;
     match args.get(1) {
         None => {}
         Some(Value::Record(fields)) => {
             // A field named like a standard error key would be dropped without
             // a word (`to_json` keeps the standard value), so refuse it here.
+            // These refusals are not retryable: the same arguments fail again.
             let clashes: Vec<String> = fields
                 .iter()
                 .filter(|(key, _)| crate::safety::ERROR_RESERVED_KEYS.contains(&key.as_str()))
                 .map(|(key, _)| format!("`{key}`"))
                 .collect();
             if !clashes.is_empty() {
-                return Err(crate::safety::bad_arg_in(
+                return Err(crate::safety::bad_value_in(
                     "error",
                     format!(
                         "error: extra field {} is reserved: the standard error fields are {}",
@@ -6313,18 +6350,37 @@ fn bi_error(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
                 ));
             }
             for (key, value) in fields {
+                // A script's `hint` is the advice its caller reads, so it
+                // replaces the default hint rather than sitting beside it.
+                if key == "hint" {
+                    let Value::Str(text) = value else {
+                        return Err(crate::safety::bad_value_in(
+                            "error",
+                            format!(
+                                "error: extra field `hint` is {}, expected a String",
+                                value.type_name()
+                            ),
+                            "give the advice as text, e.g. {hint: \"retry after the sync\"}",
+                        ));
+                    };
+                    hint = Some(text.clone());
+                    continue;
+                }
                 extra.insert(key.clone(), value.to_json());
             }
         }
         Some(other) => {
-            return Err(crate::safety::bad_arg(
+            return Err(crate::safety::bad_value_in(
                 "error",
-                "a Record of extra fields, or nothing",
-                other.type_name(),
+                format!(
+                    "error: the extra fields are {}, expected a Record or nothing",
+                    other.type_name()
+                ),
+                "pass the extra fields as a Record, e.g. error(\"bad\", {field: \"age\"})",
             ))
         }
     }
-    Err(crate::safety::user_error(message, extra))
+    Err(crate::safety::user_error(message, extra, hint))
 }
 
 /// `str(v)` — render a value as the string a user would see.
@@ -10030,9 +10086,17 @@ fn bi_from_json(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
 
 /// to-json: Convert structured data to JSON
 fn bi_to_json(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
-    let value = input.ok_or_else(|| crate::safety::arg_err("to-json: requires pipeline input"))?;
+    // Piped, the value is the input and the argument is the pretty flag; called
+    // directly, the value is the first argument.
+    let (value, flags) = match input {
+        Some(value) => (value, args.as_slice()),
+        None => match args.split_first() {
+            Some((value, flags)) => (value.clone(), flags),
+            None => return Err(subject_refusal("to_json", "a value")),
+        },
+    };
 
-    let pretty = args
+    let pretty = flags
         .first()
         .and_then(|arg| match arg {
             Value::Bool(b) => Some(*b),
@@ -10117,18 +10181,26 @@ fn value_to_json(value: Value) -> serde_json::Value {
 }
 
 /// from-csv: Parse CSV into structured data
-fn bi_from_csv(_args: Vec<Value>, input: Option<Value>) -> Result<Value> {
-    let csv_str = if let Some(input) = input {
-        match input {
-            Value::Str(s) => s,
-            _ => {
-                return Err(crate::safety::arg_err(
-                    "from-csv: input must be a CSV string",
-                ))
-            }
+/// The refusal for a conversion called with no value: it takes its subject
+/// piped in or as the first argument, and the hint shows both forms.
+fn subject_refusal(builtin: &str, what: &str) -> anyhow::Error {
+    crate::safety::bad_arg_in(
+        builtin,
+        format!("{builtin}: requires {what}"),
+        &format!("pipe the value in: v | {builtin}, or pass it as the argument: {builtin}(v)"),
+    )
+}
+
+fn bi_from_csv(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
+    // Piped, the text is the input; called directly, it is the first argument.
+    let csv_str = match input.or_else(|| args.into_iter().next()) {
+        Some(Value::Str(s)) => s,
+        Some(_) => {
+            return Err(crate::safety::arg_err(
+                "from-csv: input must be a CSV string",
+            ))
         }
-    } else {
-        return Err(crate::safety::arg_err("from-csv: requires CSV input"));
+        None => return Err(subject_refusal("from_csv", "CSV text")),
     };
 
     let mut reader = csv::Reader::from_reader(csv_str.as_bytes());
@@ -10169,8 +10241,11 @@ fn bi_from_csv(_args: Vec<Value>, input: Option<Value>) -> Result<Value> {
 }
 
 /// to-csv: Convert structured data to CSV
-fn bi_to_csv(_args: Vec<Value>, input: Option<Value>) -> Result<Value> {
-    let input = input.ok_or_else(|| crate::safety::arg_err("to-csv: requires pipeline input"))?;
+fn bi_to_csv(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
+    // Piped, the rows are the input; called directly, they are the first argument.
+    let input = input
+        .or_else(|| args.into_iter().next())
+        .ok_or_else(|| subject_refusal("to_csv", "an array of records"))?;
 
     match input {
         Value::Array(arr) => {
@@ -13621,7 +13696,7 @@ fn bi_contains(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
             "contains",
             "a string",
             "Array",
-            "contains searches a string for a substring; to test whether an array              holds a value, pipe the value to in: `value | in(array)`",
+            "contains searches a string for a substring; to test whether an array holds a value, pipe the value to in: `value | in(array)`",
         ));
     }
     let text = expect_string("contains", &input_val)?;
@@ -14412,6 +14487,24 @@ fn bi_int(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
         }
         Value::Str(text) => match text.trim().parse::<i64>() {
             Ok(n) => Ok(Value::Int(n)),
+            // A whole number too large for an Int is named as such, not as
+            // "not a whole number", which it is.
+            Err(e)
+                if matches!(
+                    e.kind(),
+                    std::num::IntErrorKind::PosOverflow | std::num::IntErrorKind::NegOverflow
+                ) =>
+            {
+                Err(crate::safety::value_not_representable(
+                    "int",
+                    format!(
+                        "int: {text:?} does not fit in a 64-bit Int (-9223372036854775808 to 9223372036854775807)"
+                    ),
+                    &format!(
+                        "float({text:?}) reads it as a Float instead, which is approximate for a number this large"
+                    ),
+                ))
+            }
             Err(_) => Err(crate::safety::value_not_representable(
                 "int",
                 format!("int: {text:?} is not a whole number"),
@@ -14938,12 +15031,14 @@ fn bi_date_parse(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
 /// Args:
 ///   - a: String (or the piped text) - an ISO date or datetime, as date_parse answers
 ///   - b: String - the later date, in the same form
-///   - unit: String (optional) - "days" (the default), "hours", "minutes" or "seconds"
-/// Returns: Int - b minus a, truncated toward zero
+///   - unit: String (optional) - "days" (the default: whole 24-hour periods of elapsed time), "hours", "minutes" or "seconds"
+/// Returns: Int - b minus a, in whole units, truncated toward zero
 ///
 /// Example:
-///   date_diff("2024-02-29", "2026-11-09")             # 984
-///   date_diff("2024-02-29", "2026-11-09", "hours")    # 23616
+///   date_diff("2024-02-29", "2026-11-09")                                # 984
+///   date_diff("2024-02-29", "2026-11-09", "hours")                       # 23616
+///   date_diff("2026-11-01T23:00:00Z", "2026-11-02T01:00:00Z")            # 0
+///   date_diff("2026-11-01T23:00:00Z", "2026-11-02T01:00:00Z", "hours")   # 2
 fn bi_date_diff(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
     const B: &str = "date_diff";
     let (first, rest) = text_subject(B, args, input)?;
@@ -15404,8 +15499,18 @@ fn bi_json_parse(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
         expect_string("json_parse", &args[0])?.to_string()
     };
 
-    let json_val: serde_json::Value = serde_json::from_str(&json_str)
-        .map_err(|e| crate::safety::bad_arg("json_parse", "valid JSON", &e.to_string()))?;
+    let json_val: serde_json::Value = serde_json::from_str(&json_str).map_err(|e| {
+        crate::safety::value_not_representable(
+            "json_parse",
+            format!("json_parse: the text is not JSON: {e}"),
+            &format!(
+                "fix the JSON at line {}, column {}: {}",
+                e.line(),
+                e.column(),
+                json_message(&e)
+            ),
+        )
+    })?;
 
     Ok(json_to_value(json_val))
 }
@@ -29079,9 +29184,10 @@ fn toml_failure_hint(text: &str, err: &toml::de::Error) -> String {
 }
 
 /// The refusal for a data file that will not parse. The file is the input, so
-/// the same call fails again until the file changes: not retryable.
+/// the same call fails again until the file changes: not retryable. It is the
+/// E_BAD_VALUE that from_toml gives for the same text, not E_BAD_ARG.
 fn unparsed_data(path: &str, kind: &str, message: &str, hint: String) -> anyhow::Error {
-    crate::safety::bad_value_in(
+    crate::safety::value_not_representable(
         "open",
         format!("open: {path} is not valid {kind}: {message}"),
         &hint,

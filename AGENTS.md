@@ -139,6 +139,7 @@ add = fn(a, b) => a + b
 
 # Pipelines
 [1,2,3] | map(fn(x) => x * 2) | reduce(fn(a,b) => a + b, 0)
+# IronShell has no loop statements (`for`/`while`); iterate with map / where / reduce / each
 
 # `|` binds loosest (as in jq): parenthesize a pipe inside && / || or before ==, e.g. ("Hello" | upper) == "HELLO"
 open("issues.json") | where(fn(r) => (r.title | lower | contains("x")) || (r.body | lower | contains("x")))
