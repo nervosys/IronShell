@@ -10086,9 +10086,17 @@ fn bi_from_json(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
 
 /// to-json: Convert structured data to JSON
 fn bi_to_json(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
-    let value = input.ok_or_else(|| crate::safety::arg_err("to-json: requires pipeline input"))?;
+    // Piped, the value is the input and the argument is the pretty flag; called
+    // directly, the value is the first argument.
+    let (value, flags) = match input {
+        Some(value) => (value, args.as_slice()),
+        None => match args.split_first() {
+            Some((value, flags)) => (value.clone(), flags),
+            None => return Err(subject_refusal("to_json", "a value")),
+        },
+    };
 
-    let pretty = args
+    let pretty = flags
         .first()
         .and_then(|arg| match arg {
             Value::Bool(b) => Some(*b),
@@ -10173,18 +10181,26 @@ fn value_to_json(value: Value) -> serde_json::Value {
 }
 
 /// from-csv: Parse CSV into structured data
-fn bi_from_csv(_args: Vec<Value>, input: Option<Value>) -> Result<Value> {
-    let csv_str = if let Some(input) = input {
-        match input {
-            Value::Str(s) => s,
-            _ => {
-                return Err(crate::safety::arg_err(
-                    "from-csv: input must be a CSV string",
-                ))
-            }
+/// The refusal for a conversion called with no value: it takes its subject
+/// piped in or as the first argument, and the hint shows both forms.
+fn subject_refusal(builtin: &str, what: &str) -> anyhow::Error {
+    crate::safety::bad_arg_in(
+        builtin,
+        format!("{builtin}: requires {what}"),
+        &format!("pipe the value in: v | {builtin}, or pass it as the argument: {builtin}(v)"),
+    )
+}
+
+fn bi_from_csv(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
+    // Piped, the text is the input; called directly, it is the first argument.
+    let csv_str = match input.or_else(|| args.into_iter().next()) {
+        Some(Value::Str(s)) => s,
+        Some(_) => {
+            return Err(crate::safety::arg_err(
+                "from-csv: input must be a CSV string",
+            ))
         }
-    } else {
-        return Err(crate::safety::arg_err("from-csv: requires CSV input"));
+        None => return Err(subject_refusal("from_csv", "CSV text")),
     };
 
     let mut reader = csv::Reader::from_reader(csv_str.as_bytes());
@@ -10225,8 +10241,11 @@ fn bi_from_csv(_args: Vec<Value>, input: Option<Value>) -> Result<Value> {
 }
 
 /// to-csv: Convert structured data to CSV
-fn bi_to_csv(_args: Vec<Value>, input: Option<Value>) -> Result<Value> {
-    let input = input.ok_or_else(|| crate::safety::arg_err("to-csv: requires pipeline input"))?;
+fn bi_to_csv(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
+    // Piped, the rows are the input; called directly, they are the first argument.
+    let input = input
+        .or_else(|| args.into_iter().next())
+        .ok_or_else(|| subject_refusal("to_csv", "an array of records"))?;
 
     match input {
         Value::Array(arr) => {

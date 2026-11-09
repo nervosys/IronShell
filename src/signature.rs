@@ -1737,16 +1737,16 @@ pub static SIGNATURES: &[Signature] = &[
         examples: &[(r#"json_parse("{\"n\":7}").n"#, "7"), (r#""[1,2]" | json_parse | len"#, "2"), (r#"(try { json_parse("{") } catch e { e.error.code })"#, "E_BAD_VALUE")],
     },
     Signature {
-        name: "from_csv", category: None, subject_required: true, aliases: &["from-csv"],
+        name: "from_csv", category: None, subject_required: false, aliases: &["from-csv"],
         subject: Some(Ty::Str), params: &[], returns: "Array",
-        doc: "Parse a piped CSV string with headers, inferring numeric and boolean cells.",
-        examples: &[(r#"("n\n7\n" | from_csv | first).n"#, "7")],
+        doc: "Parse a CSV string with headers, inferring numeric and boolean cells. The text is piped in or passed as the argument: from_csv(text).",
+        examples: &[(r#"("n\n7\n" | from_csv | first).n"#, "7"), (r#"from_csv("n\n7\n") | len"#, "1")],
     },
     Signature {
-        name: "to_csv", category: None, subject_required: true, aliases: &["to-csv"],
+        name: "to_csv", category: None, subject_required: false, aliases: &["to-csv"],
         subject: Some(Ty::Array), params: &[], returns: "String",
-        doc: "Serialize a piped array of records to CSV using the first record's columns.",
-        examples: &[(r#"[{n: 7}] | to_csv | from_csv | len"#, "1")],
+        doc: "Serialize an array of records to CSV using the first record's columns. The rows are piped in or passed as the argument: to_csv(rows).",
+        examples: &[(r#"[{n: 7}] | to_csv | from_csv | len"#, "1"), (r#"to_csv([{n: 7}]) | from_csv | len"#, "1")],
     },
     Signature {
         name: "from_yaml", category: None, subject_required: false, aliases: &["from-yaml"],
@@ -2722,8 +2722,8 @@ pub static SIGNATURES: &[Signature] = &[
         subject: Some(Ty::Any),
         params: &[],
         returns: "String",
-        doc: "Render a value as JSON text.",
-        examples: &[(r#"[1, 2] | to_json"#, r#""[1,2]""#)],
+        doc: "Render a value as JSON text. The value is piped in or passed as the argument: to_json(v).",
+        examples: &[(r#"[1, 2] | to_json"#, r#""[1,2]""#), (r#"to_json([1, 2])"#, r#""[1,2]""#)],
     },
     Signature {
         name: "ls",
