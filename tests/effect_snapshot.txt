@@ -263,6 +263,10 @@ crypto_verify_signature	ReadLocal
 curl	Network
 cut	Pure
 cut_columns	Pure
+date_add	Pure
+date_diff	Pure
+date_format	Pure
+date_parse	Pure
 db_csv_query	ReadLocal
 db_csv_to_json	ReadLocal
 db_csv_to_sqlite	WriteLocal
@@ -431,6 +435,7 @@ from-json	ReadLocal
 from-yaml	Pure
 from_csv	Pure
 from_json	ReadLocal
+from_toml	Pure
 from_yaml	Pure
 fs_chmod	WriteLocal
 fs_chown	WriteLocal
@@ -841,6 +846,8 @@ open	ReadLocal
 openssl_cert_info	ReadLocal
 openssl_genrsa	WriteLocal
 os_tools	Pure
+pad_left	Pure
+pad_right	Pure
 pager	ReadLocal
 patch_file	WriteLocal
 path_exists	ReadLocal
@@ -1056,6 +1063,10 @@ refactor_remove_parameter	Pure
 refactor_remove_unused	Exec
 refactor_rename	Pure
 refactor_rename_file	WriteLocal
+regex_find	Pure
+regex_find_all	Pure
+regex_match	Pure
+regex_replace	Pure
 relations	ReadLocal
 remote_exec	ReadLocal
 remove_lines	Destructive
@@ -1308,6 +1319,7 @@ to-yaml	Pure
 to_csv	Pure
 to_json	Pure
 to_string	Pure
+to_toml	Pure
 to_yaml	Pure
 toast	WriteLocal
 tokei	ReadLocal

@@ -69,6 +69,10 @@ crypto_hex_decode
 crypto_hex_encode
 cut
 cut_columns
+date_add
+date_diff
+date_format
+date_parse
 dbg
 debug
 describe
@@ -102,6 +106,7 @@ foreach-object
 from-csv
 from-yaml
 from_csv
+from_toml
 from_yaml
 group
 group-object
@@ -173,6 +178,8 @@ ontology_manifest
 ontology_owl
 ontology_shacl
 os_tools
+pad_left
+pad_right
 pick
 plan
 platform
@@ -204,6 +211,10 @@ refactor_inline
 refactor_move_to_file
 refactor_remove_parameter
 refactor_rename
+regex_find
+regex_find_all
+regex_match
+regex_replace
 repl_broadcast
 replace
 reverse
@@ -261,6 +272,7 @@ to-yaml
 to_csv
 to_json
 to_string
+to_toml
 to_yaml
 tokens
 tool_info

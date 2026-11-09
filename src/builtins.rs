@@ -743,6 +743,18 @@ lazy_static::lazy_static! {
         map.insert("int", 1162);
         map.insert("float", 1163);
         map.insert("now_iso", 1164);
+        map.insert("regex_match", 1165);
+        map.insert("regex_find", 1166);
+        map.insert("regex_find_all", 1167);
+        map.insert("regex_replace", 1168);
+        map.insert("pad_left", 1169);
+        map.insert("pad_right", 1170);
+        map.insert("date_parse", 1171);
+        map.insert("date_diff", 1172);
+        map.insert("date_format", 1173);
+        map.insert("date_add", 1174);
+        map.insert("to_toml", 1175);
+        map.insert("from_toml", 1176);
         // 500-519: Database
         map.insert("db_sqlite_open", 500);
         map.insert("db_sqlite_query", 501);
@@ -3779,6 +3791,18 @@ static BUILTIN_DISPATCH: &[fn(Vec<Value>, Option<Value>, &mut Env) -> Result<Val
     |args, input, _| bi_int(args, input),          // 1162
     |args, input, _| bi_float(args, input),        // 1163
     |args, input, _| bi_now_iso(args, input),      // 1164
+    |args, input, _| bi_regex_match(args, input),  // 1165
+    |args, input, _| bi_regex_find(args, input),   // 1166
+    |args, input, _| bi_regex_find_all(args, input), // 1167
+    |args, input, _| bi_regex_replace(args, input), // 1168
+    |args, input, _| bi_pad_left(args, input),     // 1169
+    |args, input, _| bi_pad_right(args, input),    // 1170
+    |args, input, _| bi_date_parse(args, input),   // 1171
+    |args, input, _| bi_date_diff(args, input),    // 1172
+    |args, input, _| bi_date_format(args, input),  // 1173
+    |args, input, _| bi_date_add(args, input),     // 1174
+    |args, input, _| bi_to_toml(args, input),      // 1175
+    |args, input, _| bi_from_toml(args, input),    // 1176
 ];
 
 /// The dispatch row that serves `name`, if the fast table has one.
@@ -14310,6 +14334,625 @@ fn bi_now_iso(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
         chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
     };
     Ok(Value::Str(text))
+}
+
+// --- Strings, dates and TOML (round 9) ---
+
+/// The largest a compiled string regex may be, in bytes. `regex` refuses a
+/// pattern whose program or lazy DFA would exceed it, so a hostile pattern
+/// cannot take the shell's memory.
+const REGEX_SIZE_LIMIT: usize = 1 << 20;
+
+/// The widest a padded text may be, in characters. A larger width is refused
+/// rather than allocated.
+const PAD_WIDTH_MAX: i64 = 1_000_000;
+
+/// The text a string builtin works on, and the arguments after it. A piped text
+/// is the subject, so every argument is a parameter; a direct call takes the
+/// text first, as `replace` does.
+fn text_subject(
+    builtin: &str,
+    args: Vec<Value>,
+    input: Option<Value>,
+) -> Result<(String, Vec<Value>)> {
+    match input {
+        Some(Value::Str(text) | Value::Uri(text)) => Ok((text, args)),
+        Some(other) => Err(crate::safety::bad_arg(
+            builtin,
+            "a String as the piped text",
+            other.type_name(),
+        )),
+        None => {
+            let mut args = args;
+            if args.is_empty() {
+                return Err(crate::safety::bad_arg(builtin, "a String text", "nothing"));
+            }
+            let first = args.remove(0);
+            let text = string_arg(builtin, "a String text", &first)?.to_string();
+            Ok((text, args))
+        }
+    }
+}
+
+/// A String argument, or a Uri, which is text too.
+fn string_arg<'a>(builtin: &str, expected: &str, value: &'a Value) -> Result<&'a str> {
+    match value {
+        Value::Str(s) | Value::Uri(s) => Ok(s.as_str()),
+        other => Err(crate::safety::bad_arg(builtin, expected, other.type_name())),
+    }
+}
+
+/// The refusal for the wrong number of arguments.
+fn arity_error(builtin: &str, expected: &str, got: usize) -> anyhow::Error {
+    crate::safety::bad_arg(builtin, expected, &format!("{got} arguments"))
+}
+
+/// pad_left(text, width, fill?) - Pad a String on the left to a width.
+/// Args:
+///   - text: String (or the piped text)
+///   - width: Int - the width in characters, 0 to 1000000
+///   - fill: String (optional) - exactly one character, " " by default
+/// Returns: String
+///
+/// A text already at or over the width is returned unchanged.
+///
+/// Example:
+///   pad_left("7", 3, "0")    # "007"
+///   "7" | pad_left(3)        # "  7"
+fn bi_pad_left(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
+    pad_text("pad_left", args, input, true)
+}
+
+/// pad_right(text, width, fill?) - Pad a String on the right to a width. The
+/// same as pad_left, with the fill after the text.
+///
+/// Example:
+///   pad_right("ab", 4, ".")  # "ab.."
+fn bi_pad_right(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
+    pad_text("pad_right", args, input, false)
+}
+
+fn pad_text(builtin: &str, args: Vec<Value>, input: Option<Value>, left: bool) -> Result<Value> {
+    let (text, rest) = text_subject(builtin, args, input)?;
+    let (width, fill) = match rest.as_slice() {
+        [] => return Err(crate::safety::bad_arg(builtin, "a width Int", "nothing")),
+        [Value::Int(width)] => (*width, " "),
+        [Value::Int(width), fill] => (
+            *width,
+            string_arg(builtin, "a one-character String fill", fill)?,
+        ),
+        [_, _, _, ..] => {
+            return Err(arity_error(
+                builtin,
+                "a width and an optional fill",
+                rest.len(),
+            ));
+        }
+        [other, ..] => {
+            return Err(crate::safety::bad_arg(
+                builtin,
+                "a width Int",
+                other.type_name(),
+            ))
+        }
+    };
+    if width < 0 {
+        return Err(crate::safety::bad_arg(
+            builtin,
+            "a width of 0 or more",
+            &width.to_string(),
+        ));
+    }
+    if width > PAD_WIDTH_MAX {
+        return Err(crate::safety::bad_arg(
+            builtin,
+            &format!("a width of at most {PAD_WIDTH_MAX}"),
+            &width.to_string(),
+        ));
+    }
+    let mut marks = fill.chars();
+    let fill_char = match (marks.next(), marks.next()) {
+        (Some(c), None) => c,
+        _ => {
+            return Err(crate::safety::bad_arg(
+                builtin,
+                "a fill of exactly one character",
+                &format!("{fill:?}"),
+            ))
+        }
+    };
+    let wanted = usize::try_from(width).unwrap_or(0);
+    let len = text.chars().count();
+    if len >= wanted {
+        return Ok(Value::Str(text));
+    }
+    let pad = fill_char.to_string().repeat(wanted - len);
+    Ok(Value::Str(if left { pad + &text } else { text + &pad }))
+}
+
+/// A regex compiled the way the string regex builtins need it. A pattern the
+/// regex crate refuses, including one over the size cap, is E_BAD_ARG, and the
+/// refusal names the pattern and the regex error.
+fn text_regex(builtin: &str, pattern: &str) -> Result<regex::Regex> {
+    regex::RegexBuilder::new(pattern)
+        .size_limit(REGEX_SIZE_LIMIT)
+        .dfa_size_limit(REGEX_SIZE_LIMIT)
+        .build()
+        .map_err(|e| {
+            crate::safety::bad_arg_in(
+                builtin,
+                format!("{builtin}: invalid regex {pattern:?}: {e}"),
+                "write the pattern in Rust regex syntax; escape a literal . ( ) [ ] * + ? with a backslash",
+            )
+        })
+}
+
+/// A character offset for a byte offset a regex reported.
+fn char_offset(text: &str, byte: usize) -> i64 {
+    (text.get(..byte).map_or(0, |s| s.chars().count())) as i64
+}
+
+/// A regex match as a Record: its text, its capture groups (null for a group
+/// that did not take part), and where it sits, in characters.
+fn match_record(text: &str, caps: &regex::Captures<'_>) -> Value {
+    let (matched, start, end) = match caps.get(0) {
+        Some(m) => (
+            m.as_str().to_string(),
+            char_offset(text, m.start()),
+            char_offset(text, m.end()),
+        ),
+        None => (String::new(), 0, 0),
+    };
+    let groups = caps
+        .iter()
+        .skip(1)
+        .map(|group| match group {
+            Some(g) => Value::Str(g.as_str().to_string()),
+            None => Value::Null,
+        })
+        .collect();
+    let mut record = BTreeMap::new();
+    record.insert("match".to_string(), Value::Str(matched));
+    record.insert("groups".to_string(), Value::Array(groups));
+    record.insert("start".to_string(), Value::Int(start));
+    record.insert("end".to_string(), Value::Int(end));
+    Value::Record(record)
+}
+
+/// regex_match(text, pattern) - Whether a regex matches anywhere in a String.
+/// Args:
+///   - text: String (or the piped text)
+///   - pattern: String - a Rust regex pattern
+/// Returns: Bool
+///
+/// Example:
+///   "abc" | regex_match("b")     # true
+fn bi_regex_match(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
+    const B: &str = "regex_match";
+    let (text, rest) = text_subject(B, args, input)?;
+    let [pattern] = rest.as_slice() else {
+        return Err(arity_error(B, "a pattern", rest.len()));
+    };
+    let re = text_regex(B, string_arg(B, "a String pattern", pattern)?)?;
+    Ok(Value::Bool(re.is_match(&text)))
+}
+
+/// regex_find(text, pattern) - The first match of a regex, as a Record.
+/// Args:
+///   - text: String (or the piped text)
+///   - pattern: String - a Rust regex pattern
+/// Returns: Record {match: String, groups: Array, start: Int, end: Int}, or null
+///
+/// groups holds each capture group as a String, or null for a group that did
+/// not take part. start and end are character offsets, end exclusive.
+///
+/// Example:
+///   regex_find("a1b22", "[0-9]+").start   # 1
+///   regex_find("ab", "b").end             # 2
+///   regex_find("abc", "z")                # null
+fn bi_regex_find(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
+    const B: &str = "regex_find";
+    let (text, rest) = text_subject(B, args, input)?;
+    let [pattern] = rest.as_slice() else {
+        return Err(arity_error(B, "a pattern", rest.len()));
+    };
+    let re = text_regex(B, string_arg(B, "a String pattern", pattern)?)?;
+    Ok(match re.captures(&text) {
+        Some(caps) => match_record(&text, &caps),
+        None => Value::Null,
+    })
+}
+
+/// regex_find_all(text, pattern) - Every match of a regex, left to right.
+/// Args:
+///   - text: String (or the piped text)
+///   - pattern: String - a Rust regex pattern
+/// Returns: Array of the records regex_find returns; [] when nothing matches
+///
+/// Example:
+///   regex_find_all("a1b22", "[0-9]+") | len    # 2
+fn bi_regex_find_all(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
+    const B: &str = "regex_find_all";
+    let (text, rest) = text_subject(B, args, input)?;
+    let [pattern] = rest.as_slice() else {
+        return Err(arity_error(B, "a pattern", rest.len()));
+    };
+    let re = text_regex(B, string_arg(B, "a String pattern", pattern)?)?;
+    Ok(Value::Array(
+        re.captures_iter(&text)
+            .map(|caps| match_record(&text, &caps))
+            .collect(),
+    ))
+}
+
+/// regex_replace(text, pattern, replacement) - Replace every regex match.
+/// Args:
+///   - text: String (or the piped text)
+///   - pattern: String - a Rust regex pattern
+///   - replacement: String - $1, ${name} and $$ expand as the regex crate expands them
+/// Returns: String
+///
+/// Example:
+///   regex_replace("a1b2", "([0-9])", "<$1>")    # "a<1>b<2>"
+fn bi_regex_replace(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
+    const B: &str = "regex_replace";
+    let (text, rest) = text_subject(B, args, input)?;
+    let [pattern, replacement] = rest.as_slice() else {
+        return Err(arity_error(B, "a pattern and a replacement", rest.len()));
+    };
+    let re = text_regex(B, string_arg(B, "a String pattern", pattern)?)?;
+    let replacement = string_arg(B, "a String replacement", replacement)?;
+    Ok(Value::Str(re.replace_all(&text, replacement).into_owned()))
+}
+
+/// The seconds in one of the units the date builtins take.
+fn unit_seconds(builtin: &str, unit: &str) -> Result<i64> {
+    match unit {
+        "days" => Ok(86_400),
+        "hours" => Ok(3_600),
+        "minutes" => Ok(60),
+        "seconds" => Ok(1),
+        other => Err(crate::safety::bad_arg(
+            builtin,
+            "a unit: days, hours, minutes or seconds",
+            other,
+        )),
+    }
+}
+
+/// An ISO 8601 / RFC 3339 datetime, or a `YYYY-MM-DD` date, as a UTC instant.
+/// The flag is true for a date alone, which is midnight UTC.
+fn iso_instant(text: &str) -> Option<(chrono::DateTime<chrono::Utc>, bool)> {
+    if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(text) {
+        return Some((dt.with_timezone(&chrono::Utc), false));
+    }
+    let date = chrono::NaiveDate::parse_from_str(text, "%Y-%m-%d").ok()?;
+    Some((date.and_hms_opt(0, 0, 0)?.and_utc(), true))
+}
+
+/// The refusal for text that is not a date in the form asked for.
+fn not_a_date(builtin: &str, text: &str) -> anyhow::Error {
+    crate::safety::value_not_representable(
+        builtin,
+        format!("{builtin}: {text:?} is not a date"),
+        "write an ISO 8601 date such as 2024-02-29, or a datetime such as 2024-02-29T10:00:00Z",
+    )
+}
+
+fn parse_iso(builtin: &str, text: &str) -> Result<(chrono::DateTime<chrono::Utc>, bool)> {
+    iso_instant(text).ok_or_else(|| not_a_date(builtin, text))
+}
+
+/// The ISO 8601 text of an instant: `2024-02-29` for a date, otherwise the UTC
+/// datetime to the second, or with its fraction, ending in `Z`.
+fn iso_text(instant: chrono::DateTime<chrono::Utc>, date_only: bool) -> String {
+    if date_only {
+        instant.format("%Y-%m-%d").to_string()
+    } else {
+        instant.to_rfc3339_opts(chrono::SecondsFormat::AutoSi, true)
+    }
+}
+
+/// A strftime layout is refused when chrono cannot read one of its specifiers.
+fn check_strftime(builtin: &str, layout: &str) -> Result<()> {
+    if chrono::format::StrftimeItems::new(layout)
+        .any(|item| matches!(item, chrono::format::Item::Error))
+    {
+        return Err(crate::safety::bad_arg_in(
+            builtin,
+            format!("{builtin}: {layout:?} is not a strftime format"),
+            "use chrono's strftime specifiers, such as %Y-%m-%d or %d %B %Y",
+        ));
+    }
+    Ok(())
+}
+
+/// Parse text in a strftime layout: with an offset it is that instant, without
+/// one it is UTC, and a layout with no time is midnight UTC.
+fn parse_with_layout(builtin: &str, text: &str, layout: &str) -> Result<Value> {
+    if let Ok(dt) = chrono::DateTime::parse_from_str(text, layout) {
+        return Ok(Value::Str(iso_text(dt.with_timezone(&chrono::Utc), false)));
+    }
+    if let Ok(naive) = chrono::NaiveDateTime::parse_from_str(text, layout) {
+        return Ok(Value::Str(iso_text(naive.and_utc(), false)));
+    }
+    if let Some(midnight) = chrono::NaiveDate::parse_from_str(text, layout)
+        .ok()
+        .and_then(|date| date.and_hms_opt(0, 0, 0))
+    {
+        return Ok(Value::Str(iso_text(midnight.and_utc(), true)));
+    }
+    Err(not_a_date(builtin, text))
+}
+
+/// date_parse(text, format?) - Read a date or datetime and answer it as ISO 8601.
+/// Args:
+///   - text: String (or the piped text)
+///   - format: String (optional) - a chrono strftime layout, such as "%d/%m/%Y"
+/// Returns: String
+///
+/// Without a format, RFC 3339 and `YYYY-MM-DD` are read. A datetime is answered
+/// in UTC, ending in Z; an offset in the text is converted. A date is answered
+/// as a date. Text that is not a date is E_BAD_VALUE and the refusal names it.
+///
+/// Example:
+///   date_parse("2024-02-29")                        # "2024-02-29"
+///   date_parse("2024-02-29T10:00:00+02:00")         # "2024-02-29T08:00:00Z"
+///   date_parse("29/02/2024", "%d/%m/%Y")            # "2024-02-29"
+fn bi_date_parse(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
+    const B: &str = "date_parse";
+    let (text, rest) = text_subject(B, args, input)?;
+    match rest.as_slice() {
+        [] => {
+            let (instant, date_only) = parse_iso(B, &text)?;
+            Ok(Value::Str(iso_text(instant, date_only)))
+        }
+        [layout] => {
+            let layout = string_arg(B, "a strftime format String", layout)?;
+            check_strftime(B, layout)?;
+            parse_with_layout(B, &text, layout)
+        }
+        _ => Err(arity_error(B, "an optional format", rest.len())),
+    }
+}
+
+/// date_diff(a, b, unit?) - The time from a to b, in whole units.
+/// Args:
+///   - a: String (or the piped text) - an ISO date or datetime, as date_parse answers
+///   - b: String - the later date, in the same form
+///   - unit: String (optional) - "days" (the default), "hours", "minutes" or "seconds"
+/// Returns: Int - b minus a, truncated toward zero
+///
+/// Example:
+///   date_diff("2024-02-29", "2026-11-09")             # 984
+///   date_diff("2024-02-29", "2026-11-09", "hours")    # 23616
+fn bi_date_diff(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
+    const B: &str = "date_diff";
+    let (first, rest) = text_subject(B, args, input)?;
+    let (second, unit) = match rest.as_slice() {
+        [second] => (string_arg(B, "a second ISO date String", second)?, "days"),
+        [second, unit] => (
+            string_arg(B, "a second ISO date String", second)?,
+            string_arg(B, "a unit String: days, hours, minutes or seconds", unit)?,
+        ),
+        _ => {
+            return Err(arity_error(
+                B,
+                "a second date and an optional unit",
+                rest.len(),
+            ))
+        }
+    };
+    let per = unit_seconds(B, unit)?;
+    let (a, _) = parse_iso(B, &first)?;
+    let (b, _) = parse_iso(B, second)?;
+    Ok(Value::Int((b - a).num_seconds() / per))
+}
+
+/// date_format(iso, format) - Format a date or datetime with a strftime layout.
+/// Args:
+///   - iso: String (or the piped text) - an ISO date or datetime; a date is midnight UTC
+///   - format: String - a chrono strftime layout
+/// Returns: String
+///
+/// Example:
+///   date_format("2024-02-29T10:00:00Z", "%d %B %Y")    # "29 February 2024"
+fn bi_date_format(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
+    use std::fmt::Write as _;
+    const B: &str = "date_format";
+    let (text, rest) = text_subject(B, args, input)?;
+    let [layout] = rest.as_slice() else {
+        return Err(arity_error(B, "a strftime format String", rest.len()));
+    };
+    let layout = string_arg(B, "a strftime format String", layout)?;
+    check_strftime(B, layout)?;
+    let (instant, _) = parse_iso(B, &text)?;
+    let mut out = String::new();
+    write!(out, "{}", instant.format(layout)).map_err(|_| {
+        crate::safety::bad_arg_in(
+            B,
+            format!("{B}: {layout:?} cannot be written for {text:?}"),
+            "use chrono's strftime specifiers, such as %Y-%m-%d or %d %B %Y",
+        )
+    })?;
+    Ok(Value::Str(out))
+}
+
+/// date_add(iso, amount, unit) - Move a date or datetime by a whole amount.
+/// Args:
+///   - iso: String (or the piped text) - an ISO date or datetime
+///   - amount: Int - may be negative
+///   - unit: String - "days", "hours", "minutes" or "seconds"
+/// Returns: String - a date when the input is a date and the unit is days; otherwise a UTC datetime ending in Z
+///
+/// Example:
+///   date_add("2024-02-28", 1, "days")                  # "2024-02-29"
+///   date_add("2024-02-28T23:00:00Z", 2, "hours")       # "2024-02-29T01:00:00Z"
+fn bi_date_add(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
+    const B: &str = "date_add";
+    let (text, rest) = text_subject(B, args, input)?;
+    let [amount, unit] = rest.as_slice() else {
+        return Err(arity_error(B, "an amount Int and a unit", rest.len()));
+    };
+    let Value::Int(amount) = amount else {
+        return Err(crate::safety::bad_arg(
+            B,
+            "an Int amount",
+            amount.type_name(),
+        ));
+    };
+    let unit = string_arg(B, "a unit String: days, hours, minutes or seconds", unit)?;
+    let per = unit_seconds(B, unit)?;
+    let (instant, date_only) = parse_iso(B, &text)?;
+    let moved = amount
+        .checked_mul(per)
+        .and_then(chrono::TimeDelta::try_seconds)
+        .and_then(|delta| instant.checked_add_signed(delta));
+    let Some(moved) = moved else {
+        return Err(crate::safety::bad_arg_in(
+            B,
+            format!("{B}: {amount} {unit} moves {text:?} out of range"),
+            "use a smaller amount",
+        ));
+    };
+    Ok(Value::Str(iso_text(moved, date_only && unit == "days")))
+}
+
+/// The path of a key under `path`, as a refusal names it: `app.servers[1].note`.
+fn path_key(path: &str, key: &str) -> String {
+    if path.is_empty() {
+        key.to_string()
+    } else {
+        format!("{path}.{key}")
+    }
+}
+
+/// A Record as a TOML table. A null, or a value TOML has no form for, is
+/// refused with the path to it.
+fn toml_table(
+    builtin: &str,
+    map: &BTreeMap<String, Value>,
+    path: &str,
+) -> Result<toml::map::Map<String, toml::Value>> {
+    let mut table = toml::map::Map::new();
+    for (key, item) in map {
+        table.insert(
+            key.clone(),
+            toml_value(builtin, item, &path_key(path, key))?,
+        );
+    }
+    Ok(table)
+}
+
+fn toml_value(builtin: &str, value: &Value, path: &str) -> Result<toml::Value> {
+    Ok(match value {
+        Value::Bool(b) => toml::Value::Boolean(*b),
+        Value::Int(i) => toml::Value::Integer(*i),
+        Value::Float(f) => toml::Value::Float(*f),
+        Value::Str(s) | Value::Uri(s) => toml::Value::String(s.clone()),
+        Value::Array(items) => toml::Value::Array(
+            items
+                .iter()
+                .enumerate()
+                .map(|(i, item)| toml_value(builtin, item, &format!("{path}[{i}]")))
+                .collect::<Result<Vec<_>>>()?,
+        ),
+        Value::Record(map) => toml::Value::Table(toml_table(builtin, map, path)?),
+        Value::Table(table) => toml::Value::Array(
+            table
+                .rows
+                .iter()
+                .enumerate()
+                .map(|(i, row)| -> Result<toml::Value> {
+                    Ok(toml::Value::Table(toml_table(
+                        builtin,
+                        row,
+                        &format!("{path}[{i}]"),
+                    )?))
+                })
+                .collect::<Result<Vec<_>>>()?,
+        ),
+        Value::Null => {
+            return Err(crate::safety::bad_arg_in(
+                builtin,
+                format!("{builtin}: null at {path} has no TOML value"),
+                "TOML has no null: leave the key out, or give it a value",
+            ))
+        }
+        other => {
+            return Err(crate::safety::bad_arg_in(
+                builtin,
+                format!(
+                    "{builtin}: a {} at {path} has no TOML value",
+                    other.type_name()
+                ),
+                "TOML holds booleans, numbers, strings, arrays, tables and dates",
+            ))
+        }
+    })
+}
+
+/// to_toml(record) - Write a Record as a TOML document.
+/// Args:
+///   - record: Record (or the piped record)
+/// Returns: String
+///
+/// The top level must be a Record. A null, or a value TOML cannot hold, is
+/// E_BAD_ARG and the refusal names its path.
+///
+/// Example:
+///   from_toml(to_toml({a: 1, b: "x"})).b    # "x"
+///   (try { to_toml([1]) } catch e { e.error.code })    # "E_BAD_ARG"
+fn bi_to_toml(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
+    const B: &str = "to_toml";
+    let value = match (input, args.as_slice()) {
+        (Some(value), []) => value,
+        (None, [value]) => value.clone(),
+        _ => return Err(arity_error(B, "one Record to convert", args.len())),
+    };
+    let Value::Record(map) = &value else {
+        return Err(crate::safety::bad_arg_in(
+            B,
+            format!("{B}: the top level is {}, not a Record", value.type_name()),
+            "a TOML document is a Record of named values; wrap an array or a scalar in a record",
+        ));
+    };
+    let table = toml_table(B, map, "")?;
+    toml::to_string(&toml::Value::Table(table))
+        .map(Value::Str)
+        .map_err(|e| {
+            crate::safety::bad_arg_in(
+                B,
+                format!("{B}: {e}"),
+                "TOML cannot hold this record; check its keys and values",
+            )
+        })
+}
+
+/// from_toml(text) - Read a TOML document as a Record.
+/// Args:
+///   - text: String (or the piped text)
+/// Returns: Record
+///
+/// Datetimes come back as their String form. Text that is not TOML is
+/// E_BAD_VALUE and the refusal says why.
+///
+/// Example:
+///   from_toml("a = 1").a    # 1
+fn bi_from_toml(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
+    const B: &str = "from_toml";
+    let (text, rest) = text_subject(B, args, input)?;
+    if !rest.is_empty() {
+        return Err(arity_error(B, "the TOML text alone", rest.len()));
+    }
+    let parsed: toml::Value = toml::from_str(&text).map_err(|e| {
+        crate::safety::value_not_representable(
+            B,
+            format!("{B}: the text is not TOML: {e}"),
+            "pass a TOML document, such as a = 1",
+        )
+    })?;
+    Ok(crate::plugins::toml_to_value(parsed))
 }
 
 /// exit(code?) - Exit the shell process with a status.

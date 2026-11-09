@@ -518,6 +518,12 @@ pub fn str_module() -> Value {
         ("contains", "contains"),
         ("starts_with", "starts_with"),
         ("ends_with", "ends_with"),
+        ("regex_match", "regex_match"),
+        ("regex_find", "regex_find"),
+        ("regex_find_all", "regex_find_all"),
+        ("regex_replace", "regex_replace"),
+        ("pad_left", "pad_left"),
+        ("pad_right", "pad_right"),
         ("len", "len"),
     ])
 }

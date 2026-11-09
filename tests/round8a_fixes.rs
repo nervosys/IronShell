@@ -190,10 +190,10 @@ fn a_projection_stage_on_a_non_collection_is_not_called_map() {
 
 #[test]
 fn a_missing_module_member_is_an_unknown_builtin() {
-    let msg = run_err("str.pad_right(\"ab\", 6)");
+    let msg = run_err("str.pad_middle(\"ab\", 6)");
     assert!(msg.contains("E_UNKNOWN_BUILTIN"), "{msg}");
     assert!(
-        msg.contains("module `str` has no member `pad_right`"),
+        msg.contains("module `str` has no member `pad_middle`"),
         "{msg}"
     );
 }

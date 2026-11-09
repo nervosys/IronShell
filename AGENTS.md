@@ -167,6 +167,11 @@ try { error("bad", {field: "age"}) } catch e { e.code }   # "E_USER"; error(mess
 int("42") + 1                  # int(x) / float(x) convert text or numbers; int("1.5") is refused, float("1.5") is 1.5
 now_iso()                      # the current time, e.g. 2026-11-08T14:03:05Z; now_iso("local") carries the offset
 
+"abc" | regex_match("b")       regex_find("a1b22", "[0-9]+").start    regex_replace("a1", "([0-9])", "<$1>")    # regex on text; a match is {match, groups, start, end}
+"7" | pad_left(3, "0")         str.pad_right("ab", 5)                  # padding counts characters; the fill is one character
+date_add("2024-02-28", 1, "days")    date_diff("2024-02-29", "2026-11-09")    date_format("2024-02-29", "%d %B %Y")    # ISO 8601 dates, in UTC
+from_toml(to_toml({a: 1})).a           # TOML: to_toml(record) -> String; from_toml(text) -> Record
+
 # String interpolation
 msg = "Hello ${name}, you have ${count} items"
 
