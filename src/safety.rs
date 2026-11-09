@@ -2906,7 +2906,7 @@ pub fn unknown_module_member_hinted(
 pub fn unknown_name(name: &str, candidates: Vec<String>) -> anyhow::Error {
     let hint = if candidates.is_empty() {
         format!(
-            "`{name}` is not a variable, builtin or module; bind it with `let {name} = ...`, \
+            "`{name}` is not a variable, builtin or module; bind it with `{name} = ...`, \
              or call a builtin as `{name}(...)`"
         )
     } else {
