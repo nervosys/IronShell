@@ -1545,14 +1545,14 @@ fn binary(op: Bin, a: &Val, b: &Val) -> Result<Val> {
         Bin::Div => {
             let d = to_num(b);
             if d == 0.0 {
-                return Err(bad_value("awk: division by zero", "the same values divide by zero again: check the divisor is not 0 before dividing"));
+                return Err(bad_value("awk: division by zero", "check the divisor is not 0 before dividing; retrying with the same values fails again"));
             }
             Val::Num(to_num(a) / d)
         }
         Bin::Mod => {
             let d = to_num(b);
             if d == 0.0 {
-                return Err(bad_value("awk: division by zero in %", "the same values divide by zero again: check the divisor is not 0 before taking the remainder"));
+                return Err(bad_value("awk: division by zero in %", "check the divisor is not 0 before taking the remainder; retrying with the same values fails again"));
             }
             Val::Num(to_num(a) % d)
         }

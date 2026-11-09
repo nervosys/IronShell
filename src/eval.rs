@@ -1522,8 +1522,8 @@ fn divide_by_zero(what: &str, operator: &str) -> anyhow::Error {
             "{what} by zero: the divisor evaluated to 0. Guard the divisor, or \
              filter the empty case before dividing"
         ),
-        "the same values divide by zero again: check the divisor is not 0 before \
-         dividing, or filter zero divisors out first",
+        "check the divisor is not 0 before dividing, or filter zero divisors out first; \
+         retrying with the same values fails again",
     )
 }
 
