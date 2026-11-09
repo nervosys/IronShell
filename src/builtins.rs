@@ -4292,7 +4292,7 @@ pub fn is_dispatched(name: &str) -> bool {
 /// Whether some implementation answers a call to `name`: the dispatcher's own
 /// tables, the workflow engine, or a plugin's manifest builtin. Asked before a
 /// call is classified, so a name nothing serves is unknown rather than gated.
-fn is_served(name: &str) -> bool {
+pub fn is_served(name: &str) -> bool {
     is_dispatched(name)
         || crate::workflow_builtins::serves(name)
         || crate::plugins::is_manifest_builtin(name)
@@ -8903,7 +8903,10 @@ fn capped_read_not_found(e: &anyhow::Error) -> bool {
 fn line_read(builtin: &str, path: &str) -> Result<String> {
     use std::io::Read;
     const MAX_BYTES: u64 = 64 * 1024 * 1024;
-    let path = validate_read_path(path)?;
+    // The jail names this builtin, as every builtin's refusal does; a name-less
+    // refusal read ": `path` is outside the workspace".
+    crate::security::check_read_jail(builtin, path)?;
+    let path = crate::security::validate_safe_path(path)?;
     let metadata = fs::metadata(&path).map_err(|e| crate::safety::fs_error(builtin, &path, &e))?;
     if metadata.len() > MAX_BYTES {
         return Err(crate::safety::budget_exceeded(
@@ -70844,13 +70847,21 @@ fn bi_sed_replace(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
     } else {
         text
     };
+    let before = file.as_ref().map(|_| source.clone());
     let result = regex_substitute(&re, &replacement, source, global);
     if let Some((original, path)) = file {
-        crate::tx::snapshot(&path);
-        write_file_atomically("sed", &path, result.as_bytes())?;
+        // The pattern matched nothing, or only text it replaced with itself: the
+        // file is left as it is, unwritten and unjournalled.
+        let status = if before.as_deref() == Some(result.as_str()) {
+            "unchanged"
+        } else {
+            crate::tx::snapshot(&path);
+            write_file_atomically("sed", &path, result.as_bytes())?;
+            "modified"
+        };
         Ok(Value::Record(BTreeMap::from([
             ("file".into(), Value::Str(original)),
-            ("status".into(), Value::Str("modified".into())),
+            ("status".into(), Value::Str(status.into())),
         ])))
     } else {
         Ok(Value::Str(result))

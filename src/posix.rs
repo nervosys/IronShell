@@ -873,6 +873,7 @@ impl Parser {
     }
 
     fn simple(&mut self) -> PResult<Cmd> {
+        let start = self.offset();
         let mut assigns = Vec::new();
         let mut words: Vec<Word> = Vec::new();
         let mut redirs = Vec::new();
@@ -915,11 +916,78 @@ impl Parser {
         if assigns.is_empty() && words.is_empty() && redirs.is_empty() {
             return unsupported("empty command");
         }
+        // A shell builtin the subset does not run is refused here, before any
+        // command runs. Left alone it would be sent to PATH as a program.
+        if let Some(what) = unsupported_builtin(&words) {
+            return Err(Unsupported {
+                what,
+                at: Some(start),
+            });
+        }
         Ok(Cmd::Simple {
             assigns,
             words,
             redirs,
         })
+    }
+}
+
+/// Shell builtins of POSIX and bash that the subset does not run. Each would
+/// otherwise run as a program of the same name, or not at all. `set` and
+/// `export` are checked for their options in [`unsupported_builtin`].
+const UNSUPPORTED_BUILTINS: &[&str] = &[
+    ".",
+    "source",
+    "eval",
+    "exec",
+    "trap",
+    "return",
+    "getopts",
+    "local",
+    "alias",
+    "unalias",
+    "readonly",
+    "declare",
+    "typeset",
+    "let",
+    "command",
+    "builtin",
+    "type",
+    "hash",
+    "umask",
+    "ulimit",
+    "wait",
+    "jobs",
+    "fg",
+    "bg",
+    "times",
+    "fc",
+    "newgrp",
+    "shopt",
+    "enable",
+    "pushd",
+    "popd",
+    "dirs",
+    "mapfile",
+    "readarray",
+    "help",
+    "caller",
+    "disown",
+];
+
+/// The construct a command word names when the subset does not run it: a
+/// builtin in [`UNSUPPORTED_BUILTINS`], `set` with any option (`set --` is
+/// run), or `export` with an option. `None` for every other command.
+fn unsupported_builtin(words: &[Word]) -> Option<String> {
+    let name = plain(words.first()?)?;
+    let arg = words.get(1).and_then(plain);
+    match name {
+        "set" if arg != Some("--") => Some("`set` with options".into()),
+        "export" => arg
+            .filter(|a| a.len() > 1 && a.starts_with('-'))
+            .map(|a| format!("`export {a}`")),
+        n if UNSUPPORTED_BUILTINS.contains(&n) => Some(format!("`{n}` builtin")),
+        _ => None,
     }
 }
 
@@ -1796,6 +1864,30 @@ impl Shell {
             // behaviour (a program named `set`, which is not found).
             "set" if args.first().map(String::as_str) == Some("--") => {
                 self.positional = args[1..].to_vec();
+                return Flow::Next(0);
+            }
+            // `shift [N]` drops the first N positional parameters (1 by default).
+            // A count past the last parameter changes nothing and fails, as bash.
+            "shift" => {
+                let n = match args.first() {
+                    None => 1,
+                    Some(a) => match a.parse::<usize>() {
+                        Ok(n) => n,
+                        Err(_) => {
+                            sink.eline(&format!(
+                                "{SHELL_NAME}: shift: {a}: numeric argument required"
+                            ));
+                            return Flow::Next(1);
+                        }
+                    },
+                };
+                if n > self.positional.len() {
+                    sink.eline(&format!(
+                        "{SHELL_NAME}: shift: {n}: shift count out of range"
+                    ));
+                    return Flow::Next(1);
+                }
+                self.positional.drain(..n);
                 return Flow::Next(0);
             }
             "cd" => {
@@ -4882,7 +4974,9 @@ pub fn in_process_reads(name: &str) -> Option<bool> {
         "cat" | "head" | "tail" | "wc" | "grep" | "sort" | "uniq" | "cut" | "sed" | "ls"
         | "find" | "test" | "[" => Some(true),
         "echo" | "printf" | "date" | "basename" | "dirname" | "seq" | "true" | ":" | "false"
-        | "exit" | "break" | "continue" | "export" | "unset" | "cd" | "read" | "pwd" => Some(false),
+        | "exit" | "break" | "continue" | "export" | "unset" | "shift" | "cd" | "read" | "pwd" => {
+            Some(false)
+        }
         _ => None,
     }
 }

@@ -389,6 +389,26 @@ pub fn parse_program_with_lines(src: &str) -> Result<(Vec<Stmt>, Vec<usize>)> {
         }
     }
 
+    // A second statement in a block that holds one expression is one fault. Its
+    // knock-on errors (an unclosed '{', then each statement after it) only
+    // bury the hint that names the fault, so that error is reported alone. The
+    // hint is the first hinted error's, as it always was, so this only picks
+    // which error is reported, never the hint.
+    if let Some(first) = errors
+        .iter()
+        .find(|e| e.downcast_ref::<HintedSyntax>().is_some())
+    {
+        if first
+            .downcast_ref::<HintedSyntax>()
+            .is_some_and(|h| h.hint == ONE_EXPR_HINT)
+        {
+            return Err(anyhow::Error::new(ParseError::with_hint(
+                first.to_string(),
+                ONE_EXPR_HINT,
+            )));
+        }
+    }
+
     // If we had errors, return them combined
     if !errors.is_empty() {
         let error_messages: Vec<String> = errors.iter().map(|e| e.to_string()).collect();

@@ -826,6 +826,8 @@ pub fn eval_expr(expr: &Expr, env: &mut Env) -> Result<Value> {
 
         // ---------- pipeline ----------
         Expr::Pipe { left, right } => {
+            // Every stage's name is checked before the first one runs.
+            check_pipeline_names(expr, env)?;
             let left_val = eval_expr(left, env)?;
 
             // `|.a.b` is parsed as `| map(fn(__) => __.a.b)`. A Record is one
@@ -1183,6 +1185,40 @@ fn method_on_non_record(
         ty,
         &hint,
     ))
+}
+
+/// Refuse a pipeline whose stage names a plain builtin that nothing serves,
+/// before any stage runs. Otherwise `file.write("p", "a") | nosuchfn()` wrote
+/// `p` and only then failed. `pipe` is the outermost `Expr::Pipe`; its left
+/// spine is walked too. A stage is checked only when it is a plain name: a
+/// bound variable or function in scope is left to the evaluator.
+fn check_pipeline_names(pipe: &Expr, env: &Env) -> Result<()> {
+    let mut cur = pipe;
+    while let Expr::Pipe { left, right } = cur {
+        if let Some(name) = plain_stage_name(right) {
+            if env.get_var(name).is_none() && !crate::builtins::is_served(name) {
+                return Err(crate::safety::unknown_builtin_hinted(
+                    name,
+                    crate::builtins::did_you_mean(name),
+                    crate::module_loader::unexported_hint(name),
+                ));
+            }
+        }
+        cur = &**left;
+    }
+    Ok(())
+}
+
+/// The name a pipeline stage calls when it is `name(...)` or a bare `name`.
+fn plain_stage_name(stage: &Expr) -> Option<&str> {
+    match stage {
+        Expr::Call { callee, .. } => match &**callee {
+            Expr::Ident(name) => Some(name.as_str()),
+            _ => None,
+        },
+        Expr::Ident(name) => Some(name.as_str()),
+        _ => None,
+    }
 }
 
 /// The row lambda and the `.a.b` path of a `|.a.b` stage. The parser writes

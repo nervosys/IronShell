@@ -1049,16 +1049,31 @@ fn narrow_ontology(
             .flat_map(|md| md.functions.iter().map(|f| f.builtin.clone()))
             .collect()
     });
+    // A module member names the implementation (`file_delete_lines`), and one
+    // implementation can be listed under its alias (`delete_lines`). The entry
+    // is kept under either name, so `file` lists `delete_lines`.
+    let member_of = |b: &BuiltinDefinition, names: &[String]| {
+        names.contains(&b.name)
+            || b.aliases
+                .as_ref()
+                .is_some_and(|a| a.iter().any(|x| names.contains(x)))
+    };
     ontology.builtins.retain(|b| {
         in_module
             .as_ref()
-            .is_none_or(|names| names.contains(&b.name))
+            .is_none_or(|names| member_of(b, names.as_slice()))
             && q.is_none_or(|q| {
                 b.name.to_lowercase().contains(q) || b.description.to_lowercase().contains(q)
             })
     });
 
-    let kept: HashSet<&str> = ontology.builtins.iter().map(|b| b.name.as_str()).collect();
+    let kept: HashSet<&str> = ontology
+        .builtins
+        .iter()
+        .flat_map(|b| {
+            std::iter::once(b.name.as_str()).chain(b.aliases.iter().flatten().map(String::as_str))
+        })
+        .collect();
     for md in &mut ontology.modules {
         md.functions.retain(|f| kept.contains(f.builtin.as_str()));
     }
@@ -3199,6 +3214,13 @@ pub fn ontology_describe_json(query: &str) -> JsonValue {
                     .as_ref()
                     .is_some_and(|a| a.iter().any(|x| x.eq_ignore_ascii_case(q)))
             })
+        })
+        // A bare session verb names the builtin its `session.` member runs:
+        // `redo` is `session.redo`, which is `session_redo`. Only after every
+        // builtin and category of that name has been looked for.
+        .or_else(|| {
+            let member = crate::modules::builtin_for_member("session", q)?;
+            defs.iter().find(|d| d.name == member)
         });
     if let Some(d) = found {
         let params: Vec<JsonValue> = d
@@ -3229,6 +3251,14 @@ pub fn ontology_describe_json(query: &str) -> JsonValue {
             "examples": examples,
             "aliases": d.aliases,
         });
+        // An alias is documented as one: when the signature names a different
+        // builtin, that is the one the call runs (`delete_lines` runs
+        // `file_delete_lines`).
+        if let Some(implemented_by) = d.signature.split('(').next().map(str::trim) {
+            if !implemented_by.is_empty() && implemented_by != d.name {
+                detail["implemented_by"] = json!(implemented_by);
+            }
+        }
         // Only when the effect is the *fall-through*, which is the only
         // direction an agent can act on: it says "this label is weaker than it
         // looks -- nobody classified this builtin".

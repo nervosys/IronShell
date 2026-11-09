@@ -885,10 +885,11 @@ pub static SIGNATURES: &[Signature] = &[
     Signature {
         name: "file_insert", category: None, subject_required: false, aliases: &["insert_lines"],
         subject: None, params: &[req("path", Ty::Str, "file to edit"), req("position", Ty::Any, "1-based line, named position, text pattern, or after/before/line record"), opt("content", Ty::Any, "lines to insert; omitted uses pipeline input")], returns: "Record",
-        doc: "Insert lines at a position or pattern, returning the insertion location. A line number is 1-based, and line count + 1 appends; a later line is E_BAD_ARG and nothing is written. A text anchor inserts AFTER the first line that contains it; the record {before: text} inserts before that line instead. An anchor that no line contains is an E_NOT_FOUND error and nothing is written.",
+        doc: "Insert lines at a position or pattern, returning the insertion location. A line number is 1-based, and line count + 1 appends; a later line is E_BAD_ARG and nothing is written. A text anchor inserts AFTER the first line that contains it; the record {after: text} is the same anchor written out, and the record {before: text} inserts before that line instead. An anchor that no line contains is an E_NOT_FOUND error and nothing is written.",
         examples: &[
             (r#"let d = fs_tempdir("ae_insert"); let f = d + "/x"; file_write(f, "a"); let result = file_insert(f, 1, "b"); rmdir(d, true); result.at_line"#, "1"),
             (r#"let d = fs_tempdir("ae_insert"); let f = d + "/x"; file_write(f, "a"); let result = "b" | file_insert(f, "end"); rmdir(d, true); result.at_line"#, "2"),
+            (r#"let d = fs_tempdir("ae_insert_after"); let f = d + "/x"; file_write(f, "a\nb"); let result = file_insert(f, {after: "a"}, "c"); rmdir(d, true); result.at_line"#, "2"),
         ],
     },
     Signature {
