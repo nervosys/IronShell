@@ -15462,7 +15462,7 @@ fn bi_format_number(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
             // Within 2^53 the scaled value is exact; the u128 covers the rest.
             let scale = 10u128.pow(decimals);
             let scaled = f.abs() * 10f64.powi(decimals as i32);
-            if !(scaled < 1.0e38) {
+            if scaled >= 1.0e38 {
                 return Err(crate::safety::bad_arg_in(
                     B,
                     format!("{B}: the number is too large to write with {decimals} decimals"),
@@ -15511,7 +15511,7 @@ fn group_thousands(digits: &str, sep: &str) -> String {
     let n = digits.len();
     let mut out = String::with_capacity(n + n / 3 * sep.len());
     for (i, c) in digits.chars().enumerate() {
-        if i > 0 && (n - i) % 3 == 0 {
+        if i > 0 && (n - i).is_multiple_of(3) {
             out.push_str(sep);
         }
         out.push(c);
