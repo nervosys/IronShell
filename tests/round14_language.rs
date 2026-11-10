@@ -90,6 +90,32 @@ fn else_if_without_a_final_else_yields_null() {
     assert_eq!(run("if false { 1 } else if false { 2 }"), Value::Null);
 }
 
+// ---- 4. Parser hints for `?:` and `?.` -------------------------------------
+
+/// The hint of the parse error for `src`; panics if it parses.
+fn parse_hint(src: &str) -> String {
+    let e = iron_shell::parser::parse_program(src).expect_err(src);
+    e.downcast_ref::<iron_shell::parser::ParseError>()
+        .unwrap_or_else(|| panic!("not a ParseError for {src}: {e:#}"))
+        .hint
+        .clone()
+}
+
+#[test]
+fn a_ternary_names_the_if_form_as_its_hint() {
+    let want = "IronShell has no ?: operator; write if cond { a } else { b }";
+    assert_eq!(parse_hint("true ? 1 : 2"), want);
+    assert_eq!(parse_hint("x = true ? 1 : 2"), want);
+}
+
+#[test]
+fn optional_chaining_names_the_null_test_as_its_hint() {
+    assert_eq!(
+        parse_hint("a?.b"),
+        "IronShell has no ?. operator; test for null first: if a == null { null } else { a.b }"
+    );
+}
+
 #[test]
 fn else_if_chains_further_than_one_link() {
     let v = run("grade = fn(s) => if s >= 90 { \"A\" } else if s >= 80 { \"B\" } else if s >= 70 { \"C\" } else { \"F\" }\n\
