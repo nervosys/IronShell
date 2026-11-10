@@ -71,6 +71,9 @@ enum Tok {
     RParen,
     Nl,
     Redir(Redir),
+    /// Where lexing stopped at a construct the subset refuses (see
+    /// [`Lexer::tokens`]). The parser never gets past it.
+    Bad,
 }
 
 #[derive(Debug, Clone)]
@@ -159,20 +162,28 @@ impl<'a> Lexer<'a> {
         self.s.get(self.i + n).copied()
     }
 
-    /// The tokens of the source, and the character offset each one starts at.
-    fn tokens(mut self) -> PResult<(Vec<Tok>, Vec<usize>)> {
+    /// The tokens of the source, the character offset each one starts at, and
+    /// the first lexical refusal. Lexing stops at a refusal and leaves a
+    /// [`Tok::Bad`] at its offset, so the parser still sees the constructs
+    /// before it: a subshell at line 3 is named ahead of a `&` at line 5.
+    fn tokens(mut self) -> (Vec<Tok>, Vec<usize>, Option<Unsupported>) {
         let mut out = Vec::new();
         let mut at = Vec::new();
         while let Some(c) = self.peek() {
             let start = self.i;
             let before = out.len();
-            if let Err(mut e) = self.token(c, &mut out) {
-                e.at.get_or_insert(start);
-                return Err(e);
+            match self.token(c, &mut out) {
+                Ok(()) => at.extend(std::iter::repeat_n(start, out.len() - before)),
+                Err(mut e) => {
+                    e.at.get_or_insert(start);
+                    out.truncate(before);
+                    out.push(Tok::Bad);
+                    at.push(start);
+                    return (out, at, Some(e));
+                }
             }
-            at.extend(std::iter::repeat_n(start, out.len() - before));
         }
-        Ok((out, at))
+        (out, at, None)
     }
 
     /// One token, or the whitespace or comment before it, at `self.i`.
@@ -1116,22 +1127,26 @@ fn line_col(src: &str, at: usize) -> (usize, usize) {
 
 fn parse(src: &str) -> PResult<List> {
     let chars: Vec<char> = src.chars().collect();
-    let (toks, at) = Lexer { s: &chars, i: 0 }.tokens()?;
+    let (toks, at, lexical) = Lexer { s: &chars, i: 0 }.tokens();
     let mut p = Parser { toks, at, i: 0 };
-    let list = match p.list(&[]) {
-        Ok(list) => list,
-        Err(mut e) => {
-            e.at.get_or_insert_with(|| p.offset());
-            return Err(e);
-        }
-    };
-    if p.i != p.toks.len() {
-        return Err(Unsupported {
+    let parsed = match p.list(&[]) {
+        Ok(list) if p.i == p.toks.len() => Ok(list),
+        Ok(_) => Err(Unsupported {
             what: "trailing tokens".into(),
             at: Some(p.offset()),
-        });
+        }),
+        Err(mut e) => {
+            e.at.get_or_insert_with(|| p.offset());
+            Err(e)
+        }
+    };
+    // The first refusal by position wins: the parser's error when it comes
+    // before the lexer's, else the lexer's.
+    match (parsed, lexical) {
+        (Err(e), Some(bad)) if e.at.unwrap_or(0) < bad.at.unwrap_or(0) => Err(e),
+        (_, Some(bad)) => Err(bad),
+        (parsed, None) => parsed,
     }
-    Ok(list)
 }
 
 // ════════════════════════════════════════════════════════════════════════
