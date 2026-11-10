@@ -2165,6 +2165,14 @@ fn binop(op: &BinOp, a: Value, b: Value) -> Result<Value> {
         (Gte, Value::Int(x), Value::Int(y)) => Value::Bool(x >= y),
         (Gte, Value::Float(x), Value::Float(y)) => Value::Bool(x >= y),
 
+        // Two Strings order by byte, as Rust's `str` Ord does: "a" < "b", and
+        // "B" < "a" because 'B' is 0x42. Mixed String and number pairs are not
+        // ordered; the refusal below names the conversions instead.
+        (Lt, Value::Str(x), Value::Str(y)) => Value::Bool(x < y),
+        (Lte, Value::Str(x), Value::Str(y)) => Value::Bool(x <= y),
+        (Gt, Value::Str(x), Value::Str(y)) => Value::Bool(x > y),
+        (Gte, Value::Str(x), Value::Str(y)) => Value::Bool(x >= y),
+
         (And, x, y) => Value::Bool(is_truthy(&x) && is_truthy(&y)),
         (Or, x, y) => Value::Bool(is_truthy(&x) || is_truthy(&y)),
 
@@ -2227,11 +2235,18 @@ fn binop(op: &BinOp, a: Value, b: Value) -> Result<Value> {
         // Uncoded (E_UNKNOWN), and printed whole values: `null - null` said
         // "unsupported op Sub on Null and Null", a record dumped its contents.
         (op, a, b) => {
-            return Err(crate::safety::bad_arg(
+            let hint = match op {
+                Lt | Lte | Gt | Gte => {
+                    "compare two numbers or two strings; convert with int(x) or float(x)"
+                }
+                _ => "use numbers for arithmetic, or strings for + (concatenation); convert with int(x) or float(x)",
+            };
+            return Err(crate::safety::bad_arg_with_hint(
                 &format!("operator {op:?}"),
                 "operands it applies to",
                 &format!("{} and {}", a.type_name(), b.type_name()),
-            ))
+                hint,
+            ));
         }
     })
 }
