@@ -8798,6 +8798,14 @@ fn bi_read_text(args: Vec<Value>, _input: Option<Value>) -> Result<Value> {
 }
 
 fn bi_head(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
+    // An Array piped in: its first n elements, the same as `take(n)`.
+    if matches!(input, Some(Value::Array(_))) {
+        let count = match args.first() {
+            None => 10,
+            Some(value) => line_count("head", value)?,
+        };
+        return bi_take(vec![Value::Int(count as i64)], input);
+    }
     let (count, content) = match input {
         Some(Value::Str(content)) => (args.first().map(|v| line_count("head", v)).transpose()?.unwrap_or(10), content),
         Some(_) => return Err(crate::safety::arg_err("head piped input must be String")),
@@ -8936,6 +8944,14 @@ fn line_read(builtin: &str, path: &str) -> Result<String> {
 }
 
 fn bi_tail(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
+    // An Array piped in: its last n elements, the same as `last(n)`.
+    if matches!(input, Some(Value::Array(_))) {
+        let count = match args.first() {
+            None => 10,
+            Some(value) => line_count("tail", value)?,
+        };
+        return bi_last(vec![Value::Int(count as i64)], input);
+    }
     let (count, content) = if let Some(value) = input {
         let Value::Str(content) = value else {
             return Err(crate::safety::arg_err("tail piped input must be String"));

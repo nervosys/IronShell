@@ -785,9 +785,9 @@ pub static SIGNATURES: &[Signature] = &[
     },
     Signature {
         name: "tail", category: None, subject_required: false, aliases: &[], subject: Some(Ty::Any),
-        params: &[opt("count_or_path", Ty::Any, "nonnegative representable Int count (default 10), or a file String in the count-first direct form")], returns: "String",
-        doc: "Return the last lines of a piped String, or read a UTF-8 file with tail(path,count?) or tail(count,path). Preserve both direct argument orders. Reject non-String input/path and invalid counts; zero yields empty output. Strip line terminators, normalize CRLF to LF and join without a trailing newline. Bound file reads to 64 MiB and validate read paths. Scan backwards and retain only the selected line references.",
-        examples: &[(r#""a\nb\nc" | tail"#, "\"a\nb\nc\""), (r#""a\nb\nc" | tail(2)"#, "\"b\nc\""), (r#"let d = fs_tempdir("ae_tail"); let f = d + "/x"; file_write(f, "a\nb\nc"); let result = tail(1, f); rmdir(d, true); result"#, r#""c""#)],
+        params: &[opt("count_or_path", Ty::Any, "nonnegative representable Int count (default 10), or a file String in the count-first direct form")], returns: "Any",
+        doc: "Return the last lines of a piped String, or read a UTF-8 file with tail(path,count?) or tail(count,path). Preserve both direct argument orders. Reject non-String input/path and invalid counts; zero yields empty output. Strip line terminators, normalize CRLF to LF and join without a trailing newline. Bound file reads to 64 MiB and validate read paths. Scan backwards and retain only the selected line references. A piped Array gives its last count elements, as last(count) does (default 10).",
+        examples: &[(r#""a\nb\nc" | tail"#, "\"a\nb\nc\""), (r#""a\nb\nc" | tail(2)"#, "\"b\nc\""), (r#"[1, 2, 3, 4] | tail(2)"#, "[3, 4]"),(r#"let d = fs_tempdir("ae_tail"); let f = d + "/x"; file_write(f, "a\nb\nc"); let result = tail(1, f); rmdir(d, true); result"#, r#""c""#)],
     },
     Signature {
         name: "journalctl", category: None, subject_required: false, aliases: &[], subject: None,
@@ -2690,11 +2690,12 @@ pub static SIGNATURES: &[Signature] = &[
         aliases: &[],
         subject: Some(Ty::Any),
         params: &[opt("count_or_path", Ty::Any, "nonnegative representable Int count (default 10), or file String in count-first direct calls")],
-        returns: "String",
-        doc: "Return the first lines of a piped String, or a regular UTF-8 file with head(path,count?) or head(count,path). Preserve both direct argument orders. Counts must be nonnegative representable Int values; zero returns empty text. Normalize CRLF to LF and join without a trailing newline. Validate file read paths and bound reads to 64 MiB.",
+        returns: "Any",
+        doc: "Return the first lines of a piped String, or a regular UTF-8 file with head(path,count?) or head(count,path). Preserve both direct argument orders. Counts must be nonnegative representable Int values; zero returns empty text. Normalize CRLF to LF and join without a trailing newline. Validate file read paths and bound reads to 64 MiB. A piped Array gives its first count elements, as take(count) does (default 10).",
         examples: &[
             (r#""abc" | head"#, r#""abc""#),
             (r#""a\nb\nc" | head(2) | split("\n") | len"#, "2"),
+            (r#"[1, 2, 3, 4] | head(3)"#, "[1, 2, 3]"),
             (r#"let d = fs_tempdir("ae_head"); let f = d + "/x"; file_write(f, "a\nb"); let result = head(1, f); rmdir(d, true); result"#, r#""a""#),
         ],
     },
