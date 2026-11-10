@@ -978,10 +978,11 @@ fn a_declared_subject_replaces_an_uncoded_failure_with_a_coded_one() {
     let e = call_with_input(
         "head",
         vec![],
-        Some(Value::Array(vec![Value::Int(1)])),
+        // An Array is now head's other subject (its first elements); an Int is not.
+        Some(Value::Int(1)),
         &mut env,
     )
-    .expect_err("head over an array must be refused");
+    .expect_err("head over an Int must be refused");
     let msg = e.to_string();
     assert!(msg.contains("E_BAD_ARG"), "still uncoded: {msg}");
     assert!(
