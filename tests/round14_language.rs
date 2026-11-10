@@ -129,8 +129,8 @@ fn merge_takes_the_second_records_fields() {
 
 #[test]
 fn merge_pipes_its_first_record() {
-    assert_eq!(run("x = {a: 1}\n(x | merge({c: 4})).c"), Value::Int(4));
-    assert_eq!(run("x = {a: 1}\n(x | merge({a: 9})).a"), Value::Int(9));
+    assert_eq!(run("({a: 1} | merge({c: 4})).c"), Value::Int(4));
+    assert_eq!(run("({a: 1} | merge({a: 9})).a"), Value::Int(9));
 }
 
 #[test]
@@ -242,4 +242,10 @@ fn else_if_chains_further_than_one_link() {
     let v = run("grade = fn(s) => if s >= 90 { \"A\" } else if s >= 80 { \"B\" } else if s >= 70 { \"C\" } else { \"F\" }\n\
                  [95, 85, 75, 10] | map(grade)");
     assert_eq!(v, strs(&["A", "B", "C", "F"]));
+}
+
+#[test]
+fn merge_refuses_a_non_record() {
+    let e = run_err("merge({a: 1}, 5)");
+    assert!(e.contains("E_BAD_ARG"), "{e}");
 }
