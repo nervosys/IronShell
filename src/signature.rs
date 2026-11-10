@@ -2529,7 +2529,7 @@ pub static SIGNATURES: &[Signature] = &[
         params: &[req("delimiter", Ty::Str, "separator to split on; required")],
         returns: "Array",
         doc: "Split a string on a delimiter.",
-        examples: &[(r#"split("a,b,c", ",")"#, r#"["a", "b", "c"]"#), (r#""a,b,c" | split(",") | len"#, "3")],
+        examples: &[(r#"split("a,b,c", ",")"#, r#"["a", "b", "c"]"#), (r#""a,b,c" | split(",") | len"#, "3"), (r#"split("abc", "")"#, r#"["a", "b", "c"]"#)],
     },
     Signature {
         name: "upper",
@@ -7205,7 +7205,7 @@ pub static SIGNATURES: &[Signature] = &[
         subject: None,
         params: &[req("name", Ty::Str, "a category or builtin name")],
         returns: "Record",
-        doc: "A category's builtins, or one builtin's full definition.",
+        doc: "A category's builtins, or one builtin's full definition. A name that is neither is E_UNKNOWN_BUILTIN, with the nearest names as did_you_mean.",
         examples: &[
             (r#"typeof(ontology_describe("Array"))"#, r#"Record"#),
         ],
@@ -7473,6 +7473,38 @@ pub static SIGNATURES: &[Signature] = &[
         examples: &[
             (r#"from_toml("a = 1").a"#, "1"),
             (r#"(try { from_toml("a = ") } catch e { e.error.code })"#, "E_BAD_VALUE"),
+        ],
+    },
+    Signature {
+        name: "merge",
+        category: None,
+        subject_required: false,
+        aliases: &[],
+        subject: Some(Ty::Record),
+        params: &[req("b", Ty::Record, "the Record whose fields win")],
+        returns: "Record",
+        doc: "Shallow-merge two Records; a field both have takes b's value whole, and a nested Record is replaced, not merged. A non-Record argument is E_BAD_ARG.",
+        examples: &[
+            (r#"merge({a: 1, b: 2}, {b: 3}).b"#, "3"),
+            (r#"(try { merge({a: 1}, 2) } catch e { e.error.code })"#, "E_BAD_ARG"),
+        ],
+    },
+    Signature {
+        name: "format_number",
+        category: None,
+        subject_required: false,
+        aliases: &[],
+        subject: Some(Ty::Numeric),
+        params: &[
+            req("decimals", Ty::Int, "digits after the point, 0 to 15; 0 writes no point"),
+            opt("separator", Ty::Str, "groups the integer part, such as \",\""),
+        ],
+        returns: "String",
+        doc: "Format an Int or Float with exactly decimals digits after the point, rounded half away from zero. With a separator the integer part is grouped in threes. A negative number keeps its sign unless it rounds to zero.",
+        examples: &[
+            (r#"format_number(1234567.891, 2, ",")"#, r#""1,234,567.89""#),
+            (r#"format_number(1000, 2)"#, r#""1000.00""#),
+            (r#"format_number(-0.5, 0)"#, r#""-1""#),
         ],
     },
     Signature {

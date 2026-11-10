@@ -455,6 +455,14 @@ fn eval_binop(op: &BinOp, left: &Value, right: &Value) -> Result<Value, String> 
         (BinOp::Gt, Value::Float(a), Value::Float(b)) => Ok(Value::Bool(a > b)),
         (BinOp::Gte, Value::Int(a), Value::Int(b)) => Ok(Value::Bool(a >= b)),
         (BinOp::Gte, Value::Float(a), Value::Float(b)) => Ok(Value::Bool(a >= b)),
+        (BinOp::Lt, Value::Int(a), Value::Float(b)) => Ok(Value::Bool((*a as f64) < *b)),
+        (BinOp::Lt, Value::Float(a), Value::Int(b)) => Ok(Value::Bool(*a < (*b as f64))),
+        (BinOp::Lte, Value::Int(a), Value::Float(b)) => Ok(Value::Bool((*a as f64) <= *b)),
+        (BinOp::Lte, Value::Float(a), Value::Int(b)) => Ok(Value::Bool(*a <= (*b as f64))),
+        (BinOp::Gt, Value::Int(a), Value::Float(b)) => Ok(Value::Bool((*a as f64) > *b)),
+        (BinOp::Gt, Value::Float(a), Value::Int(b)) => Ok(Value::Bool(*a > (*b as f64))),
+        (BinOp::Gte, Value::Int(a), Value::Float(b)) => Ok(Value::Bool((*a as f64) >= *b)),
+        (BinOp::Gte, Value::Float(a), Value::Int(b)) => Ok(Value::Bool(*a >= (*b as f64))),
         (BinOp::And, Value::Bool(a), Value::Bool(b)) => Ok(Value::Bool(*a && *b)),
         (BinOp::Or, Value::Bool(a), Value::Bool(b)) => Ok(Value::Bool(*a || *b)),
         _ => Err(format!(
@@ -735,7 +743,12 @@ fn eval_call_wasm(
                 })
                 .unwrap_or(" ");
             if let Value::Str(s) = val {
-                let parts: Vec<Value> = s.split(sep).map(|p| Value::Str(p.to_string())).collect();
+                // An empty separator splits into characters, as the native builtin does.
+                let parts: Vec<Value> = if sep.is_empty() {
+                    s.chars().map(|c| Value::Str(c.to_string())).collect()
+                } else {
+                    s.split(sep).map(|p| Value::Str(p.to_string())).collect()
+                };
                 Ok(Value::Array(parts))
             } else {
                 Err("split requires a string".to_string())

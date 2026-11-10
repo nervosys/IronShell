@@ -755,6 +755,9 @@ lazy_static::lazy_static! {
         map.insert("date_add", 1174);
         map.insert("to_toml", 1175);
         map.insert("from_toml", 1176);
+        // Records and number text (1177-1178)
+        map.insert("merge", 1177);
+        map.insert("format_number", 1178);
         // 500-519: Database
         map.insert("db_sqlite_open", 500);
         map.insert("db_sqlite_query", 501);
@@ -3803,6 +3806,9 @@ static BUILTIN_DISPATCH: &[fn(Vec<Value>, Option<Value>, &mut Env) -> Result<Val
     |args, input, _| bi_date_add(args, input),     // 1174
     |args, input, _| bi_to_toml(args, input),      // 1175
     |args, input, _| bi_from_toml(args, input),    // 1176
+    // Records and number text (1177-1178)
+    |args, input, _| bi_merge(args, input),         // 1177
+    |args, input, _| bi_format_number(args, input), // 1178
 ];
 
 /// The dispatch row that serves `name`, if the fast table has one.
@@ -13575,10 +13581,16 @@ fn bi_split(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
     let text = expect_string("split", &text_val)?;
     let delimiter = expect_string("split", delim_arg)?;
 
-    let parts: Vec<Value> = text
-        .split(delimiter)
-        .map(|s| Value::Str(s.to_string()))
-        .collect();
+    // Rust's `split("")` yields an empty piece at each end and between every
+    // character, so `"abc" | split("")` gave ["", "a", "b", "c", ""]. An empty
+    // delimiter splits into characters instead, so "café" gives four items.
+    let parts: Vec<Value> = if delimiter.is_empty() {
+        text.chars().map(|c| Value::Str(c.to_string())).collect()
+    } else {
+        text.split(delimiter)
+            .map(|s| Value::Str(s.to_string()))
+            .collect()
+    };
 
     Ok(Value::Array(parts))
 }
@@ -15308,6 +15320,203 @@ fn bi_from_toml(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
         )
     })?;
     Ok(crate::plugins::toml_to_value(parsed))
+}
+
+/// merge(a, b) - Shallow-merge two Records; b's fields win.
+/// Args:
+///   - a: Record (or the piped record)
+///   - b: Record
+/// Returns: Record
+///
+/// Only the top level merges: a field both Records have takes b's value whole,
+/// and a nested Record is replaced, not merged. A non-Record argument is
+/// E_BAD_ARG.
+///
+/// Example:
+///   merge({a: 1, b: 2}, {b: 3}).b    # 3
+///   {a: 1} | merge({a: 0, c: 4}).a   # 0
+fn bi_merge(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
+    const B: &str = "merge";
+    let (first, second) = match (input, args.as_slice()) {
+        (Some(first), [second]) => (first, second.clone()),
+        (None, [first, second]) => (first.clone(), second.clone()),
+        _ => {
+            return Err(arity_error(
+                B,
+                "two Records: merge(a, b), or a | merge(b)",
+                args.len(),
+            ))
+        }
+    };
+    let mut merged = match first {
+        Value::Record(map) => map,
+        other => {
+            return Err(crate::safety::bad_arg_in(
+                B,
+                format!(
+                    "{B}: the first Record is {}, not a Record",
+                    other.type_name()
+                ),
+                "merge takes two Records; wrap a scalar or an array in a record first",
+            ))
+        }
+    };
+    let overrides = match second {
+        Value::Record(map) => map,
+        other => {
+            return Err(crate::safety::bad_arg_in(
+                B,
+                format!(
+                    "{B}: the second Record is {}, not a Record",
+                    other.type_name()
+                ),
+                "merge takes two Records; wrap a scalar or an array in a record first",
+            ))
+        }
+    };
+    merged.extend(overrides);
+    Ok(Value::Record(merged))
+}
+
+/// The most decimals `format_number` writes; past this the scaled value would
+/// not fit the integer arithmetic it uses.
+const FORMAT_NUMBER_MAX_DECIMALS: i64 = 15;
+
+/// format_number(x, decimals, separator?) - Format a number with fixed decimals.
+/// Args:
+///   - x: Int or Float (or the piped number)
+///   - decimals: Int, 0 to 15 - digits after the point; 0 writes no point
+///   - separator: String (optional) - groups the integer part, such as ","
+/// Returns: String
+///
+/// A Float rounds half away from zero, and a negative value keeps its sign
+/// unless it rounds to zero. NaN and the infinities are E_BAD_ARG.
+///
+/// Example:
+///   format_number(1234567.891, 2, ",")    # "1,234,567.89"
+///   format_number(1000, 2)                # "1000.00"
+///   format_number(-0.5, 0)                # "-1"
+fn bi_format_number(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
+    const B: &str = "format_number";
+    let (number, rest) = match input {
+        Some(number) => (number, args.as_slice()),
+        None => match args.split_first() {
+            Some((number, rest)) => (number.clone(), rest),
+            None => {
+                return Err(arity_error(
+                    B,
+                    "a number, then decimals and an optional separator",
+                    0,
+                ))
+            }
+        },
+    };
+    let (decimals, separator) = match rest {
+        [decimals] => (decimals, None),
+        [decimals, Value::Str(separator)] => (decimals, Some(separator.as_str())),
+        [_, other] => {
+            return Err(crate::safety::bad_arg_in(
+                B,
+                format!("{B}: the separator is {}, not a String", other.type_name()),
+                "pass the separator as a String, such as \",\"",
+            ))
+        }
+        _ => {
+            return Err(arity_error(
+                B,
+                "decimals, then an optional separator",
+                rest.len(),
+            ))
+        }
+    };
+    let decimals = match decimals {
+        Value::Int(d) if (0..=FORMAT_NUMBER_MAX_DECIMALS).contains(d) => *d as u32,
+        other => {
+            return Err(crate::safety::bad_arg_in(
+                B,
+                format!(
+                    "{B}: decimals is {}, not an Int from 0 to {FORMAT_NUMBER_MAX_DECIMALS}",
+                    other.type_name()
+                ),
+                "pass the number of digits after the point, such as 2",
+            ))
+        }
+    };
+
+    // The sign, the integer digits and the fraction digits, each as text.
+    let (negative, int_digits, frac_digits) = match number {
+        Value::Int(i) => (
+            i < 0,
+            i.unsigned_abs().to_string(),
+            "0".repeat(decimals as usize),
+        ),
+        Value::Float(f) => {
+            if !f.is_finite() {
+                return Err(crate::safety::bad_arg_in(
+                    B,
+                    format!("{B}: the number is {f}, which has no decimal form"),
+                    "pass a finite number; NaN and the infinities cannot be written with decimals",
+                ));
+            }
+            // Scale to an integer and round it half away from zero (f64::round).
+            // Within 2^53 the scaled value is exact; the u128 covers the rest.
+            let scale = 10u128.pow(decimals);
+            let scaled = f.abs() * 10f64.powi(decimals as i32);
+            if scaled >= 1.0e38 {
+                return Err(crate::safety::bad_arg_in(
+                    B,
+                    format!("{B}: the number is too large to write with {decimals} decimals"),
+                    "pass fewer decimals or a smaller number",
+                ));
+            }
+            let rounded = scaled.round() as u128;
+            let frac = if decimals == 0 {
+                String::new()
+            } else {
+                format!("{:0width$}", rounded % scale, width = decimals as usize)
+            };
+            (f < 0.0, (rounded / scale).to_string(), frac)
+        }
+        other => {
+            return Err(crate::safety::bad_arg_in(
+                B,
+                format!(
+                    "{B}: the number is {}, not an Int or Float",
+                    other.type_name()
+                ),
+                "format_number takes an Int or a Float",
+            ))
+        }
+    };
+
+    let is_zero = int_digits == "0" && frac_digits.bytes().all(|b| b == b'0');
+    let grouped = match separator {
+        Some(sep) if !sep.is_empty() => group_thousands(&int_digits, sep),
+        _ => int_digits,
+    };
+    let mut out = String::new();
+    if negative && !is_zero {
+        out.push('-');
+    }
+    out.push_str(&grouped);
+    if decimals > 0 {
+        out.push('.');
+        out.push_str(&frac_digits);
+    }
+    Ok(Value::Str(out))
+}
+
+/// Insert `sep` between each group of three digits, counted from the right.
+fn group_thousands(digits: &str, sep: &str) -> String {
+    let n = digits.len();
+    let mut out = String::with_capacity(n + n / 3 * sep.len());
+    for (i, c) in digits.chars().enumerate() {
+        if i > 0 && (n - i).is_multiple_of(3) {
+            out.push_str(sep);
+        }
+        out.push(c);
+    }
+    out
 }
 
 /// exit(code?) - Exit the shell process with a status.
@@ -23229,9 +23438,22 @@ fn bi_ontology_describe(args: Vec<Value>, _input: Option<Value>) -> Result<Value
             ))
         }
     };
-    Ok(Value::from_json(&crate::agent_api::ontology_describe_json(
-        &q,
-    )))
+    let described = crate::agent_api::ontology_describe_json(&q);
+    if described.get("error").is_some() {
+        // An unknown name is a failed lookup, as an unknown builtin call is: an
+        // E_UNKNOWN_BUILTIN error with the nearest real builtin or category
+        // names, not a successful record that carries an error field.
+        let categories = crate::agent_api::ontology_category_names();
+        let candidates = nearest_names(
+            q.trim(),
+            BUILTIN_LOOKUP
+                .keys()
+                .copied()
+                .chain(categories.iter().map(String::as_str)),
+        );
+        return Err(crate::safety::unknown_builtin(q.trim(), candidates));
+    }
+    Ok(Value::from_json(&described))
 }
 
 /// Pull a string field out of a caught-error record, accepting either the

@@ -2172,6 +2172,17 @@ fn binop(op: &BinOp, a: Value, b: Value) -> Result<Value> {
         (Gte, Value::Int(x), Value::Int(y)) => Value::Bool(x >= y),
         (Gte, Value::Float(x), Value::Float(y)) => Value::Bool(x >= y),
 
+        // Int and Float order together as f64, so `1.5 < 2` works as
+        // `1.5 == 2` already did. `1.5 < 0` was refused before this.
+        (Lt, Value::Int(x), Value::Float(y)) => Value::Bool((x as f64) < y),
+        (Lt, Value::Float(x), Value::Int(y)) => Value::Bool(x < (y as f64)),
+        (Lte, Value::Int(x), Value::Float(y)) => Value::Bool((x as f64) <= y),
+        (Lte, Value::Float(x), Value::Int(y)) => Value::Bool(x <= (y as f64)),
+        (Gt, Value::Int(x), Value::Float(y)) => Value::Bool((x as f64) > y),
+        (Gt, Value::Float(x), Value::Int(y)) => Value::Bool(x > (y as f64)),
+        (Gte, Value::Int(x), Value::Float(y)) => Value::Bool((x as f64) >= y),
+        (Gte, Value::Float(x), Value::Int(y)) => Value::Bool(x >= (y as f64)),
+
         // Two Strings order by byte, as Rust's `str` Ord does: "a" < "b", and
         // "B" < "a" because 'B' is 0x42. Mixed String and number pairs are not
         // ordered; the refusal below names the conversions instead.

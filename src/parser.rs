@@ -113,6 +113,13 @@ const BLOCK_HINT: &str = "a braced `{ ... }` holds one expression, not statement
 const ONE_EXPR_HINT: &str =
     "a block holds one expression; bind values before it (x = 1, then if c { x + 1 })";
 
+/// The hint for `c ? a : b`, which IronShell does not have.
+const TERNARY_HINT: &str = "IronShell has no ?: operator; write if cond { a } else { b }";
+
+/// The hint for `a?.b`, which IronShell does not have.
+const OPTIONAL_CHAIN_HINT: &str =
+    "IronShell has no ?. operator; test for null first: if a == null { null } else { a.b }";
+
 /// The hint for `while`, `for` and `loop`, which IronShell does not have.
 const LOOP_HINT: &str = "IronShell has no loop statements; iterate with map/where/reduce \
      over arr.range(n) or a list, or recurse";
@@ -2646,6 +2653,18 @@ impl Parser {
             Box::new(expr)
         };
 
+        // `c ? a : b`: the `?` opened a terse match, and the `:` is where that
+        // match should have had its `{`. Name the ternary instead.
+        if self.check(Tok::Colon) {
+            let tok = self.peek();
+            return Err(anyhow::Error::new(HintedSyntax {
+                msg: format!(
+                    "expected '{{' after match expression at line {}, column {}",
+                    tok.line, tok.col
+                ),
+                hint: TERNARY_HINT.to_string(),
+            }));
+        }
         self.need(Tok::LBrace, "expected '{' after match expression")?;
 
         let mut arms = Vec::new();
@@ -2674,10 +2693,16 @@ impl Parser {
         self.need(Tok::RBrace, "expected '}' after if branch")?;
         let else_expr = if self.check(Tok::Ident) && self.peek().text == "else" {
             self.i += 1; // consume 'else'
-            self.need(Tok::LBrace, "expected '{' after else")?;
-            let e = self.parse_expr()?;
-            self.need(Tok::RBrace, "expected '}' after else branch")?;
-            e
+            if self.match_tok(Tok::If) {
+                // `else if c { .. } else { .. }`: the chained `if` is a nested
+                // if expression in the else position.
+                self.parse_if_expr()?
+            } else {
+                self.need(Tok::LBrace, "expected '{' after else")?;
+                let e = self.parse_expr()?;
+                self.need(Tok::RBrace, "expected '}' after else branch")?;
+                e
+            }
         } else {
             Expr::Null
         };
@@ -3043,6 +3068,38 @@ impl Parser {
         }
         if matches!(cur, Tok::Star) && prev.is_some_and(|p| matches!(p.kind, Tok::Star)) {
             return Some("no `**` operator: use math.pow(a, b)");
+        }
+        // `a?.b` is optional chaining. The `?` opens a terse match, so the
+        // error lands on the `?` before the dot or on the dot after it.
+        if (matches!(cur, Tok::Question)
+            && self
+                .toks
+                .get(self.i + 1)
+                .is_some_and(|t| t.kind == Tok::Dot))
+            || (matches!(cur, Tok::Dot) && prev.is_some_and(|p| p.kind == Tok::Question))
+        {
+            return Some(OPTIONAL_CHAIN_HINT);
+        }
+        // `c ? a : b` is the ternary. A `?` right after an operand is never
+        // the start of a terse match, so it is the ternary's `?`.
+        if matches!(cur, Tok::Question)
+            && prev.is_some_and(|p| {
+                matches!(
+                    p.kind,
+                    Tok::Ident
+                        | Tok::String
+                        | Tok::Int
+                        | Tok::Float
+                        | Tok::True
+                        | Tok::False
+                        | Tok::Null
+                        | Tok::RParen
+                        | Tok::RBracket
+                        | Tok::RBrace
+                )
+            })
+        {
+            return Some(TERNARY_HINT);
         }
         None
     }
