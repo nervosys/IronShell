@@ -117,3 +117,115 @@ fn undo_reverts_every_file_an_approved_apply_wrote() {
         "undo must revert the files the apply wrote"
     );
 }
+
+// ── Item 1: outside agent mode the hint still names approve() ──
+
+#[test]
+fn outside_agent_mode_the_hint_still_names_approve() {
+    let hint = iron_shell::safety::approval_instruction("apv_0000000000000000");
+    assert!(
+        hint.contains("call approve(\"apv_0000000000000000\")"),
+        "{hint}"
+    );
+}
+
+// ── Item 4: a delete the journal can restore says reversible, and undo restores it ──
+
+#[test]
+fn a_delete_the_journal_can_restore_is_approved_as_reversible() {
+    let dir = scratch("rm_reversible");
+    let victim = dir.join("proj").join("victim.txt");
+    std::fs::write(&victim, "keep me\n").unwrap();
+
+    let first = ish_agent(&dir, r#"rm("victim.txt")"#, None);
+    assert!(!first.status.success(), "the first delete must be refused");
+    let json = first_error(&first);
+    assert_eq!(json["error"]["approval"]["reversible"], true, "{json}");
+    let hint = json["error"]["hint"].as_str().unwrap_or("");
+    assert!(!hint.contains("approve(\""), "{hint}");
+    let token = token_from_refusal(&first);
+    assert!(victim.exists(), "a refused delete must not delete");
+
+    let removed = ish_agent(&dir, r#"rm("victim.txt")"#, Some(&token));
+    assert!(
+        removed.status.success(),
+        "the approved delete must run: {}",
+        String::from_utf8_lossy(&removed.stderr)
+    );
+    assert!(!victim.exists());
+
+    let undone = ish_agent(&dir, "undo()", None);
+    assert!(
+        undone.status.success(),
+        "undo must run: {}",
+        String::from_utf8_lossy(&undone.stderr)
+    );
+    assert_eq!(
+        std::fs::read_to_string(&victim).expect("undo restores the file"),
+        "keep me\n"
+    );
+}
+
+// ── Item 5: a String selector deletes the lines that contain it ──
+
+fn ish_human(dir: &Path, code: &str) -> Output {
+    Command::new(env!("CARGO_BIN_EXE_ish"))
+        .args(["-c", code])
+        .current_dir(dir.join("proj"))
+        .env("IRONSHELL_SESSION_DIR", dir.join("session"))
+        .env("NO_COLOR", "1")
+        .env_remove("IRONSHELL_MODE")
+        .env_remove("IRONSHELL_AGENT")
+        .env_remove("IRONSHELL_WORKSPACE")
+        .env_remove("IRONSHELL_APPROVE")
+        .output()
+        .expect("run ish")
+}
+
+#[test]
+fn delete_lines_with_a_string_deletes_every_line_containing_it() {
+    let dir = scratch("delete_lines_string");
+    let src = dir.join("proj").join("parser.py");
+    let code = r##"file_write("parser.py", "keep\n# DEPRECATED\nalso keep\n# DEPRECATED old\n"); delete_lines("parser.py", "# DEPRECATED")"##;
+    let out = ish_human(&dir, code);
+    assert!(
+        out.status.success(),
+        "a String selector must be accepted: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(
+        std::fs::read_to_string(&src).unwrap(),
+        "keep\nalso keep\n",
+        "every line containing the text goes, and no other"
+    );
+}
+
+#[test]
+fn delete_lines_with_a_string_matches_the_contains_record() {
+    let dir = scratch("delete_lines_string_vs_record");
+    let src = dir.join("proj").join("input.txt");
+    let code = r#"file_write("input.txt", "one\ntwo\n"); delete_lines("input.txt", {contains: "two"}); file_write("input.txt", "one\ntwo\n"); delete_lines("input.txt", "two")"#;
+    let out = ish_human(&dir, code);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(std::fs::read_to_string(&src).unwrap(), "one\n");
+}
+
+#[test]
+fn delete_lines_refuses_a_selector_that_is_neither_int_string_nor_record() {
+    let dir = scratch("delete_lines_bad_selector");
+    let src = dir.join("proj").join("input.txt");
+    let code = r#"file_write("input.txt", "one\ntwo\n"); delete_lines("input.txt", true)"#;
+    let out = ish_human(&dir, code);
+    assert!(!out.status.success());
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("E_BAD_ARG"), "{err}");
+    assert!(
+        err.contains("a String"),
+        "the message names the String form: {err}"
+    );
+    assert_eq!(std::fs::read_to_string(&src).unwrap(), "one\ntwo\n");
+}
