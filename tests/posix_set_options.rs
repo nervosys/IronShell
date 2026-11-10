@@ -121,7 +121,7 @@ fn nounset_names_an_unset_variable_and_exits_1() {
     assert_eq!(code, 1);
     assert_eq!(out, "");
     assert!(
-        err.contains("ish: NOPE_ISH_UNSET_X: unbound variable"),
+        err.contains("ish: line 2: NOPE_ISH_UNSET_X: unbound variable"),
         "{err}"
     );
 }
@@ -131,7 +131,7 @@ fn nounset_refuses_an_unset_positional_parameter() {
     let (code, out, err) = run("nounset_pos", "set -u\necho \"$1\"\n");
     assert_eq!(code, 1);
     assert_eq!(out, "");
-    assert!(err.contains("1: unbound variable"), "{err}");
+    assert!(err.contains("ish: line 2: 1: unbound variable"), "{err}");
 }
 
 #[test]

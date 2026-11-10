@@ -110,6 +110,8 @@ enum Cmd {
 struct Pipeline {
     negate: bool,
     cmds: Vec<Cmd>,
+    /// The line the pipeline starts on, which an expansion error names.
+    line: usize,
 }
 
 #[derive(Debug, Clone)]
@@ -869,6 +871,7 @@ impl Parser {
     }
 
     fn pipeline(&mut self) -> PResult<Pipeline> {
+        let line = self.line_of(self.offset());
         let mut negate = false;
         if self.peek_keyword() == Some("!") {
             negate = true;
@@ -882,7 +885,7 @@ impl Parser {
             }
             cmds.push(self.command()?);
         }
-        Ok(Pipeline { negate, cmds })
+        Ok(Pipeline { negate, cmds, line })
     }
 
     fn trailing_redirs(&mut self) -> Vec<Redir> {
@@ -1481,9 +1484,12 @@ struct Shell {
     /// list but the last, and a `!` pipeline. Counted, not flagged, because
     /// these nest: a list inside a condition is exempt all the way down.
     errexit_off: u32,
-    /// The first unset parameter an expansion met under `set -u`. The command
+    /// The first fatal expansion error: an unset parameter under `set -u`, or a
+    /// `${name:?message}` that fails. Its message, ready to print. The command
     /// that made the expansion takes it and exits, before it runs.
     unbound: Option<String>,
+    /// The line of the pipeline now running, for an expansion error's message.
+    line: usize,
 }
 
 const SHELL_NAME: &str = "ish";
@@ -1529,15 +1535,20 @@ impl Shell {
     /// The first one wins.
     fn note_unbound(&mut self, name: &str) {
         if self.nounset && self.unbound.is_none() {
-            self.unbound = Some(name.to_string());
+            self.unbound = Some(self.expansion_message(name, "unbound variable"));
         }
     }
 
-    /// The exit for a command whose expansion met an unset parameter under
-    /// `set -u`: the message goes to stderr, and the script ends with status 1.
+    /// An expansion error in bash's shape: `script: line N: NAME: text`.
+    fn expansion_message(&self, name: &str, text: &str) -> String {
+        format!("{}: line {}: {name}: {text}", self.script_name, self.line)
+    }
+
+    /// The exit for a command whose expansion failed (see [`Shell::note_unbound`]):
+    /// the message goes to stderr, and the script ends with status 1.
     fn unbound_refusal(&mut self, sink: &mut Sink) -> Option<Flow> {
-        let name = self.unbound.take()?;
-        sink.eline(&format!("{SHELL_NAME}: {name}: unbound variable"));
+        let msg = self.unbound.take()?;
+        sink.eline(&msg);
         self.last = 1;
         Some(Flow::Exit(1))
     }
@@ -1719,9 +1730,11 @@ impl Shell {
         let value = self.var(name);
         // Unset is an error under `set -u`, except for `$@` and `$*`, and for
         // the forms that supply their own value: `${x:-d}`, `${x-d}`, `${x:=d}`
-        // and `${x+v}`.
-        let supplies =
-            matches!(op, Some((o, _)) if matches!(o.trim_start_matches(':'), "-" | "=" | "+"));
+        // and `${x+v}`; `${x?msg}` raises its own error below.
+        let supplies = matches!(
+            op,
+            Some((o, _)) if matches!(o.trim_start_matches(':'), "-" | "=" | "+" | "?")
+        );
         if value.is_none() && !supplies && name != "@" && name != "*" {
             self.note_unbound(name);
         }
@@ -1758,6 +1771,27 @@ impl Shell {
                     operand(self, stdin)
                 }
             }
+            // `${x:?msg}` / `${x?msg}`: an error whatever `set -u` says, with
+            // the message given, or bash's own when there is none. The command
+            // that made the expansion does not run, and the script ends with 1.
+            "?" => {
+                if unset_or_null {
+                    let given = operand(self, stdin);
+                    let text = if !given.is_empty() {
+                        given
+                    } else if colon {
+                        "parameter null or not set".to_string()
+                    } else {
+                        "parameter not set".to_string()
+                    };
+                    if self.unbound.is_none() {
+                        self.unbound = Some(self.expansion_message(name, &text));
+                    }
+                    String::new()
+                } else {
+                    value.unwrap_or_default()
+                }
+            }
             _ => value.unwrap_or_default(),
         }
     }
@@ -1783,9 +1817,13 @@ impl Shell {
         // substitution's own commands meet is theirs; the caller's is kept.
         let errexit = std::mem::replace(&mut self.errexit, false);
         let unbound = self.unbound.take();
+        // The body's lines count from its own start, so the caller's line is
+        // restored: its later messages name its own line.
+        let line = self.line;
         let flow = self.run_list(&list, &mut input, &mut sink);
         self.errexit = errexit;
         self.unbound = unbound;
+        self.line = line;
         self.last = match flow {
             Flow::Next(c) | Flow::Exit(c) => c,
             _ => 0,
@@ -1889,6 +1927,7 @@ impl Shell {
     }
 
     fn run_pipeline(&mut self, p: &Pipeline, stdin: &mut Input, sink: &mut Sink) -> Flow {
+        self.line = p.line;
         // A `!` pipeline is exempt from errexit, and so is everything in it.
         if p.negate {
             self.errexit_off += 1;
@@ -5413,6 +5452,7 @@ fn run_named(src: &str, script_name: &str, args: &[String]) -> Option<i32> {
         pipefail: false,
         errexit_off: 0,
         unbound: None,
+        line: 1,
     };
     let mut stdin = Input::real();
     let mut sink = Sink::new(ErrMode::Real);
@@ -5683,6 +5723,7 @@ mod tests {
             pipefail: false,
             errexit_off: 0,
             unbound: None,
+            line: 1,
         };
         let mut stdin = Input::buf(Vec::new());
         let mut sink = Sink::new(ErrMode::Null);
