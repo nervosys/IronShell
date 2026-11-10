@@ -7644,16 +7644,38 @@ fn without_credentials(
     out
 }
 
-pub fn guard_dispatch(builtin: &str, args: &[crate::value::Value]) -> Result<(), SafetyError> {
-    // `delete_lines` is an alias of `file_delete_lines`, one implementation whose
-    // body guards itself (the guard names the resolved path, reversible). Judged
-    // here under the alias name too, the call was refused for a token whose
-    // builtin, target and reversible differed from the one the body then
-    // demanded, so the approval named could never admit the retry.
-    let builtin = match builtin {
-        "delete_lines" => "file_delete_lines",
-        other => other,
+lazy_static! {
+    /// Every alias that reaches a self-guarding implementation under another
+    /// spelling, mapped to the spelling the body guards under.
+    ///
+    /// The dispatcher used to judge `mv` as `mv`, while the body it reached
+    /// (`file_move`, same dispatch index) judged as `file_move`. The approval
+    /// token names the builtin, so the refusal's token could never admit the
+    /// retry, and the jail was only checked by the body, after the central
+    /// approval had already issued a token for an outside target. Judging the
+    /// alias under the name its body guards under makes the two agree by
+    /// construction. Built from `builtins::alias_groups`, like `INHERITED_EFFECT`,
+    /// so a new alias cannot drift from its implementation.
+    static ref GUARDED_UNDER: std::collections::HashMap<&'static str, &'static str> = {
+        let mut map = std::collections::HashMap::new();
+        for group in crate::builtins::alias_groups() {
+            let Some(canonical) = group.iter().copied().find(|n| SELF_GUARDED.contains(n)) else {
+                continue;
+            };
+            for name in group {
+                if !SELF_GUARDED.contains(&name) {
+                    map.insert(name, canonical);
+                }
+            }
+        }
+        map
     };
+}
+
+pub fn guard_dispatch(builtin: &str, args: &[crate::value::Value]) -> Result<(), SafetyError> {
+    // An alias whose implementation guards itself is judged under the body's own
+    // name, so the token the dispatcher would name is the one the body demands.
+    let builtin = GUARDED_UNDER.get(builtin).copied().unwrap_or(builtin);
     let effect = effect_of(builtin);
     // `Pure` and `ReadLocal` are neither centrally enforced nor audited, so
     // every path below ends in `Ok(())` for them. They are most calls, and
