@@ -158,10 +158,15 @@ fn a_builtin_that_runs_its_own_approval_flow_is_not_double_gated() {
         Ok(_) => {}
         Err(e) => {
             let text = e.to_string();
+            // apply refuses with its own plan token (apl_), never with a
+            // dispatcher token (apv_) for a generic Exec gate.
             assert!(
-                !text.contains("E_NEEDS_APPROVAL"),
+                !text.contains("apv_"),
                 "apply must not be gated by the dispatcher: {text}"
             );
+            if text.contains("E_NEEDS_APPROVAL") {
+                assert!(text.contains("apl_"), "apply's own refusal: {text}");
+            }
         }
     }
 }
