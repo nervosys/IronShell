@@ -1637,6 +1637,46 @@ impl Shell {
         s
     }
 
+    /// The value of an assignment (`x=word`). Bash does no field splitting,
+    /// globbing or trimming here: the expansions are joined as text. A command
+    /// substitution loses only its trailing newlines (see [`Shell::substitute`]).
+    fn expand_assign(&mut self, w: &Word, stdin: &mut Input) -> String {
+        let tilde =
+            matches!(w.first(), Some(Part::Lit(s, false)) if s == "~" || s.starts_with("~/"));
+        let mut out = String::new();
+        for (idx, part) in w.iter().enumerate() {
+            match part {
+                Part::Lit(s, _) => {
+                    if idx == 0 && tilde {
+                        out.push_str(&self.var("HOME").unwrap_or_default());
+                        out.push_str(&s[1..]);
+                    } else {
+                        out.push_str(s);
+                    }
+                }
+                Part::Len(name) => {
+                    let value = self.var(name);
+                    if value.is_none() {
+                        self.note_unbound(name);
+                    }
+                    out.push_str(&value.unwrap_or_default().chars().count().to_string());
+                }
+                Part::Var(name, None, _) if name == "@" || name == "*" => {
+                    out.push_str(&self.positional.join(" "));
+                }
+                Part::Var(name, op, _) => {
+                    let value = self.param(name, op, stdin);
+                    out.push_str(&value);
+                }
+                Part::Cmd(body, _) => {
+                    let value = self.substitute(body);
+                    out.push_str(&value);
+                }
+            }
+        }
+        out
+    }
+
     // ── running ──
 
     fn run_list(&mut self, list: &List, stdin: &mut Input, sink: &mut Sink) -> Flow {
@@ -1995,7 +2035,7 @@ impl Shell {
             if refuse_steering(sink, name) {
                 return Flow::Next(126);
             }
-            let v = self.expand(w, stdin).join(" ");
+            let v = self.expand_assign(w, stdin);
             if argv.is_empty() {
                 self.set_var(name, v);
             } else {
