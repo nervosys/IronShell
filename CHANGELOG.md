@@ -52,6 +52,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `"\${"` writes a literal `${` in a string.
 - `date_parse` without a format accepts `YYYY-MM-DD HH:MM:SS` and `YYYY-MM-DDTHH:MM:SS` as UTC; with a format, a mismatch names the format.
 - `ish -b`: `shift` and `shift N`.
+- `ish -b`: `set -e`, `set -u` and `set -o pipefail` (and `set -euo pipefail`, `set -o errexit`, the `+` forms) run in-process with bash's rules: `-e` does not exit in an `if`/`while` condition, inside `&&`/`||` before the last command, or after `!`. Other `set` options such as `-x` are still refused before the script runs.
 - `ontology_describe("redo")` and other session verbs describe their builtin; an alias such as `delete_lines` names the builtin that implements it, and `ish agent schema --module file` lists `delete_lines`. `file_insert` documents its `{after: text}` anchor.
 
 ### Fixed
