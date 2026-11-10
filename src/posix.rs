@@ -533,7 +533,7 @@ impl<'a> Lexer<'a> {
                     self.i += 1;
                     let name = self.name();
                     if self.peek() != Some('}') {
-                        return unsupported("${#…} form");
+                        return unsupported("${#...} form");
                     }
                     self.i += 1;
                     parts.push(Part::Len(name));
@@ -545,7 +545,7 @@ impl<'a> Lexer<'a> {
                         self.i += 1;
                         c.to_string()
                     }
-                    _ => return unsupported("${…} form"),
+                    _ => return unsupported("${...} form"),
                 };
                 if self.peek() == Some('}') {
                     self.i += 1;
@@ -562,7 +562,7 @@ impl<'a> Lexer<'a> {
                         op.push(c);
                         self.i += 1;
                     }
-                    _ => return unsupported("${…} operator"),
+                    _ => return unsupported("${...} operator"),
                 }
                 // The operator's word, up to the matching brace.
                 let start = self.i;
@@ -600,7 +600,7 @@ impl<'a> Lexer<'a> {
                     } else {
                         w = sub.word()?;
                         if sub.i != inner.len() {
-                            return unsupported("${…} operand");
+                            return unsupported("${...} operand");
                         }
                     }
                     w
