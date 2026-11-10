@@ -1794,15 +1794,23 @@ impl Shell {
                         if path == "/dev/null" {
                             err_mode = ErrMode::Null;
                         } else {
+                            let resolved = match self.refuse_write(sink, &path) {
+                                Ok(p) => p,
+                                Err(flow) => return flow,
+                            };
                             err_mode = ErrMode::Capture;
-                            err_file = Some((path, *append));
+                            err_file = Some((resolved, *append));
                         }
                     } else if path == "/dev/null" {
                         out_null = true;
                         out_file = None;
                     } else {
+                        let resolved = match self.refuse_write(sink, &path) {
+                            Ok(p) => p,
+                            Err(flow) => return flow,
+                        };
                         out_null = false;
-                        out_file = Some((path, *append));
+                        out_file = Some((resolved, *append));
                     }
                 }
                 Redir::Both(target) => {
@@ -1811,7 +1819,11 @@ impl Shell {
                         out_null = true;
                         err_mode = ErrMode::Null;
                     } else {
-                        out_file = Some((path, false));
+                        let resolved = match self.refuse_write(sink, &path) {
+                            Ok(p) => p,
+                            Err(flow) => return flow,
+                        };
+                        out_file = Some((resolved, false));
                         err_mode = ErrMode::Merge;
                     }
                 }
@@ -1849,6 +1861,17 @@ impl Shell {
             sink.out.extend_from_slice(&local.out);
         }
         flow
+    }
+
+    /// Judge a redirection's output file before its command runs. Bash opens the
+    /// file first, so a refused file is a failed redirection: the command does
+    /// not run and the status is 1 (and errexit applies, as for any failure).
+    fn refuse_write(&mut self, sink: &mut Sink, path: &str) -> Result<String, Flow> {
+        check_write(path).map_err(|msg| {
+            sink.eline(&msg);
+            self.last = 1;
+            Flow::Next(1)
+        })
     }
 
     fn run_cmd_inner(&mut self, cmd: &Cmd, stdin: &mut Input, sink: &mut Sink) -> Flow {
@@ -2452,15 +2475,16 @@ fn resolve_program(argv: &[String], env: &[(String, String)]) -> Result<String, 
     ))
 }
 
-/// Write a redirection's output through the same guard as `file.write`.
+/// Judge a redirection's output file through the same guard as `file.write`,
+/// and return the path it judged.
 ///
-/// The write goes to the path the guard checked. It went to `path` as given,
-/// which the OS resolved against the working directory while the guard, in
-/// agent mode, had resolved it against the workspace: with the two apart,
+/// This runs before the command, so a refused file never runs its command. The
+/// write then goes to the path returned here. It must not go to the path as
+/// given, which the OS resolves against the working directory while the guard,
+/// in agent mode, resolved it against the workspace: with the two apart,
 /// `echo x > f` was approved as `<workspace>/f` and wrote `<cwd>/f`, outside
-/// the jail. The prior contents are journalled first, as the dispatcher does
-/// for `file.write`, so the `reversible` the guard is told is true.
-fn write_file(path: &str, data: &[u8], append: bool) -> Result<(), String> {
+/// the jail.
+fn check_write(path: &str) -> Result<String, String> {
     let resolved = crate::safety::resolve_path_str(path);
     crate::safety::guard(crate::safety::GuardCtx {
         builtin: "posix",
@@ -2472,20 +2496,27 @@ fn write_file(path: &str, data: &[u8], append: bool) -> Result<(), String> {
         fs_paths: true,
     })
     .map_err(|e| e.to_string())?;
+    Ok(resolved)
+}
+
+/// Write a redirection's output to `path`, a path `check_write` has judged. The
+/// prior contents are journalled first, as the dispatcher does for `file.write`,
+/// so the `reversible` the guard is told is true.
+fn write_file(path: &str, data: &[u8], append: bool) -> Result<(), String> {
     let mark = crate::journal::mark();
     crate::journal::record_before(
         "posix",
         crate::safety::Effect::WriteLocal,
-        &[crate::value::Value::Str(resolved.clone())],
+        &[crate::value::Value::Str(path.to_string())],
     );
     let res = if append {
         std::fs::OpenOptions::new()
             .create(true)
             .append(true)
-            .open(&resolved)
+            .open(path)
             .and_then(|mut f| f.write_all(data))
     } else {
-        std::fs::write(&resolved, data)
+        std::fs::write(path, data)
     };
     crate::journal::settle(mark, res.is_ok());
     res.map_err(|e| format!("{SHELL_NAME}: {path}: {}", io_reason(&e)))
