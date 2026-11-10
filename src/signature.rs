@@ -2528,7 +2528,7 @@ pub static SIGNATURES: &[Signature] = &[
         params: &[req("delimiter", Ty::Str, "separator to split on; required")],
         returns: "Array",
         doc: "Split a string on a delimiter.",
-        examples: &[(r#"split("a,b,c", ",")"#, r#"["a", "b", "c"]"#), (r#""a,b,c" | split(",") | len"#, "3")],
+        examples: &[(r#"split("a,b,c", ",")"#, r#"["a", "b", "c"]"#), (r#""a,b,c" | split(",") | len"#, "3"), (r#"split("abc", "")"#, r#"["a", "b", "c"]"#)],
     },
     Signature {
         name: "upper",

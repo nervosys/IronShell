@@ -34,3 +34,31 @@ fn an_int_and_a_float_order_against_each_other() {
     assert_eq!(run("1.0 <= 1"), Value::Bool(true));
     assert_eq!(run("1 > 1.0"), Value::Bool(false));
 }
+
+// ---- 2. split on the empty separator ---------------------------------------
+
+fn strs(v: &[&str]) -> Value {
+    Value::Array(v.iter().map(|s| Value::Str((*s).into())).collect())
+}
+
+#[test]
+fn split_on_the_empty_separator_gives_the_characters() {
+    assert_eq!(run(r#""abc" | split("")"#), strs(&["a", "b", "c"]));
+    assert_eq!(run(r#"split("abc", "")"#), strs(&["a", "b", "c"]));
+}
+
+#[test]
+fn split_on_the_empty_separator_counts_unicode_characters() {
+    assert_eq!(run(r#""café" | split("") | len"#), Value::Int(4));
+    assert_eq!(run(r#""café" | split("")"#), strs(&["c", "a", "f", "é"]));
+}
+
+#[test]
+fn split_of_an_empty_string_on_the_empty_separator_is_empty() {
+    assert_eq!(run(r#""" | split("")"#), Value::Array(vec![]));
+}
+
+#[test]
+fn split_on_a_real_separator_is_unchanged() {
+    assert_eq!(run(r#""a,b,c" | split(",")"#), strs(&["a", "b", "c"]));
+}

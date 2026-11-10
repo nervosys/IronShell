@@ -13575,10 +13575,16 @@ fn bi_split(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
     let text = expect_string("split", &text_val)?;
     let delimiter = expect_string("split", delim_arg)?;
 
-    let parts: Vec<Value> = text
-        .split(delimiter)
-        .map(|s| Value::Str(s.to_string()))
-        .collect();
+    // Rust's `split("")` yields an empty piece at each end and between every
+    // character, so `"abc" | split("")` gave ["", "a", "b", "c", ""]. An empty
+    // delimiter splits into characters instead, so "café" gives four items.
+    let parts: Vec<Value> = if delimiter.is_empty() {
+        text.chars().map(|c| Value::Str(c.to_string())).collect()
+    } else {
+        text.split(delimiter)
+            .map(|s| Value::Str(s.to_string()))
+            .collect()
+    };
 
     Ok(Value::Array(parts))
 }

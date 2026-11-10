@@ -743,7 +743,12 @@ fn eval_call_wasm(
                 })
                 .unwrap_or(" ");
             if let Value::Str(s) = val {
-                let parts: Vec<Value> = s.split(sep).map(|p| Value::Str(p.to_string())).collect();
+                // An empty separator splits into characters, as the native builtin does.
+                let parts: Vec<Value> = if sep.is_empty() {
+                    s.chars().map(|c| Value::Str(c.to_string())).collect()
+                } else {
+                    s.split(sep).map(|p| Value::Str(p.to_string())).collect()
+                };
                 Ok(Value::Array(parts))
             } else {
                 Err("split requires a string".to_string())
