@@ -79,6 +79,10 @@ real program, directly, through the effect gate — never via `bash -c` — so
 agent mode gates each one. On E6 (`benches/agentic/bashcompat.mjs`), 32 of 32
 matched bash byte-for-byte, and 32 of 32 on a held-out corpus.
 
+`set -e` (errexit), `set -u` (nounset) and `set -o pipefail` run in-process too, with bash's
+exemptions (conditions, `&&`/`||` operands, `!` pipelines) and `+` forms to turn them off. `set -x`
+and other `set` options are refused before anything runs, naming the option.
+
 In the subset, `uniq` drops only adjacent duplicates, as Unix `uniq` does
 (`sort | uniq` drops all of them); the `arr.unique` builtin drops all duplicates.
 
