@@ -22689,6 +22689,9 @@ fn bi_apply(args: Vec<Value>, _input: Option<Value>) -> Result<Value> {
         return Ok(apply_refused_record(err, &token));
     }
     crate::tx::begin()?;
+    // The journal steps this apply adds start here. A failed apply that rolls
+    // its files back drops them, since nothing it did remains to be undone.
+    let journal_mark = crate::journal::mark();
 
     let mut applied = 0i64;
     let mut failure: Option<String> = None;
@@ -22699,6 +22702,19 @@ fn bi_apply(args: Vec<Value>, _input: Option<Value>) -> Result<Value> {
             failure = Some(err);
             break;
         }
+        // Each file this op changes is kept before it changes, so `undo` can
+        // put it back: one journal step per file. A journal step is one path,
+        // so the batch is not one step; `mkdir` changes no file and is not kept.
+        let mut touched: Vec<String> = match op.as_str() {
+            "write" | "append" | "rm" | "move" => vec![path.clone()],
+            _ => Vec::new(),
+        };
+        if matches!(op.as_str(), "copy" | "move") {
+            if let Some(d) = dest {
+                touched.push(d.clone());
+            }
+        }
+        crate::journal::record_paths("apply", crate::safety::Effect::Destructive, touched);
         crate::tx::snapshot(path);
         if let Some(d) = dest {
             crate::tx::snapshot(d);
@@ -22729,6 +22745,10 @@ fn bi_apply(args: Vec<Value>, _input: Option<Value>) -> Result<Value> {
         applied += 1;
     }
 
+    // Seal the steps with the state the ops left their files in. The dispatcher
+    // does not settle an apply's steps (its effect is `Exec`), so this is the
+    // only place they are sealed. A rollback below drops the ones it undid.
+    crate::journal::seal_steps(journal_mark);
     let mut r = BTreeMap::new();
     if let Some(err) = failure {
         // Old code reported rolled_back: true even when the rollback itself
@@ -22737,6 +22757,12 @@ fn bi_apply(args: Vec<Value>, _input: Option<Value>) -> Result<Value> {
             Ok(n) => (true, n, None),
             Err(e) => (false, 0, Some(e.to_string())),
         };
+        // Every file is back as it was, so the steps this apply recorded
+        // describe nothing. If the rollback failed, the files may still hold
+        // the batch's changes, and the steps stay so `undo` can reach them.
+        if rolled_back {
+            crate::journal::rollback_to(journal_mark);
+        }
         let _ = crate::safety::audit(
             "apply",
             crate::safety::Effect::Destructive,

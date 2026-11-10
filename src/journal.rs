@@ -634,23 +634,47 @@ pub fn record_before(builtin: &str, effect: Effect, args: &[Value]) {
     let mut s = state();
     discard_redo(&mut s);
     for path in paths {
-        let used = held_bytes(&s);
-        let before = match capture(&path, used) {
-            Ok(before) => before,
-            Err(why) => Before::Irreversible(why),
-        };
-        let seq = s.journal.len() + 1;
-        let entry = Entry {
-            seq,
-            builtin: builtin.to_string(),
-            effect: effect.as_str().to_string(),
-            path,
-            before,
-            after: None,
-        };
-        persist(&entry);
-        s.journal.push(entry);
+        push_capture(&mut s, builtin, effect, path);
     }
+}
+
+/// Record the pre-state of named paths that a builtin is about to write or
+/// delete, for a caller that knows its targets without an argument to parse.
+/// `apply` uses it once per op, before the op runs, so that each file a plan
+/// touches can be undone. Same rules as [`record_before`].
+pub fn record_paths(builtin: &str, effect: Effect, paths: Vec<String>) {
+    if !enabled() || is_journal_builtin(builtin) {
+        return;
+    }
+    if !matches!(effect, Effect::WriteLocal | Effect::Destructive) {
+        return;
+    }
+    let mut s = state();
+    discard_redo(&mut s);
+    for path in paths {
+        push_capture(&mut s, builtin, effect, path);
+    }
+}
+
+/// Capture `path` as a new step. The caller holds the journal lock, so the
+/// budget it measures and the entry it pushes are one decision.
+fn push_capture(s: &mut State, builtin: &str, effect: Effect, path: String) {
+    let used = held_bytes(s);
+    let before = match capture(&path, used) {
+        Ok(before) => before,
+        Err(why) => Before::Irreversible(why),
+    };
+    let seq = s.journal.len() + 1;
+    let entry = Entry {
+        seq,
+        builtin: builtin.to_string(),
+        effect: effect.as_str().to_string(),
+        path,
+        before,
+        after: None,
+    };
+    persist(&entry);
+    s.journal.push(entry);
 }
 
 thread_local! {
@@ -702,6 +726,13 @@ pub fn settle(mark: usize, ok: bool) {
     } else {
         seal_since(mark);
     }
+}
+
+/// Seal the steps recorded after `mark` with the state they left their paths
+/// in, for a caller that settles its own steps instead of going through the
+/// dispatcher (`apply` does: its effect is `Exec`, so the dispatcher does not).
+pub fn seal_steps(mark: usize) {
+    seal_since(mark);
 }
 
 /// Record the state that each step recorded after `mark` left its path in.
