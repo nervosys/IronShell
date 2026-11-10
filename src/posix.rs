@@ -603,9 +603,25 @@ impl<'a> Lexer<'a> {
                         let mut q = Lexer { s: &chars, i: 0 };
                         q.double_quoted(&mut w)?;
                     } else {
+                        // The operand runs to the closing brace, blanks
+                        // included (`${1:?usage: f COLUMN}`), as in bash; its
+                        // words are kept apart by the blanks between them.
                         w = sub.word()?;
-                        if sub.i != inner.len() {
-                            return unsupported("${...} operand");
+                        while sub.i < inner.len() {
+                            let blanks: String = inner[sub.i..]
+                                .iter()
+                                .take_while(|c| matches!(c, ' ' | '\t'))
+                                .collect();
+                            if blanks.is_empty() {
+                                return unsupported("${...} operand");
+                            }
+                            sub.i += blanks.chars().count();
+                            w.push(Part::Lit(blanks, false));
+                            let before = sub.i;
+                            w.extend(sub.word()?);
+                            if sub.i == before && sub.i < inner.len() {
+                                return unsupported("${...} operand");
+                            }
                         }
                     }
                     w

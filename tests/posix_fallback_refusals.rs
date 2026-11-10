@@ -139,7 +139,10 @@ fn a_flag_with_no_gnu_program_is_refused_with_status_2() {
     ] {
         let (out, err, code) = sb.run(script);
         assert_eq!(out, "", "{script}");
-        assert_eq!((err.as_str(), code), (want, 2), "{script}");
+        // The refusal is followed by where Git for Windows keeps GNU tools.
+        let (first, rest) = err.split_at(err.find('\n').map_or(err.len(), |i| i + 1));
+        assert_eq!((first, code), (want, 2), "{script}");
+        assert!(rest.contains(r"Git\usr\bin"), "{script}: {err}");
     }
 }
 
