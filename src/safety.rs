@@ -7878,7 +7878,7 @@ lazy_static! {
     /// value ≥6 chars to skip trivial placeholders). Group 1 (key + separator)
     /// is kept; group 2 (the value) is redacted.
     static ref SECRET_ASSIGN_RE: regex::Regex = regex::Regex::new(
-        r#"(?i)((?:password|passwd|pwd|secret|token|api[_-]?key|access[_-]?key|client[_-]?secret|auth[_-]?token)["']?\s*[:=]\s*)["']?([^\s"',}]{6,})"#
+        r#"(?i)((?:password|passwd|pwd|secret|token|api[_-]?key|access[_-]?key|client[_-]?secret|auth[_-]?token)["']?\s*[:=]\s*["']?)([^\s"',}]{6,})"#
     ).unwrap();
 }
 
@@ -8074,6 +8074,17 @@ pub fn redact_str(s: &str) -> (String, bool) {
                 if crate::signature::Ty::is_type_name(word) {
                     return caps[0].to_string();
                 }
+                // An approval handle must be echoed back, and is no secret
+                // (see `is_capability_token`); hiding it made the approval
+                // `ish -b` prints unusable.
+                if is_capability_token(word) {
+                    return caps[0].to_string();
+                }
+                // `DEPLOY_TOKEN: DEPLOY_TOKEN must be set` names a variable
+                // that holds a secret; the name itself is not one.
+                if names_secret_variable(word) {
+                    return caps[0].to_string();
+                }
                 replaced = true;
                 // The pattern swallows a closing paren after the value; put it back.
                 format!("{}[REDACTED]{}", &caps[1], &value[word.len()..])
@@ -8088,6 +8099,19 @@ pub fn redact_str(s: &str) -> (String, bool) {
         changed = true;
     }
     (cur, changed)
+}
+
+/// Whether `word` is the name of a variable that holds a secret (`GITHUB_TOKEN`,
+/// `$DB_PASSWORD`), as opposed to a secret: upper-case words joined by `_`,
+/// with a secret-sounding name. A credential is not spelled that way.
+fn names_secret_variable(word: &str) -> bool {
+    let name = word.strip_prefix('$').unwrap_or(word);
+    name.contains('_')
+        && name.starts_with(|c: char| c.is_ascii_uppercase())
+        && name
+            .chars()
+            .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_')
+        && is_secret_name(name)
 }
 
 /// Recursively redact secret shapes from a JSON value in place: every string
@@ -8985,6 +9009,26 @@ mod tests {
         assert!(r.contains("[REDACTED]") && !r.contains("swordfish123"));
         let (r, _) = redact_str("api_key: \"abcdef123456\"");
         assert!(r.contains("[REDACTED]") && !r.contains("abcdef123456"));
+    }
+
+    #[test]
+    fn redact_str_keeps_json_quotes_handles_and_variable_names() {
+        // The opening quote stays, so redacted JSON still parses.
+        let (r, c) = redact_str(r#"{"password":"swordfish123","n":1}"#);
+        assert!(c);
+        assert_eq!(r, r#"{"password":"[REDACTED]","n":1}"#);
+        serde_json::from_str::<Json>(&r).expect("still JSON");
+        // An approval handle must be echoed back; it is left.
+        let line = r#"{"token":"apv_0123456789abcdef","what":"exec"}"#;
+        assert_eq!(redact_str(line), (line.to_string(), false));
+        // A variable's name is not its value.
+        let msg = "deploy.sh: line 1: DEPLOY_TOKEN: DEPLOY_TOKEN must be set";
+        assert_eq!(redact_str(msg), (msg.to_string(), false));
+        let (r, _) = redact_str("token: $GITHUB_TOKEN");
+        assert_eq!(r, "token: $GITHUB_TOKEN");
+        // A mixed-case value is still a secret.
+        let (r, _) = redact_str("token: Ab_Cd_EfGh123");
+        assert_eq!(r, "token: [REDACTED]");
     }
 
     #[test]
