@@ -118,6 +118,109 @@ fn optional_chaining_names_the_null_test_as_its_hint() {
 
 // ---- 5. ontology_describe of an unknown name -------------------------------
 
+// ---- 6. merge and format_number builtins ------------------------------------
+
+#[test]
+fn merge_takes_the_second_records_fields() {
+    assert_eq!(run("merge({a: 1, b: 2}, {b: 3}).b"), Value::Int(3));
+    assert_eq!(run("merge({a: 1, b: 2}, {b: 3}).a"), Value::Int(1));
+    assert_eq!(run("merge({a: 1}, {c: 4}).c"), Value::Int(4));
+}
+
+#[test]
+fn merge_pipes_its_first_record() {
+    assert_eq!(run("x = {a: 1}\nx | merge({c: 4}).c"), Value::Int(4));
+    assert_eq!(run("x = {a: 1}\nx | merge({a: 9}).a"), Value::Int(9));
+}
+
+#[test]
+fn merge_is_shallow() {
+    let v = run("merge({n: {x: 1, y: 2}}, {n: {x: 5}}).n.x");
+    assert_eq!(v, Value::Int(5));
+}
+
+#[test]
+fn merge_refuses_a_non_record_argument() {
+    assert_eq!(
+        run(r#"try { merge({a: 1}, 2) } catch e { e.error.code }"#),
+        Value::Str("E_BAD_ARG".into())
+    );
+    assert_eq!(
+        run(r#"try { merge([1], {a: 1}) } catch e { e.error.code }"#),
+        Value::Str("E_BAD_ARG".into())
+    );
+}
+
+#[test]
+fn format_number_writes_exactly_the_decimals_asked() {
+    assert_eq!(
+        run(r#"format_number(1000, 2)"#),
+        Value::Str("1000.00".into())
+    );
+    assert_eq!(run(r#"format_number(7, 0)"#), Value::Str("7".into()));
+    assert_eq!(run(r#"format_number(3.5, 3)"#), Value::Str("3.500".into()));
+}
+
+#[test]
+fn format_number_groups_thousands_with_a_separator() {
+    assert_eq!(
+        run(r#"format_number(1234567.891, 2, ",")"#),
+        Value::Str("1,234,567.89".into())
+    );
+    assert_eq!(
+        run(r#"format_number(1234567, 0, ",")"#),
+        Value::Str("1,234,567".into())
+    );
+    assert_eq!(
+        run(r#"format_number(999, 0, ",")"#),
+        Value::Str("999".into())
+    );
+    assert_eq!(
+        run(r#"format_number(-1234.5, 1, ",")"#),
+        Value::Str("-1,234.5".into())
+    );
+}
+
+#[test]
+fn format_number_rounds_half_away_from_zero() {
+    assert_eq!(run(r#"format_number(2.5, 0)"#), Value::Str("3".into()));
+    assert_eq!(run(r#"format_number(-0.5, 0)"#), Value::Str("-1".into()));
+    assert_eq!(run(r#"format_number(0.125, 2)"#), Value::Str("0.13".into()));
+}
+
+#[test]
+fn format_number_keeps_the_sign_unless_the_value_rounds_to_zero() {
+    assert_eq!(
+        run(r#"format_number(-0.001, 2)"#),
+        Value::Str("0.00".into())
+    );
+    assert_eq!(run(r#"format_number(-2, 1)"#), Value::Str("-2.0".into()));
+}
+
+#[test]
+fn format_number_takes_the_piped_number() {
+    assert_eq!(
+        run(r#"3.14159 | format_number(3)"#),
+        Value::Str("3.142".into())
+    );
+}
+
+#[test]
+fn format_number_refuses_bad_decimals_and_non_numbers() {
+    assert_eq!(
+        run(r#"try { format_number(1.5, 16) } catch e { e.error.code }"#),
+        Value::Str("E_BAD_ARG".into())
+    );
+    assert_eq!(
+        run(r#"try { format_number(1.5, -1) } catch e { e.error.code }"#),
+        Value::Str("E_BAD_ARG".into())
+    );
+    assert_eq!(
+        run(r#"try { format_number("1.5", 2) } catch e { e.error.code }"#),
+        Value::Str("E_BAD_ARG".into())
+    );
+}
+
 #[test]
 fn ontology_describe_of_an_unknown_name_is_an_error_not_a_record() {
     let mut env = iron_shell::env::Env::new();

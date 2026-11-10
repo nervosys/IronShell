@@ -177,6 +177,8 @@ now_iso()                      # the current time, e.g. 2026-11-08T14:03:05Z; no
 "7" | pad_left(3, "0")         str.pad_right("ab", 5)                  # padding counts characters; the fill is one character
 date_add("2024-02-28", 1, "days")    date_diff("2024-02-29", "2026-11-09")    date_format("2024-02-29", "%d %B %Y")    # ISO 8601 dates, in UTC
 from_toml(to_toml({a: 1})).a           # TOML: to_toml(record) -> String; from_toml(text) -> Record
+merge({a: 1, b: 2}, {b: 3}).b         # merge(a, b): shallow Record merge, b's fields win; `a | merge(b)` pipes
+format_number(1234567.891, 2, ",")    # "1,234,567.89": exactly `decimals` digits, optional thousands separator
 
 # String interpolation
 msg = "Hello ${name}, you have ${count} items"

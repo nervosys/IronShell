@@ -103,6 +103,7 @@ float
 floor
 foreach
 foreach-object
+format_number
 from-csv
 from-yaml
 from_csv
@@ -160,6 +161,7 @@ mcp_tools
 mean
 measure
 measure-object
+merge
 min
 nn_create
 nn_crossover

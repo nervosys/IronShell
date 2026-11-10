@@ -430,6 +430,7 @@ float	Pure
 floor	Pure
 foreach	Pure
 foreach-object	Pure
+format_number	Pure
 from-csv	Pure
 from-json	ReadLocal
 from-yaml	Pure
@@ -735,6 +736,7 @@ md5	ReadLocal
 mean	Pure
 measure	Pure
 measure-object	Pure
+merge	Pure
 min	Pure
 mise	ReadLocal
 mise_list	ReadLocal
