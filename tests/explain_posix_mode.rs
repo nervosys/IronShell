@@ -115,3 +115,41 @@ fn a_mix_takes_the_strictest_decision() {
     let report = d.explain("cat inside.txt\ngit status");
     assert_eq!(report["decision"], "approve", "{report}");
 }
+
+#[test]
+fn an_output_redirection_is_write_local_with_its_target() {
+    let d = Dirs::new("redir");
+    for (script, call) in [
+        ("echo x > ../x", "> ../x"),
+        ("echo x >> ../x", ">> ../x"),
+        ("echo x 2> ../x", "2> ../x"),
+    ] {
+        let report = d.explain(script);
+        let calls = report["calls"].as_array().expect("calls");
+        let write = calls
+            .iter()
+            .find(|c| c["call"] == call)
+            .unwrap_or_else(|| panic!("no {call} call in {report}"));
+        assert_eq!(write["effect"], "write_local", "{report}");
+        assert_eq!(write["target"], "../x", "{report}");
+        assert_eq!(report["effects"].as_array().unwrap().len(), 2, "{report}");
+    }
+    let report = d.explain("echo x > ../x");
+    assert_eq!(report["decision"], "allow", "{report}");
+}
+
+#[test]
+fn tee_writes_its_operands_and_an_external_tee_is_an_exec() {
+    let d = Dirs::new("tee");
+    let report = d.explain("echo x | tee ../f");
+    let calls = report["calls"].as_array().expect("calls");
+    let write = calls
+        .iter()
+        .find(|c| c["call"] == "tee ../f")
+        .unwrap_or_else(|| panic!("no tee write in {report}"));
+    assert_eq!(write["effect"], "write_local", "{report}");
+
+    // A tee with an option the subset does not run is a program, as the run makes it.
+    let external = d.explain("echo x | tee -i f");
+    assert_eq!(external["decision"], "approve", "{external}");
+}

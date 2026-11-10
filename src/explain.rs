@@ -281,7 +281,9 @@ pub fn explain(code: &str) -> Result<Value> {
 /// `--explain` for the POSIX subset (`ish -b`). Each command word the source
 /// names is listed with the class the run gives it, and the decision is the
 /// strictest of them. A word the subset runs itself is judged by its effect: a
-/// utility that reads a path is `read_local`, the rest `pure`. Any other word
+/// utility that reads a path is `read_local`, the rest `pure`. An output file a
+/// redirection names, and each file `tee` writes, is `write_local` with its
+/// target, as `file.write` is. Any other word
 /// runs as a program through the effect gate, as `exec`, which agent mode
 /// approves; so `git --version` is `approve`, as the run is refused for approval.
 /// Source outside the subset is run by the transpiler, which is not predicted,
@@ -292,7 +294,52 @@ pub fn explain_posix(src: &str) -> Result<Value> {
     let mut effects: BTreeMap<u8, &'static str> = BTreeMap::new();
     let mut unresolved = Vec::new();
     let mut verdict = if in_subset { "allow" } else { "unknown" };
-    for head in crate::posix::heads(src) {
+    for cmd in crate::posix::explain_commands(src) {
+        // An output file is a write_local call of its own, as file.write is,
+        // and so is each file `tee` writes when it runs in the subset. The
+        // workspace jail is applied when the run opens the file, as it is for
+        // file.write, so the decision here is the policy's.
+        let tee_files = match cmd.head.as_deref() {
+            Some("tee") => crate::posix::tee_operands(&cmd.args),
+            _ => None,
+        };
+        let tee_in_subset = tee_files.is_some();
+        let mut writes: Vec<(String, String)> = cmd.writes.clone();
+        for f in tee_files.unwrap_or_default() {
+            if f != "/dev/null" {
+                writes.push(("tee".to_string(), f));
+            }
+        }
+        for (op, target) in writes {
+            let mut r = BTreeMap::new();
+            r.insert("call".to_string(), Value::Str(format!("{op} {target}")));
+            if target.is_empty() {
+                // A target computed at run time: where it goes is not known here.
+                let shown = format!("{op} <computed>");
+                if !unresolved.contains(&shown) {
+                    unresolved.push(shown);
+                }
+                if rank("unknown") > rank(verdict) {
+                    verdict = "unknown";
+                }
+                r.insert("decision".to_string(), Value::Str("unknown".to_string()));
+            } else {
+                let effect = Effect::WriteLocal;
+                let decision = agent_decision(effect);
+                effects.insert(effect as u8, effect.as_str());
+                if rank(decision) > rank(verdict) {
+                    verdict = decision;
+                }
+                r.insert(
+                    "effect".to_string(),
+                    Value::Str(effect.as_str().to_string()),
+                );
+                r.insert("target".to_string(), Value::Str(target.clone()));
+                r.insert("decision".to_string(), Value::Str(decision.to_string()));
+            }
+            calls.push(Value::Record(r));
+        }
+        let Some(head) = cmd.head else { continue };
         let mut r = BTreeMap::new();
         r.insert("call".to_string(), Value::Str(head.clone()));
         if head.is_empty() {
@@ -305,10 +352,14 @@ pub fn explain_posix(src: &str) -> Result<Value> {
             }
             r.insert("decision".to_string(), Value::Str("unknown".to_string()));
         } else {
-            let effect = match crate::posix::in_process_reads(&head) {
-                Some(true) => Effect::ReadLocal,
-                Some(false) => Effect::Pure,
-                None => Effect::Exec,
+            let effect = if tee_in_subset {
+                Effect::WriteLocal
+            } else {
+                match crate::posix::in_process_reads(&head) {
+                    Some(true) => Effect::ReadLocal,
+                    Some(false) => Effect::Pure,
+                    None => Effect::Exec,
+                }
             };
             let decision = agent_decision(effect);
             effects.insert(effect as u8, effect.as_str());
@@ -344,7 +395,8 @@ pub fn explain_posix(src: &str) -> Result<Value> {
         "note".to_string(),
         Value::Str(
             "static, POSIX subset: a program named here runs through the effect gate as exec; \
-             a utility the subset runs itself is judged by its read effect; a utility that \
+             a utility the subset runs itself is judged by its read effect; an output file is \
+             write_local and is judged by the jail when the run opens it; a utility that \
              declines its flags runs as a program and is not predicted"
                 .to_string(),
         ),

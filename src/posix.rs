@@ -5307,6 +5307,28 @@ pub struct Refusal {
 /// and an assignment with no words names no command, so it is not listed.
 /// Source outside the subset has no heads.
 pub fn heads(src: &str) -> Vec<String> {
+    explain_commands(src)
+        .into_iter()
+        .filter_map(|c| c.head)
+        .collect()
+}
+
+/// One command as `--explain` reads it.
+pub struct ExplainCommand {
+    /// The first word as literal text (empty when it is computed), or `None`
+    /// for a command with no words, only redirections.
+    pub head: Option<String>,
+    /// The other words, as literal text (empty when computed).
+    pub args: Vec<String>,
+    /// The output files its redirections name, as `(operator, target)`, for
+    /// `>`, `>>`, `2>`, `2>>` and `&>`. `/dev/null` is not a file.
+    pub writes: Vec<(String, String)>,
+}
+
+/// Every command in `src` in source order, including those inside `if`, loops
+/// and groups, with the output files each one's redirections name. Source
+/// outside the subset has none.
+pub fn explain_commands(src: &str) -> Vec<ExplainCommand> {
     let mut out = Vec::new();
     if let Ok(list) = parse(src) {
         walk_list(&list, &mut out);
@@ -5314,7 +5336,14 @@ pub fn heads(src: &str) -> Vec<String> {
     out
 }
 
-fn walk_list(list: &List, out: &mut Vec<String>) {
+/// The files `tee` writes when it runs in-process: its operands, when every
+/// option is one the subset supports (`-a`). `None` when it declines and runs as
+/// a program.
+pub fn tee_operands(args: &[String]) -> Option<Vec<String>> {
+    short_flags(args, "a").map(|(_, ops)| ops)
+}
+
+fn walk_list(list: &List, out: &mut Vec<ExplainCommand>) {
     for ao in list {
         walk_pipeline(&ao.first, out);
         for (_, p) in &ao.rest {
@@ -5323,14 +5352,27 @@ fn walk_list(list: &List, out: &mut Vec<String>) {
     }
 }
 
-fn walk_pipeline(p: &Pipeline, out: &mut Vec<String>) {
+fn walk_pipeline(p: &Pipeline, out: &mut Vec<ExplainCommand>) {
+    let no_words: &[Word] = &[];
     for cmd in &p.cmds {
+        let (redirs, words): (&[Redir], &[Word]) = match cmd {
+            Cmd::Simple { redirs, words, .. } => (redirs.as_slice(), words.as_slice()),
+            Cmd::If { redirs, .. }
+            | Cmd::For { redirs, .. }
+            | Cmd::While { redirs, .. }
+            | Cmd::Group { redirs, .. } => (redirs.as_slice(), no_words),
+        };
+        let head = words.first().map(literal_text);
+        let writes: Vec<(String, String)> = redirs.iter().filter_map(write_of).collect();
+        if head.is_some() || !writes.is_empty() {
+            out.push(ExplainCommand {
+                head,
+                args: words.iter().skip(1).map(literal_text).collect(),
+                writes,
+            });
+        }
         match cmd {
-            Cmd::Simple { words, .. } => {
-                if let Some(first) = words.first() {
-                    out.push(literal_text(first));
-                }
-            }
+            Cmd::Simple { .. } => {}
             Cmd::If {
                 branches,
                 otherwise,
@@ -5351,6 +5393,29 @@ fn walk_pipeline(p: &Pipeline, out: &mut Vec<String>) {
             }
         }
     }
+}
+
+/// The output file a redirection names, as `(operator, target)`, or `None` for
+/// an input, a duplication and `/dev/null`.
+fn write_of(r: &Redir) -> Option<(String, String)> {
+    let (op, target) = match r {
+        Redir::Out { fd, append, target } => {
+            let op = match (*fd == 2, *append) {
+                (true, true) => "2>>",
+                (true, false) => "2>",
+                (false, true) => ">>",
+                (false, false) => ">",
+            };
+            (op, target)
+        }
+        Redir::Both(target) => ("&>", target),
+        Redir::In(_) | Redir::Dup { .. } => return None,
+    };
+    let text = literal_text(target);
+    if text == "/dev/null" {
+        return None;
+    }
+    Some((op.to_string(), text))
 }
 
 /// The text of a word made only of literal parts, or empty when any part is a
