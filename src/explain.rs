@@ -299,15 +299,14 @@ pub fn explain_posix(src: &str) -> Result<Value> {
         // and so is each file `tee` writes when it runs in the subset. The
         // workspace jail is applied when the run opens the file, as it is for
         // file.write, so the decision here is the policy's.
-        let tee_files = match cmd.head.as_deref() {
-            Some("tee") => crate::posix::tee_operands(&cmd.args),
-            _ => None,
-        };
+        // `mkdir` and `touch` write their operands the same way.
+        let head = cmd.head.clone().unwrap_or_default();
+        let tee_files = crate::posix::write_operands(&head, &cmd.args);
         let tee_in_subset = tee_files.is_some();
         let mut writes: Vec<(String, String)> = cmd.writes.clone();
         for f in tee_files.unwrap_or_default() {
             if f != "/dev/null" {
-                writes.push(("tee".to_string(), f));
+                writes.push((head.clone(), f));
             }
         }
         for (op, target) in writes {

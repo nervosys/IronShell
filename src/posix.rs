@@ -2574,6 +2574,9 @@ impl Shell {
             Ok(c) => c,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
                 sink.eline(&format!("{SHELL_NAME}: {}: command not found", argv[0]));
+                if let Some(hint) = windows_tools_hint() {
+                    sink.eline(&hint);
+                }
                 return 127;
             }
             Err(e) => {
@@ -2614,7 +2617,7 @@ impl Shell {
 /// PATH, because a `sort.exe` that is not GNU would be the wrong program.
 const SUBSET_NAMES: &[&str] = &[
     "echo", "printf", "test", "[", "cat", "tee", "head", "tail", "wc", "grep", "sort", "uniq",
-    "cut", "sed", "ls", "find", "date", "basename", "dirname", "seq",
+    "cut", "sed", "ls", "find", "date", "basename", "dirname", "seq", "mkdir", "touch", "tr",
 ];
 
 /// The GNU-compatible program called `name` on PATH, if there is one (Windows).
@@ -2706,12 +2709,26 @@ fn resolve_program(argv: &[String], env: &[(String, String)]) -> Result<String, 
             None => "this form".to_string(),
         }
     };
-    Err((
-        2,
-        format!(
-            "{SHELL_NAME}: {name}: {what} is not supported by the in-process subset, and no GNU-compatible {name} is installed"
-        ),
-    ))
+    let mut msg = format!(
+        "{SHELL_NAME}: {name}: {what} is not supported by the in-process subset, and no GNU-compatible {name} is installed"
+    );
+    if let Some(hint) = windows_tools_hint() {
+        msg.push('\n');
+        msg.push_str(&hint);
+    }
+    Err((2, msg))
+}
+
+/// On Windows, where to find the GNU tools a script expects: Git for Windows
+/// ships them, but its `usr\bin` folder is not on PATH by default.
+fn windows_tools_hint() -> Option<String> {
+    if !cfg!(windows) {
+        return None;
+    }
+    Some(
+        r"  hint: Git for Windows ships GNU tools in C:\Program Files\Git\usr\bin; put that folder on PATH, or do this step in ish (ish -c)"
+            .to_string(),
+    )
 }
 
 /// Judge a redirection's output file through the same guard as `file.write`,
@@ -3300,6 +3317,9 @@ fn utility(name: &str, args: &[String], stdin: &mut Input, sink: &mut Sink) -> U
         }
         "cat" => cat(args, stdin, sink),
         "tee" => tee(args, stdin, sink),
+        "mkdir" => mkdir(args, sink),
+        "touch" => touch(args, sink),
+        "tr" => tr(args, stdin, sink),
         "head" => head_tail(true, args, stdin, sink),
         "tail" => head_tail(false, args, stdin, sink),
         "wc" => wc(args, stdin, sink),
@@ -3760,6 +3780,203 @@ fn tee(args: &[String], stdin: &mut Input, sink: &mut Sink) -> Util {
         }
     }
     Util::Done(status)
+}
+
+/// `mkdir [-p] DIR...`: each directory is judged by the jail as a `>` target is,
+/// so a directory outside the workspace is refused and nothing is made.
+fn mkdir(args: &[String], sink: &mut Sink) -> Util {
+    let Some((flags, dirs)) = short_flags(args, "p") else {
+        return Util::Decline;
+    };
+    if dirs.is_empty() {
+        sink.eline("mkdir: missing operand");
+        return Util::Done(1);
+    }
+    let parents = flags.contains(&'p');
+    let mut status = 0;
+    for d in &dirs {
+        let resolved = match check_write(d) {
+            Ok(p) => p,
+            Err(msg) => {
+                sink.eline(&msg);
+                status = 1;
+                continue;
+            }
+        };
+        let res = if parents {
+            std::fs::create_dir_all(&resolved)
+        } else {
+            std::fs::create_dir(&resolved)
+        };
+        if let Err(e) = res {
+            let why = if e.kind() == std::io::ErrorKind::AlreadyExists {
+                "File exists".to_string()
+            } else {
+                io_reason(&e)
+            };
+            sink.eline(&format!("mkdir: cannot create directory '{d}': {why}"));
+            status = 1;
+        }
+    }
+    Util::Done(status)
+}
+
+/// `touch FILE...`: a missing file is created empty, an existing one gets the
+/// current modification time. Each file is judged by the jail as a `>` target.
+fn touch(args: &[String], sink: &mut Sink) -> Util {
+    let Some((_, files)) = short_flags(args, "") else {
+        return Util::Decline;
+    };
+    if files.is_empty() {
+        sink.eline("touch: missing file operand");
+        return Util::Done(1);
+    }
+    let mut status = 0;
+    for f in &files {
+        let resolved = match check_write(f) {
+            Ok(p) => p,
+            Err(msg) => {
+                sink.eline(&msg);
+                status = 1;
+                continue;
+            }
+        };
+        let res = if Path::new(&resolved).exists() {
+            std::fs::OpenOptions::new()
+                .append(true)
+                .open(&resolved)
+                .and_then(|file| file.set_modified(std::time::SystemTime::now()))
+                .map_err(|e| format!("touch: cannot touch '{f}': {}", io_reason(&e)))
+        } else {
+            write_file(&resolved, b"", true)
+                .map_err(|_| format!("touch: cannot touch '{f}': No such file or directory"))
+        };
+        if let Err(msg) = res {
+            sink.eline(&msg);
+            status = 1;
+        }
+    }
+    Util::Done(status)
+}
+
+/// The characters of a `tr` set: ranges (`a-z`), the classes `[:upper:]`,
+/// `[:lower:]`, `[:digit:]`, `[:space:]`, `[:alpha:]`, `[:alnum:]`, and the
+/// escapes `\n`, `\t`, `\r`, `\\`. `None` for anything else (`[=c=]`, `[c*n]`,
+/// octal escapes), so the caller declines.
+fn tr_set(spec: &str) -> Option<Vec<char>> {
+    let chars: Vec<char> = spec.chars().collect();
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < chars.len() {
+        if chars[i] == '[' && chars.get(i + 1) == Some(&':') {
+            let rest: String = chars[i..].iter().collect();
+            let end = rest.find(":]")?;
+            let class = &rest[2..end];
+            let members: Vec<char> = match class {
+                "upper" => ('A'..='Z').collect(),
+                "lower" => ('a'..='z').collect(),
+                "digit" => ('0'..='9').collect(),
+                "space" => vec![' ', '\t', '\n', '\r', '\x0b', '\x0c'],
+                "alpha" => ('A'..='Z').chain('a'..='z').collect(),
+                "alnum" => ('0'..='9').chain('A'..='Z').chain('a'..='z').collect(),
+                _ => return None,
+            };
+            out.extend(members);
+            i += rest[..end + 2].chars().count();
+            continue;
+        }
+        if chars[i] == '[' {
+            // `[c*n]` and `[=c=]` are not supported.
+            if chars.get(i + 1) == Some(&'=') || chars[i + 1..].contains(&'*') {
+                return None;
+            }
+        }
+        let (c, width) = if chars[i] == '\\' {
+            let e = match chars.get(i + 1)? {
+                'n' => '\n',
+                't' => '\t',
+                'r' => '\r',
+                '\\' => '\\',
+                '-' => '-',
+                _ => return None,
+            };
+            (e, 2)
+        } else {
+            (chars[i], 1)
+        };
+        if chars.get(i + width) == Some(&'-') && i + width + 1 < chars.len() {
+            let hi = chars[i + width + 1];
+            if hi == '\\' || hi < c {
+                return None;
+            }
+            out.extend(c..=hi);
+            i += width + 2;
+        } else {
+            out.push(c);
+            i += width;
+        }
+    }
+    Some(out)
+}
+
+/// `tr SET1 SET2`, `tr -d SET1`, `tr -s SET1` and `tr -s SET1 SET2`, over
+/// characters. SET2 shorter than SET1 is padded with its last character, as
+/// GNU tr does. Other options (`-c`, `-t`) and set forms decline to the real
+/// program.
+fn tr(args: &[String], stdin: &mut Input, sink: &mut Sink) -> Util {
+    let Some((flags, sets)) = short_flags(args, "ds") else {
+        return Util::Decline;
+    };
+    let delete = flags.contains(&'d');
+    let squeeze = flags.contains(&'s');
+    let parsed: Option<Vec<Vec<char>>> = sets.iter().map(|s| tr_set(s)).collect();
+    let Some(parsed) = parsed else {
+        return Util::Decline;
+    };
+    let (set1, set2) = match (delete, squeeze, parsed.as_slice()) {
+        (true, false, [a]) => (a.clone(), Vec::new()),
+        (false, true, [a]) => (a.clone(), Vec::new()),
+        (false, _, [a, b]) if !b.is_empty() => (a.clone(), b.clone()),
+        (false, false, [_]) => {
+            sink.eline(&format!(
+                "tr: missing operand after '{}'\nTry 'tr --help' for more information.",
+                sets[0]
+            ));
+            return Util::Done(1);
+        }
+        _ => return Util::Decline,
+    };
+    let text = String::from_utf8_lossy(&stdin.read_all()).into_owned();
+    let translate = !delete && !set2.is_empty();
+    let mut map = std::collections::HashMap::new();
+    if translate {
+        let last = *set2.last().unwrap_or(&' ');
+        for (k, c) in set1.iter().enumerate() {
+            // The first mapping of a repeated character wins, as in GNU tr.
+            map.entry(*c).or_insert(*set2.get(k).unwrap_or(&last));
+        }
+    }
+    // -s squeezes runs of the characters of the last set given.
+    let squeeze_set: &[char] = if translate { &set2 } else { &set1 };
+    let mut out = String::with_capacity(text.len());
+    let mut prev: Option<char> = None;
+    for c in text.chars() {
+        if delete && set1.contains(&c) {
+            continue;
+        }
+        let c = if translate {
+            *map.get(&c).unwrap_or(&c)
+        } else {
+            c
+        };
+        if squeeze && prev == Some(c) && squeeze_set.contains(&c) {
+            continue;
+        }
+        out.push(c);
+        prev = Some(c);
+    }
+    sink.out.extend_from_slice(out.as_bytes());
+    Util::Done(0)
 }
 
 /// Like [`read_inputs`], but a directory operand is the GNU "Is a directory"
@@ -5499,10 +5716,9 @@ pub fn in_process_reads(name: &str) -> Option<bool> {
     match name {
         "cat" | "head" | "tail" | "wc" | "grep" | "sort" | "uniq" | "cut" | "sed" | "ls"
         | "find" | "test" | "[" => Some(true),
-        "echo" | "printf" | "date" | "basename" | "dirname" | "seq" | "true" | ":" | "false"
-        | "exit" | "break" | "continue" | "export" | "unset" | "shift" | "cd" | "read" | "pwd" => {
-            Some(false)
-        }
+        "echo" | "printf" | "date" | "basename" | "dirname" | "seq" | "tr" | "true" | ":"
+        | "false" | "exit" | "break" | "continue" | "export" | "unset" | "shift" | "cd"
+        | "read" | "pwd" => Some(false),
         _ => None,
     }
 }
@@ -5615,6 +5831,18 @@ pub fn explain_commands(src: &str) -> Vec<ExplainCommand> {
 /// a program.
 pub fn tee_operands(args: &[String]) -> Option<Vec<String>> {
     short_flags(args, "a").map(|(_, ops)| ops)
+}
+
+/// The paths an in-process utility writes, for `--explain`: `tee`'s files and
+/// `mkdir`'s and `touch`'s operands. `None` for any other command, or when the
+/// utility declines its options and runs as a program.
+pub fn write_operands(head: &str, args: &[String]) -> Option<Vec<String>> {
+    match head {
+        "tee" => tee_operands(args),
+        "mkdir" => short_flags(args, "p").map(|(_, ops)| ops),
+        "touch" => short_flags(args, "").map(|(_, ops)| ops),
+        _ => None,
+    }
 }
 
 fn walk_list(list: &List, out: &mut Vec<ExplainCommand>) {
