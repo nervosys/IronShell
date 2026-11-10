@@ -2209,7 +2209,9 @@ impl Parser {
         loop {
             links += 1;
             self.chain_guard(links)?;
-            if self.match_tok(Tok::LParen) {
+            // A `(` that starts a new line starts a new statement, not a call
+            // on the line before: `x = 5` then `(x + 1) * 2` called `5(...)`.
+            if self.check(Tok::LParen) && self.continues_line() && self.match_tok(Tok::LParen) {
                 let mut args = Vec::new();
                 if !self.check(Tok::RParen) {
                     loop {
@@ -2908,6 +2910,17 @@ impl Parser {
             self.i += 1;
         }
         starts_operand
+    }
+
+    /// Whether the current token is on the same line as the token before it.
+    fn continues_line(&self) -> bool {
+        match (
+            self.i.checked_sub(1).and_then(|p| self.toks.get(p)),
+            self.toks.get(self.i),
+        ) {
+            (Some(prev), Some(cur)) => prev.line == cur.line,
+            _ => true,
+        }
     }
 
     fn check_any(&self, ks: &[Tok]) -> bool {
