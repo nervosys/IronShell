@@ -35,7 +35,12 @@ fn a_nonexistent_workspace_is_a_usage_error_and_is_not_created() {
     let missing = dir.join("no-such-ws");
     let out = ish(
         &dir,
-        &["--workspace", missing.to_str().unwrap(), "-c", "echo ran"],
+        &[
+            "--workspace",
+            missing.to_str().unwrap(),
+            "-c",
+            "print(\"ran\")",
+        ],
     );
 
     assert_eq!(out.status.code(), Some(2), "{out:?}");
@@ -62,7 +67,7 @@ fn an_existing_workspace_runs_as_before() {
     std::fs::create_dir_all(&ws).expect("workspace");
     let out = ish(
         &dir,
-        &["--workspace", ws.to_str().unwrap(), "-c", "echo ran"],
+        &["--workspace", ws.to_str().unwrap(), "-c", "print(\"ran\")"],
     );
     assert!(out.status.success(), "{out:?}");
     assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "ran");
@@ -71,7 +76,7 @@ fn an_existing_workspace_runs_as_before() {
 #[test]
 fn no_workspace_flag_is_unchanged() {
     let dir = scratch("default");
-    let out = ish(&dir, &["-c", "echo ran"]);
+    let out = ish(&dir, &["-c", "print(\"ran\")"]);
     assert!(out.status.success(), "{out:?}");
     assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "ran");
 }
