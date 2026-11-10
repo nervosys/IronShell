@@ -62,6 +62,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `ontology_describe("redo")` and other session verbs describe their builtin; an alias such as `delete_lines` names the builtin that implements it, and `ish agent schema --module file` lists `delete_lines`. `file_insert` documents its `{after: text}` anchor.
 - `ish -b`: `mkdir [-p]`, `touch` and `tr` (`SET1 SET2`, `-d`, `-s`, ranges and `[:upper:]`-style classes) run in-process; `mkdir` and `touch` are jailed like a redirection. `${VAR:?message}` and `${VAR?message}` fail with their message.
 - `--explain` lists an `ish -b` output redirection, and the files of `tee`, `mkdir` and `touch`, as `write_local` calls with their targets.
+- Two strings order with `<`, `<=`, `>` and `>=`, by byte (`"b" >= "a"` is true). A string against a number is still refused, now with a hint naming `int(x)` and `float(x)`.
+- `head(n)` and `tail(n)` take a piped Array and give its first or last n elements, as `take` and `last` do.
+- `group_by` takes a lambda key, `group_by(.region)` or `group_by(fn(r) => r.region)`, as well as a field name.
 
 ### Fixed
 
@@ -88,6 +91,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `ish -b`: an assignment from a command substitution keeps its leading blanks and newlines (`x=$(printf '   a')` is `   a`); only trailing newlines are removed.
 - An approval token from a refused `mv` approves the same call when retried.
 - On Windows, `ish -b` names Git for Windows' `usr\bin` when a command is not found or no GNU-compatible program is installed.
+- Redaction no longer breaks what it scrubs: `"password":"x"` keeps its opening quote, so a redacted JSON line still parses. An approval handle (`apv_...`) is left, so the approval `ish -b` prints for a gated command can be used, and the name of a secret variable (`DEPLOY_TOKEN: DEPLOY_TOKEN must be set`) is no longer taken for a secret.
+- A missing record field's E_UNKNOWN_FIELD hint lists the record's keys when no name is close.
 
 
 ## [14.0.1] - 2026-11-08
