@@ -1266,15 +1266,25 @@ fn run_posix_or_fall_back(src: &str, script: Option<&str>, args: &[String]) {
     // through `bash -lc`, and without it each refuses at run time, after the
     // lines before it have already run. Without the opt-in, refuse here, naming
     // the construct and where it starts.
-    if iron_shell::security::validate_sh_allowed().is_err() {
-        if let Some(r) = iron_shell::posix::refusal(src) {
+    if let Some(r) = iron_shell::posix::refusal(src) {
+        // A syntax error is wrong in every shell, so it is reported as one
+        // (E_PARSE, exit 2) whether or not the transpiler fallback is allowed.
+        if r.syntax {
+            let e = anyhow::Error::new(iron_shell::parser::ParseError::with_hint(
+                format!("{} at line {}, column {}", r.construct, r.line, r.column),
+                r.hint,
+            ));
+            iron_shell::repl::report_error(&e);
+            std::process::exit(iron_shell::repl::exit_status_for(&e));
+        }
+        if iron_shell::security::validate_sh_allowed().is_err() {
             let e = iron_shell::safety::policy_deny(
                 "posix",
                 format!(
                     "{} at line {}, column {} is not in the in-process POSIX subset, so nothing in this script was run",
                     r.construct, r.line, r.column
                 ),
-                iron_shell::posix::refusal_hint(&r.construct),
+                r.hint,
             );
             iron_shell::repl::report_error(&e);
             std::process::exit(iron_shell::repl::exit_status_for(&e));

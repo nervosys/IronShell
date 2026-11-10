@@ -124,11 +124,16 @@ type List = Vec<AndOr>;
 /// to fall back, or, for `ish -b`, the reason a refusal names.
 #[derive(Debug)]
 pub struct Unsupported {
-    /// The construct, named as the user would name it: `case ... esac`.
+    /// The construct, named as the user would name it: `case ... esac`. For a
+    /// syntax error, the error itself: ``syntax error near unexpected token `fi'``.
     pub what: String,
     /// The character offset in the source where the construct starts, when the
     /// parser knows it.
     pub at: Option<usize>,
+    /// Set when `what` is a syntax error, not an unsupported construct: the hint
+    /// that says what the parser expected. A syntax error is wrong in every
+    /// shell, so it is not a fallback case.
+    pub syntax: Option<String>,
 }
 
 type PResult<T> = Result<T, Unsupported>;
@@ -137,6 +142,7 @@ fn unsupported<T>(what: &str) -> PResult<T> {
     Err(Unsupported {
         what: what.to_string(),
         at: None,
+        syntax: None,
     })
 }
 
@@ -265,6 +271,7 @@ impl<'a> Lexer<'a> {
                         .map_err(|_| Unsupported {
                             what: "descriptor".into(),
                             at: None,
+                            syntax: None,
                         })?;
                     self.i = j;
                     out.push(Tok::Redir(self.redir(Some(fd))?));
@@ -639,6 +646,47 @@ struct Parser {
     /// The character offset each token starts at.
     at: Vec<usize>,
     i: usize,
+    /// The constructs open at the current token, innermost last, each as its
+    /// keyword and the offset it starts at. Named in syntax-error hints.
+    open: Vec<(&'static str, usize)>,
+    /// The character offset of every newline, for line numbers.
+    newlines: Vec<usize>,
+    /// The length of the source: where the end of input is.
+    end: usize,
+}
+
+/// The keyword that closes a construct opened by `kw`.
+fn closer_of(kw: &str) -> &'static str {
+    match kw {
+        "if" => "fi",
+        "{" => "}",
+        _ => "done",
+    }
+}
+
+/// A token as bash names it in a syntax error.
+fn token_text(t: &Tok) -> String {
+    match t {
+        Tok::Word(w) => w
+            .iter()
+            .map(|p| match p {
+                Part::Lit(s, _) => s.clone(),
+                Part::Var(name, _, _) => format!("${name}"),
+                Part::Len(name) => format!("${{#{name}}}"),
+                Part::Cmd(..) => "$(...)".to_string(),
+            })
+            .collect(),
+        Tok::Pipe => "|".into(),
+        Tok::And => "&&".into(),
+        Tok::Or => "||".into(),
+        Tok::Semi => ";".into(),
+        Tok::DSemi => ";;".into(),
+        Tok::LParen => "(".into(),
+        Tok::RParen => ")".into(),
+        Tok::Nl => "newline".into(),
+        Tok::Redir(_) => "redirection".into(),
+        Tok::Bad => "&".into(),
+    }
 }
 
 /// The text of a word that is a single unquoted literal, which is what a
@@ -676,9 +724,59 @@ const RESERVED: &[&str] = &[
 ];
 
 impl Parser {
-    /// The offset of the token at `self.i`, or of the last one at the end.
+    /// The offset of the token at `self.i`, or the end of the source.
     fn offset(&self) -> usize {
-        self.at.get(self.i).or(self.at.last()).copied().unwrap_or(0)
+        self.at.get(self.i).copied().unwrap_or(self.end)
+    }
+
+    /// The 1-based line of character offset `at`.
+    fn line_of(&self, at: usize) -> usize {
+        self.newlines.partition_point(|&n| n < at) + 1
+    }
+
+    /// A syntax error at the current token, with `hint` saying what was wanted.
+    fn syntax<T>(&self, hint: String) -> PResult<T> {
+        let what = match self.peek() {
+            None => "syntax error: unexpected end of file".to_string(),
+            Some(t) => format!("syntax error near unexpected token `{}'", token_text(t)),
+        };
+        Err(Unsupported {
+            what,
+            at: Some(self.offset()),
+            syntax: Some(hint),
+        })
+    }
+
+    /// A reserved word that closes nothing open, where a command starts. The
+    /// hint names the construct it closes, when one is open.
+    fn stray<T>(&self) -> PResult<T> {
+        let hint = match self.open.last() {
+            Some(&(kw, at)) => {
+                let line = self.line_of(at);
+                let close = closer_of(kw);
+                if self.peek().is_none() {
+                    format!("the `{kw}` at line {line} needs a closing `{close}`")
+                } else {
+                    format!("the `{kw}` at line {line} is closed by `{close}`")
+                }
+            }
+            None => "there is no open `if`, loop or `{` for it to close".to_string(),
+        };
+        self.syntax(hint)
+    }
+
+    /// The keyword `kw` was wanted here, for the construct open at this point.
+    fn expected<T>(&self, kw: &str) -> PResult<T> {
+        let hint = match self.open.last() {
+            Some(&(open, at)) => {
+                format!(
+                    "expected `{kw}` for the `{open}` at line {}",
+                    self.line_of(at)
+                )
+            }
+            None => format!("expected `{kw}`"),
+        };
+        self.syntax(hint)
     }
 
     fn peek(&self) -> Option<&Tok> {
@@ -704,7 +802,7 @@ impl Parser {
             self.i += 1;
             Ok(())
         } else {
-            unsupported(&format!("expected `{kw}`"))
+            self.expected(kw)
         }
     }
 
@@ -782,6 +880,8 @@ impl Parser {
     fn command(&mut self) -> PResult<Cmd> {
         match self.peek_keyword() {
             Some("if") => {
+                let at = self.offset();
+                self.open.push(("if", at));
                 self.i += 1;
                 let mut branches = Vec::new();
                 let cond = self.list(&["then"])?;
@@ -807,9 +907,10 @@ impl Parser {
                             self.i += 1;
                             break;
                         }
-                        _ => return unsupported("unterminated if"),
+                        _ => return self.stray(),
                     }
                 }
+                self.open.pop();
                 Ok(Cmd::If {
                     branches,
                     otherwise,
@@ -817,6 +918,8 @@ impl Parser {
                 })
             }
             Some("for") => {
+                let at = self.offset();
+                self.open.push(("for", at));
                 self.i += 1;
                 let var = match self.peek() {
                     Some(Tok::Word(w)) => match plain(w) {
@@ -849,6 +952,7 @@ impl Parser {
                 self.expect_keyword("do")?;
                 let body = self.list(&["done"])?;
                 self.expect_keyword("done")?;
+                self.open.pop();
                 Ok(Cmd::For {
                     var,
                     items,
@@ -858,11 +962,15 @@ impl Parser {
             }
             Some(k @ ("while" | "until")) => {
                 let until = k == "until";
+                let kw: &'static str = if until { "until" } else { "while" };
+                let at = self.offset();
+                self.open.push((kw, at));
                 self.i += 1;
                 let cond = self.list(&["do"])?;
                 self.expect_keyword("do")?;
                 let body = self.list(&["done"])?;
                 self.expect_keyword("done")?;
+                self.open.pop();
                 Ok(Cmd::While {
                     until,
                     cond,
@@ -871,14 +979,19 @@ impl Parser {
                 })
             }
             Some("{") => {
+                let at = self.offset();
+                self.open.push(("{", at));
                 self.i += 1;
                 let body = self.list(&["}"])?;
                 self.expect_keyword("}")?;
+                self.open.pop();
                 Ok(Cmd::Group {
                     body,
                     redirs: self.trailing_redirs(),
                 })
             }
+            // A closer that reaches a command's start has nothing to close.
+            Some("fi" | "done" | "then" | "else" | "elif" | "do" | "esac" | "}") => self.stray(),
             Some(k) if !matches!(k, "!") => unsupported(&keyword_what(k)),
             _ => self.simple(),
         }
@@ -934,6 +1047,7 @@ impl Parser {
             return Err(Unsupported {
                 what,
                 at: Some(start),
+                syntax: None,
             });
         }
         Ok(Cmd::Simple {
@@ -1128,12 +1242,26 @@ fn line_col(src: &str, at: usize) -> (usize, usize) {
 fn parse(src: &str) -> PResult<List> {
     let chars: Vec<char> = src.chars().collect();
     let (toks, at, lexical) = Lexer { s: &chars, i: 0 }.tokens();
-    let mut p = Parser { toks, at, i: 0 };
+    let newlines: Vec<usize> = chars
+        .iter()
+        .enumerate()
+        .filter(|(_, c)| **c == '\n')
+        .map(|(i, _)| i)
+        .collect();
+    let mut p = Parser {
+        toks,
+        at,
+        i: 0,
+        open: Vec::new(),
+        newlines,
+        end: chars.len(),
+    };
     let parsed = match p.list(&[]) {
         Ok(list) if p.i == p.toks.len() => Ok(list),
         Ok(_) => Err(Unsupported {
             what: "trailing tokens".into(),
             at: Some(p.offset()),
+            syntax: None,
         }),
         Err(mut e) => {
             e.at.get_or_insert_with(|| p.offset());
@@ -5332,10 +5460,17 @@ pub fn supports(src: &str) -> Result<(), String> {
 pub fn refusal(src: &str) -> Option<Refusal> {
     let u = parse(src).err()?;
     let (line, column) = line_col(src, u.at.unwrap_or(0));
+    let syntax = u.syntax.is_some();
+    let hint = match &u.syntax {
+        Some(hint) => hint.clone(),
+        None => refusal_hint(&u.what).to_string(),
+    };
     Some(Refusal {
         construct: u.what,
         line,
         column,
+        hint,
+        syntax,
     })
 }
 
@@ -5354,6 +5489,11 @@ pub struct Refusal {
     pub construct: String,
     pub line: usize,
     pub column: usize,
+    /// What to do instead: for a syntax error, what was expected; otherwise
+    /// the hint for the unsupported construct.
+    pub hint: String,
+    /// Whether this is a syntax error (`E_PARSE`), not an unsupported construct.
+    pub syntax: bool,
 }
 
 /// The first word of each simple command in `src`, in source order, for the
