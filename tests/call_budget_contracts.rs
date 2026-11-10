@@ -150,7 +150,10 @@ fn dynamic_dispatch_keeps_the_target_effect_gate() {
             ],
             &mut env,
         ),
-        "E_NEEDS_APPROVAL",
+        // `shell` is judged under `sh`, the name its body guards under, and
+        // agent mode refuses sh outright without IRONSHELL_ALLOW_SH: a token
+        // for it could never be used.
+        "E_POLICY_DENY",
     );
 }
 #[test]
