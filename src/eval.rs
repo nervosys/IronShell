@@ -1067,10 +1067,16 @@ fn module_field_error(
         }
     }
     let candidates = crate::builtins::nearest_names(field, map.keys().map(|k| k.as_str()));
-    let specific = crate::module_loader::unexported_hint(field).or_else(|| match object {
-        Expr::Ident(name) => crate::module_loader::empty_module_hint(name),
-        _ => None,
-    });
+    let specific = crate::module_loader::unexported_hint(field)
+        .or_else(|| match object {
+            Expr::Ident(name) => crate::module_loader::empty_module_hint(name),
+            _ => None,
+        })
+        .or_else(|| {
+            candidates
+                .is_empty()
+                .then(|| crate::safety::record_keys_hint(map.keys().map(|k| k.as_str())))
+        });
     crate::safety::unknown_field_hinted(field, candidates, specific)
 }
 
@@ -1286,10 +1292,11 @@ fn index_value(target: &Value, idx: &Value, object: &Expr) -> Result<Value> {
             Ok(Value::Str(chars[pos].to_string()))
         }
         (Value::Record(map), Value::Str(key)) => map.get(key).cloned().ok_or_else(|| {
-            crate::safety::unknown_field(
-                key,
-                crate::builtins::nearest_names(key, map.keys().map(|k| k.as_str())),
-            )
+            let candidates = crate::builtins::nearest_names(key, map.keys().map(|k| k.as_str()));
+            let specific = candidates
+                .is_empty()
+                .then(|| crate::safety::record_keys_hint(map.keys().map(|k| k.as_str())));
+            crate::safety::unknown_field_hinted(key, candidates, specific)
         }),
         (Value::Array(_) | Value::Str(_), other) => Err(crate::safety::bad_arg(
             &label,

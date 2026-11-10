@@ -2963,7 +2963,7 @@ pub fn unknown_field_hinted(
     let hint = if let Some(specific) = specific {
         specific
     } else if candidates.is_empty() {
-        format!("no field named '{}'; check the record's keys", field)
+        format!("no field named '{}' in this record", field)
     } else {
         format!("did you mean: {}", candidates.join(", "))
     };
@@ -2978,6 +2978,22 @@ pub fn unknown_field_hinted(
         got: String::new(),
         extra: serde_json::Map::new(),
     })
+}
+
+/// The hint for a missing record field when no key is close enough to suggest:
+/// the record's actual keys, sorted, at most twelve of them, then "…". An agent
+/// that misspelt or guessed a key gets the real ones back in one reply.
+pub fn record_keys_hint<'a>(keys: impl Iterator<Item = &'a str>) -> String {
+    let mut keys: Vec<&str> = keys.collect();
+    if keys.is_empty() {
+        return "the record has no fields".to_string();
+    }
+    keys.sort_unstable();
+    let mut listed = keys.iter().take(12).copied().collect::<Vec<_>>().join(", ");
+    if keys.len() > 12 {
+        listed.push_str(", …");
+    }
+    format!("the record has: {listed}")
 }
 
 /// A code for an uncoded error whose cause is an I/O or HTTP error: one passed
