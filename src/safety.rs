@@ -3973,6 +3973,75 @@ fn approve_env_is_set() -> bool {
         .is_ok_and(|list| list.split(',').any(|t| !t.trim().is_empty()))
 }
 
+/// How a refused call says its approval token is granted. In agent mode
+/// `approve()` is refused for the agent's own calls (AS-2026-01), so naming it
+/// would offer a dead end: the grant comes from whoever launched the agent,
+/// through `IRONSHELL_APPROVE`. Outside agent mode `approve()` is the in-process
+/// route and is named too.
+pub fn approval_instruction(token: &str) -> String {
+    if current_mode() == Mode::Agent {
+        format!(
+            "a human approves this token out of band: re-run with IRONSHELL_APPROVE={token} set by the operator"
+        )
+    } else {
+        format!("re-run with IRONSHELL_APPROVE={token} (or call approve(\"{token}\"))")
+    }
+}
+
+/// The full hint for a refused call that needs `token`. `network` adds the
+/// operator's allowlist route, which is the only other way a `Network` call
+/// is admitted.
+fn approval_refusal_hint(token: &str, network: bool) -> String {
+    let mut hint = approval_instruction(token);
+    if network {
+        hint.push_str(
+            ", or have the operator allow the destination with IRONSHELL_NET_ALLOW=<host>",
+        );
+    }
+    // This call was not approved, so every token in a set IRONSHELL_APPROVE
+    // failed to match it. Without saying so, the variable looks ignored, and a
+    // retry with the same value fails the same way.
+    if approve_env_is_set() {
+        hint.push_str(
+            "; IRONSHELL_APPROVE was set but none of its tokens approve this call; tokens are bound to the exact action and target",
+        );
+    }
+    hint
+}
+
+/// The `E_NEEDS_APPROVAL` refusal for a batch gated on one plan token (`apl_`).
+/// It has the shape the central gate gives a single call, so an agent reads one
+/// error for every gated call, and `approval.token` is the plan's token.
+pub fn plan_needs_approval(
+    builtin: &str,
+    token: &str,
+    targets: Vec<String>,
+    operations: usize,
+) -> SafetyError {
+    let what = "apply plan";
+    SafetyError {
+        code: ErrorCode::NeedsApproval,
+        message: format!("{builtin}: requires approval ({what})"),
+        builtin: builtin.to_string(),
+        hint: approval_refusal_hint(token, false),
+        approval: Some(ApprovalDescriptor {
+            what: what.to_string(),
+            builtin: builtin.to_string(),
+            targets,
+            blast_radius: json!({ "operations": operations }),
+            // A plan is not claimed reversible as a whole: a `mkdir` is not
+            // restored, and a file over the journal's capture limit is recorded
+            // as irreversible.
+            reversible: false,
+            token: token.to_string(),
+        }),
+        did_you_mean: Vec::new(),
+        expected: String::new(),
+        got: String::new(),
+        extra: serde_json::Map::new(),
+    }
+}
+
 fn is_token_approved(token: &str) -> bool {
     if truthy_env("IRONSHELL_APPROVE_ALL") {
         return true;
@@ -7379,25 +7448,7 @@ pub fn guard(ctx: GuardCtx) -> Result<(), SafetyError> {
                     json!({ "token": descriptor.token }),
                 );
                 let token = descriptor.token.clone();
-                let mut hint = if ctx.effect == Effect::Network {
-                    format!(
-                        "re-run with IRONSHELL_APPROVE={token} (or call approve(\"{token}\")), or have the operator allow the destination with IRONSHELL_NET_ALLOW=<host>"
-                    )
-                } else {
-                    format!(
-                        "re-run with IRONSHELL_APPROVE={} (or call approve(\"{}\"))",
-                        token, token
-                    )
-                };
-                // This call was not approved, so every token in a set
-                // IRONSHELL_APPROVE failed to match it. Without saying so, the
-                // variable looks ignored, and a retry with the same value fails
-                // the same way.
-                if approve_env_is_set() {
-                    hint.push_str(
-                        "; IRONSHELL_APPROVE was set but none of its tokens approve this call; tokens are bound to the exact action and target",
-                    );
-                }
+                let hint = approval_refusal_hint(&token, ctx.effect == Effect::Network);
                 Err(SafetyError {
                     code: ErrorCode::NeedsApproval,
                     message: format!("{}: requires approval ({})", ctx.builtin, ctx.what),

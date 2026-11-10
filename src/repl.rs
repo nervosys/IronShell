@@ -419,10 +419,9 @@ fn print_eval_error(e: &anyhow::Error, color: bool, line: Option<usize>, note: O
             print_extra_fields(se);
             if let Some(a) = &se.approval {
                 eprintln!(
-                    "  {} re-run with IRONSHELL_APPROVE={}  (or call approve(\"{}\"))",
+                    "  {} {}",
                     "approve:".cyan().bold(),
-                    a.token,
-                    a.token
+                    crate::safety::approval_instruction(&a.token)
                 );
             }
         } else {
@@ -436,8 +435,8 @@ fn print_eval_error(e: &anyhow::Error, color: bool, line: Option<usize>, note: O
             print_extra_fields(se);
             if let Some(a) = &se.approval {
                 eprintln!(
-                    "  approve: re-run with IRONSHELL_APPROVE={}  (or call approve(\"{}\"))",
-                    a.token, a.token
+                    "  approve: {}",
+                    crate::safety::approval_instruction(&a.token)
                 );
             }
         }
