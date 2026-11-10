@@ -2674,10 +2674,16 @@ impl Parser {
         self.need(Tok::RBrace, "expected '}' after if branch")?;
         let else_expr = if self.check(Tok::Ident) && self.peek().text == "else" {
             self.i += 1; // consume 'else'
-            self.need(Tok::LBrace, "expected '{' after else")?;
-            let e = self.parse_expr()?;
-            self.need(Tok::RBrace, "expected '}' after else branch")?;
-            e
+            if self.match_tok(Tok::If) {
+                // `else if c { .. } else { .. }`: the chained `if` is a nested
+                // if expression in the else position.
+                self.parse_if_expr()?
+            } else {
+                self.need(Tok::LBrace, "expected '{' after else")?;
+                let e = self.parse_expr()?;
+                self.need(Tok::RBrace, "expected '}' after else branch")?;
+                e
+            }
         } else {
             Expr::Null
         };

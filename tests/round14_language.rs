@@ -62,3 +62,37 @@ fn split_of_an_empty_string_on_the_empty_separator_is_empty() {
 fn split_on_a_real_separator_is_unchanged() {
     assert_eq!(run(r#""a,b,c" | split(",")"#), strs(&["a", "b", "c"]));
 }
+
+// ---- 3. else if ------------------------------------------------------------
+
+#[test]
+fn else_if_takes_the_branch_whose_condition_holds() {
+    assert_eq!(
+        run("if false { 1 } else if true { 2 } else { 3 }"),
+        Value::Int(2)
+    );
+    assert_eq!(
+        run("if true { 1 } else if true { 2 } else { 3 }"),
+        Value::Int(1)
+    );
+}
+
+#[test]
+fn else_if_falls_through_to_the_final_else() {
+    assert_eq!(
+        run("if false { 1 } else if false { 2 } else { 3 }"),
+        Value::Int(3)
+    );
+}
+
+#[test]
+fn else_if_without_a_final_else_yields_null() {
+    assert_eq!(run("if false { 1 } else if false { 2 }"), Value::Null);
+}
+
+#[test]
+fn else_if_chains_further_than_one_link() {
+    let v = run("grade = fn(s) => if s >= 90 { \"A\" } else if s >= 80 { \"B\" } else if s >= 70 { \"C\" } else { \"F\" }\n\
+                 [95, 85, 75, 10] | map(grade)");
+    assert_eq!(v, strs(&["A", "B", "C", "F"]));
+}
