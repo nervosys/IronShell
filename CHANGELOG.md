@@ -41,6 +41,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `--workspace DIR` refuses a directory that does not exist (exit 2) instead of creating it.
 - `ish -b`: a syntax error (a stray `fi` or `done`, an unclosed `if`) is E_PARSE with exit 2, as bash reports it, instead of a policy refusal saying the keyword is not in the subset. A refusal names the first unsupported construct by position, with a hint saying what to write instead (`if`/`elif` for `case`, `[ ]` for `[[ ]]`, and so on), and names the `${...}` operator it does not run.
 - `ish -b`: an expansion error names the script and line as bash does (`deploy.sh: line 4: X: unbound variable`).
+- An agent-mode `apply` that needs approval fails with E_NEEDS_APPROVAL (exit 75) carrying the plan's `apl_` token, as every other gated call does. It used to return a `needs_approval` record and exit 0, so a script chaining on the status went on as if the plan had run.
+- In agent mode, an approval refusal names only the out-of-band route (the operator re-runs with `IRONSHELL_APPROVE=<token>`); it no longer offers `approve()`, which agent mode refuses for the agent's own call.
+- `ontology_describe` of an unknown name fails with E_UNKNOWN_BUILTIN and `did_you_mean`, instead of exiting 0 with an `error` field.
+- A `(` at the start of a line starts a new statement. `x = 5` followed by `(x + 1) * 2` used to parse as `x = 5(x + 1) * 2`.
 
 ### Added
 
@@ -65,6 +69,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Two strings order with `<`, `<=`, `>` and `>=`, by byte (`"b" >= "a"` is true). A string against a number is still refused, now with a hint naming `int(x)` and `float(x)`.
 - `head(n)` and `tail(n)` take a piped Array and give its first or last n elements, as `take` and `last` do.
 - `group_by` takes a lambda key, `group_by(.region)` or `group_by(fn(r) => r.region)`, as well as a field name.
+- `merge(a, b)` (or `a | merge(b)`) merges two Records shallowly, `b`'s fields winning; `format_number(x, decimals, separator?)` writes a number with fixed decimals and optional thousands grouping (`format_number(1234567.891, 2, ",")` is `1,234,567.89`).
+- `if a { 1 } else if b { 2 } else { 3 }` parses. `c ? a : b` and `a?.b` are refused with a hint naming the `if`/`else` and null-test forms.
+- `delete_lines(path, "text")` deletes the lines containing the text, as `{contains: "text"}` does.
 
 ### Fixed
 
@@ -93,6 +100,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - On Windows, `ish -b` names Git for Windows' `usr\bin` when a command is not found or no GNU-compatible program is installed.
 - Redaction no longer breaks what it scrubs: `"password":"x"` keeps its opening quote, so a redacted JSON line still parses. An approval handle (`apv_...`) is left, so the approval `ish -b` prints for a gated command can be used, and the name of a secret variable (`DEPLOY_TOKEN: DEPLOY_TOKEN must be set`) is no longer taken for a secret.
 - A missing record field's E_UNKNOWN_FIELD hint lists the record's keys when no name is close.
+- `undo` reverts a file an approved `apply` wrote or deleted (one step per file), and `journal()` lists it.
+- An `rm` approval says `reversible: true` when the undo journal will keep the file.
+- `1.5 < 0` and the other Int/Float orderings compare as numbers instead of failing.
+- `split("")` splits into characters (`"abc"` gives `["a", "b", "c"]`, `""` gives `[]`) instead of adding an empty string at each end.
 
 
 ## [14.0.1] - 2026-11-08
