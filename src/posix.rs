@@ -562,7 +562,10 @@ impl<'a> Lexer<'a> {
                         op.push(c);
                         self.i += 1;
                     }
-                    _ => return unsupported("${...} operator"),
+                    _ => {
+                        let named = param_operator(op.starts_with(':'), &self.s[self.i..]);
+                        return unsupported(&format!("${{...}} operator `{named}`"));
+                    }
                 }
                 // The operator's word, up to the matching brace.
                 let start = self.i;
@@ -689,8 +692,20 @@ fn token_text(t: &Tok) -> String {
     }
 }
 
-/// The text of a word that is a single unquoted literal, which is what a
-/// reserved word must be to count as one.
+/// The operator of a `${name...}` form that the subset does not run, as its
+/// refusal names it: `:offset` for `${name:2}`, else the operator's own
+/// characters (`%`, `##`, `//`, `^`, `,`, `@`).
+fn param_operator(colon: bool, rest: &[char]) -> String {
+    if colon {
+        return ":offset".into();
+    }
+    match rest {
+        [a, b, ..] if a == b && matches!(*a, '%' | '#' | '/' | '^' | ',') => format!("{a}{b}"),
+        [a, ..] => a.to_string(),
+        [] => String::new(),
+    }
+}
+
 /// What a stray operator token is, as the construct it belongs to.
 fn operator_what(t: &Tok) -> &'static str {
     match t {
@@ -711,6 +726,8 @@ fn keyword_what(k: &str) -> String {
     }
 }
 
+/// The text of a word that is a single unquoted literal, which is what a
+/// reserved word must be to count as one.
 fn plain(w: &Word) -> Option<&str> {
     match w.as_slice() {
         [Part::Lit(s, false)] => Some(s),
@@ -5463,7 +5480,7 @@ pub fn refusal(src: &str) -> Option<Refusal> {
     let syntax = u.syntax.is_some();
     let hint = match &u.syntax {
         Some(hint) => hint.clone(),
-        None => refusal_hint(&u.what).to_string(),
+        None => refusal_hint(&u.what),
     };
     Some(Refusal {
         construct: u.what,
@@ -5475,12 +5492,34 @@ pub fn refusal(src: &str) -> Option<Refusal> {
 }
 
 /// The hint that goes with a refusal of `construct`: what to do instead.
-pub fn refusal_hint(construct: &str) -> &'static str {
+pub fn refusal_hint(construct: &str) -> String {
     if construct.starts_with("arithmetic expansion") {
-        "arithmetic is not in the subset; compute in ish (ish -c) or set IRONSHELL_ALLOW_SH=true to run the unsupported parts through bash -lc, outside the effect gate"
-    } else {
-        "run the supported parts on their own, or set IRONSHELL_ALLOW_SH=true to run the unsupported parts through bash -lc, outside the effect gate"
+        return "arithmetic is not in the subset; compute in ish (ish -c) or set IRONSHELL_ALLOW_SH=true to run the unsupported parts through bash -lc, outside the effect gate".into();
     }
+    // The operator of a `${name...}` form, named in its refusal as `op`.
+    let op = construct.split('`').nth(1).unwrap_or("");
+    let tip: String = match construct {
+        "function definition" => "inline the body, or write the logic in ish".into(),
+        "case ... esac" => {
+            "rewrite it as if/elif with [ \"$x\" = value ] tests".into()
+        }
+        "subshell" => "drop the parentheses, or group the commands with { ...; } when they need not run isolated".into(),
+        "background job" => "run it in the foreground: drop the trailing &".into(),
+        "[[" | "[[ ... ]]" => "use [ ... ] (test) instead of [[ ... ]]".into(),
+        "process substitution" => "write the output to a file first, then read the file".into(),
+        c if c.starts_with("here-document") => {
+            "pass the text with printf '%s\\n' ... | cmd, or write it to a file first".into()
+        }
+        c if c.starts_with("${...} operator") => match op {
+            "%" | "%%" => "strip a suffix with sed, e.g. sed 's/PATTERN$//'".into(),
+            "#" | "##" => "strip a prefix with sed, e.g. sed 's/^PATTERN//', or cut -d/ -f2-".into(),
+            "/" | "//" => "replace text with sed, e.g. sed 's/OLD/NEW/g'".into(),
+            ":offset" => "take a substring with cut -c, e.g. cut -c4-, or sed".into(),
+            _ => "change the text with tr or sed".into(),
+        },
+        _ => "run the supported parts on their own".into(),
+    };
+    format!("{tip}. Otherwise set IRONSHELL_ALLOW_SH=true to run the unsupported parts through bash -lc, outside the effect gate")
 }
 
 /// See [`refusal`].
