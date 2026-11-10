@@ -332,9 +332,19 @@ fn run(cli: Cli) -> Result<()> {
         std::env::set_var("IRONSHELL_MODE", "agent");
     }
     if let Some(ws) = &cli.workspace {
+        // A workspace that does not exist is refused before anything runs. It
+        // used to be created, with an audit log inside, so a mistyped path
+        // quietly made a new jail. A UNC path is not probed: `is_dir` on it
+        // opens an SMB session (see `names_a_remote_share`).
+        let given = std::path::Path::new(ws);
+        if !iron_shell::safety::names_a_remote_share(ws) && !given.is_dir() {
+            eprintln!("ish: --workspace {ws} does not exist");
+            eprintln!("hint: create the directory first (for example: mkdir {ws}), then run again");
+            std::process::exit(2);
+        }
         // Fixed as an absolute path now, so a later `cd` does not move the jail
         // and a child `ish` inherits the same root.
-        let ws = std::path::Path::new(ws);
+        let ws = given;
         let ws = std::path::absolute(ws).unwrap_or_else(|_| ws.to_path_buf());
         std::env::set_var("IRONSHELL_WORKSPACE", ws);
     }

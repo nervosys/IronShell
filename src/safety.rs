@@ -7619,7 +7619,7 @@ pub fn existing_paths(args: &[String]) -> Vec<String> {
 /// handshake offered to whoever runs `attacker`, before any policy decision.
 /// Such a string is not evidence of a local path, so it is never probed; the
 /// call sites that know an argument is a path still jail it.
-pub(crate) fn names_a_remote_share(s: &str) -> bool {
+pub fn names_a_remote_share(s: &str) -> bool {
     let b = s.as_bytes();
     cfg!(windows) && b.len() >= 2 && matches!(b[0], b'/' | b'\\') && matches!(b[1], b'/' | b'\\')
 }
