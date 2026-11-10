@@ -10,6 +10,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Security
 
 - A relative workspace root (`--workspace proj` or `IRONSHELL_WORKSPACE=proj`) no longer lets a write escape it: `file_write("../x", ...)` was judged as `proj/x` and written as `x`, outside the workspace, while reads of the same path were refused. The root is now always absolute, and `--workspace` is fixed at startup.
+- `ish -b` runs `tee` in-process, and each file it names is judged as a `>` redirection is. `tee` used to run as the real program, so with an approval token `echo x | tee ../f` wrote outside the workspace: an approved program is not confined by the jail.
+- An alias whose implementation guards itself (`mv` for `file_move`, and every other such alias) is judged under the implementation's name, so the workspace jail is checked before any approval token is issued: a target outside the workspace is E_OUTSIDE_WORKSPACE, never a token.
+- A redirection the jail refuses in `ish -b` no longer runs its command; its status is 1 and `set -e` applies. The command used to run, with its output going to stderr, and the script exited 0.
 
 ### Changed
 
@@ -35,6 +38,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `sed` in file mode reports `status: "unchanged"` and leaves the file alone when nothing matched.
 - A pipeline whose later stage names no builtin fails before its first stage runs; `file.write(...) | nosuchfn()` wrote the file first.
 - `to_json`, `from_csv` and `to_csv` take the value as an argument when nothing is piped.
+- `--workspace DIR` refuses a directory that does not exist (exit 2) instead of creating it.
+- `ish -b`: a syntax error (a stray `fi` or `done`, an unclosed `if`) is E_PARSE with exit 2, as bash reports it, instead of a policy refusal saying the keyword is not in the subset. A refusal names the first unsupported construct by position, with a hint saying what to write instead (`if`/`elif` for `case`, `[ ]` for `[[ ]]`, and so on), and names the `${...}` operator it does not run.
+- `ish -b`: an expansion error names the script and line as bash does (`deploy.sh: line 4: X: unbound variable`).
 
 ### Added
 
@@ -54,6 +60,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `ish -b`: `shift` and `shift N`.
 - `ish -b`: `set -e`, `set -u` and `set -o pipefail` (and `set -euo pipefail`, `set -o errexit`, the `+` forms) run in-process with bash's rules: `-e` does not exit in an `if`/`while` condition, inside `&&`/`||` before the last command, or after `!`. Other `set` options such as `-x` are still refused before the script runs.
 - `ontology_describe("redo")` and other session verbs describe their builtin; an alias such as `delete_lines` names the builtin that implements it, and `ish agent schema --module file` lists `delete_lines`. `file_insert` documents its `{after: text}` anchor.
+- `ish -b`: `mkdir [-p]`, `touch` and `tr` (`SET1 SET2`, `-d`, `-s`, ranges and `[:upper:]`-style classes) run in-process; `mkdir` and `touch` are jailed like a redirection. `${VAR:?message}` and `${VAR?message}` fail with their message.
+- `--explain` lists an `ish -b` output redirection, and the files of `tee`, `mkdir` and `touch`, as `write_local` calls with their targets.
 
 ### Fixed
 
@@ -77,6 +85,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - A block with two statements is one parse error carrying the one-expression hint, not five.
 - Suggestions: library spellings (`json.loads`, `toml.parse`, `re.findall`, `regex.match`, `filter`) suggest the IronShell builtin they mean; the unknown-name hint shows `x = ...`.
 - Messages: missing-file and outside-workspace errors drop the `\\?\` prefix and name the builtin; a carriage return in a path gets the forward-slash hint; two hints lost a run of spaces; the division-by-zero hint is reworded; `date_diff` states what its default unit counts.
+- `ish -b`: an assignment from a command substitution keeps its leading blanks and newlines (`x=$(printf '   a')` is `   a`); only trailing newlines are removed.
+- An approval token from a refused `mv` approves the same call when retried.
+- On Windows, `ish -b` names Git for Windows' `usr\bin` when a command is not found or no GNU-compatible program is installed.
 
 
 ## [14.0.1] - 2026-11-08
