@@ -49698,9 +49698,21 @@ fn bi_file_delete_lines(args: Vec<Value>, input: Option<Value>) -> Result<Value>
             };
             Selection::Pattern(pattern, key == "exact")
         }
+        // A String is the `contains` form of the pattern record: every line that
+        // holds this literal text goes, as `{contains: text}` does.
+        Some(Value::Str(text)) => {
+            if args.next().is_some() {
+                return Err(crate::safety::arg_err(
+                    "file_delete_lines takes one String selector and no range end",
+                ));
+            }
+            Selection::Pattern(text, false)
+        }
         _ => {
-            return Err(crate::safety::arg_err(
-                "file_delete_lines selection must be positive Int or pattern Record",
+            return Err(crate::safety::bad_arg_in(
+                "file_delete_lines",
+                "file_delete_lines selection must be a positive Int, a String, or a pattern Record",
+                "file_delete_lines takes a positive Int (one line, or a range with an end), a String (every line containing that text), or a pattern Record such as {contains: text}",
             ))
         }
     };

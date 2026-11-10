@@ -964,12 +964,13 @@ pub static SIGNATURES: &[Signature] = &[
     },
     Signature {
         name: "file_delete_lines", category: None, subject_required: false, aliases: &["delete_lines", "remove_lines"],
-        subject: None, params: &[req("path", Ty::Str, "regular UTF-8 file, bounded to 64 MiB"), req("selection", Ty::Any, "positive one-based line or one String selector: matching/contains/pattern/exact"), opt("end", Ty::Int, "inclusive positive end for numeric selection only")], returns: "Record",
-        doc: "Delete a line, an ascending inclusive range, or lines matching a literal selector. Surviving lines are normalized to LF with a final newline; empty output stays empty. Out-of-range selection deletes nothing. Pipeline input is refused; the resolved path passes the destructive gate and transaction snapshot before atomic replacement.",
+        subject: None, params: &[req("path", Ty::Str, "regular UTF-8 file, bounded to 64 MiB"), req("selection", Ty::Any, "positive one-based line; or a String, which deletes every line containing that literal text (the same as {contains: text}); or a pattern Record {matching|contains|pattern|exact: text}"), opt("end", Ty::Int, "inclusive positive end for numeric selection only")], returns: "Record",
+        doc: "Delete a line, an ascending inclusive range, or lines containing a literal text. A String selector is the same as the pattern record {contains: text}, so an empty String deletes every line, as that record does. Surviving lines are normalized to LF with a final newline; empty output stays empty. Out-of-range selection deletes nothing. Pipeline input is refused; the resolved path passes the destructive gate and transaction snapshot before atomic replacement.",
         examples: &[
             (r#"let d = fs_tempdir("ae_delete_line"); let f = d + "/x"; file_write(f, "a\nb\nc"); let result = file_delete_lines(f, 2); rmdir(d, true); result.lines_deleted"#, "1"),
             (r#"let d = fs_tempdir("ae_delete_range"); let f = d + "/x"; file_write(f, "a\nb\nc"); let result = delete_lines(f, 1, 2); rmdir(d, true); result.lines_remaining"#, "1"),
             (r#"let d = fs_tempdir("ae_delete_pattern"); let f = d + "/x"; file_write(f, "keep\ndrop\n"); let result = remove_lines(f, {exact: "drop"}); rmdir(d, true); result.success"#, "true"),
+            (r##"let d = fs_tempdir("ae_delete_string"); let f = d + "/x"; file_write(f, "keep\n# DEPRECATED\nalso keep\n"); let result = delete_lines(f, "# DEPRECATED"); rmdir(d, true); result.lines_deleted"##, "1"),
         ],
     },
     Signature {
