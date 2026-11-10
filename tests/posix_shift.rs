@@ -108,14 +108,13 @@ fn eval_and_set_options_are_refused_before_anything_runs() {
     assert!(out.is_empty(), "ran something: {out:?}");
     assert!(err.contains("`eval` builtin at line 2, column 1"), "{err}");
 
-    let s = script(&dir, "echo before\nset -e\n");
+    // `set -e` runs now (see posix_set_options.rs); an option the subset does
+    // not run is still refused, and named.
+    let s = script(&dir, "echo before\nset -x\n");
     let (code, out, err) = ish(&dir, &["-b", &s]);
     assert_eq!(code, 77, "{err}");
     assert!(out.is_empty(), "ran something: {out:?}");
-    assert!(
-        err.contains("`set` with options at line 2, column 1"),
-        "{err}"
-    );
+    assert!(err.contains("`set -x` at line 2, column 1"), "{err}");
 }
 
 #[test]
