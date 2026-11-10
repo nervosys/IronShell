@@ -2186,14 +2186,14 @@ pub static SIGNATURES: &[Signature] = &[
         subject_required: false,
         aliases: &["group_by", "group-object", "Group-Object"],
         subject: Some(Ty::Array),
-        params: &[req("key", Ty::Str, "field name to group on")],
+        params: &[req("key", Ty::Any, "field name String to group on, or a lambda (or .field) called per row whose result is the key")],
         returns: "Array",
         // The doc is what an agent reads (E7 builds its reference from this
         // line). Asked "which author opened the most PRs, and how many?",
         // a Haiku run returned the whole `{Count, Group, Name}` record: the
         // right fact in a form nobody asked for. The idiom that answers it is
         // named here rather than left to be discovered.
-        doc: r#"Group records by a field, returning {Name, Count, Group} records. For "which, and how many": | sort_by("Count", "desc") | first | fn(g) => "${g.Name} ${g.Count}"."#,
+        doc: r#"Group records by a field name or by a lambda key (`group_by(.region)`, `group_by(fn(r) => r.region)`), returning {Name, Count, Group} records. For "which, and how many": | sort_by("Count", "desc") | first | fn(g) => "${g.Name} ${g.Count}"."#,
         examples: &[
             (
                 r#"[{user: "a"}, {user: "a"}, {user: "b"}] | group_by("user") | len"#,
@@ -2202,6 +2202,10 @@ pub static SIGNATURES: &[Signature] = &[
             (
                 r#"[{user: "a"}, {user: "a"}, {user: "b"}] | group_by("user") | sort_by("Count", "desc") | first | fn(g) => "${g.Name} ${g.Count}""#,
                 r#""a 2""#,
+            ),
+            (
+                r#"[{user: "a"}, {user: "a"}, {user: "b"}] | group_by(fn(r) => r.user) | len"#,
+                "2",
             ),
         ],
     },

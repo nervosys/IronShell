@@ -4431,7 +4431,7 @@ fn call_with_input_inner(
         "Where-Object" | "where-object" => bi_where_object(args, input, env),
         "ForEach-Object" | "foreach-object" | "foreach" => bi_foreach_object(args, input, env),
         "Sort-Object" | "sort-object" => bi_sort_object(args, input),
-        "Group-Object" | "group-object" | "group" | "group_by" => bi_group_object(args, input),
+        "Group-Object" | "group-object" | "group" | "group_by" => bi_group_object(args, input, env),
         "Measure-Object" | "measure-object" | "measure" => bi_measure_object(args, input),
 
         // Nushell-style data commands (not in fast lookup)
@@ -9934,7 +9934,7 @@ fn compare_values_for_sort(a: &Value, b: &Value) -> std::cmp::Ordering {
 }
 
 /// Group-Object: PowerShell-style grouping
-fn bi_group_object(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
+fn bi_group_object(args: Vec<Value>, input: Option<Value>, env: &mut Env) -> Result<Value> {
     let input =
         input.ok_or_else(|| crate::safety::arg_err("Group-Object: requires pipeline input"))?;
 
@@ -9944,22 +9944,45 @@ fn bi_group_object(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
         ));
     }
 
+    // The key is a field name, or a lambda called once per row whose result is
+    // the key. `group_by(.region)` and `group_by(fn(r) => r.region)` are both
+    // lambdas by the time they arrive here.
     let property = match &args[0] {
-        Value::Str(s) => s,
+        Value::Str(s) => Some(s),
+        Value::Lambda(_) => None,
         _ => {
             return Err(crate::safety::arg_err(
-                "Group-Object: property name must be a string",
+                "Group-Object: property name must be a string or a lambda",
             ))
         }
     };
 
     match input {
         Value::Array(arr) => {
-            let mut groups = BTreeMap::new();
+            // Each row with the text of its key. Rows whose keys have the same
+            // text share a group, whichever form gave the key.
+            let mut keyed: Vec<(String, Value)> = Vec::with_capacity(arr.len());
+            match property {
+                Some(property) => {
+                    for item in arr {
+                        let key = get_property_value(&item, property);
+                        keyed.push((value_to_string(&key), item));
+                    }
+                }
+                None => {
+                    let lam = need_lambda(&args[0], "group_by")?;
+                    with_param_slots(lam, env, |env| {
+                        for item in arr {
+                            let key = call_lambda_one(lam, item.clone(), env, false)?.0;
+                            keyed.push((value_to_string(&key), item));
+                        }
+                        Ok(())
+                    })?;
+                }
+            }
 
-            for item in arr {
-                let key = get_property_value(&item, property);
-                let key_str = value_to_string(&key);
+            let mut groups = BTreeMap::new();
+            for (key_str, item) in keyed {
                 groups.entry(key_str).or_insert_with(Vec::new).push(item);
             }
 
