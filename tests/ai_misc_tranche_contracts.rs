@@ -83,6 +83,13 @@ fn token_of(plan: &Value) -> String {
     }
 }
 
+/// The approval token a refusal carries, read from the structured error.
+fn approval_token_of(e: &anyhow::Error) -> Option<String> {
+    e.downcast_ref::<safety::SafetyError>()
+        .and_then(|se| se.approval.as_ref())
+        .map(|a| a.token.clone())
+}
+
 /// A fresh workspace directory, made the jail for the duration of one test.
 struct Workspace(PathBuf);
 
@@ -149,10 +156,12 @@ fn an_agent_may_not_approve_its_own_plan() {
     let ops = Value::Array(vec![write_op(&target, "x")]);
     let token = token_of(&run("plan", vec![ops.clone()]).expect("plan"));
     assert_eq!(outcome(run("approve", vec![s(&token)])), "E_POLICY_DENY");
-    // The refusal left the plan unapproved, so apply does not run it.
+    // The refusal left the plan unapproved, so apply does not run it. The
+    // refusal is an error, so a script chained on apply's exit status stops.
+    assert_eq!(outcome(run("apply", vec![ops.clone()])), "E_NEEDS_APPROVAL");
     assert_eq!(
-        field(&run("apply", vec![ops]).expect("apply"), "status"),
-        s("needs_approval")
+        approval_token_of(&run("apply", vec![ops]).expect_err("refused")),
+        Some(token)
     );
     assert!(!Path::new(&target).exists());
 }
@@ -237,10 +246,7 @@ fn a_granted_plan_is_spent_by_the_apply_it_authorises() {
 
     // The same token no longer authorises a second run of the same batch.
     std::fs::write(&f, "changed since").expect("change the file");
-    assert_eq!(
-        field(&run("apply", vec![ops]).expect("apply again"), "status"),
-        s("needs_approval")
-    );
+    assert_eq!(outcome(run("apply", vec![ops])), "E_NEEDS_APPROVAL");
     assert_eq!(
         std::fs::read_to_string(&f).expect("unchanged"),
         "changed since"
@@ -258,8 +264,7 @@ fn an_approval_covers_only_the_plan_it_was_given_for() {
     safety::grant_approval(&token);
 
     // A different batch has a different token, so the grant does not reach it.
-    let swapped = run("apply", vec![other]).expect("apply");
-    assert_eq!(field(&swapped, "status"), s("needs_approval"));
+    assert_eq!(outcome(run("apply", vec![other])), "E_NEEDS_APPROVAL");
     assert!(!Path::new(&ws.path("b.txt")).exists());
     safety::revoke_approval(&token);
 }

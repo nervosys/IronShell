@@ -137,7 +137,7 @@ fn the_self_guarded_list_matches_the_source() {
 #[test]
 fn a_builtin_that_runs_its_own_approval_flow_is_not_double_gated() {
     // Regression. `apply` gates a whole plan on one plan-derived token and
-    // returns a `needs_approval` record carrying it. Central enforcement first
+    // refuses with E_NEEDS_APPROVAL carrying it. Central enforcement first
     // shipped detecting only `guard(`, so `apply` was gated generically as
     // `Exec`: it demanded a second, unrelated token and never reached the code
     // that hands back the plan token. A working approval flow became a dead end.

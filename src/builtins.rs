@@ -22612,7 +22612,7 @@ fn apply_refused_record(err: String, token: &str) -> Value {
 const APPLY_MAX_OPS: usize = 10_000;
 
 /// apply(ops) - Execute a plan atomically inside a transaction. In agent mode it
-/// requires the plan's token to be approved (else returns `{status:"needs_approval"}`);
+/// requires the plan's token to be approved (else fails with E_NEEDS_APPROVAL, whose `approval.token` is the plan's token);
 /// any failure rolls the whole batch back. Filesystem paths are confined to the
 /// workspace jail when enforced. Every op is checked before the first one runs.
 fn bi_apply(args: Vec<Value>, _input: Option<Value>) -> Result<Value> {
@@ -22638,21 +22638,24 @@ fn bi_apply(args: Vec<Value>, _input: Option<Value>) -> Result<Value> {
     let agent = matches!(crate::safety::current_mode(), crate::safety::Mode::Agent);
 
     if agent && !crate::safety::is_approved(&token) {
-        let mut r = BTreeMap::new();
-        r.insert(
-            "status".to_string(),
-            Value::Str("needs_approval".to_string()),
+        // Refused like every other gated call: the error has the exit status a
+        // script can branch on (75), and the plan token in `approval.token`. A
+        // success-shaped record here let a script chained on `apply` go on as
+        // though the plan had run.
+        let targets: Vec<String> = parsed.iter().map(|(_, path, _, _)| path.clone()).collect();
+        let _ = crate::safety::audit(
+            "apply",
+            crate::safety::Effect::Destructive,
+            "needs_approval",
+            &token,
+            serde_json::json!({ "token": token, "operations": parsed.len() }),
         );
-        r.insert("token".to_string(), Value::Str(token.clone()));
-        r.insert("operations".to_string(), Value::Int(parsed.len() as i64));
-        r.insert(
-            "hint".to_string(),
-            Value::Str(format!(
-                "a human approves this token out of band (IRONSHELL_APPROVE={}), then re-run apply",
-                token
-            )),
-        );
-        return Ok(Value::Record(r));
+        return Err(anyhow::Error::new(crate::safety::plan_needs_approval(
+            "apply",
+            &token,
+            targets,
+            parsed.len(),
+        )));
     }
 
     if agent {

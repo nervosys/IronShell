@@ -174,9 +174,19 @@ fn plan_apply_requires_approval_then_applies_atomically() {
     assert!(token.starts_with("apl_"));
     assert!(!f1.exists(), "plan must not execute");
 
-    // apply() without approval in agent mode → needs_approval, still nothing done.
-    let na = call("apply", vec![ops.clone()]);
-    assert_eq!(get_str(&na, "status"), "needs_approval");
+    // apply() without approval in agent mode is refused with E_NEEDS_APPROVAL
+    // (an error, so the exit status is not 0), still nothing done, and the
+    // plan token is readable from the error's approval payload.
+    let mut env = iron_shell::env::Env::new();
+    let refusal = iron_shell::builtins::call("apply", vec![ops.clone()], &mut env)
+        .expect_err("an unapproved apply must be refused");
+    let se = refusal
+        .downcast_ref::<iron_shell::safety::SafetyError>()
+        .expect("a structured refusal");
+    assert_eq!(
+        se.approval.as_ref().map(|a| a.token.as_str()),
+        Some(token.as_str())
+    );
     assert!(!f1.exists() && !f2.exists());
 
     // Approve the plan token out of band, then apply -> atomic success.
