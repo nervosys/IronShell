@@ -116,6 +116,24 @@ fn optional_chaining_names_the_null_test_as_its_hint() {
     );
 }
 
+// ---- 5. ontology_describe of an unknown name -------------------------------
+
+#[test]
+fn ontology_describe_of_an_unknown_name_is_an_error_not_a_record() {
+    let mut env = iron_shell::env::Env::new();
+    let e = iron_shell::builtins::call(
+        "ontology_describe",
+        vec![Value::Str("format".into())],
+        &mut env,
+    )
+    .expect_err("an unknown name is an error, not a record with an error field");
+    let j = e
+        .downcast_ref::<iron_shell::safety::SafetyError>()
+        .expect("a structured error")
+        .to_json();
+    assert_eq!(j["error"]["code"], "E_UNKNOWN_BUILTIN");
+}
+
 #[test]
 fn else_if_chains_further_than_one_link() {
     let v = run("grade = fn(s) => if s >= 90 { \"A\" } else if s >= 80 { \"B\" } else if s >= 70 { \"C\" } else { \"F\" }\n\

@@ -7204,7 +7204,7 @@ pub static SIGNATURES: &[Signature] = &[
         subject: None,
         params: &[req("name", Ty::Str, "a category or builtin name")],
         returns: "Record",
-        doc: "A category's builtins, or one builtin's full definition.",
+        doc: "A category's builtins, or one builtin's full definition. A name that is neither is E_UNKNOWN_BUILTIN, with the nearest names as did_you_mean.",
         examples: &[
             (r#"typeof(ontology_describe("Array"))"#, r#"Record"#),
         ],

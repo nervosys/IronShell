@@ -3159,6 +3159,17 @@ pub fn builtin_tool_specs() -> Vec<JsonValue> {
 const IMPORT_SYNTAX: &str =
     "import \"lib/x.ish\"  (the path is relative to the importing file; only pub names are visible)";
 
+/// The category names the catalogue lists, sorted and without repeats.
+pub fn ontology_category_names() -> Vec<String> {
+    let mut names: Vec<String> = get_all_builtin_definitions()
+        .into_iter()
+        .map(|d| d.category)
+        .collect();
+    names.sort();
+    names.dedup();
+    names
+}
+
 pub fn ontology_describe_json(query: &str) -> JsonValue {
     let defs = get_all_builtin_definitions();
     // `file.replace` names the builtin that the call runs (`file_replace`), so

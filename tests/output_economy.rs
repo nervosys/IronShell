@@ -798,42 +798,32 @@ fn ontology_manifest_is_compact_and_describe_expands() {
         other => panic!("expected record, got {other:?}"),
     }
 
-    // Unknown query → structured error.
-    match call(
-        "ontology_describe",
-        vec![Value::Str("definitely_not_a_thing_xyz".into())],
-    ) {
-        Value::Record(r) => assert!(r.contains_key("error")),
-        other => panic!("expected error record, got {other:?}"),
-    }
+    // Unknown query → E_UNKNOWN_BUILTIN, the error an unknown call gets.
+    let j = describe_error_json("definitely_not_a_thing_xyz");
+    assert_eq!(j["error"]["code"], "E_UNKNOWN_BUILTIN");
+}
+
+/// The structured error `ontology_describe(name)` returns for an unknown name.
+fn describe_error_json(name: &str) -> serde_json::Value {
+    let mut env = iron_shell::env::Env::new();
+    let e =
+        iron_shell::builtins::call("ontology_describe", vec![Value::Str(name.into())], &mut env)
+            .expect_err("an unknown name is an error");
+    e.downcast_ref::<iron_shell::safety::SafetyError>()
+        .unwrap_or_else(|| panic!("not a structured error: {e:#}"))
+        .to_json()
 }
 
 #[test]
 fn ontology_describe_suggests_the_nearest_builtin_for_a_typo() {
-    match call(
-        "ontology_describe",
-        vec![Value::Str("ontology_manifst".into())],
-    ) {
-        Value::Record(r) => {
-            let error = match r.get("error") {
-                Some(Value::Str(s)) => s.clone(),
-                other => panic!("expected an error string, got {other:?}"),
-            };
-            assert!(
-                error.contains("ontology_manifest"),
-                "the error does not name the real builtin: {error}"
-            );
-            let suggested = match r.get("did_you_mean") {
-                Some(Value::Array(a)) => a.clone(),
-                other => panic!("expected a did_you_mean array, got {other:?}"),
-            };
-            assert!(
-                suggested.contains(&Value::Str("ontology_manifest".into())),
-                "ontology_manifest is not in did_you_mean: {suggested:?}"
-            );
-        }
-        other => panic!("expected error record, got {other:?}"),
-    }
+    let j = describe_error_json("ontology_manifst");
+    let suggested = j["error"]["did_you_mean"]
+        .as_array()
+        .expect("did_you_mean is an array");
+    assert!(
+        suggested.iter().any(|s| s == "ontology_manifest"),
+        "ontology_manifest is not in did_you_mean: {suggested:?}"
+    );
 }
 
 #[test]

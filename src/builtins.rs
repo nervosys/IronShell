@@ -23206,9 +23206,22 @@ fn bi_ontology_describe(args: Vec<Value>, _input: Option<Value>) -> Result<Value
             ))
         }
     };
-    Ok(Value::from_json(&crate::agent_api::ontology_describe_json(
-        &q,
-    )))
+    let described = crate::agent_api::ontology_describe_json(&q);
+    if described.get("error").is_some() {
+        // An unknown name is a failed lookup, as an unknown builtin call is: an
+        // E_UNKNOWN_BUILTIN error with the nearest real builtin or category
+        // names, not a successful record that carries an error field.
+        let categories = crate::agent_api::ontology_category_names();
+        let candidates = nearest_names(
+            q.trim(),
+            BUILTIN_LOOKUP
+                .keys()
+                .copied()
+                .chain(categories.iter().map(String::as_str)),
+        );
+        return Err(crate::safety::unknown_builtin(q.trim(), candidates));
+    }
+    Ok(Value::from_json(&described))
 }
 
 /// Pull a string field out of a caught-error record, accepting either the
