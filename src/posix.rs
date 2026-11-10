@@ -2374,8 +2374,8 @@ impl Shell {
 /// that the subset declines runs only as a GNU-compatible program found on
 /// PATH, because a `sort.exe` that is not GNU would be the wrong program.
 const SUBSET_NAMES: &[&str] = &[
-    "echo", "printf", "test", "[", "cat", "head", "tail", "wc", "grep", "sort", "uniq", "cut",
-    "sed", "ls", "find", "date", "basename", "dirname", "seq",
+    "echo", "printf", "test", "[", "cat", "tee", "head", "tail", "wc", "grep", "sort", "uniq",
+    "cut", "sed", "ls", "find", "date", "basename", "dirname", "seq",
 ];
 
 /// The GNU-compatible program called `name` on PATH, if there is one (Windows).
@@ -3060,6 +3060,7 @@ fn utility(name: &str, args: &[String], stdin: &mut Input, sink: &mut Sink) -> U
             Util::Done(test(&args[..args.len() - 1], sink))
         }
         "cat" => cat(args, stdin, sink),
+        "tee" => tee(args, stdin, sink),
         "head" => head_tail(true, args, stdin, sink),
         "tail" => head_tail(false, args, stdin, sink),
         "wc" => wc(args, stdin, sink),
@@ -3483,6 +3484,40 @@ fn cat(args: &[String], stdin: &mut Input, sink: &mut Sink) -> Util {
             sink.out
                 .extend_from_slice(format!("{line_no:>6}\t").as_bytes());
             sink.out.extend_from_slice(line);
+        }
+    }
+    Util::Done(status)
+}
+
+/// `tee [-a] FILE...`: copy stdin to stdout and to each FILE.
+///
+/// A FILE is written only after the same guard a `>` redirection passes
+/// ([`check_write`]), so `tee ../f` is refused and writes nothing, and the other
+/// FILEs and stdout still get their copy, as GNU tee does. `/dev/null` is
+/// special-cased as a redirection is. `-a` appends.
+fn tee(args: &[String], stdin: &mut Input, sink: &mut Sink) -> Util {
+    let Some((flags, files)) = short_flags(args, "a") else {
+        return Util::Decline;
+    };
+    let append = flags.contains(&'a');
+    let data = stdin.read_all();
+    sink.out.extend_from_slice(&data);
+    let mut status = 0;
+    for f in &files {
+        if f == "/dev/null" {
+            continue;
+        }
+        let resolved = match check_write(f) {
+            Ok(p) => p,
+            Err(msg) => {
+                sink.eline(&msg);
+                status = 1;
+                continue;
+            }
+        };
+        if let Err(msg) = write_file(&resolved, &data, append) {
+            sink.eline(&msg);
+            status = 1;
         }
     }
     Util::Done(status)

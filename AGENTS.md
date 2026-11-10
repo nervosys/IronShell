@@ -71,8 +71,9 @@ tools = get_agent_api_tools("http://localhost:3002")
 `ish -b` (and `.sh` files) run the ordinary POSIX subset **in-process**
 (`src/posix.rs`): pipelines, `&&`/`||`, variables, `$(…)`, redirections,
 `if`/`for`/`while`, `test`, and GNU-compatible `ls`/`find`/`grep`/`head`/`tail`/
-`wc`/`sort`/`uniq`/`cut`/`sed`/`cat`/`echo`/`printf` (the common GNU flags, not all: `ls` takes `-a` but not `-l`;
-`sort -k`/`-t`, `cat -n` and printf `%x` and `%.Nf` run in-process too). On Windows, an unsupported flag
+`wc`/`sort`/`uniq`/`cut`/`sed`/`cat`/`tee`/`echo`/`printf` (the common GNU flags, not all: `ls` takes `-a` but not `-l`;
+`sort -k`/`-t`, `cat -n` and printf `%x` and `%.Nf` run in-process too). `tee` takes `-a`, and each file it names
+is judged as a `>` redirection is, so `tee ../f` is refused and writes nothing. On Windows, an unsupported flag
 runs a GNU-compatible program if one is on PATH, and otherwise exits 2 naming the flag (elsewhere it runs the
 PATH program of that name). Other commands run as the
 real program, directly, through the effect gate — never via `bash -c` — so
