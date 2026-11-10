@@ -511,7 +511,7 @@ fn written_path_argument(builtin: &str) -> Option<usize> {
     let canonical = crate::signature::signature_of(builtin).map_or(builtin, |s| s.name);
     match canonical {
         "file_write" | "file_append" | "save_json" | "file_patch" | "file_replace"
-        | "file_insert" | "file_edit" | "touch" => Some(0),
+        | "file_insert" | "file_edit" | "touch" | "rm" => Some(0),
         "file_copy" => Some(1),
         _ => None,
     }
@@ -654,6 +654,24 @@ pub fn record_paths(builtin: &str, effect: Effect, paths: Vec<String>) {
     for path in paths {
         push_capture(&mut s, builtin, effect, path);
     }
+}
+
+/// Whether [`record_before`] would keep the bytes of `path`, so that undo can
+/// put them back: the journal is on, and the path is a regular file within the
+/// capture limits. A delete asks this before it runs, so that the approval it
+/// is asked for says `reversible` only when the journal will restore the file.
+pub fn would_capture(path: &str) -> bool {
+    if !enabled() {
+        return false;
+    }
+    let Ok(meta) = std::fs::metadata(path) else {
+        return false;
+    };
+    if !meta.is_file() {
+        return false;
+    }
+    let size = meta.len() as usize;
+    size <= MAX_FILE_BYTES && held_bytes(&state()) + size <= MAX_TOTAL_BYTES
 }
 
 /// Capture `path` as a new step. The caller holds the journal lock, so the

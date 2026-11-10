@@ -62666,13 +62666,15 @@ pub fn bi_rm(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
         );
         return Err(crate::safety::not_found("rm", "file", &path));
     }
+    // Reversible exactly when the journal keeps this file's bytes for undo: the
+    // journal is on (agent mode) and the file is one it can capture.
     crate::safety::guard(crate::safety::GuardCtx {
         builtin: "rm",
         effect: crate::safety::Effect::Destructive,
         what: "delete",
         targets: vec![path.clone()],
         blast_radius: serde_json::json!({ "files": 1 }),
-        reversible: false,
+        reversible: crate::journal::would_capture(&path),
         fs_paths: true,
     })?;
     crate::tx::snapshot(&path); // record pre-delete state if a transaction is active
