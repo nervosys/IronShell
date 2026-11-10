@@ -10,8 +10,9 @@
 //!
 //! The first thing a model writes is bash (`docs/LANGUAGE_FIRST_PRINCIPLES.md`
 //! §3: borrow the syntax, own the semantics). So this runs the ordinary subset
-//! itself: pipelines, `&&`/`||`/`;`, variables and `export`, `$(…)`, quoting,
-//! globs, redirections, `if`/`for`/`while`/`until`, `test`/`[`, and text-mode
+//! itself: pipelines, `&&`/`||`/`;`, variables, `export`, `set -e`/`-u`/
+//! `-o pipefail`, `$(…)`, quoting, globs, redirections,
+//! `if`/`for`/`while`/`until`, `test`/`[`, and text-mode
 //! versions of the utilities agents reach for, written to print what GNU
 //! coreutils prints. A command it does not implement runs as that program,
 //! directly -- never through a shell -- after `safety::guard_exec`, so agent
@@ -976,19 +977,105 @@ const UNSUPPORTED_BUILTINS: &[&str] = &[
 ];
 
 /// The construct a command word names when the subset does not run it: a
-/// builtin in [`UNSUPPORTED_BUILTINS`], `set` with any option (`set --` is
-/// run), or `export` with an option. `None` for every other command.
+/// builtin in [`UNSUPPORTED_BUILTINS`], a `set` option the subset does not run
+/// (see [`set_refusal`]), or `export` with an option. `None` for every other
+/// command.
 fn unsupported_builtin(words: &[Word]) -> Option<String> {
     let name = plain(words.first()?)?;
     let arg = words.get(1).and_then(plain);
     match name {
-        "set" if arg != Some("--") => Some("`set` with options".into()),
+        "set" => set_refusal(&words[1..]),
         "export" => arg
             .filter(|a| a.len() > 1 && a.starts_with('-'))
             .map(|a| format!("`export {a}`")),
         n if UNSUPPORTED_BUILTINS.contains(&n) => Some(format!("`{n}` builtin")),
         _ => None,
     }
+}
+
+/// A `set` option the subset runs.
+#[derive(Clone, Copy)]
+enum SetOpt {
+    Errexit,
+    Nounset,
+    Pipefail,
+}
+
+/// What one `set` command does: the options it turns on (`true`) or off, and
+/// the new positional parameters when it has `--`.
+struct SetArgs {
+    changes: Vec<(SetOpt, bool)>,
+    positional: Option<Vec<String>>,
+}
+
+/// The arguments of `set` the subset runs: `-e`/`+e`, `-u`/`+u`, and `-o`/`+o`
+/// with `errexit`, `nounset` or `pipefail`, in clusters too (`-eu`, `-euo
+/// pipefail`). `--` ends the options, and what follows is the new parameters.
+/// Any other option or argument is an `Err` naming it, as the refusal does.
+fn parse_set(args: &[String]) -> Result<SetArgs, String> {
+    let mut out = SetArgs {
+        changes: Vec::new(),
+        positional: None,
+    };
+    let mut k = 0;
+    while k < args.len() {
+        let a = args[k].as_str();
+        if a == "--" {
+            out.positional = Some(args[k + 1..].to_vec());
+            break;
+        }
+        let sign = a
+            .chars()
+            .next()
+            .filter(|c| (*c == '-' || *c == '+') && a.len() > 1);
+        let Some(sign) = sign else {
+            return Err(format!("`set {a}`"));
+        };
+        let on = sign == '-';
+        for c in a[1..].chars() {
+            let opt = match c {
+                'e' => SetOpt::Errexit,
+                'u' => SetOpt::Nounset,
+                'o' => {
+                    // `-o name` takes the next argument as its name.
+                    k += 1;
+                    match args.get(k).map(String::as_str) {
+                        Some("errexit") => SetOpt::Errexit,
+                        Some("nounset") => SetOpt::Nounset,
+                        Some("pipefail") => SetOpt::Pipefail,
+                        Some(name) => return Err(format!("`set {sign}o {name}`")),
+                        None => return Err(format!("`set {sign}o`")),
+                    }
+                }
+                _ => return Err(format!("`set {sign}{c}`")),
+            };
+            out.changes.push((opt, on));
+        }
+        k += 1;
+    }
+    Ok(out)
+}
+
+/// Why a `set` command is refused before anything runs, or `None` when the
+/// subset runs it. Only the options are looked at: the words after `--` are
+/// the new parameters, whatever they are. A `set` with no arguments lists the
+/// variables, which the subset does not do.
+fn set_refusal(args: &[Word]) -> Option<String> {
+    if args.is_empty() {
+        return Some("`set` with no options".into());
+    }
+    let dashes = args.iter().position(|w| plain(w) == Some("--"));
+    let mut words = Vec::new();
+    for w in &args[..dashes.unwrap_or(args.len())] {
+        match plain(w) {
+            Some(s) => words.push(s.to_string()),
+            None => return Some("`set` with options".into()),
+        }
+    }
+    if dashes.is_some() {
+        words.push("--".into());
+    }
+    parse_set(&words).err()
 }
 
 /// `NAME=value` at the start of a simple command.
@@ -1222,6 +1309,21 @@ struct Shell {
     positional: Vec<String>,
     /// `$0`: the script's path, or `ish` when there is no script file (`-c`).
     script_name: String,
+    /// `set -e`: a failing command ends the script, unless `errexit_off` says
+    /// it is exempt.
+    errexit: bool,
+    /// `set -u`: an unset parameter is an error (see [`Shell::note_unbound`]).
+    nounset: bool,
+    /// `set -o pipefail`: a pipeline fails when any of its commands does.
+    pipefail: bool,
+    /// How many enclosing contexts exempt the commands in them from errexit:
+    /// an `if`/`elif`/`while`/`until` condition, every operand of a `&&`/`||`
+    /// list but the last, and a `!` pipeline. Counted, not flagged, because
+    /// these nest: a list inside a condition is exempt all the way down.
+    errexit_off: u32,
+    /// The first unset parameter an expansion met under `set -u`. The command
+    /// that made the expansion takes it and exits, before it runs.
+    unbound: Option<String>,
 }
 
 const SHELL_NAME: &str = "ish";
@@ -1260,6 +1362,24 @@ impl Shell {
             return;
         }
         self.vars.insert(name.to_string(), value);
+    }
+
+    /// Under `set -u`, an unset parameter is noted for the command whose
+    /// expansion met it, which then exits (see [`Shell::unbound_refusal`]).
+    /// The first one wins.
+    fn note_unbound(&mut self, name: &str) {
+        if self.nounset && self.unbound.is_none() {
+            self.unbound = Some(name.to_string());
+        }
+    }
+
+    /// The exit for a command whose expansion met an unset parameter under
+    /// `set -u`: the message goes to stderr, and the script ends with status 1.
+    fn unbound_refusal(&mut self, sink: &mut Sink) -> Option<Flow> {
+        let name = self.unbound.take()?;
+        sink.eline(&format!("{SHELL_NAME}: {name}: unbound variable"));
+        self.last = 1;
+        Some(Flow::Exit(1))
     }
 
     // ── expansion ──
@@ -1304,7 +1424,11 @@ impl Shell {
                     have = true;
                 }
                 Part::Len(name) => {
-                    let n = self.var(name).unwrap_or_default().chars().count();
+                    let value = self.var(name);
+                    if value.is_none() {
+                        self.note_unbound(name);
+                    }
+                    let n = value.unwrap_or_default().chars().count();
                     for c in n.to_string().chars() {
                         cur.push(c);
                         mask.push(false);
@@ -1433,6 +1557,14 @@ impl Shell {
 
     fn param(&mut self, name: &str, op: &Option<(String, Word)>, stdin: &mut Input) -> String {
         let value = self.var(name);
+        // Unset is an error under `set -u`, except for `$@` and `$*`, and for
+        // the forms that supply their own value: `${x:-d}`, `${x-d}`, `${x:=d}`
+        // and `${x+v}`.
+        let supplies =
+            matches!(op, Some((o, _)) if matches!(o.trim_start_matches(':'), "-" | "=" | "+"));
+        if value.is_none() && !supplies && name != "@" && name != "*" {
+            self.note_unbound(name);
+        }
         let Some((op, word)) = op else {
             return value.unwrap_or_default();
         };
@@ -1485,7 +1617,15 @@ impl Shell {
         };
         let mut sink = Sink::new(ErrMode::Real);
         let mut input = Input::buf(Vec::new());
+        // Bash does not pass `set -e` into a command substitution (it clears
+        // it unless `inherit_errexit` is set), so a failing command in one does
+        // not end the script. `set -u` is inherited. An unbound parameter the
+        // substitution's own commands meet is theirs; the caller's is kept.
+        let errexit = std::mem::replace(&mut self.errexit, false);
+        let unbound = self.unbound.take();
         let flow = self.run_list(&list, &mut input, &mut sink);
+        self.errexit = errexit;
+        self.unbound = unbound;
         self.last = match flow {
             Flow::Next(c) | Flow::Exit(c) => c,
             _ => 0,
@@ -1511,15 +1651,18 @@ impl Shell {
     }
 
     fn run_and_or(&mut self, ao: &AndOr, stdin: &mut Input, sink: &mut Sink) -> Flow {
-        let mut status = match self.run_pipeline(&ao.first, stdin, sink) {
+        // Every operand of the list but the last is exempt from errexit: a
+        // failure there is the list's business, not the script's.
+        let n = ao.rest.len();
+        let mut status = match self.run_exempt(&ao.first, n > 0, stdin, sink) {
             Flow::Next(c) => c,
             other => return other,
         };
-        for (and, p) in &ao.rest {
+        for (k, (and, p)) in ao.rest.iter().enumerate() {
             if (*and && status != 0) || (!*and && status == 0) {
                 continue;
             }
-            status = match self.run_pipeline(p, stdin, sink) {
+            status = match self.run_exempt(p, k + 1 < n, stdin, sink) {
                 Flow::Next(c) => c,
                 other => return other,
             };
@@ -1527,7 +1670,29 @@ impl Shell {
         Flow::Next(status)
     }
 
+    /// [`Shell::run_pipeline`], with errexit suppressed when `exempt`.
+    fn run_exempt(
+        &mut self,
+        p: &Pipeline,
+        exempt: bool,
+        stdin: &mut Input,
+        sink: &mut Sink,
+    ) -> Flow {
+        if exempt {
+            self.errexit_off += 1;
+        }
+        let flow = self.run_pipeline(p, stdin, sink);
+        if exempt {
+            self.errexit_off -= 1;
+        }
+        flow
+    }
+
     fn run_pipeline(&mut self, p: &Pipeline, stdin: &mut Input, sink: &mut Sink) -> Flow {
+        // A `!` pipeline is exempt from errexit, and so is everything in it.
+        if p.negate {
+            self.errexit_off += 1;
+        }
         let flow = if p.cmds.len() == 1 {
             self.run_cmd(&p.cmds[0], stdin, sink)
         } else {
@@ -1543,10 +1708,14 @@ impl Shell {
                 let mut stage = Sink::new(sink.err_mode);
                 // Each stage of a pipeline is a subshell in bash: `exit` and
                 // `break` end the stage, not the script.
-                status = match self.run_cmd(cmd, input, &mut stage) {
+                let c = match self.run_cmd(cmd, input, &mut stage) {
                     Flow::Next(c) | Flow::Exit(c) => c,
                     _ => 0,
                 };
+                // Under `pipefail` the status is the last failing stage's, or 0.
+                if !self.pipefail || c != 0 {
+                    status = c;
+                }
                 if stage.err_mode == ErrMode::Capture {
                     sink.err.extend_from_slice(&stage.err);
                 }
@@ -1558,10 +1727,17 @@ impl Shell {
             }
             Flow::Next(status)
         };
+        if p.negate {
+            self.errexit_off -= 1;
+        }
         match flow {
             Flow::Next(c) => {
                 let c = if p.negate { i32::from(c == 0) } else { c };
                 self.last = c;
+                // errexit: a failing pipeline ends the script, unless exempt.
+                if c != 0 && !p.negate && self.errexit && self.errexit_off == 0 {
+                    return Flow::Exit(c);
+                }
                 Flow::Next(c)
             }
             other => other,
@@ -1573,6 +1749,7 @@ impl Shell {
         // left by an expansion no site checks (a `case` word, a `${x:-...}`
         // operand) must not refuse this, unrelated, command.
         self.glob_refused = None;
+        self.unbound = None;
         let redirs = match cmd {
             Cmd::Simple { redirs, .. }
             | Cmd::If { redirs, .. }
@@ -1594,6 +1771,9 @@ impl Shell {
             match r {
                 Redir::In(w) => {
                     let path = self.expand(w, stdin).join(" ");
+                    if let Some(flow) = self.unbound_refusal(sink) {
+                        return flow;
+                    }
                     if let Some(refusal) = jail_refusal(SHELL_NAME, &path) {
                         sink.eline(&refusal);
                         self.last = 1;
@@ -1640,6 +1820,9 @@ impl Shell {
                 Redir::Dup { .. } => {}
             }
         }
+        if let Some(flow) = self.unbound_refusal(sink) {
+            return flow;
+        }
         if let Some(flow) = self.glob_refusal(sink) {
             return flow;
         }
@@ -1677,7 +1860,11 @@ impl Shell {
                 ..
             } => {
                 for (cond, body) in branches {
-                    match self.run_list(cond, stdin, sink) {
+                    // A condition is exempt from errexit.
+                    self.errexit_off += 1;
+                    let flow = self.run_list(cond, stdin, sink);
+                    self.errexit_off -= 1;
+                    match flow {
                         Flow::Next(0) => return self.run_list(body, stdin, sink),
                         Flow::Next(_) => {}
                         other => return other,
@@ -1697,6 +1884,9 @@ impl Shell {
                 let mut values = Vec::new();
                 for w in items {
                     values.extend(self.expand(w, stdin));
+                }
+                if let Some(flow) = self.unbound_refusal(sink) {
+                    return flow;
                 }
                 if let Some(flow) = self.glob_refusal(sink) {
                     return flow;
@@ -1733,7 +1923,11 @@ impl Shell {
                         sink.eline(&format!("{SHELL_NAME}: loop ran 10,000,000 times; stopped"));
                         return Flow::Next(1);
                     }
-                    let c = match self.run_list(cond, stdin, sink) {
+                    // The condition is exempt from errexit.
+                    self.errexit_off += 1;
+                    let flow = self.run_list(cond, stdin, sink);
+                    self.errexit_off -= 1;
+                    let c = match flow {
                         Flow::Next(c) => c,
                         other => return other,
                     };
@@ -1784,6 +1978,9 @@ impl Shell {
             } else {
                 env_overrides.push((name.clone(), v));
             }
+        }
+        if let Some(flow) = self.unbound_refusal(sink) {
+            return flow;
         }
         if let Some(flow) = self.glob_refusal(sink) {
             return flow;
@@ -1859,12 +2056,30 @@ impl Shell {
                 }
                 return Flow::Next(0);
             }
+            // `set -e`, `-u`, `-o pipefail` and their `+` forms switch options;
             // `set -- a b` replaces the positional parameters, `set --` clears
-            // them. Other `set` options are not in the subset and keep their
-            // behaviour (a program named `set`, which is not found).
-            "set" if args.first().map(String::as_str) == Some("--") => {
-                self.positional = args[1..].to_vec();
-                return Flow::Next(0);
+            // them. Anything else was refused before the script ran (see
+            // `set_refusal`), so the error here is a guard only.
+            "set" => {
+                return match parse_set(args) {
+                    Ok(set) => {
+                        for (opt, on) in set.changes {
+                            match opt {
+                                SetOpt::Errexit => self.errexit = on,
+                                SetOpt::Nounset => self.nounset = on,
+                                SetOpt::Pipefail => self.pipefail = on,
+                            }
+                        }
+                        if let Some(params) = set.positional {
+                            self.positional = params;
+                        }
+                        Flow::Next(0)
+                    }
+                    Err(what) => {
+                        sink.eline(&format!("{SHELL_NAME}: {what} is not in the subset"));
+                        Flow::Next(2)
+                    }
+                };
             }
             // `shift [N]` drops the first N positional parameters (1 by default).
             // A count past the last parameter changes nothing and fails, as bash.
@@ -4927,6 +5142,11 @@ fn run_named(src: &str, script_name: &str, args: &[String]) -> Option<i32> {
         glob_refused: None,
         positional: args.to_vec(),
         script_name: script_name.to_string(),
+        errexit: false,
+        nounset: false,
+        pipefail: false,
+        errexit_off: 0,
+        unbound: None,
     };
     let mut stdin = Input::real();
     let mut sink = Sink::new(ErrMode::Real);
@@ -5093,6 +5313,11 @@ mod tests {
             glob_refused: None,
             positional: Vec::new(),
             script_name: SHELL_NAME.to_string(),
+            errexit: false,
+            nounset: false,
+            pipefail: false,
+            errexit_off: 0,
+            unbound: None,
         };
         let mut stdin = Input::buf(Vec::new());
         let mut sink = Sink::new(ErrMode::Null);
