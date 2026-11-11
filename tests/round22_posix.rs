@@ -109,3 +109,47 @@ fn an_arithmetic_refusal_is_at_the_dollar_sign() {
         "{err}"
     );
 }
+
+#[test]
+fn an_unterminated_quote_is_a_parse_error_at_the_quote() {
+    // A lexical syntax error is E_PARSE (exit 2), not a refusal of the subset:
+    // nothing ran, and the message names the quote's own position.
+    let sb = Sandbox::new("unterminated-human");
+    let out = sb.run_args(&["-b", "-c", "echo 'oops"]);
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(out.status.code(), Some(2), "{err}");
+    assert!(out.stdout.is_empty());
+    assert!(
+        err.contains("error[E_PARSE]: unterminated quote at line 1, column 6"),
+        "{err}"
+    );
+    assert!(!err.contains("E_POLICY_DENY"), "{err}");
+    assert!(!err.contains("in-process POSIX subset"), "{err}");
+}
+
+#[test]
+fn an_unterminated_quote_in_agent_mode_is_e_parse_not_a_policy_refusal() {
+    let sb = Sandbox::new("unterminated-agent");
+    let out = sb.run_args(&["--agent", "--workspace", ".", "-b", "-c", "echo 'oops"]);
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(out.status.code(), Some(2), "{err}");
+    assert!(out.stdout.is_empty());
+    assert!(err.contains("E_PARSE"), "{err}");
+    assert!(
+        err.contains("unterminated quote at line 1, column 6"),
+        "{err}"
+    );
+    assert!(!err.contains("E_POLICY_DENY"), "{err}");
+    assert!(!err.contains("in-process POSIX subset"), "{err}");
+}
+
+#[test]
+fn a_stray_close_paren_is_a_parse_error() {
+    let sb = Sandbox::new("stray-paren");
+    let (out, err, code) = sb.run("echo a )\n");
+    assert_eq!((out.as_str(), code), ("", 2), "{err}");
+    assert!(
+        err.contains("error[E_PARSE]: syntax error near unexpected token `)' at line 1, column 8"),
+        "{err}"
+    );
+}

@@ -158,6 +158,17 @@ fn unsupported_at<T>(what: &str, at: usize) -> PResult<T> {
     })
 }
 
+/// A syntax error for input that ends inside a construct, placed at the
+/// construct's opening character. It is wrong in every shell, so it is E_PARSE
+/// and not a refusal of the subset: `syntax` says what closes it.
+fn unterminated<T>(what: &str, open: usize, closing: &str) -> PResult<T> {
+    Err(Unsupported {
+        what: what.to_string(),
+        at: Some(open),
+        syntax: Some(format!("the construct is never closed: add {closing}")),
+    })
+}
+
 /// `e`, placed at `at`. An error found while lexing the operand of a `${...}`
 /// reports the expansion's own position, not an offset into the operand.
 fn at_outer(mut e: Unsupported, at: usize) -> Unsupported {
@@ -370,7 +381,11 @@ impl<'a> Lexer<'a> {
         }
         match self.peek() {
             None | Some('\n') | Some(';') | Some('|') | Some('&') | Some('<') | Some('>') => {
-                unsupported("redirection without a target")
+                Err(Unsupported {
+                    what: "redirection without a target".into(),
+                    at: None,
+                    syntax: Some("a redirection needs a file name after its operator".into()),
+                })
             }
             _ => self.word(),
         }
@@ -402,11 +417,14 @@ impl<'a> Lexer<'a> {
                 }
                 '\'' => {
                     flush(&mut lit, &mut parts);
+                    let open = self.i;
                     self.i += 1;
                     let mut q = String::new();
                     loop {
                         match self.peek() {
-                            None => return unsupported("unterminated quote"),
+                            None => {
+                                return unterminated("unterminated quote", open, "a `'`");
+                            }
                             Some('\'') => {
                                 self.i += 1;
                                 break;
@@ -447,12 +465,14 @@ impl<'a> Lexer<'a> {
     }
 
     fn double_quoted(&mut self, parts: &mut Word) -> PResult<()> {
+        // Called just past the opening quote.
+        let open = self.i.saturating_sub(1);
         let mut lit = String::new();
         // An empty "" is still an argument.
         let mut any = false;
         loop {
             match self.peek() {
-                None => return unsupported("unterminated quote"),
+                None => return unterminated("unterminated quote", open, "a `\"`"),
                 Some('"') => {
                     self.i += 1;
                     break;
@@ -470,7 +490,7 @@ impl<'a> Lexer<'a> {
                             lit.push(e);
                             self.i += 1;
                         }
-                        None => return unsupported("unterminated quote"),
+                        None => return unterminated("unterminated quote", open, "a `\"`"),
                     }
                 }
                 Some('$') => {
@@ -501,11 +521,12 @@ impl<'a> Lexer<'a> {
     }
 
     fn backquote(&mut self) -> PResult<String> {
+        let open = self.i;
         self.i += 1;
         let mut body = String::new();
         loop {
             match self.peek() {
-                None => return unsupported("unterminated backquote"),
+                None => return unterminated("unterminated backquote", open, "a closing backquote"),
                 Some('`') => {
                     self.i += 1;
                     return Ok(body);
@@ -553,7 +574,7 @@ impl<'a> Lexer<'a> {
                     self.i += 1;
                 }
                 if self.peek() != Some(')') {
-                    return unsupported_at("unterminated $(", dollar_at);
+                    return unterminated("unterminated $(", dollar_at, "a `)`");
                 }
                 let body: String = self.s[start..self.i].iter().collect();
                 self.i += 1;
@@ -626,7 +647,7 @@ impl<'a> Lexer<'a> {
                     self.i += 1;
                 }
                 if self.peek() != Some('}') {
-                    return unsupported_at("unterminated ${", dollar_at);
+                    return unterminated("unterminated ${", dollar_at, "a `}`");
                 }
                 let inner: Vec<char> = self.s[start..self.i].to_vec();
                 self.i += 1;
@@ -841,6 +862,13 @@ impl Parser {
         self.syntax(hint)
     }
 
+    /// A `)` where a command starts or ends with nothing open for it to close.
+    /// A subshell's `(` is refused as a construct; its `)` alone is a syntax
+    /// error in every shell.
+    fn stray_paren<T>(&self) -> PResult<T> {
+        self.syntax("there is no open `(` for this `)` to close".to_string())
+    }
+
     /// The keyword `kw` was wanted here, for the construct open at this point.
     fn expected<T>(&self, kw: &str) -> PResult<T> {
         let hint = match self.open.last() {
@@ -897,6 +925,7 @@ impl Parser {
                     }
                 }
                 Some(Tok::Redir(_)) => {}
+                Some(Tok::RParen) => return self.stray_paren(),
                 Some(t) => return unsupported(operator_what(t)),
             }
             out.push(self.and_or()?);
@@ -1109,7 +1138,8 @@ impl Parser {
                 {
                     return unsupported("function definition");
                 }
-                Some(t @ (Tok::LParen | Tok::RParen | Tok::DSemi)) => {
+                Some(Tok::RParen) => return self.stray_paren(),
+                Some(t @ (Tok::LParen | Tok::DSemi)) => {
                     return unsupported(operator_what(t));
                 }
                 _ => break,
