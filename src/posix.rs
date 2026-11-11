@@ -290,7 +290,13 @@ impl<'a> Lexer<'a> {
         self.i += 1;
         if c == '<' {
             match self.peek() {
-                Some('<') => return unsupported("here-document (<<)"),
+                Some('<') => {
+                    return if self.peek_at(1) == Some('<') {
+                        unsupported("here-string (<<<)")
+                    } else {
+                        unsupported("here-document (<<)")
+                    };
+                }
                 Some('(') => return unsupported("process substitution"),
                 Some('&') | Some('>') => return unsupported("<& / <>"),
                 _ => {}
@@ -5886,6 +5892,9 @@ pub fn refusal_hint(construct: &str) -> String {
         "process substitution" => "write the output to a file first, then read the file".into(),
         c if c.starts_with("here-document") => {
             "pass the text with printf '%s\\n' ... | cmd, or write it to a file first".into()
+        }
+        c if c.starts_with("here-string") => {
+            "pipe it instead: printf '%s\\n' \"abc\" | grep -c b, or write the text to a file first".into()
         }
         c if c.starts_with("${...} operator") => match op {
             "%" | "%%" => "strip a suffix with sed, e.g. sed 's/PATTERN$//'".into(),
