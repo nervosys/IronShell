@@ -990,9 +990,9 @@ pub static SIGNATURES: &[Signature] = &[
     },
     Signature {
         name: "file_mkdir", category: None, subject_required: false, aliases: &["mkdir", "mkdirp"],
-        subject: Some(Ty::Str), params: &[], returns: "Record",
-        doc: "Create a directory and missing parents, returning path, created and success.",
-        examples: &[(r#"let d = fs_tempdir("ae_mkdir"); let result = file_mkdir(d + "/a/b"); rmdir(d, true); result.created"#, "true")],
+        subject: None, params: &[opt("path", Ty::Str, "the directory to create; its missing parents are created too. Piped, the path is the input")], returns: "Record",
+        doc: "Create a directory and missing parents, returning path, created and success. Direct mkdir(path) or path | mkdir.",
+        examples: &[(r#"let d = fs_tempdir("ae_mkdir"); let result = mkdir(d + "/a/b"); rmdir(d, true); result.created"#, "true"), (r#"let d = fs_tempdir("ae_mkdir_pipe"); let result = (d + "/p") | mkdir; rmdir(d, true); result.created"#, "true")],
     },
     Signature {
         name: "syntax_get", category: None, subject_required: false, aliases: &[],
@@ -2754,7 +2754,7 @@ pub static SIGNATURES: &[Signature] = &[
         subject: None,
         params: &[req("path", Ty::Str, "directory to walk recursively")],
         returns: "Array",
-        doc: "Every file beneath a directory, recursively. At most 1,000,000 entries; more is E_BUDGET_EXCEEDED.",
+        doc: "The files and the directories beneath a directory, recursively, as paths: a directory is listed as well as what is in it. At most 1,000,000 entries; more is E_BUDGET_EXCEEDED.",
         examples: &[(r#"(fs_walk("tests") | len) > 0"#, "true")],
     },
     Signature {

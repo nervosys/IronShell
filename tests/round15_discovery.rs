@@ -177,6 +177,51 @@ fn mv_of_a_file_to_a_new_name_still_moves_it() {
     );
 }
 
+// ── declarations describe what the builtins take ────────────────────────
+
+#[test]
+fn ontology_describes_mkdir_with_its_path_parameter() {
+    let def = iron_shell::agent_api::ontology_describe_json("mkdir");
+    let params = def
+        .get("parameters")
+        .and_then(|v| v.as_array())
+        .expect("parameters");
+    assert!(
+        params
+            .iter()
+            .any(|p| p.get("name").and_then(|v| v.as_str()) == Some("path")),
+        "mkdir declares no path parameter: {def}"
+    );
+    let sig = def.get("signature").and_then(|v| v.as_str()).unwrap_or("");
+    assert!(sig.contains("path"), "{sig}");
+    assert!(!sig.starts_with("String |"), "{sig}");
+}
+
+#[test]
+fn mkdir_takes_its_path_directly_and_through_a_pipe() {
+    assert_eq!(
+        run("let d = fs_tempdir(\"ae_r15_mkdir\"); \
+             let r = mkdir(d + \"/tree/c/d\"); \
+             rmdir(d, true); r.created"),
+        Value::Bool(true)
+    );
+    assert_eq!(
+        run("let d = fs_tempdir(\"ae_r15_mkdir_pipe\"); \
+             let r = (d + \"/p\") | mkdir; \
+             rmdir(d, true); r.created"),
+        Value::Bool(true)
+    );
+}
+
+#[test]
+fn fs_walk_is_documented_as_returning_directories_too() {
+    let doc = iron_shell::signature::signature_of("fs_walk")
+        .expect("fs_walk is declared")
+        .doc;
+    assert!(doc.contains("directories"), "{doc}");
+    assert!(!doc.starts_with("Every file beneath"), "{doc}");
+}
+
 // ── the CLI says where to look ──────────────────────────────────────────
 
 /// `ish` with its arguments, in a temporary session directory of its own.
