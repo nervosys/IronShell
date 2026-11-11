@@ -19,6 +19,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - A path that does not exist is judged by where it would land: `sub/../missing.txt` inside the workspace is E_NOT_FOUND, `nosuchdir/../../x` is E_OUTSIDE_WORKSPACE, and a dangling link is judged by its target, so a link to a missing file outside the workspace is refused.
 - Agent-mode hints no longer suggest setting `IRONSHELL_ALLOW_SH`.
 - An in-place write in agent mode (a redirection, `tee`, `touch`, `file_append`, `dd_copy` on Windows, `git_ignore`) reads the link count from the file it opened, before truncating, so a hard link planted between the check and the write is refused too. The HTTP `execute` endpoints parse their body as stdin does, so they refuse a repeated top-level key and answer a malformed body with a coded JSON error.
+- `IRONSHELL_REFUSE_LINKED_READS=1` (an operator setting, kept for child processes) refuses reads through a hard link under the workspace jail, in builtins and in `ish -b`. It is off by default, because package stores such as pnpm's hard-link `node_modules`.
+- A repeated key is refused at any depth of an agent request, naming its path (`args.path`), and on the MCP stdio transport (-32600).
 
 ### Changed
 
@@ -164,6 +166,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `x = x + e` on a mutable String or Array, and a lambda body `acc + e` (as in `reduce`), append in place instead of copying, so building a string step by step is linear.
 - `apply`'s copy step, and `dd_copy` under the jail on every platform, write through a destination handle whose link count was checked, closing the last check-then-write windows.
 - `ontology_describe` of a builtin carries the same `json_schema` the `describe` action returns. `file_append`'s docs say content is appended exactly as given, with no newline added.
+- `sql` and `sql_value` declare `query` as one optional String again (it rendered as `query...: String` and took extra Strings). A trailing Array still binds: the last argument may skip one optional parameter whose type it does not match.
 
 
 ## [14.0.1] - 2026-11-08
