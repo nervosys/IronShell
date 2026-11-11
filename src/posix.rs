@@ -6100,8 +6100,16 @@ pub fn refusal(src: &str) -> Option<Refusal> {
 
 /// The hint that goes with a refusal of `construct`: what to do instead.
 pub fn refusal_hint(construct: &str) -> String {
+    // Agent mode refuses to set IRONSHELL_ALLOW_SH (an IRONSHELL_ name, see
+    // safety::env_name_steers_children), so the suggestion to set it is not
+    // offered there. The rest of each hint stands.
+    let agent = crate::safety::current_mode() == crate::safety::Mode::Agent;
     if construct.starts_with("arithmetic expansion") {
-        return "arithmetic is not in the subset; compute in ish (ish -c) or set IRONSHELL_ALLOW_SH=true to run the unsupported parts through bash -lc, outside the effect gate".into();
+        return if agent {
+            "arithmetic is not in the subset; compute in ish (ish -c)".into()
+        } else {
+            "arithmetic is not in the subset; compute in ish (ish -c) or set IRONSHELL_ALLOW_SH=true to run the unsupported parts through bash -lc, outside the effect gate".into()
+        };
     }
     // The operator of a `${name...}` form, named in its refusal as `op`.
     let op = construct.split('`').nth(1).unwrap_or("");
@@ -6129,6 +6137,9 @@ pub fn refusal_hint(construct: &str) -> String {
         },
         _ => "run the supported parts on their own".into(),
     };
+    if agent {
+        return tip;
+    }
     format!("{tip}. Otherwise set IRONSHELL_ALLOW_SH=true to run the unsupported parts through bash -lc, outside the effect gate")
 }
 

@@ -215,3 +215,25 @@ fn an_agent_cannot_reset_the_script_depth_for_a_script() {
     assert!(err.contains("E_POLICY_DENY"), "{err}");
     assert!(out.stdout.is_empty(), "the script must not run");
 }
+
+// ── Item 4: agent mode is not told to set IRONSHELL_ALLOW_SH ──
+
+/// Agent mode refuses to set IRONSHELL_ALLOW_SH, so a refusal in agent mode
+/// keeps what to do instead and drops the suggestion to set that variable.
+#[test]
+fn agent_mode_refusals_do_not_offer_allow_sh() {
+    let dir = scratch("hint_agent");
+    let builtin = ish_agent(&dir, &["-b", "-c", "eval 'echo hi'"]);
+    let err = stderr_of(&builtin);
+    assert!(!builtin.status.success(), "{err}");
+    assert!(err.contains("`eval` builtin"), "{err}");
+    assert!(
+        !err.contains("IRONSHELL_ALLOW_SH"),
+        "agent mode must not be told to set it: {err}"
+    );
+
+    let arithmetic = ish_agent(&dir, &["-b", "-c", "echo $((1+2))"]);
+    let err = stderr_of(&arithmetic);
+    assert!(err.contains("compute in ish (ish -c)"), "{err}");
+    assert!(!err.contains("IRONSHELL_ALLOW_SH"), "{err}");
+}
