@@ -141,6 +141,21 @@ fn read_collapses_blank_ifs_and_keeps_empty_fields_for_a_comma() {
 }
 
 #[test]
+fn a_last_line_without_a_newline_is_read_but_fails() {
+    let dir = scratch("read_no_newline");
+    std::fs::write(dir.join("f.txt"), "a\nb").expect("write f");
+    let s = script(
+        &dir,
+        "r.sh",
+        "while read -r line; do echo \"[$line]\"; done < f.txt\necho \"last=[$line]\"\nread -r v < f.txt; echo \"status=$?\"\n",
+    );
+    let (code, out, err) = ish(&dir, &["-b", &s]);
+    assert_eq!(code, 0, "{err}");
+    // The loop body does not run for `b`, but `read` still assigned it.
+    assert_eq!(out, "[a]\nlast=[b]\nstatus=0");
+}
+
+#[test]
 fn a_here_string_is_named_and_refused_before_anything_runs() {
     let dir = scratch("here_string");
     let s = script(&dir, "h.sh", "echo before\ngrep -c b <<< \"abc\"\n");

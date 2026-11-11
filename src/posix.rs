@@ -1374,11 +1374,12 @@ impl Input {
         self.pos = self.data.len();
         out
     }
-    /// One line without its newline, `Ok(None)` at end of input, or `Err` for
-    /// a line from the terminal or a pipe longer than [`READ_LINE_MAX`]. A
-    /// line was read whole however long, and one that was not UTF-8 read as
-    /// the end of input; consumed lines are now dropped, not kept.
-    fn read_line(&mut self) -> Result<Option<Vec<u8>>, String> {
+    /// One line without its newline and whether a newline ended it, `Ok(None)`
+    /// at end of input, or `Err` for a line from the terminal or a pipe longer
+    /// than [`READ_LINE_MAX`]. A line was read whole however long, and one that
+    /// was not UTF-8 read as the end of input; consumed lines are now dropped,
+    /// not kept. A last line with no newline is returned with `false`.
+    fn read_line(&mut self) -> Result<Option<(Vec<u8>, bool)>, String> {
         use std::io::BufRead;
         loop {
             if let Some(nl) = self.data[self.pos..].iter().position(|&b| b == b'\n') {
@@ -1388,7 +1389,7 @@ impl Input {
                     self.data.drain(..self.pos);
                     self.pos = 0;
                 }
-                return Ok(Some(line));
+                return Ok(Some((line, true)));
             }
             if self.real && !self.eof {
                 let mut chunk = Vec::new();
@@ -1410,7 +1411,7 @@ impl Input {
             if self.pos < self.data.len() {
                 let line = self.data[self.pos..].to_vec();
                 self.pos = self.data.len();
-                return Ok(Some(line));
+                return Ok(Some((line, false)));
             }
             return Ok(None);
         }
@@ -2498,18 +2499,18 @@ impl Shell {
             let _ = writeln!(std::io::stderr(), "{refusal}");
             return 126;
         }
-        let line = match stdin.read_line() {
-            Ok(line) => line,
+        let (line, terminated) = match stdin.read_line() {
+            Ok(Some(found)) => found,
+            Ok(None) => {
+                for n in &names {
+                    self.set_var(n, String::new());
+                }
+                return 1;
+            }
             Err(why) => {
                 let _ = writeln!(std::io::stderr(), "{SHELL_NAME}: read: {why}");
                 return 2;
             }
-        };
-        let Some(line) = line else {
-            for n in &names {
-                self.set_var(n, String::new());
-            }
-            return 1;
         };
         let mut line = String::from_utf8_lossy(&line).into_owned();
         if !raw {
@@ -2526,9 +2527,12 @@ impl Shell {
             }
             line = s;
         }
+        // As bash does, a last line with no newline is assigned but reads as
+        // a failure, so `while read` does not run its body for it.
+        let status = if terminated { 0 } else { 1 };
         if default_reply {
             self.set_var("REPLY", line);
-            return 0;
+            return status;
         }
         let ifs = match env.iter().rev().find(|(n, _)| n == "IFS") {
             Some((_, v)) => v.clone(),
@@ -2541,7 +2545,7 @@ impl Shell {
         for (n, v) in names.iter().zip(read_fields(&line, &ifs, names.len())) {
             self.set_var(n, v);
         }
-        0
+        status
     }
 
     /// Run a program that is not implemented here: directly, with no shell in
