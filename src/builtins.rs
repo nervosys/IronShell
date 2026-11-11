@@ -8764,6 +8764,11 @@ fn read_named_files(builtin: &str, path_str: &str) -> Result<String> {
         }
         let mut all = String::new();
         for p in files {
+            // A file that ends without a newline would run into the next one, so
+            // `lines` would count the two as one line. Separate them.
+            if !all.is_empty() && !all.ends_with('\n') {
+                all.push('\n');
+            }
             all.push_str(&read_named_file(builtin, p)?);
         }
         return Ok(all);

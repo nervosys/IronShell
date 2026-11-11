@@ -66,3 +66,30 @@ fn an_audit_entry_for_a_content_write_names_the_path_but_not_the_content() {
     assert!(!log.contains("hunter2hunter2"), "{log}");
     assert!(!log.contains("rotated-pw-9988"), "{log}");
 }
+
+// ── Item 3: cat over several files keeps a file that lacks a newline apart ──
+
+fn run_in_process(src: &str) -> iron_shell::value::Value {
+    let mut env = iron_shell::modules::env_with_modules();
+    let stmts = iron_shell::parser::parse_program(src).expect("parses");
+    iron_shell::eval::eval_program(&stmts, &mut env).expect("runs")
+}
+
+#[test]
+fn cat_of_files_without_trailing_newlines_keeps_their_lines_apart() {
+    let dir = scratch("cat_join");
+    let proj = dir.join("proj");
+    std::fs::write(proj.join("a.txt"), "one").expect("write a");
+    std::fs::write(proj.join("b.txt"), "two").expect("write b");
+    let glob = format!("{}/*.txt", proj.display().to_string().replace('\\', "/"));
+
+    // The glob matches in either order; both orders must keep the lines apart.
+    let text = run_in_process(&format!(r#"cat("{glob}")"#));
+    assert!(
+        text == iron_shell::value::Value::Str("one\ntwo".into())
+            || text == iron_shell::value::Value::Str("two\none".into()),
+        "{text:?}"
+    );
+    let n = run_in_process(&format!(r#"cat("{glob}") | lines | len"#));
+    assert_eq!(n, iron_shell::value::Value::Int(2));
+}
