@@ -916,6 +916,13 @@ pub fn eval_expr(expr: &Expr, env: &mut Env) -> Result<Value> {
         // ---------- binary ----------
         Expr::Binary { left, op, right } => {
             let a = eval_expr(left, env)?;
+            // `&&` and `||` short-circuit, as in every shell and C-family
+            // language: `x != "" && x >= 1` must not compare "" with 1.
+            match op {
+                BinOp::And if !is_truthy(&a) => return Ok(Value::Bool(false)),
+                BinOp::Or if is_truthy(&a) => return Ok(Value::Bool(true)),
+                _ => {}
+            }
             let b = eval_expr(right, env)?;
             binop(op, a, b)
         }
