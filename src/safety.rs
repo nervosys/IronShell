@@ -7668,6 +7668,49 @@ fn centrally_enforced(effect: Effect) -> bool {
     )
 }
 
+/// Declared parameter names whose argument names a path or a host. Only these
+/// reach the audit log for a call the gate does not judge.
+const TARGET_PARAMS: &[&str] = &[
+    "path",
+    "file",
+    "filename",
+    "file_path",
+    "source",
+    "destination",
+    "dest",
+    "target",
+    "url",
+    "host",
+    "hostname",
+];
+
+/// The audit resource for a call the gate does not judge: the arguments that
+/// the signature declares as paths or hosts, with a count in place of the rest.
+/// Content arguments (the text a write puts in a file, a request body) are never
+/// named, because the log outlives the call and would keep its secrets.
+fn target_resource(builtin: &str, args: &[crate::value::Value]) -> String {
+    let named: Vec<&str> = crate::signature::signature_of(builtin)
+        .map(|sig| {
+            sig.params
+                .iter()
+                .enumerate()
+                .filter(|(_, p)| !p.variadic && TARGET_PARAMS.contains(&p.name))
+                .filter_map(|(i, _)| match args.get(i) {
+                    Some(crate::value::Value::Str(s)) => Some(s.as_str()),
+                    _ => None,
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    let rest = args.len() - named.len();
+    match (named.is_empty(), rest) {
+        (true, 0) => String::new(),
+        (true, n) => format!("<{n} arguments>"),
+        (false, 0) => named.join(", "),
+        (false, n) => format!("{}, <{n} more arguments>", named.join(", ")),
+    }
+}
+
 /// Enforce policy for a builtin that does not guard itself. Called from the
 /// dispatcher immediately before a builtin runs.
 ///
@@ -7839,7 +7882,7 @@ pub fn guard_dispatch(builtin: &str, args: &[crate::value::Value]) -> Result<(),
                 builtin,
                 effect,
                 "allow_unguarded",
-                &args_as_strings.join(", "),
+                &target_resource(builtin, args),
                 json!({ "central": true }),
             );
         }
