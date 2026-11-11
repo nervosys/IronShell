@@ -21,6 +21,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - An in-place write in agent mode (a redirection, `tee`, `touch`, `file_append`, `dd_copy` on Windows, `git_ignore`) reads the link count from the file it opened, before truncating, so a hard link planted between the check and the write is refused too. The HTTP `execute` endpoints parse their body as stdin does, so they refuse a repeated top-level key and answer a malformed body with a coded JSON error.
 - `IRONSHELL_REFUSE_LINKED_READS=1` (an operator setting, kept for child processes) refuses reads through a hard link under the workspace jail, in builtins and in `ish -b`. It is off by default, because package stores such as pnpm's hard-link `node_modules`.
 - A repeated key is refused at any depth of an agent request, naming its path (`args.path`), and on the MCP stdio transport (-32600).
+- `ish --explain` judges the POSIX subset's file operands (`rm`, `tee`, `mkdir`, `touch`, `cp`, `mv`) against the workspace jail, so a plan that would be refused is reported as denied rather than allowed.
+- An audit chain key that is set but too short is named once on stderr and in `audit_verify`'s note, instead of being dropped silently. A hash mismatch in an unkeyed chain says it was edited or corrupted, not tampered with: an unkeyed chain cannot tell which.
 
 ### Changed
 
@@ -69,6 +71,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - An empty cell in a CSV column whose other cells are all numbers reads as null, so `sum`, `avg` and SQL `count(column)` skip it. Text columns keep "".
 - Tool schemas list a builtin's subject first and its parameters in declaration order. A subject is required in tool schemas when the builtin has no parameters, and so is a parameter that defaults to the pipeline input (`file_write`'s `content`): a tool call has no pipeline.
 - MCP `initialize` answers the client's protocol version when it is 2025-06-18, 2025-03-26 or 2024-11-05, and 2025-06-18 otherwise. An agent request that repeats a top-level key is refused as E_PARSE.
+- `&&` and `||` take Bool operands, as `if` and `where` do; another value is E_TYPE naming it. A Lambda operand points at `|` binding loosest.
+- CSV columns are typed as a whole: a column is numeric only when every non-empty cell is a number without a leading `+` or a leading zero (`007` stays text), Bool when every cell is `true` or `false`, and otherwise all Strings.
+- `to_csv` without a columns Array writes the sorted union of every record's keys, not only the first record's.
+- `json_stringify` with piped input takes an indent as its first argument.
+- A relative path under the jail is joined with the platform's separator throughout, so the journal and audit log record `proj\src\a.py` on Windows, not `proj\src/a.py`.
 
 ### Added
 
@@ -112,6 +119,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `undo({id: N})` undoes one journal step out of order; it is refused (E_BAD_STATE) when a later step changed the same file, unless `force: true`.
 - `audit_verify` notes when the audit chain has no key, naming IRONSHELL_AUDIT_KEY and IRONSHELL_AUDIT_LOG.
 - `file_write`, `file_patch` and `file_replace` add a `note` when the file they replaced was hard-linked: its other links keep the old content.
+- `date_diff` units `weeks`, `months` and `years`; months and years are calendar units, the inverse of `date_add`.
+- `enumerate(arr)` gives `{index, value}` records; `grep(pattern, path, {line_numbers: true})` gives `{file, line, text}` records.
+- `to_json(v, indent)` and `json_stringify(v, indent)` take an indent of 0 to 8; `json_set(path, key_path, value)` edits one value in a JSON file in place, keeping its key order and indentation.
+- `sql` and `sql_value` take an Array of records as the first argument, as piped rows.
+- String literals accept `\0`, `\'` and `\xHH` up to `\x7F`.
 
 ### Fixed
 
@@ -167,6 +179,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `apply`'s copy step, and `dd_copy` under the jail on every platform, write through a destination handle whose link count was checked, closing the last check-then-write windows.
 - `ontology_describe` of a builtin carries the same `json_schema` the `describe` action returns. `file_append`'s docs say content is appended exactly as given, with no newline added.
 - `sql` and `sql_value` declare `query` as one optional String again (it rendered as `query...: String` and took extra Strings). A trailing Array still binds: the last argument may skip one optional parameter whose type it does not match.
+- In agent mode, `help(...)`, `ontology_describe(...)` and `handle(id)` print the value whole instead of minting another handle.
+- `tee` of a non-String value writes plain text, not the terminal's coloured rendering; a variable listing's preview is plain too.
+- Agent-mode errors carry no ANSI escape codes. Undo ids are never reused within a session, an undone step keeps its id, and an unknown id says "step".
+- `ish -b`: `sed s///` reads an escaped delimiter as a literal; an unterminated quote or a stray parenthesis is E_PARSE (exit 2); a refused construct inside a word names its own column.
+- Appending to an array in a loop (`a = a + [x]`) is linear, not quadratic.
+- Assignments in the wrong place (`a[0] = v`, two expressions on a line) and a non-Bool `where` predicate name the fix.
+- `csv_columns("name.csv")` for a file that does not exist is E_NOT_FOUND, not CSV text with one column.
+- `sql` names a missing source and a non-Array params argument; its params doc lists SQLite's placeholder forms and that a String binds as text.
+- `delete`, `remove`, `unlink` and similar spellings suggest `rm`; `path.*` suggests the path builtins, not `math`.
 
 
 ## [14.0.1] - 2026-11-08
