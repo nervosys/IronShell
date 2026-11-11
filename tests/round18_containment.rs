@@ -174,3 +174,44 @@ fn a_script_outside_the_workspace_is_refused_before_it_runs() {
         );
     }
 }
+
+// ── Item 3: a script that runs itself stops, and the depth cannot be reset ──
+
+/// A script that calls itself nests children until the limit, then stops with
+/// the budget refusal instead of exhausting memory.
+#[cfg(windows)]
+#[test]
+fn a_script_that_runs_itself_stops_at_the_nesting_limit() {
+    let dir = scratch("script_bomb");
+    std::fs::write(
+        dir.join("proj").join("bomb.sh"),
+        "#!/bin/sh\n./bomb.sh \"$1x\"\n",
+    )
+    .unwrap();
+    let out = ish_agent(&dir, &["-b", "-c", "./bomb.sh x"]);
+    let err = stderr_of(&out);
+    assert!(
+        !out.status.success(),
+        "a self-calling script must stop: {err}"
+    );
+    assert!(
+        err.contains("scripts nest at most 32 deep"),
+        "the refusal names the limit: {err}"
+    );
+    assert!(err.contains("E_BUDGET_EXCEEDED"), "{err}");
+}
+
+/// The depth variable is an IRONSHELL_ name, so an agent cannot set it for a
+/// script to reset the count.
+#[cfg(windows)]
+#[test]
+fn an_agent_cannot_reset_the_script_depth_for_a_script() {
+    let dir = scratch("depth_reset");
+    std::fs::write(dir.join("proj").join("x.sh"), "#!/bin/sh\necho hi\n").unwrap();
+    let out = ish_agent(&dir, &["-b", "-c", "IRONSHELL_SCRIPT_DEPTH=0 ./x.sh"]);
+    let err = stderr_of(&out);
+    assert!(!out.status.success(), "{err}");
+    assert!(err.contains("IRONSHELL_SCRIPT_DEPTH"), "{err}");
+    assert!(err.contains("E_POLICY_DENY"), "{err}");
+    assert!(out.stdout.is_empty(), "the script must not run");
+}

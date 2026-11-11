@@ -2650,6 +2650,25 @@ impl Shell {
             sink.eline(&refusal);
             return 126;
         }
+        // A script that runs itself would nest children until memory ran out.
+        // Each child is told its depth, and a script at the limit starts none.
+        let depth = match std::env::var_os(SCRIPT_DEPTH_ENV) {
+            None => 0,
+            // A depth that cannot be read is treated as the limit: when unsure, refuse.
+            Some(text) => text
+                .to_str()
+                .and_then(|t| t.parse::<u32>().ok())
+                .unwrap_or(MAX_SCRIPT_DEPTH),
+        };
+        if depth >= MAX_SCRIPT_DEPTH {
+            let refusal = crate::safety::budget_exceeded(
+                "posix",
+                format!("{script}: scripts nest at most {MAX_SCRIPT_DEPTH} deep"),
+                "a script is probably running itself; add a stop condition",
+            );
+            sink.eline(&refusal.to_string());
+            return 1;
+        }
         let exe = match std::env::current_exe() {
             Ok(exe) => exe,
             Err(e) => {
@@ -2675,6 +2694,8 @@ impl Shell {
         for (n, v) in env {
             cmd.env(n, v);
         }
+        // Set last, so no inherited or exported value can stand in for it.
+        cmd.env(SCRIPT_DEPTH_ENV, (depth + 1).to_string());
         crate::safety::strip_ironshell_env(&mut cmd);
         self.run_piped(cmd, script, stdin, sink)
     }
@@ -2741,6 +2762,14 @@ impl Shell {
         out.status.code().unwrap_or(128)
     }
 }
+
+/// The environment variable that counts how deeply scripts nest: a script's
+/// child `ish -b` gets one more than its own. It is an `IRONSHELL_` name, so an
+/// agent cannot set or reset it (see `safety::env_name_steers_children`).
+const SCRIPT_DEPTH_ENV: &str = "IRONSHELL_SCRIPT_DEPTH";
+
+/// The deepest a script may nest: a script at this depth starts no child.
+const MAX_SCRIPT_DEPTH: u32 = 32;
 
 /// The script a command runs in a child shell (see `Shell::run_script_child`):
 /// `FILE args...` where FILE is a path (it has a slash or a backslash) to a

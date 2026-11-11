@@ -2185,6 +2185,9 @@ const CONFINING_ENV: &[&str] = &[
     "IRONSHELL_PRINCIPAL",
     "IRONSHELL_AUDIT_LOG",
     "IRONSHELL_AUDIT_REQUIRED",
+    // The script nesting depth (posix.rs). Kept, so a child `ish` started by a
+    // program rather than by a script still counts its depth from the parent.
+    "IRONSHELL_SCRIPT_DEPTH",
 ];
 
 /// Remove the shell's own `IRONSHELL_*` settings from a child's environment.
