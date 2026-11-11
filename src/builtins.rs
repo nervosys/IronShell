@@ -23300,11 +23300,21 @@ fn bi_apply(args: Vec<Value>, _input: Option<Value>) -> Result<Value> {
             }
             "rm" => std::fs::remove_file(path),
             "mkdir" => std::fs::create_dir_all(path),
-            // std::fs::copy truncates an existing destination and writes it in place.
+            // A copy truncates an existing destination and writes it in place,
+            // so the destination is opened first and its link count read from
+            // that handle, as for every in-place write.
             "copy" => {
-                crate::safety::refuse_hard_linked_write("apply", dest.as_deref().unwrap_or(""))
-                    .map_err(|e| std::io::Error::other(e.to_string()))
-                    .and_then(|()| std::fs::copy(path, dest.as_deref().unwrap_or("")).map(|_| ()))
+                // The source is opened first: a missing source must leave an
+                // existing destination as it was.
+                let to = dest.as_deref().unwrap_or("");
+                std::fs::File::open(path).and_then(|mut from| {
+                    crate::safety::refuse_hard_linked_write("apply", to)
+                        .and_then(|()| {
+                            crate::safety::open_in_place("apply", std::path::Path::new(to), false)
+                        })
+                        .map_err(|e| std::io::Error::other(e.to_string()))
+                        .and_then(|mut out| std::io::copy(&mut from, &mut out).map(|_| ()))
+                })
             }
             "move" => std::fs::rename(path, dest.as_deref().unwrap_or("")),
             _ => Ok(()),
