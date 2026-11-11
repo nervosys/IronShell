@@ -3972,17 +3972,34 @@ pub fn resolve_path_str(path: &str) -> String {
     if p.is_absolute() || !jail_enforced(current_mode()) {
         path.to_string()
     } else if std::env::var_os("IRONSHELL_WORKSPACE").is_some() {
-        workspace_root().join(p).to_string_lossy().to_string()
+        join_native(workspace_root(), path)
     } else {
         // No workspace was named, so a relative path means what it means to any
         // program: the working directory. The jail still judges the result
         // against the pinned root.
-        std::env::current_dir()
-            .unwrap_or_else(|_| workspace_root())
-            .join(p)
-            .to_string_lossy()
-            .to_string()
+        join_native(
+            std::env::current_dir().unwrap_or_else(|_| workspace_root()),
+            path,
+        )
     }
+}
+
+/// `base` joined with the relative `path` one component at a time, so the
+/// result uses the platform's separator throughout (`proj\src\a.py` on
+/// Windows, not `proj\src/a.py`) for the journal, the audit log and messages.
+/// `.` components are dropped; `..` is kept for the jail to judge. A trailing
+/// separator is kept, since it can say the path names a directory.
+fn join_native(mut base: std::path::PathBuf, path: &str) -> String {
+    for part in std::path::Path::new(path).components() {
+        if part != std::path::Component::CurDir {
+            base.push(part.as_os_str());
+        }
+    }
+    let mut text = base.to_string_lossy().into_owned();
+    if (path.ends_with('/') || path.ends_with('\\')) && !text.ends_with(std::path::MAIN_SEPARATOR) {
+        text.push(std::path::MAIN_SEPARATOR);
+    }
+    text
 }
 
 /// Test whether a (possibly non-existent) path is contained in the workspace
