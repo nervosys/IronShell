@@ -496,7 +496,7 @@ file               # => {read, write, exists, copy, move, patch, ...}
 
 - **Name**: IronShell
 - **Binary**: `ish`
-- **Language**: Rust (2021 edition, MSRV 1.88)
+- **Language**: Rust (2021 edition, MSRV 1.89)
 - **Version**: 14.0.1
 - **License**: AGPL-3.0-or-later (commercial dual-license available)
 - **Author**: Nervosys <contact@nervosys.ai>
