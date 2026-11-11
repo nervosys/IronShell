@@ -134,6 +134,29 @@ fn item3_an_unknown_module_member_says_to_drop_the_prefix() {
     assert!(hint.contains("nosuch_zz"), "{hint}");
 }
 
+// ── Item 7: a request that fails the same way is not retryable ──────────────
+
+#[test]
+fn item7_a_request_that_fails_the_same_way_again_is_not_retryable() {
+    for request in [
+        r#"{"action":"call","builtin":"upper","args":{"bogus":1}}"#,
+        r#"{"action":"call","builtin":"sqrt","args":[-1]}"#,
+        r#"{"action":"eval","code":"((("}"#,
+        r#"{"action":"describe","builtin":"no_such_builtin_zz"}"#,
+        "{}",
+    ] {
+        let (_, v) = execute_once(request);
+        assert_eq!(v["error"]["retryable"], json!(false), "{request}: {v}");
+    }
+}
+
+#[test]
+fn item7_a_failure_a_corrected_call_can_clear_stays_retryable() {
+    let (_, v) = execute_once(r#"{"action":"type_info","type_name":"no_such_type_zz"}"#);
+    assert_eq!(v["error"]["code"], json!("E_NOT_FOUND"), "{v}");
+    assert_eq!(v["error"]["retryable"], json!(true), "{v}");
+}
+
 // ── Item 6: sqrt of a negative number is a domain error ─────────────────────
 
 #[test]
