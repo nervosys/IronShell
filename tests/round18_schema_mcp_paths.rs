@@ -101,12 +101,14 @@ fn item1_a_subject_is_required_when_a_parameter_is_required() {
 
 #[test]
 fn item1_ontology_describe_lists_the_subject_and_marks_it_piped() {
+    // A builtin with no parameters cannot run without its subject, so a
+    // direct call (a tool call) must give it: required since round 20.
     let def = ontology_describe_json("upper");
     let params = def["parameters"].as_array().expect("parameters");
     assert_eq!(params.len(), 1, "{def}");
     assert_eq!(params[0]["name"], "subject", "{def}");
     assert_eq!(params[0]["type"], "String", "{def}");
-    assert_eq!(params[0]["required"], false, "{def}");
+    assert_eq!(params[0]["required"], true, "{def}");
     assert_eq!(params[0]["subject"], true, "{def}");
     assert_eq!(def["signature"], "String | upper() -> String", "{def}");
 
