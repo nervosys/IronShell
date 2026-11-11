@@ -35,8 +35,13 @@ impl Dirs {
 
     /// Runs `ish` in agent mode, from the directory outside the workspace.
     fn ish(&self, args: &[&str]) -> Output {
-        Command::new(env!("CARGO_BIN_EXE_ish"))
-            .args(args)
+        self.ish_keyed(args, None)
+    }
+
+    /// `ish` with the audit chain key set to `key`, or unset when `None`.
+    fn ish_keyed(&self, args: &[&str], key: Option<&str>) -> Output {
+        let mut cmd = Command::new(env!("CARGO_BIN_EXE_ish"));
+        cmd.args(args)
             .current_dir(&self.outside)
             .env("NO_COLOR", "1")
             .env("IRONSHELL_MODE", "agent")
@@ -44,8 +49,12 @@ impl Dirs {
             .env("IRONSHELL_SESSION_DIR", &self.session)
             .env("IRONSHELL_JOURNAL", "on")
             .env("IRONSHELL_ALLOW_SH", "")
-            .output()
-            .expect("run ish")
+            .env_remove("IRONSHELL_AUDIT_KEY_FILE");
+        match key {
+            Some(k) => cmd.env("IRONSHELL_AUDIT_KEY", k),
+            None => cmd.env_remove("IRONSHELL_AUDIT_KEY"),
+        };
+        cmd.output().expect("run ish")
     }
 }
 
@@ -215,4 +224,29 @@ fn undo_by_id_with_force_undoes_past_a_later_step_and_an_unknown_id_is_refused()
 
     let missing = d.ish(&["-c", "undo({id: 99})"]);
     assert!(!missing.status.success(), "{missing:?}");
+}
+
+const UNKEYED_NOTE: &str = "the chain is not keyed";
+
+#[test]
+fn an_unkeyed_audit_chain_is_reported_as_unkeyed_with_a_note() {
+    let d = Dirs::new("auditkey");
+    let log = d.root.join("audit.log");
+    std::fs::write(&log, "").unwrap();
+    let call = format!(
+        r#"audit_verify("{}")"#,
+        log.display().to_string().replace('\\', "/")
+    );
+
+    let unkeyed = d.ish_keyed(&["-c", call.as_str()], None);
+    let text = String::from_utf8_lossy(&unkeyed.stdout).to_string();
+    assert!(text.contains("keyed"), "{unkeyed:?}");
+    assert!(text.contains(UNKEYED_NOTE), "{unkeyed:?}");
+    assert!(text.contains("IRONSHELL_AUDIT_LOG"), "{unkeyed:?}");
+
+    let key = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+    let keyed = d.ish_keyed(&["-c", call.as_str()], Some(key));
+    let text = String::from_utf8_lossy(&keyed.stdout).to_string();
+    assert!(text.contains("keyed"), "{keyed:?}");
+    assert!(!text.contains(UNKEYED_NOTE), "{keyed:?}");
 }

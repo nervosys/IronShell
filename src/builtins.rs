@@ -24458,9 +24458,13 @@ fn bi_approve(args: Vec<Value>, _input: Option<Value>) -> Result<Value> {
     Ok(Value::Record(rec))
 }
 
+/// The note on an `audit_verify` record whose chain is not keyed.
+const UNKEYED_AUDIT_NOTE: &str = "the chain is not keyed: set IRONSHELL_AUDIT_KEY so an edited log cannot be re-chained; set IRONSHELL_AUDIT_LOG to keep the log outside the workspace";
+
 /// audit_verify(path?) - Verify the tamper-evident, hash-chained audit log
 /// (§7.5). With no argument, verifies the currently active log. Returns a
-/// record {valid, entries, path} or {valid: false, error, path}.
+/// record {valid, entries, path, keyed} or {valid: false, error, path, keyed}.
+/// An unkeyed chain also carries a note.
 fn bi_audit_verify(args: Vec<Value>, _input: Option<Value>) -> Result<Value> {
     let path = match args.first() {
         Some(Value::Str(s)) if !s.is_empty() => std::path::PathBuf::from(s),
@@ -24492,10 +24496,14 @@ fn bi_audit_verify(args: Vec<Value>, _input: Option<Value>) -> Result<Value> {
     // Whether the chain is keyed says how much a `valid` answer proves: an
     // unkeyed chain can be rewritten end to end by anyone who can write the
     // file, so it shows corruption, not tampering.
-    rec.insert(
-        "keyed".to_string(),
-        Value::Bool(crate::safety::audit_key().is_some()),
-    );
+    let keyed = crate::safety::audit_key().is_some();
+    rec.insert("keyed".to_string(), Value::Bool(keyed));
+    if !keyed {
+        rec.insert(
+            "note".to_string(),
+            Value::Str(UNKEYED_AUDIT_NOTE.to_string()),
+        );
+    }
     match crate::safety::verify_audit(&path) {
         // A log with no entries is what a truncation leaves behind, so it
         // attests to nothing and must not read as valid.

@@ -8083,7 +8083,7 @@ pub static SIGNATURES: &[Signature] = &[
         subject: None,
         params: &[opt("path", Ty::Str, "the log to verify; the active log when absent")],
         returns: "Record",
-        doc: "Verify a hash-chained audit log. Returns {valid, entries, path, keyed}: valid is true only for a log whose every entry chains to the one before. A missing, unreadable, empty or broken log is valid: false with the reason in error. keyed says whether the chain was keyed (IRONSHELL_AUDIT_KEY); an unkeyed chain shows corruption, not tampering. A path that is not a string is E_BAD_ARG.",
+        doc: "Verify a hash-chained audit log. Returns {valid, entries, path, keyed}: valid is true only for a log whose every entry chains to the one before. A missing, unreadable, empty or broken log is valid: false with the reason in error. keyed says whether the chain was keyed (IRONSHELL_AUDIT_KEY); an unkeyed chain shows corruption, not tampering, and the record then also carries a note on how to key it. A path that is not a string is E_BAD_ARG.",
         examples: &[
             (r#"try { audit_verify() } catch e { e.error.code }"#, r#"E_BAD_STATE"#),
             (r#"audit_verify("no-such-audit-log-here.log").valid"#, r#"false"#),
