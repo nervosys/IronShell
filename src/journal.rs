@@ -135,6 +135,10 @@ pub struct Entry {
     /// step recorded before this was kept (its undo is not checked against
     /// later hand edits), and for a step that was never sealed.
     pub after: Option<Fingerprint>,
+    /// Entries recorded by one call that changed several paths (a move changes
+    /// both ends) share this id, and undo and redo count them as one step. None
+    /// for a call that changed one path.
+    pub group: Option<usize>,
 }
 
 impl Entry {
@@ -153,6 +157,8 @@ pub struct RedoEntry {
     pub path: String,
     /// Always `Contents` or `Absent`; anything else is never pushed.
     pub after: Before,
+    /// The group of the undone entry: see [`Entry::group`].
+    pub group: Option<usize>,
 }
 
 #[derive(Default)]
@@ -212,6 +218,10 @@ struct StoredEntry {
     /// from entries an earlier version wrote, which keep the old undo.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     after: Option<String>,
+    /// The step group, when the call changed several paths. Absent from entries
+    /// an earlier version wrote, which are single-path steps.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    group: Option<usize>,
 }
 
 impl From<&Entry> for StoredEntry {
@@ -229,6 +239,7 @@ impl From<&Entry> for StoredEntry {
             contents,
             irreversible,
             after: e.after.as_ref().map(Fingerprint::encode),
+            group: e.group,
         }
     }
 }
@@ -247,6 +258,7 @@ impl From<StoredEntry> for Entry {
             path: s.path,
             before,
             after: s.after.as_deref().map(Fingerprint::decode),
+            group: s.group,
         }
     }
 }
@@ -396,6 +408,7 @@ fn redo_as_entry(r: &RedoEntry) -> Entry {
         path: r.path.clone(),
         before: r.after.clone(),
         after: None,
+        group: r.group,
     }
 }
 
@@ -425,6 +438,7 @@ fn hydrate(s: &mut State) {
                     effect: e.effect,
                     path: e.path,
                     after,
+                    group: e.group,
                 }),
             })
             .collect();
@@ -624,7 +638,7 @@ fn capture(path: &str, used: usize) -> Result<Before, String> {
 /// candidate path: a new action ends the undone future.
 pub fn record_before(builtin: &str, effect: Effect, args: &[Value]) {
     NO_CHANGE.with(|c| c.set(false));
-    if !enabled() || is_journal_builtin(builtin) {
+    if !enabled() || is_journal_builtin(builtin) || records_its_own_steps(builtin) {
         return;
     }
     if !matches!(effect, Effect::WriteLocal | Effect::Destructive) {
@@ -634,8 +648,18 @@ pub fn record_before(builtin: &str, effect: Effect, args: &[Value]) {
     let mut s = state();
     discard_redo(&mut s);
     for path in paths {
-        push_capture(&mut s, builtin, effect, path);
+        push_capture(&mut s, builtin, effect, path, None);
     }
+}
+
+/// Builtins that record their own steps, because the dispatcher's guess at their
+/// paths is wrong for them: a move changes both ends ([`record_group`]), and a
+/// directory removal is recorded as irreversible ([`record_irreversible`]). The
+/// guess resolves a relative name against the process directory, not the
+/// workspace, so it captured the wrong path.
+fn records_its_own_steps(builtin: &str) -> bool {
+    let canonical = crate::signature::signature_of(builtin).map_or(builtin, |s| s.name);
+    matches!(canonical, "file_move" | "rmdir")
 }
 
 /// Record the pre-state of named paths that a builtin is about to write or
@@ -652,7 +676,28 @@ pub fn record_paths(builtin: &str, effect: Effect, paths: Vec<String>) {
     let mut s = state();
     discard_redo(&mut s);
     for path in paths {
-        push_capture(&mut s, builtin, effect, path);
+        push_capture(&mut s, builtin, effect, path, None);
+    }
+}
+
+/// Record the pre-state of every path one call changes, as one step: undo puts
+/// all of them back in a single `undo()`, and redo re-applies them together. For
+/// a call whose single argument does not name every path it writes, such as a
+/// move, which removes its source and replaces its destination. Same rules as
+/// [`record_before`]; call it after the call's approval has passed and before
+/// it changes anything.
+pub fn record_group(builtin: &str, effect: Effect, paths: Vec<String>) {
+    if !enabled() || is_journal_builtin(builtin) {
+        return;
+    }
+    if !matches!(effect, Effect::WriteLocal | Effect::Destructive) {
+        return;
+    }
+    let mut s = state();
+    discard_redo(&mut s);
+    let group = Some(s.journal.len() + 1);
+    for path in paths {
+        push_capture(&mut s, builtin, effect, path, group);
     }
 }
 
@@ -676,7 +721,7 @@ pub fn would_capture(path: &str) -> bool {
 
 /// Capture `path` as a new step. The caller holds the journal lock, so the
 /// budget it measures and the entry it pushes are one decision.
-fn push_capture(s: &mut State, builtin: &str, effect: Effect, path: String) {
+fn push_capture(s: &mut State, builtin: &str, effect: Effect, path: String, group: Option<usize>) {
     let used = held_bytes(s);
     let before = match capture(&path, used) {
         Ok(before) => before,
@@ -690,6 +735,7 @@ fn push_capture(s: &mut State, builtin: &str, effect: Effect, path: String) {
         path,
         before,
         after: None,
+        group,
     };
     persist(&entry);
     s.journal.push(entry);
@@ -730,6 +776,7 @@ pub fn record_irreversible(builtin: &str, effect: Effect, why: &str) {
         path: String::new(),
         before: Before::Irreversible(why.to_string()),
         after: None,
+        group: None,
     };
     persist(&entry);
     s.journal.push(entry);
@@ -819,7 +866,18 @@ pub enum Outcome {
 pub fn undo(n: usize, force: bool) -> Result<Vec<Outcome>, (String, bool)> {
     let mut s = state();
     let mut out = Vec::new();
-    for _ in 0..n {
+    // Steps counted so far, and the group of the step in progress: the entries
+    // of one group are one step, however many there are.
+    let mut steps = 0;
+    let mut group: Option<usize> = None;
+    while let Some(top) = s.journal.last() {
+        if group.is_none() || top.group != group {
+            if steps == n {
+                break;
+            }
+            steps += 1;
+            group = top.group;
+        }
         // Checked before anything is taken: a step left alone stays in the
         // journal, and nothing older is undone past it, so the order is kept.
         if let Some(why) = s
@@ -964,6 +1022,7 @@ fn push_redo(s: &mut State, undone: &Entry, after: Result<Before, String>) {
         effect: undone.effect.clone(),
         path: undone.path.clone(),
         after,
+        group: undone.group,
     };
     persist_redo(&r);
     s.redo.push(r);
@@ -980,7 +1039,17 @@ fn push_redo(s: &mut State, undone: &Entry, after: Result<Before, String>) {
 pub fn redo(n: usize) -> Vec<Outcome> {
     let mut s = state();
     let mut out = Vec::new();
-    for _ in 0..n {
+    // As in undo: the entries of one group are one step.
+    let mut steps = 0;
+    let mut group: Option<usize> = None;
+    while let Some(top) = s.redo.last() {
+        if group.is_none() || top.group != group {
+            if steps == n {
+                break;
+            }
+            steps += 1;
+            group = top.group;
+        }
         if let Some(why) = s
             .redo
             .last()
@@ -1066,6 +1135,7 @@ pub fn redo(n: usize) -> Vec<Outcome> {
                 // The state this re-apply wrote, so a later undo of it is
                 // checked the same way as any other step.
                 after: Fingerprint::of_before(&r.after),
+                group: r.group,
             };
             persist(&entry);
             s.journal.push(entry);
@@ -1291,6 +1361,7 @@ mod tests {
             path: "big.bin".into(),
             before: Before::Irreversible("too big".into()),
             after: None,
+            group: None,
         };
         assert!(!e.reversible());
     }
@@ -1304,6 +1375,7 @@ mod tests {
             path: ".".into(),
             before: Before::Irreversible("path is a directory; trees are not captured".into()),
             after: None,
+            group: None,
         };
         assert!(!e.reversible());
     }
@@ -1341,6 +1413,7 @@ mod tests {
             path: "secret.txt".into(),
             before: Before::Contents(b"secret".to_vec()),
             after: None,
+            group: None,
         };
         persist_in(Some(dir.clone()), &e);
 

@@ -4738,12 +4738,18 @@ fn guard_local_write(builtin: &str, path: &str) -> Result<String> {
 fn guard_local_move(builtin: &str, from: &str, to: &str) -> Result<(String, String)> {
     let from = crate::safety::resolve_path_str(from);
     let to = crate::safety::resolve_path_str(to);
+    // A move onto an existing path replaces it, and the approval says so. The
+    // destination is not probed when it names a remote share (see safety).
+    let mut blast_radius = serde_json::json!({ "from": from, "to": to });
+    if !crate::safety::names_a_remote_share(&to) && std::path::Path::new(&to).exists() {
+        blast_radius["overwrites"] = serde_json::json!(true);
+    }
     crate::safety::guard(crate::safety::GuardCtx {
         builtin,
         effect: crate::safety::Effect::Destructive,
         what: "move",
         targets: vec![from.clone(), to.clone()],
-        blast_radius: serde_json::json!({ "from": from, "to": to }),
+        blast_radius,
         reversible: false,
         fs_paths: true,
     })?;
@@ -35676,7 +35682,13 @@ fn bi_tar_create(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
     let out = guard_local_write("tar_create", &archive)?;
     let mut argv: Vec<&str> = vec!["-c", "-f", "-", "--"];
     argv.extend(members.iter().map(String::as_str));
-    tool_to_new_file("tar_create", "tar", &argv, &out)?;
+    // A .tar.gz or .tgz name gets a gzipped stream, which tar_list and
+    // tar_extract read back. The plain tar stream was written under that name.
+    if archive_kind(&archive) == Some("tar.gz") {
+        tool_to_new_gzip_file("tar_create", "tar", &argv, &out)?;
+    } else {
+        tool_to_new_file("tar_create", "tar", &argv, &out)?;
+    }
     Ok(Value::Bool(true))
 }
 
@@ -50706,6 +50718,13 @@ fn bi_file_move(args: Vec<Value>, _input: Option<Value>) -> Result<Value> {
     // destination.
     crate::tx::snapshot(&source);
     crate::tx::snapshot(&dest);
+    // Both ends are one journal step, recorded before the rename: one undo()
+    // puts the source back and restores what the move replaced.
+    crate::journal::record_group(
+        "file_move",
+        crate::safety::Effect::Destructive,
+        vec![source.clone(), dest.clone()],
+    );
     fs::rename(&source, &dest)
         .map_err(|error| crate::safety::fs_error("file_move", &dest, &error))?;
 
@@ -63030,6 +63049,15 @@ pub fn bi_rmdir(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
         reversible: false,
         fs_paths: true,
     })?;
+    // Undo does not restore a directory: the step is recorded as irreversible so
+    // that undo reports it as not reversed. A failed removal leaves no step.
+    crate::journal::record_irreversible(
+        "rmdir",
+        crate::safety::Effect::Destructive,
+        &format!(
+            "a directory removal is not journaled: {path} and what it held cannot be restored by undo"
+        ),
+    );
     crate::tx::snapshot(&path); // back up the directory tree if a transaction is active
                                 // `remove_dir_all` removes a symbolic link rather than following it, so a
                                 // link inside the workspace to a directory outside it is not a way out.
@@ -64903,6 +64931,41 @@ fn tool_to_new_file(builtin: &str, tool: &str, argv: &[&str], out_path: &str) ->
         FILE_OUTPUT_CAP,
     )
     .and_then(|(status, stderr)| tool_ok(builtin, tool, status, &stderr));
+    if result.is_err() {
+        remove_partial(out_path);
+    }
+    result
+}
+
+/// Runs a tool whose stdout is a stream, and writes that stream gzipped to the
+/// new file `out_path` (in-process, flate2: no gzip program is needed). Like
+/// [`tool_to_new_file`], an existing file is refused and a failed run removes it.
+fn tool_to_new_gzip_file(builtin: &str, tool: &str, argv: &[&str], out_path: &str) -> Result<()> {
+    let file = create_new_output(builtin, out_path)?;
+    let sink = std::sync::Arc::new(std::sync::Mutex::new(Vec::<u8>::new()));
+    let mut cmd = crate::safety::child_command(tool);
+    cmd.args(argv);
+    let result = run_tool(
+        builtin,
+        tool,
+        cmd,
+        None,
+        sink.clone(),
+        LOCAL_DEADLINE_SECS,
+        FILE_OUTPUT_CAP,
+    )
+    .and_then(|(status, stderr)| tool_ok(builtin, tool, status, &stderr))
+    .and_then(|()| {
+        let bytes = std::mem::take(
+            &mut *sink
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+        );
+        let mut enc = flate2::write::GzEncoder::new(file, flate2::Compression::default());
+        std::io::Write::write_all(&mut enc, &bytes)
+            .and_then(|()| enc.finish().map(|_| ()))
+            .map_err(|e| crate::safety::fs_error(builtin, out_path, &e))
+    });
     if result.is_err() {
         remove_partial(out_path);
     }
