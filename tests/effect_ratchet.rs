@@ -876,6 +876,11 @@ fn current_violations() -> Vec<(String, &'static str, String)> {
         let mut seen = HashSet::new();
         // Do not follow into itself.
         seen.insert(fn_name.clone());
+        // Nor into the dispatcher: `call("json_set", ...)` reaches every
+        // builtin through `call_with_input_inner`, which judges each one by its
+        // own name with `guard_dispatch`, so what it reaches is not `call`'s
+        // effect.
+        seen.insert("call_with_input_inner".to_string());
         if let Some((marker, chain)) = delegated_evidence(body, &all, FOLLOW_DEPTH, &mut seen, None)
         {
             out.push((name, marker, format!("delegates: {chain}")));

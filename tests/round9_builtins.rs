@@ -365,7 +365,9 @@ fn date_diff_truncates_a_partial_day_toward_zero() {
 
 #[test]
 fn date_diff_refuses_a_bad_unit_and_a_bad_date() {
-    assert!(refusal(r#"date_diff("2024-02-29", "2026-11-09", "weeks")"#).contains("E_BAD_ARG"));
+    assert!(
+        refusal(r#"date_diff("2024-02-29", "2026-11-09", "fortnights")"#).contains("E_BAD_ARG")
+    );
     let msg = refusal(r#"date_diff("2024-02-29", "nope")"#);
     assert!(msg.contains("E_BAD_VALUE"), "{msg}");
     assert!(msg.contains("nope"), "{msg}");

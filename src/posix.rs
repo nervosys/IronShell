@@ -211,10 +211,14 @@ impl<'a> Lexer<'a> {
             match self.token(c, &mut out) {
                 Ok(()) => at.extend(std::iter::repeat_n(start, out.len() - before)),
                 Err(mut e) => {
-                    e.at.get_or_insert(start);
+                    let bad_at = *e.at.get_or_insert(start);
                     out.truncate(before);
                     out.push(Tok::Bad);
-                    at.push(start);
+                    // At the refusal's own offset, which may be inside the
+                    // word (`n=$((` refuses at the `$`): placed at the word's
+                    // start, the parser's "unexpected operator" on this token
+                    // came first and hid the real refusal.
+                    at.push(bad_at);
                     return (out, at, Some(e));
                 }
             }

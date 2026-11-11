@@ -2516,7 +2516,7 @@ fn tee_overwrites_appends_and_formats_data_in_both_forms_and_aliases() {
     let fixture = Fixture::new();
     let path = fixture.path("output");
     let mut env = Env::default();
-    let rendered = Value::Int(2).to_string();
+    let rendered = Value::Int(2).to_display_string();
     assert_eq!(
         call("tee", vec![s(&path), s("a")], &mut env).unwrap(),
         s("a")

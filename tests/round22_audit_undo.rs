@@ -89,7 +89,9 @@ fn a_chain_key_set_but_too_short_warns_on_stderr_and_is_named_in_the_verify_note
 
     let stdout = String::from_utf8_lossy(&out.stdout).to_string();
     assert!(
-        stdout.contains("\"keyed\": false") || stdout.contains("\"keyed\":false"),
+        stdout.contains("\"keyed\": false")
+            || stdout.contains("\"keyed\":false")
+            || stdout.contains("keyed=false"),
         "{out:?}"
     );
     assert!(
@@ -117,7 +119,9 @@ fn a_chain_key_of_the_minimum_length_is_used_without_a_warning() {
     let stdout = String::from_utf8_lossy(&out.stdout).to_string();
     assert!(!stdout.contains("shorter than 32"), "{out:?}");
     assert!(
-        stdout.contains("\"keyed\": true") || stdout.contains("\"keyed\":true"),
+        stdout.contains("\"keyed\": true")
+            || stdout.contains("\"keyed\":true")
+            || stdout.contains("keyed=true"),
         "{out:?}"
     );
 }
