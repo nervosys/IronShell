@@ -19,7 +19,7 @@ AI agents today are forced to interact with shells designed decades ago for huma
 
 ## What Is IronShell?
 
-IronShell eliminates this entire class of failure. It provides a single cross-platform shell language with deterministic, typed output — every command returns structured data (Int, Float, String, Array, Record, Lambda), not raw text. An ontology built into the shell makes commands, their arguments, and their return types discoverable by AI agents without documentation scraping or prompt engineering. It has 1,100+ builtins (1,172 listed by its ontology; 1,438 callable names counting aliases) in 108 modules, native AI agents with multi-modal support, and implements the MCP, A2A, A2UI, and NANDA agentic protocols.
+IronShell eliminates this entire class of failure. It provides a single cross-platform shell language with deterministic, typed output — every command returns structured data (Int, Float, String, Array, Record, Lambda), not raw text. An ontology built into the shell makes commands, their arguments, and their return types discoverable by AI agents without documentation scraping or prompt engineering. It has 1,100+ builtins (1,173 listed by its ontology; 1,439 callable names counting aliases) in 108 modules, native AI agents with multi-modal support, and implements the MCP, A2A, A2UI, and NANDA agentic protocols.
 
 ## How To Use IronShell (for AI agents)
 
@@ -180,6 +180,12 @@ date_add("2024-02-28", 1, "days")    date_diff("2024-02-29", "2026-11-09")    da
 from_toml(to_toml({a: 1})).a           # TOML: to_toml(record) -> String; from_toml(text) -> Record
 merge({a: 1, b: 2}, {b: 3}).b         # merge(a, b): shallow Record merge, b's fields win; `a | merge(b)` pipes
 [1, 2] + [3]   # [1, 2, 3]: + concatenates Arrays
+mut r = {a: 1}
+r.a = 2                                # set a field of a `mut` record (r.a.b = v nests); other copies keep theirs
+rows | sql("select * from t where amount > ?", [100])   # a trailing Array binds the ? placeholders
+to_csv(rows, ["id", "customer"])       # column order (Records sort their keys); csv_columns("orders.csv") is the header in file order
+date_add("2024-01-31", 1, "months")    # "2024-02-29": weeks, months and years clamp to the month's end
+undo({id: 3})                          # undo one journal step out of order; refused if a later step changed the same file
 format_number(1234567.891, 2, ",")    # "1,234,567.89": exactly `decimals` digits, optional thousands separator
 
 # String interpolation

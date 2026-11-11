@@ -377,7 +377,7 @@ This document tracks the development progress of IronShell, the world's first ag
 - **Language:** Rust
 - **Source Lines:** ~198,000 (src/)
 - **Test Lines:** ~85,000 (tests/)
-- **Builtins:** 1,172 in the ontology (1,438 names including aliases)
+- **Builtins:** 1,173 in the ontology (1,439 names including aliases)
 - **Modules:** 108
 - **Themes:** 38
 
