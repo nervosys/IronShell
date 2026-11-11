@@ -49975,8 +49975,10 @@ fn bi_file_delete_lines(args: Vec<Value>, input: Option<Value>) -> Result<Value>
             let start = line_index(value)?;
             let end = args.next().map(line_index).transpose()?.unwrap_or(start);
             if end < start {
-                return Err(crate::safety::arg_err(
+                return Err(crate::safety::bad_arg_in(
+                    "delete_lines",
                     "delete_lines range end must not precede start",
+                    "give the first line, then a last line at or after it",
                 ));
             }
             Selection::Range(start, end)

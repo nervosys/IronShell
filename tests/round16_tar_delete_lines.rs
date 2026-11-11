@@ -37,11 +37,23 @@ fn ish_in(dir: &Path, code: &str) -> Output {
         .expect("run ish")
 }
 
-/// The structured refusal on the first stderr line.
+/// The refusal on stderr, as `{error: {code, message, hint}}`. Outside agent
+/// mode it is printed as text: `error[CODE]: message` then `  hint: ...`.
 fn first_error(out: &Output) -> serde_json::Value {
     let err = String::from_utf8_lossy(&out.stderr);
-    let line = err.lines().next().unwrap_or("");
-    serde_json::from_str(line).unwrap_or_else(|e| panic!("not JSON ({e}): {err:?}"))
+    if let Ok(json) = serde_json::from_str(err.lines().next().unwrap_or("")) {
+        return json;
+    }
+    let first = err.lines().next().unwrap_or("");
+    let (code, message) = first
+        .strip_prefix("error[")
+        .and_then(|rest| rest.split_once("]: "))
+        .unwrap_or_else(|| panic!("not a refusal: {err:?}"));
+    let hint = err
+        .lines()
+        .find_map(|l| l.trim_start().strip_prefix("hint: "))
+        .unwrap_or("");
+    serde_json::json!({ "error": { "code": code, "message": message, "hint": hint } })
 }
 
 #[test]
