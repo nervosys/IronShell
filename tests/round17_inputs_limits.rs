@@ -208,3 +208,48 @@ fn runaway_recursion_is_budget_exceeded_and_the_hint_covers_intended_depth() {
         "hint: {stderr}"
     );
 }
+
+#[test]
+fn json_parse_of_nesting_past_the_limit_says_so_and_gives_a_hint() {
+    let dir = scratch("json_nesting_parse");
+    let proj = dir.join("proj");
+    let deep = format!("{}{}", "[".repeat(129), "]".repeat(129));
+    let out = ish_in(&proj, &format!("json.parse(\"{deep}\")"));
+    assert!(
+        !out.status.success(),
+        "nesting past the limit must be refused"
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+    assert!(stderr.contains("E_BAD_VALUE"), "code: {stderr}");
+    assert!(
+        stderr.contains("JSON nested deeper than 128 levels is not read"),
+        "message: {stderr}"
+    );
+    assert!(
+        stderr.contains("flatten the document, or read it as text"),
+        "hint: {stderr}"
+    );
+    assert!(!stderr.contains("line 1 column"), "no position: {stderr}");
+}
+
+#[test]
+fn open_of_a_json_file_nested_past_the_limit_says_so_and_gives_a_hint() {
+    let dir = scratch("json_nesting_open");
+    let proj = dir.join("proj");
+    let deep = format!("{}{}", "[".repeat(129), "]".repeat(129));
+    std::fs::write(proj.join("deep.json"), deep).unwrap();
+    let out = ish_in(&proj, r#"open("deep.json")"#);
+    assert!(
+        !out.status.success(),
+        "nesting past the limit must be refused"
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+    assert!(
+        stderr.contains("JSON nested deeper than 128 levels is not read"),
+        "message: {stderr}"
+    );
+    assert!(
+        stderr.contains("flatten the document, or read it as text"),
+        "hint: {stderr}"
+    );
+}

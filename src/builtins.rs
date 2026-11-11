@@ -15829,15 +15829,11 @@ fn bi_json_parse(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
     let json_str = without_bom(json_str);
 
     let json_val: serde_json::Value = serde_json::from_str(&json_str).map_err(|e| {
+        let (detail, hint) = json_failure(&e);
         crate::safety::value_not_representable(
             "json_parse",
-            format!("json_parse: the text is not JSON: {e}"),
-            &format!(
-                "fix the JSON at line {}, column {}: {}",
-                e.line(),
-                e.column(),
-                json_message(&e)
-            ),
+            format!("json_parse: the text is not JSON: {detail}"),
+            &hint,
         )
     })?;
 
@@ -29678,6 +29674,28 @@ fn json_message(e: &serde_json::Error) -> String {
         .to_string()
 }
 
+/// The detail and the hint for JSON text that will not read. serde_json's
+/// recursion limit (128 levels of nesting) is not a position in the text: a
+/// document that nests deeper is well formed, so it is named as such, and the
+/// hint says what to do about it.
+fn json_failure(e: &serde_json::Error) -> (String, String) {
+    if e.to_string().starts_with("recursion limit exceeded") {
+        return (
+            "JSON nested deeper than 128 levels is not read".to_string(),
+            "flatten the document, or read it as text".to_string(),
+        );
+    }
+    (
+        e.to_string(),
+        format!(
+            "fix the JSON at line {}, column {}: {}",
+            e.line(),
+            e.column(),
+            json_message(e)
+        ),
+    )
+}
+
 fn bi_open(args: Vec<Value>, _input: Option<Value>) -> Result<Value> {
     let path = match args.first() {
         Some(Value::Str(s)) => s.clone(),
@@ -29706,17 +29724,8 @@ fn bi_open(args: Vec<Value>, _input: Option<Value>) -> Result<Value> {
     match ext.as_str() {
         "json" => {
             let j: serde_json::Value = serde_json::from_str(&text).map_err(|e| {
-                unparsed_data(
-                    &path,
-                    "JSON",
-                    &e.to_string(),
-                    format!(
-                        "fix the JSON at line {}, column {}: {}",
-                        e.line(),
-                        e.column(),
-                        json_message(&e)
-                    ),
-                )
+                let (detail, hint) = json_failure(&e);
+                unparsed_data(&path, "JSON", &detail, hint)
             })?;
             Ok(Value::from_json(&j))
         }
