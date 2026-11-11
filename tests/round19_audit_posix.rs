@@ -87,3 +87,35 @@ fn a_write_to_the_audit_log_is_refused_as_protected_policy() {
     assert!(!text.contains("E_OUTSIDE_WORKSPACE"), "{text}");
     assert!(text.contains("protected"), "the refusal says why: {text}");
 }
+
+// ── Item 3: the audit entry of a refused exec redacts secret shapes ──
+
+/// An external command refused for approval is audited with its command line.
+/// The secret shapes in that line are redacted before the entry is written, and
+/// the program name stays. No approval is given, so the Exec gate refuses before
+/// the program starts and nothing runs.
+#[test]
+fn a_refused_exec_audit_entry_redacts_secret_shapes() {
+    let dir = scratch("exec_redact");
+    std::fs::create_dir_all(dir.join("proj").join(".ironshell")).unwrap();
+    let out = ish_agent(
+        &dir,
+        &[
+            "-b",
+            "-c",
+            "rustc sk-abcdefghijklmnopqrstuvwx99 API_KEY=hunter2hunter2",
+        ],
+    );
+    let text = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        stderr_of(&out)
+    );
+    assert!(!out.status.success(), "the exec must be refused: {text}");
+    let log = std::fs::read_to_string(dir.join("proj").join(".ironshell").join("audit.log"))
+        .expect("the refusal is audited");
+    assert!(log.contains("needs_approval"), "{log}");
+    assert!(log.contains("rustc"), "the program name stays: {log}");
+    assert!(!log.contains("sk-abcdefghijklmnopqrstuvwx99"), "{log}");
+    assert!(!log.contains("hunter2hunter2"), "{log}");
+}
