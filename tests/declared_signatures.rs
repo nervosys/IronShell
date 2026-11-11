@@ -1192,14 +1192,6 @@ fn sqlite_query_no_longer_answers_calls_it_cannot_honour() {
     for (args, why) in [
         (vec![Value::Str(":memory:".into())], "no query"),
         (vec![], "no arguments at all"),
-        (
-            vec![
-                Value::Str(":memory:".into()),
-                Value::Str("SELECT ? AS n".into()),
-                Value::Array(vec![Value::Int(7)]),
-            ],
-            "bind parameters, which are not supported",
-        ),
     ] {
         let e = err("sqlite_query", args);
         assert!(
@@ -1207,6 +1199,18 @@ fn sqlite_query_no_longer_answers_calls_it_cannot_honour() {
             "{why}: answered instead of refusing, or refused uncoded: {e}"
         );
     }
+
+    // Bind parameters are supported since round 20 and bind, rather than being
+    // discarded as they were: `?` takes the 7.
+    let bound = ok(
+        "sqlite_query",
+        vec![
+            Value::Str(":memory:".into()),
+            Value::Str("SELECT ? AS n".into()),
+            Value::Array(vec![Value::Int(7)]),
+        ],
+    );
+    assert!(format!("{bound:?}").contains("Int(7)"), "{bound:?}");
 
     // The supported call is untouched, and still returns rows as records.
     let out = ok(
