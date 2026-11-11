@@ -507,6 +507,6 @@ file               # => {read, write, exists, copy, move, patch, ...}
 - **Categories**: command-line-utilities, development-tools
 - **Tests**: 3,572 passing on Windows, 3,582 on Linux (`cargo test --workspace`, 2026-10-23)
 - **Source**: ~198,000 lines (src/)
-- **Builtins**: 1,173 in the ontology (1,439 callable names with aliases) across 108 modules
+- **Builtins**: 1,188 in the ontology (1,400+ callable names with aliases) across 108 modules
 - **File Extension**: `.ish`
 - **MIME Type**: `text/x-ironshell`

@@ -19,7 +19,7 @@ AI agents today are forced to interact with shells designed decades ago for huma
 
 ## What Is IronShell?
 
-IronShell eliminates this entire class of failure. It provides a single cross-platform shell language with deterministic, typed output — every command returns structured data (Int, Float, String, Array, Record, Lambda), not raw text. An ontology built into the shell makes commands, their arguments, and their return types discoverable by AI agents without documentation scraping or prompt engineering. It has 1,100+ builtins (1,173 listed by its ontology; 1,439 callable names counting aliases) in 108 modules, native AI agents with multi-modal support, and implements the MCP, A2A, A2UI, and NANDA agentic protocols.
+IronShell eliminates this entire class of failure. It provides a single cross-platform shell language with deterministic, typed output — every command returns structured data (Int, Float, String, Array, Record, Lambda), not raw text. An ontology built into the shell makes commands, their arguments, and their return types discoverable by AI agents without documentation scraping or prompt engineering. It has 1,100+ builtins (1,188 listed by its ontology; 1,400+ callable names counting aliases) in 108 modules, native AI agents with multi-modal support, and implements the MCP, A2A, A2UI, and NANDA agentic protocols.
 
 ## How To Use IronShell (for AI agents)
 
