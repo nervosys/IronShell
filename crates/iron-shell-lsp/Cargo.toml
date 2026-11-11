@@ -11,7 +11,7 @@ documentation = "https://docs.rs/iron-shell-lsp"
 readme = "README.md"
 keywords = ["lsp", "shell", "language-server", "ironshell", "ide"]
 categories = ["development-tools", "command-line-utilities"]
-rust-version = "1.88"
+rust-version = "1.89"
 
 [[bin]]
 name = "iron-shell-lsp"

@@ -16,7 +16,7 @@ documentation = "https://nervosys.github.io/IronShell/book/"
 keywords = ["shell", "ai", "multi-agent", "functional", "multimodal"]
 categories = ["command-line-utilities", "development-tools"]
 readme = "README.md"
-rust-version = "1.88"
+rust-version = "1.89"
 exclude = [
     "assets/",
     "demos/",
@@ -270,7 +270,7 @@ libc = "0.2"
 # SQLite itself, so the builtin never depends on a `sqlite3` on PATH — the
 # dependency whose absence once zeroed E7's SQL arm. `hooks` is for the
 # authorizer that keeps a query from reaching the filesystem.
-rusqlite = { version = "0.40", features = ["bundled", "hooks", "limits"] }
+rusqlite = { version = "0.41", features = ["bundled", "hooks", "limits"] }
 # Only pulled in by the opt-in `vendored-tls` feature; `vendored` builds
 # OpenSSL from source so it cross-compiles rather than needing target headers.
 openssl = { version = "0.10", features = ["vendored"], optional = true }

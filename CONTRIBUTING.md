@@ -15,7 +15,7 @@ Thank you for your interest in contributing to IronShell! This document provides
 
 ### Prerequisites
 
-- Rust 1.88 or later
+- Rust 1.89 or later
 - Git
 - Basic understanding of Rust and shell scripting
 
@@ -251,7 +251,7 @@ result = data.user.name  // Panics here
 
 **Environment:**
 - OS: Windows 11
-- Rust: 1.88.0
+- Rust: 1.89.0
 - IronShell: 0.1.0
 ```
 
