@@ -247,7 +247,6 @@ fn forget_tally() {
     *TALLY.lock().unwrap_or_else(|e| e.into_inner()) = None;
 }
 
-/// The byte threshold in force. `0` means handles are disabled.
 thread_local! {
     /// Set by a builtin whose whole result is what the caller asked to read:
     /// `help`, `ontology_describe`, and `handle(id)` itself. Taking the next
@@ -266,6 +265,7 @@ pub fn take_show_whole() -> bool {
     SHOW_WHOLE.with(|c| c.replace(false))
 }
 
+/// The byte threshold in force. `0` means handles are disabled.
 pub fn threshold_bytes() -> usize {
     match std::env::var("IRONSHELL_HANDLE_BYTES") {
         Ok(v) => v.trim().parse().unwrap_or(DEFAULT_THRESHOLD_BYTES),
