@@ -1342,7 +1342,8 @@ fn ends_operand(prev: &Spanned, line: usize) -> bool {
         return false;
     }
     match prev.kind {
-        Tok::Ident => prev.text != "else",
+        // `else -1` and `not -1` take a negative operand.
+        Tok::Ident => !matches!(prev.text.as_str(), "else" | "not"),
         Tok::String
         | Tok::Int
         | Tok::Float
