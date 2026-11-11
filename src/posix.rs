@@ -1490,6 +1490,9 @@ enum Flow {
 enum Util {
     Done(i32),
     Decline,
+    /// Declined, naming the part of the command the subset does not support
+    /// (`the s command's flag `w``), so the refusal can say what it was.
+    DeclineFor(String),
 }
 
 struct Shell {
@@ -2448,10 +2451,12 @@ impl Shell {
             }
             _ => {}
         }
+        let mut why = None;
         if env.is_empty() {
             match utility(name, args, stdin, sink) {
                 Util::Done(c) => return Flow::Next(c),
                 Util::Decline => {}
+                Util::DeclineFor(part) => why = Some(part),
             }
         }
         // A script file run as a command, or `sh FILE` / `bash FILE`, runs in a
@@ -2459,7 +2464,7 @@ impl Shell {
         if let Some((script, script_args)) = shell_script_command(argv) {
             return Flow::Next(self.run_script_child(script, script_args, env, stdin, sink));
         }
-        Flow::Next(self.external(argv, env, stdin, sink))
+        Flow::Next(self.external(argv, env, stdin, sink, why.as_deref()))
     }
 
     /// `read [-r] [NAME...]`. The line is split into the names with the IFS in
@@ -2554,13 +2559,15 @@ impl Shell {
     }
 
     /// Run a program that is not implemented here: directly, with no shell in
-    /// between, and only after the effect gate has admitted it.
+    /// between, and only after the effect gate has admitted it. `why` is the
+    /// part of the command the subset declined, named if no GNU program runs it.
     fn external(
         &mut self,
         argv: &[String],
         env: &[(String, String)],
         stdin: &mut Input,
         sink: &mut Sink,
+        why: Option<&str>,
     ) -> i32 {
         if let Err(e) = crate::safety::guard_exec("posix", argv.join(" ")) {
             sink.eline(&e.to_string());
@@ -2570,7 +2577,7 @@ impl Shell {
             sink.eline(&refusal);
             return 126;
         }
-        let program = match resolve_program(argv, env) {
+        let program = match resolve_program(argv, env, why) {
             Ok(p) => p,
             Err((code, message)) => {
                 sink.eline(&message);
@@ -2910,7 +2917,11 @@ fn path_program(name: &str) -> Option<std::path::PathBuf> {
 /// error names what the subset does not support and the status is 2. Elsewhere
 /// it runs the PATH program of that name, as it did before, and a missing one is
 /// "command not found" (127). Any other name runs as typed.
-fn resolve_program(argv: &[String], env: &[(String, String)]) -> Result<String, (i32, String)> {
+fn resolve_program(
+    argv: &[String],
+    env: &[(String, String)],
+    why: Option<&str>,
+) -> Result<String, (i32, String)> {
     let name = argv[0].as_str();
     if name.contains(['/', '\\']) || !SUBSET_NAMES.contains(&name) {
         return Ok(name.to_string());
@@ -2926,6 +2937,8 @@ fn resolve_program(argv: &[String], env: &[(String, String)]) -> Result<String, 
     }
     let what = if !env.is_empty() {
         "a variable before the command".to_string()
+    } else if let Some(part) = why {
+        part.to_string()
     } else {
         match argv[1..].iter().find(|a| a.len() > 1 && a.starts_with('-')) {
             Some(flag) => flag.clone(),
@@ -5301,6 +5314,61 @@ struct SedLine {
     active: bool,
 }
 
+/// The parts of an `s` command's body, split at its delimiter. A `\` keeps the
+/// character after it in the part it is in, so an escaped delimiter does not end
+/// a part; the parts keep their backslashes for [`unescape_delim`] and the
+/// replacement's own escapes to read.
+fn split_s_parts(body: &str, sep: char) -> Vec<String> {
+    let mut parts = Vec::new();
+    let mut cur = String::new();
+    let mut it = body.chars();
+    while let Some(c) = it.next() {
+        match c {
+            '\\' => {
+                cur.push('\\');
+                if let Some(n) = it.next() {
+                    cur.push(n);
+                }
+            }
+            c if c == sep => parts.push(std::mem::take(&mut cur)),
+            c => cur.push(c),
+        }
+    }
+    parts.push(cur);
+    parts
+}
+
+/// A pattern with each `\<delimiter>` read as the delimiter character itself,
+/// literal in the syntax in use: `s|a\|b|c|` matches `a|b`, not an alternation,
+/// and `s.a\.b.c.` matches `a.b` only. Other escapes are left for the regex
+/// converters.
+fn unescape_delim(pat: &str, sep: char, ere: bool) -> String {
+    let mut out = String::new();
+    let mut it = pat.chars();
+    while let Some(c) = it.next() {
+        if c != '\\' {
+            out.push(c);
+            continue;
+        }
+        match it.next() {
+            Some(n) if n == sep => {
+                // Special in this syntax, so it needs its escape to be literal.
+                let special = if ere { ".*[]^$+?|(){}" } else { ".*[]^$" };
+                if special.contains(n) {
+                    out.push('\\');
+                }
+                out.push(n);
+            }
+            Some(n) => {
+                out.push('\\');
+                out.push(n);
+            }
+            None => out.push('\\'),
+        }
+    }
+    out
+}
+
 /// `sed` for the everyday scripts: `Np`, `a,bp`, `$p`, `/re/p`, `Nd`, `q`,
 /// and `s/re/rep/[gp]`, with `-n`, `-e` and `-E`. Anything else declines.
 /// `s/RE/REP/N`: replace the Nth match only, or from the Nth on with `g`.
@@ -5345,7 +5413,7 @@ fn sed(args: &[String], stdin: &mut Input, sink: &mut Sink) -> Util {
                 i += 1;
                 match args.get(i) {
                     Some(s) => scripts.push(s.clone()),
-                    None => return Util::Decline,
+                    None => return Util::DeclineFor("option `-e` with no script".into()),
                 }
             }
             "-ne" | "-nE" | "-En" => {
@@ -5355,11 +5423,13 @@ fn sed(args: &[String], stdin: &mut Input, sink: &mut Sink) -> Util {
                     i += 1;
                     match args.get(i) {
                         Some(s) => scripts.push(s.clone()),
-                        None => return Util::Decline,
+                        None => return Util::DeclineFor("option `-e` with no script".into()),
                     }
                 }
             }
-            s if s.starts_with('-') && s != "-" => return Util::Decline,
+            s if s.starts_with('-') && s != "-" => {
+                return Util::DeclineFor(format!("option `{s}`"));
+            }
             _ => {
                 if scripts.is_empty() {
                     scripts.push(a.clone());
@@ -5411,14 +5481,14 @@ fn sed(args: &[String], stdin: &mut Input, sink: &mut Sink) -> Util {
                 }
             };
             let Ok(a1) = addr(&mut k) else {
-                return Util::Decline;
+                return Util::DeclineFor(format!("the address `{s}`"));
             };
             let mut a2 = None;
             if a1.is_some() && c.get(k) == Some(&',') {
                 k += 1;
                 match addr(&mut k) {
                     Ok(Some(a)) => a2 = Some(a),
-                    _ => return Util::Decline,
+                    _ => return Util::DeclineFor(format!("the address range `{s}`")),
                 }
             }
             let rest: String = c[k..].iter().collect();
@@ -5429,26 +5499,33 @@ fn sed(args: &[String], stdin: &mut Input, sink: &mut Sink) -> Util {
                 "q" => SedCmd::Quit,
                 r if r.starts_with('s') && r.len() > 1 => {
                     let sep = r[1..].chars().next().unwrap_or('/');
-                    let body: Vec<&str> = r[1 + sep.len_utf8()..].split(sep).collect();
+                    let body = split_s_parts(&r[1 + sep.len_utf8()..], sep);
                     let [pat, rep, fl] = body.as_slice() else {
-                        return Util::Decline;
+                        return Util::DeclineFor(format!(
+                            "the s command with its parts not split by `{sep}`"
+                        ));
                     };
+                    let pat = unescape_delim(pat, sep, ere);
                     let fl: &str = fl;
                     let digits: String = fl.chars().take_while(char::is_ascii_digit).collect();
                     let tail = &fl[digits.len()..];
-                    if tail.chars().any(|f| !matches!(f, 'g' | 'p')) {
-                        return Util::Decline;
+                    if let Some(f) = tail.chars().find(|f| !matches!(f, 'g' | 'p')) {
+                        return Util::DeclineFor(format!("the s command's flag `{f}`"));
                     }
                     let nth = if digits.is_empty() {
                         1
                     } else {
                         match digits.parse::<usize>() {
                             Ok(n) if n >= 1 => n,
-                            _ => return Util::Decline,
+                            _ => {
+                                return Util::DeclineFor(format!(
+                                    "the s command's occurrence number `{digits}`"
+                                ))
+                            }
                         }
                     };
-                    let Some(re) = to_re(pat) else {
-                        return Util::Decline;
+                    let Some(re) = to_re(pat.as_str()) else {
+                        return Util::DeclineFor(format!("the regular expression `{pat}`"));
                     };
                     // `&` is the match and `\N` a group: in regex's syntax
                     // `${0}` and `${N}`; a literal `$` must be escaped for it.
@@ -5478,7 +5555,13 @@ fn sed(args: &[String], stdin: &mut Input, sink: &mut Sink) -> Util {
                     }
                     SedCmd::Subst(re, r2, tail.contains('g'), tail.contains('p'), nth)
                 }
-                _ => return Util::Decline,
+                _ => {
+                    return Util::DeclineFor(if rest.is_empty() {
+                        format!("the address `{s}` with no command")
+                    } else {
+                        format!("the `{rest}` command")
+                    })
+                }
             };
             prog.push(SedLine {
                 a1,
