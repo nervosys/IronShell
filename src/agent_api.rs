@@ -359,9 +359,7 @@ fn structured_error_body(text: &str) -> Option<(String, serde_json::Map<String, 
             .next()?
             .ok()?;
         let body = value.get("error")?.as_object()?;
-        if body.get("code").and_then(JsonValue::as_str).is_none() {
-            return None;
-        }
+        body.get("code").and_then(JsonValue::as_str)?;
         let prefix = text[..start]
             .trim()
             .trim_end_matches(':')
