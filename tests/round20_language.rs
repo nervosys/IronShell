@@ -126,7 +126,7 @@ fn string_built_by_repeated_assignment_keeps_every_piece() {
     for _ in 0..20000 {
         src.push_str("s = s + \"x\"\n");
     }
-    src.push_str("s");
+    src.push('s');
     assert_eq!(eval(&src).unwrap(), Value::Str("x".repeat(20000)));
 }
 
