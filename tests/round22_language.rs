@@ -207,3 +207,69 @@ fn appending_50000_elements_in_one_program() {
         other => panic!("expected an Array, got {other:?}"),
     }
 }
+
+// ---- 6. string escapes ----
+
+fn text_of(src: &str) -> String {
+    match eval(src).unwrap_or_else(|e| panic!("{src}: {e}")) {
+        Value::Str(s) => s,
+        other => panic!("{src}: expected a String, got {other:?}"),
+    }
+}
+
+#[test]
+fn tab_and_carriage_return_escapes() {
+    assert_eq!(text_of(r#""a\tb""#), "a\tb");
+    assert_eq!(text_of(r#""a\rb""#), "a\rb");
+}
+
+#[test]
+fn nul_escape() {
+    assert_eq!(text_of(r#""a\0b""#), "a\0b");
+}
+
+#[test]
+fn backslash_and_quote_escapes() {
+    assert_eq!(text_of(r#""a\\b""#), "a\\b");
+    assert_eq!(text_of(r#""say \"hi\"""#), "say \"hi\"");
+    assert_eq!(text_of(r#""it\'s""#), "it's");
+}
+
+#[test]
+fn hex_escape_is_two_digits_ascii_only() {
+    assert_eq!(text_of(r#""\x41""#), "A");
+    assert_eq!(text_of(r#""\x07""#), "\u{7}");
+    assert_eq!(text_of(r#""\x7F""#), "\u{7f}");
+    // Above 0x7F the escape is not decoded: it keeps its backslash.
+    assert_eq!(text_of(r#""\xFF""#), "\\xFF");
+}
+
+#[test]
+fn unicode_braced_escape() {
+    assert_eq!(text_of(r#""\u{41}""#), "A");
+    assert_eq!(text_of(r#""\u{1F600}""#), "\u{1F600}");
+    assert_eq!(text_of(r#""\u{0007}""#), "\u{7}");
+}
+
+#[test]
+fn unicode_escape_must_be_a_scalar_value() {
+    let text = parse_refusal(r#""\u{D800}""#);
+    assert!(text.contains("invalid unicode escape"), "{text}");
+}
+
+#[test]
+fn unknown_escape_keeps_its_backslash() {
+    assert_eq!(text_of(r#""C:\qux""#), "C:\\qux");
+}
+
+#[test]
+fn escaped_dollar_still_stops_interpolation() {
+    assert_eq!(text_of(r#""\${x}""#), "${x}");
+    assert_eq!(
+        text_of(
+            r#"x = 3
+"n=${x}\t!""#
+        ),
+        "n=3\t!"
+    );
+}

@@ -1115,6 +1115,8 @@ fn lex_marked(src: &str) -> Result<(Vec<Spanned>, std::collections::HashSet<usiz
                                 't' => s.push('\t'),
                                 '\\' => s.push('\\'),
                                 '"' => s.push('"'),
+                                '\'' => s.push('\''),
+                                '0' => s.push('\0'),
                                 '$' => s.push(ESCAPED_DOLLAR),
                                 'x' | 'u' => match hex_escape(&chars, pos, esc) {
                                     Some((scalar, width)) => {
@@ -1430,7 +1432,11 @@ fn hex_escape(chars: &[char], at: usize, kind: char) -> Option<(char, usize)> {
         if !hex.chars().all(|c| c.is_ascii_hexdigit()) {
             return None;
         }
+        // `\xHH` is ASCII only: above 0x7F it is refused, and keeps its backslash.
         let value = u32::from_str_radix(&hex, 16).ok()?;
+        if value > 0x7F {
+            return None;
+        }
         return Some((char::from_u32(value)?, 2));
     }
     if chars.get(at) != Some(&'{') {
