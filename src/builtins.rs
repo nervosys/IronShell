@@ -4737,12 +4737,18 @@ fn guard_local_write(builtin: &str, path: &str) -> Result<String> {
 fn guard_local_move(builtin: &str, from: &str, to: &str) -> Result<(String, String)> {
     let from = crate::safety::resolve_path_str(from);
     let to = crate::safety::resolve_path_str(to);
+    // A move onto an existing path replaces it, and the approval says so. The
+    // destination is not probed when it names a remote share (see safety).
+    let mut blast_radius = serde_json::json!({ "from": from, "to": to });
+    if !crate::safety::names_a_remote_share(&to) && std::path::Path::new(&to).exists() {
+        blast_radius["overwrites"] = serde_json::json!(true);
+    }
     crate::safety::guard(crate::safety::GuardCtx {
         builtin,
         effect: crate::safety::Effect::Destructive,
         what: "move",
         targets: vec![from.clone(), to.clone()],
-        blast_radius: serde_json::json!({ "from": from, "to": to }),
+        blast_radius,
         reversible: false,
         fs_paths: true,
     })?;
@@ -50647,6 +50653,13 @@ fn bi_file_move(args: Vec<Value>, _input: Option<Value>) -> Result<Value> {
     // destination.
     crate::tx::snapshot(&source);
     crate::tx::snapshot(&dest);
+    // Both ends are one journal step, recorded before the rename: one undo()
+    // puts the source back and restores what the move replaced.
+    crate::journal::record_group(
+        "file_move",
+        crate::safety::Effect::Destructive,
+        vec![source.clone(), dest.clone()],
+    );
     fs::rename(&source, &dest)
         .map_err(|error| crate::safety::fs_error("file_move", &dest, &error))?;
 
