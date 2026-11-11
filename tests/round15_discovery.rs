@@ -49,3 +49,57 @@ fn bare_help_is_still_the_short_reference_and_points_at_help_name() {
     assert!(short.contains("help(\"name\")"), "{short}");
     assert!(short.contains("ontology_manifest()"), "{short}");
 }
+
+// ── shell-style flags ───────────────────────────────────────────────────
+
+/// The E_PARSE hint for a source that must not parse.
+fn parse_refusal_hint(src: &str) -> String {
+    let err = iron_shell::parser::parse_program(src)
+        .expect_err(&format!("{src:?} must be refused as a shell flag"));
+    assert!(
+        err.to_string().contains("\"code\":\"E_PARSE\""),
+        "{src:?} is not E_PARSE: {err}"
+    );
+    err.downcast_ref::<iron_shell::parser::ParseError>()
+        .unwrap_or_else(|| panic!("{src:?} is not a ParseError: {err}"))
+        .hint
+        .clone()
+}
+
+#[test]
+fn a_shell_flag_at_the_start_of_a_statement_is_named_as_a_parse_error() {
+    let hint = parse_refusal_hint("ls --help");
+    assert!(hint.contains("help(\"ls\")"), "{hint}");
+    assert!(hint.contains("has no -flags"), "{hint}");
+    assert!(hint.contains("ish -b"), "{hint}");
+
+    let hint = parse_refusal_hint("mkdir -p tree/a/b");
+    assert!(hint.contains("help(\"mkdir\")"), "{hint}");
+
+    let hint = parse_refusal_hint("grep -r x");
+    assert!(hint.contains("help(\"grep\")"), "{hint}");
+
+    // The second statement of a program is a statement start too.
+    let hint = parse_refusal_hint("x = 1; ls -la");
+    assert!(hint.contains("help(\"ls\")"), "{hint}");
+}
+
+#[test]
+fn subtraction_negative_numbers_and_mid_statement_words_are_not_flags() {
+    for src in [
+        "a - b",
+        "a-b",
+        "x = a -b",
+        "x = a - -1",
+        "-1",
+        "n - -1",
+        "n -1",
+        "[1, -1]",
+        "ls -1",
+    ] {
+        assert!(
+            iron_shell::parser::parse_program(src).is_ok(),
+            "{src:?} is not a shell flag and must still parse"
+        );
+    }
+}

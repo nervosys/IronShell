@@ -1419,6 +1419,7 @@ fn hex_escape(chars: &[char], at: usize, kind: char) -> Option<(char, usize)> {
 
 impl Parser {
     fn parse_stmt(&mut self) -> Result<Stmt> {
+        self.reject_shell_flag()?;
         // Check for #[cfg(...)] attribute
         if self.check(Tok::Attribute) {
             let attr_text = self.peek().text.clone();
@@ -2971,6 +2972,45 @@ impl Parser {
             }),
             None => anyhow!("{}", text),
         }
+    }
+
+    /// A builtin written the way a shell runs a command: `ls --help`, `mkdir -p
+    /// x`, `grep -r x`. The word starts the statement, a space comes before its
+    /// dash, and the dash (or the pair `--`) is glued to the flag's name. Without
+    /// this, the parser reads the dash as minus and reports `unary -` on a
+    /// builtin, or `unknown builtin: p`. `a - b`, `a-b`, `-1` and `n - -1` are
+    /// not this shape, and neither is a word that does not start the statement.
+    fn reject_shell_flag(&self) -> Result<()> {
+        let (Some(word), Some(dash)) = (self.toks.get(self.i), self.toks.get(self.i + 1)) else {
+            return Ok(());
+        };
+        let spaced = dash.line == word.line && dash.col > word.col + word.text.chars().count();
+        if word.kind != Tok::Ident || dash.kind != Tok::Minus || !spaced {
+            return Ok(());
+        }
+        let second_dash = self
+            .toks
+            .get(self.i + 2)
+            .is_some_and(|t| t.kind == Tok::Minus && t.line == dash.line && t.col == dash.col + 1);
+        let dashes = if second_dash { 2 } else { 1 };
+        let Some(flag) = self.toks.get(self.i + 1 + dashes) else {
+            return Ok(());
+        };
+        let glued =
+            flag.kind == Tok::Ident && flag.line == dash.line && flag.col == dash.col + dashes;
+        if !glued {
+            return Ok(());
+        }
+        let name = word.text.as_str();
+        Err(anyhow::Error::new(HintedSyntax {
+            msg: format!(
+                "unexpected '-' after `{name}` at line {}, column {}",
+                dash.line, dash.col
+            ),
+            hint: format!(
+                "IronShell calls builtins as name(args), and has no -flags: write {name}(args) with each argument as a value; help(\"{name}\") describes a builtin; run shell commands with ish -b"
+            ),
+        }))
     }
 
     /// A pipeline stage written `from-csv` or `to-csv`. The lexer reads that as
