@@ -14,6 +14,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - An alias whose implementation guards itself (`mv` for `file_move`, and every other such alias) is judged under the implementation's name, so the workspace jail is checked before any approval token is issued: a target outside the workspace is E_OUTSIDE_WORKSPACE, never a token.
 - A redirection the jail refuses in `ish -b` no longer runs its command; its status is 1 and `set -e` applies. The command used to run, with its output going to stderr, and the script exited 0.
 - An audit entry for a write the central gate does not judge names only its path arguments, never its content: `file_replace(".env", old, new)` logged both secrets in plain text.
+- Under the workspace jail, an in-place write to a file with more than one hard link is refused (E_POLICY_DENY): a link inside the workspace to a file outside it let `>`, `>>`, `tee`, `touch`, `file_append`, `dd_copy`, `apply` and others write outside. Reading through a hard link is still allowed.
+- On Windows, a script run as a command in `ish -b` is judged by the read jail before its child shell starts, so a script outside the workspace is refused. Script nesting stops at 32 levels.
+- A path that does not exist is judged by where it would land: `sub/../missing.txt` inside the workspace is E_NOT_FOUND, `nosuchdir/../../x` is E_OUTSIDE_WORKSPACE, and a dangling link is judged by its target, so a link to a missing file outside the workspace is refused.
+- Agent-mode hints no longer suggest setting `IRONSHELL_ALLOW_SH`.
 
 ### Changed
 
@@ -53,6 +57,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `take` refuses a negative count instead of returning `[]`. `tar_create` refuses an archive name other than `.tar`, `.tar.gz` or `.tgz` (a `.zip` name points at `zip_create`).
 - On Windows, `ish -b` runs a script given as a command (`./x.sh` with a `sh` or `bash` shebang, or `sh FILE` / `bash FILE`) in a child `ish -b` with the same mode and workspace, and passes back its status. It used to fail with "%1 is not a valid Win32 application". Elsewhere the real shell still runs it.
 - Reading a file that is not UTF-8 is E_BAD_VALUE naming the offset of the first bad byte, not E_IO. The recursion limit is E_BUDGET_EXCEEDED, with a hint for intended deep recursion. JSON nested deeper than 128 levels is refused as nesting, not as a position to fix.
+- The Agent API's `execute` returns JSON values, not display text. A malformed request is a coded error (E_PARSE or E_BAD_ARG) on stdout with exit status 1, and `error` is always an object.
+- Generated tool schemas list a builtin's piped value as a `subject` parameter, first; `ontology_describe` marks it `subject: true`.
+- MCP `tools/call`: `{}` means no arguments, named arguments map to parameters, an unknown argument name is refused, and an unknown tool is a -32602 error whose data suggests names.
 
 ### Added
 
@@ -85,6 +92,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `delete_lines(path, {regex: "..."})` deletes the lines a regular expression matches. A literal selector holding regex syntax that deletes nothing says so in a `note`.
 - `head` and `tail` take an Array as their first argument, as they do piped.
 - `ish -b`: `read` splits on `IFS` (`IFS=, read -r a b c`), and a one-command `IFS=` prefix does not persist; `${10}` and later positional parameters; `\xHH` in `echo -e` and `printf`; `printf` `%e`, `%E`, `%g` and `%G`.
+- Global flags may come before a subcommand: `ish --agent agent serve`.
+- Schema format aliases (`gpt` and `chatgpt` for `openai`, `hf` for `huggingface`, `json` for the full JSON Schema, and others).
+- An unknown builtin guessed from another tool (`file_read`, `read_file`) names the real one (`read_text`).
 
 ### Fixed
 
@@ -129,6 +139,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `help("")` is refused as an empty name; `format_number`'s decimals error names the range and the value; `delete_lines` errors name `delete_lines` and list its selector forms.
 - `ish -b`: `read` returns 1 for a last line without a newline (assigning it), so `while read` skips it as bash does. A here-string (`<<<`) is refused as a here-string, with a pipe hint.
 - A leading UTF-8 byte-order mark (Windows PowerShell writes one) is dropped by `cat`, `file.read`, `read_text`, `open` (every format) and `json.parse`; `open` of a `.json` file with a BOM failed.
+- The Agent API's interactive banner goes to stderr, so stdout carries only JSON lines. `code_executed` is capped; object arguments accept `subject` or `input`; JSON `null` is IronShell null.
+- A refusal from a path check names the builtin instead of starting with an empty name.
+- A failed write names the path and says it cannot write, not a bare OS error.
 
 
 ## [14.0.1] - 2026-11-08
