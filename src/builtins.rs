@@ -3937,6 +3937,16 @@ fn mapped_spelling(name: &str) -> Vec<String> {
         "parse_toml" => vec!["from_toml".to_string()],
         // A filter is where: the rows that pass the test.
         "filter" => vec!["where".to_string()],
+        // Names agents guess that IronShell does not have. The real name is
+        // listed first. There is no `file_read` or `read_file`: reading a file is
+        // read_text, or the file.read module call.
+        "file_read" | "read_file" | "readfile" => {
+            vec!["read_text".to_string(), "file.read".to_string()]
+        }
+        "exists_file" => vec!["exists".to_string()],
+        // No repeat builtin. For one character, pad_left repeats it:
+        // "-" | pad_left(10, "-") is ten dashes.
+        "repeat" | "str_repeat" => vec!["pad_left".to_string()],
         _ => Vec::new(),
     }
 }

@@ -115,5 +115,7 @@ fn the_signature_lists_the_data_parameter_first() {
         .iter()
         .map(|p| p["name"].as_str().unwrap_or_default().to_string())
         .collect();
-    assert_eq!(names, vec!["data", "algorithm"], "{v}");
+    // The piped text is the subject, and it comes first; the direct form's
+    // data and algorithm follow it.
+    assert_eq!(names, vec!["subject", "data", "algorithm"], "{v}");
 }

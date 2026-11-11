@@ -557,8 +557,19 @@ impl McpServer {
             JsonValue::Null => vec![],
             other => vec![crate::value::Value::from_json(other)],
         };
+        self.run_builtin(name, values, None)
+    }
+
+    /// Run a builtin with its values and an optional piped subject, and render
+    /// the outcome as an MCP result.
+    fn run_builtin(
+        &self,
+        name: &str,
+        values: Vec<crate::value::Value>,
+        input: Option<crate::value::Value>,
+    ) -> McpToolResult {
         let mut env = crate::env::Env::new();
-        match crate::builtins::call(name, values, &mut env) {
+        match crate::builtins::call_with_input(name, values, input, &mut env) {
             Ok(v) => {
                 let v = crate::agent_api::redact_for_agent(v);
                 // Agent mode mirrors the CLI/HTTP default: tabular results render
@@ -614,17 +625,104 @@ impl McpServer {
                     is_error: Some(true),
                 };
             }
-            let args = arguments
-                .get("args")
-                .cloned()
-                .unwrap_or_else(|| JsonValue::Array(vec![]));
-            return self.call_builtin(inner, &args);
+            let mut rest = arguments.clone();
+            if let Some(map) = rest.as_object_mut() {
+                map.remove("name");
+            }
+            return self.route_named(inner, &rest);
         }
-        let args = arguments
-            .get("args")
-            .cloned()
-            .unwrap_or_else(|| arguments.clone());
-        self.call_builtin(name, &args)
+        self.route_named(name, arguments)
+    }
+
+    /// Run `name` with MCP `arguments`, in one of three forms:
+    ///
+    /// - an object with an `args` array: the positional list;
+    /// - an empty object: no arguments;
+    /// - any other object: each key is a parameter, by the name the schema
+    ///   advertises (`subject` is the piped value). A builtin with no declared
+    ///   signature has no names to map, so the object is one argument, as before.
+    ///
+    /// A bare array or `null` is the positional list itself.
+    fn route_named(&self, name: &str, arguments: &JsonValue) -> McpToolResult {
+        let Some(map) = arguments.as_object() else {
+            return self.call_builtin(name, arguments);
+        };
+        if let Some(args) = map.get("args") {
+            return self.call_builtin(name, args);
+        }
+        if map.is_empty() {
+            return self.call_builtin(name, &JsonValue::Array(vec![]));
+        }
+        let Some(sig) = crate::signature::signature_of(name) else {
+            return self.call_builtin(name, arguments);
+        };
+        match Self::named_arguments(sig, map) {
+            Ok((input, values)) => self.run_builtin(name, values, input),
+            Err(e) => McpToolResult {
+                content: vec![McpContent::Text {
+                    text: format!("{}", e),
+                }],
+                is_error: Some(true),
+            },
+        }
+    }
+
+    /// Map a named-argument object onto a declared signature: the `subject`
+    /// becomes the piped input, and the parameters become the positional values
+    /// in declaration order. A null is the same as an absent key. A variadic
+    /// parameter given an array is spread over its values, unless it takes
+    /// arrays itself. A parameter left out before a later one is refused, since
+    /// the positions would otherwise shift.
+    fn named_arguments(
+        sig: &crate::signature::Signature,
+        map: &serde_json::Map<String, JsonValue>,
+    ) -> Result<(Option<crate::value::Value>, Vec<crate::value::Value>)> {
+        use crate::value::Value;
+        let takes_subject = sig.subject.is_some();
+        for key in map.keys() {
+            let known =
+                (key == "subject" && takes_subject) || sig.params.iter().any(|p| p.name == key);
+            if !known {
+                return Err(crate::safety::bad_arg_with_hint(
+                    sig.name,
+                    &sig.render(),
+                    &format!("unknown argument '{key}'"),
+                    "pass each argument under the name the signature gives it",
+                ));
+            }
+        }
+        let input = if takes_subject {
+            map.get("subject")
+                .filter(|v| !v.is_null())
+                .map(Value::from_json)
+        } else {
+            None
+        };
+        let mut values = Vec::new();
+        let mut gap: Option<&str> = None;
+        for p in sig.params {
+            let Some(v) = map.get(p.name).filter(|v| !v.is_null()) else {
+                if gap.is_none() {
+                    gap = Some(p.name);
+                }
+                continue;
+            };
+            if let Some(missing) = gap {
+                return Err(crate::safety::bad_arg_with_hint(
+                    sig.name,
+                    &sig.render(),
+                    &format!("'{}' given without '{missing}'", p.name),
+                    &format!("give '{missing}' too: parameters are positional"),
+                ));
+            }
+            match v {
+                JsonValue::Array(items) if p.variadic && p.ty != crate::signature::Ty::Array => {
+                    values.extend(items.iter().map(Value::from_json));
+                }
+                _ => values.push(Value::from_json(v)),
+            }
+        }
+        Ok((input, values))
     }
 
     /// Run a strict **JSON-RPC 2.0 over stdio** MCP server (the canonical MCP
@@ -717,7 +815,7 @@ impl McpServer {
             ),
             "tools/call" => match self.stdio_tools_call(req.get("params")) {
                 Ok(result) => Self::rpc_ok(id, result),
-                Err((code, msg)) => Self::rpc_error(id, code, &msg),
+                Err((code, msg, data)) => Self::rpc_error_data(id, code, &msg, data),
             },
             "ping" => Self::rpc_ok(id, serde_json::json!({})),
             other => Self::rpc_error(id, -32601, &format!("method not found: {}", other)),
@@ -736,18 +834,32 @@ impl McpServer {
     /// Handle a `tools/call`: extract the tool name and positional args
     /// (`arguments.args` if present, else the whole `arguments`), route through
     /// `call_builtin`, and serialize the [`McpToolResult`].
-    fn stdio_tools_call(&self, params: Option<&JsonValue>) -> Result<JsonValue, (i64, String)> {
-        let params = params.ok_or((-32602, "missing params".to_string()))?;
-        let name = params
-            .get("name")
-            .and_then(|v| v.as_str())
-            .ok_or((-32602, "missing tool name".to_string()))?;
+    ///
+    /// A name that is neither the `ironshell` meta-tool nor a builtin is a
+    /// protocol error (`-32602`), not a tool result: the call never reached a
+    /// tool. Its did-you-mean suggestions go in `error.data`.
+    fn stdio_tools_call(
+        &self,
+        params: Option<&JsonValue>,
+    ) -> Result<JsonValue, (i64, String, Option<JsonValue>)> {
+        let params = params.ok_or((-32602, "missing params".to_string(), None))?;
+        let name = params.get("name").and_then(|v| v.as_str()).ok_or((
+            -32602,
+            "missing tool name".to_string(),
+            None,
+        ))?;
+        if name != Self::META_INVOKE_TOOL && !crate::builtins::is_served(name) {
+            let suggestions = crate::builtins::did_you_mean(name);
+            let data = (!suggestions.is_empty())
+                .then(|| json!({ "code": "E_UNKNOWN_BUILTIN", "did_you_mean": suggestions }));
+            return Err((-32602, format!("unknown tool: {}", name), data));
+        }
         let arguments = params
             .get("arguments")
             .cloned()
             .unwrap_or_else(|| JsonValue::Array(vec![]));
         let result = self.route_tool_call(name, &arguments);
-        serde_json::to_value(result).map_err(|e| (-32603, format!("serialize result: {}", e)))
+        serde_json::to_value(result).map_err(|e| (-32603, format!("serialize result: {}", e), None))
     }
 
     fn rpc_ok(id: JsonValue, result: JsonValue) -> JsonValue {
@@ -755,7 +867,20 @@ impl McpServer {
     }
 
     fn rpc_error(id: JsonValue, code: i64, message: &str) -> JsonValue {
-        serde_json::json!({ "jsonrpc": "2.0", "id": id, "error": { "code": code, "message": message } })
+        Self::rpc_error_data(id, code, message, None)
+    }
+
+    fn rpc_error_data(
+        id: JsonValue,
+        code: i64,
+        message: &str,
+        data: Option<JsonValue>,
+    ) -> JsonValue {
+        let mut error = serde_json::json!({ "code": code, "message": message });
+        if let (Some(data), Some(obj)) = (data, error.as_object_mut()) {
+            obj.insert("data".to_string(), data);
+        }
+        serde_json::json!({ "jsonrpc": "2.0", "id": id, "error": error })
     }
 
     fn write_message(out: &mut impl std::io::Write, msg: &JsonValue) -> std::io::Result<()> {

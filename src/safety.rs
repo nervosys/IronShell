@@ -3120,6 +3120,12 @@ pub fn ensure_structured(builtin: &str, e: anyhow::Error) -> anyhow::Error {
             let mut filled = se.clone();
             if filled.builtin.is_empty() {
                 filled.builtin = builtin.to_string();
+                // A refusal built with no name leads with the empty name:
+                // ": `x` is outside the workspace". Name it here, where the
+                // name becomes known.
+                if let Some(rest) = filled.message.strip_prefix(": ") {
+                    filled.message = format!("{builtin}: {rest}");
+                }
             }
             if generic {
                 if let Some(sig) = crate::signature::signature_of(builtin) {
