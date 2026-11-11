@@ -64986,14 +64986,14 @@ fn bi_dd_copy(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
     }
     #[cfg(not(windows))]
     {
+        // dd opens the destination itself, so under the jail the copy runs
+        // in-process instead, where the link count is read from the handle the
+        // bytes are written through.
+        if crate::safety::jail_enforced(crate::safety::current_mode()) {
+            return dd_copy_in_process(&src, &dst, &operands);
+        }
         // dd writes the destination in place, as the in-process copy does.
         crate::tx::snapshot(&dst);
-        // dd opens the destination itself, after this. The link check runs on a
-        // handle here, just before dd, so a link planted in between is not seen.
-        drop(
-            crate::safety::open_in_place("dd_copy", std::path::Path::new(&dst), false)
-                .map_err(|e| crate::safety::in_place_error("dd_copy", &dst, e))?,
-        );
         let argv: Vec<&str> = operands.iter().map(String::as_str).collect();
         let run = tool_run(
             "dd_copy",
@@ -65020,11 +65020,9 @@ fn bi_dd_copy(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
 }
 
 /// Largest block dd_copy's in-process copy reads at once.
-#[cfg(windows)]
 const DD_BLOCK_MAX: u64 = 64 * 1024 * 1024;
 
 /// The byte count of a `dd` block size already checked by [`dd_block_size`].
-#[cfg(windows)]
 fn dd_block_bytes(bs: &str) -> Option<u64> {
     let (digits, unit) = match bs.char_indices().last() {
         Some((i, c)) if c.is_ascii_alphabetic() => {
@@ -65045,11 +65043,12 @@ fn dd_block_bytes(bs: &str) -> Option<u64> {
     digits.parse::<u64>().ok()?.checked_mul(unit)
 }
 
-/// Windows: dd's copy done in-process with the operands dd_copy built. The block
-/// size and count are the ones the options gave (512 and no count when absent).
-/// The Unix run has a 900 s deadline; this one is checked between blocks. The
-/// output is the three report lines dd prints on stderr.
-#[cfg(windows)]
+/// dd's copy done in-process with the operands dd_copy built: always on
+/// Windows, and elsewhere when the workspace jail is enforced, so the
+/// destination is judged on the handle the bytes go through. The block size and
+/// count are the ones the options gave (512 and no count when absent). The Unix
+/// dd run has a 900 s deadline; this one is checked between blocks. The output
+/// is the three report lines dd prints on stderr.
 fn dd_copy_in_process(src: &str, dst: &str, operands: &[String]) -> Result<Value> {
     use std::io::{Read as _, Write as _};
     const NAME: &str = "dd_copy";
@@ -65145,7 +65144,6 @@ fn dd_copy_in_process(src: &str, dst: &str, operands: &[String]) -> Result<Value
 }
 
 /// The coded error for a file dd_copy could not open, read or write.
-#[cfg(windows)]
 fn dd_io(builtin: &str, path: &str, e: &std::io::Error) -> anyhow::Error {
     match e.kind() {
         std::io::ErrorKind::NotFound => crate::safety::not_found(builtin, "file", path),
