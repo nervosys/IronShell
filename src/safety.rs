@@ -2527,6 +2527,31 @@ pub fn fs_error(
     path: impl AsRef<std::path::Path>,
     e: &std::io::Error,
 ) -> anyhow::Error {
+    fs_error_as(builtin, path, e, false)
+}
+
+/// [`fs_error`] for a failed write: the message says `cannot write`, and the
+/// expectation is a writable path. A write that fails on a name the filesystem
+/// refuses (such as an NTFS alternate stream) read as a read failure before.
+pub fn fs_write_error(
+    builtin: &str,
+    path: impl AsRef<std::path::Path>,
+    e: &std::io::Error,
+) -> anyhow::Error {
+    fs_error_as(builtin, path, e, true)
+}
+
+fn fs_error_as(
+    builtin: &str,
+    path: impl AsRef<std::path::Path>,
+    e: &std::io::Error,
+    writing: bool,
+) -> anyhow::Error {
+    let (verb, expected_access) = if writing {
+        ("write", "writable")
+    } else {
+        ("read", "readable")
+    };
     // A canonicalised path carries the `\\?\` verbatim prefix on Windows. The
     // message shows the ordinary form, as the other builtins' paths do.
     let path = strip_verbatim_prefix(path.as_ref()).display().to_string();
@@ -2549,7 +2574,7 @@ pub fn fs_error(
         ),
         _ => anyhow::Error::new(SafetyError {
             code: ErrorCode::Io,
-            message: format!("{builtin}: cannot read `{path}`: {e}"),
+            message: format!("{builtin}: cannot {verb} `{path}`: {e}"),
             builtin: builtin.to_string(),
             // Windows refuses a control character in a name with an invalid-name
             // error, not "not found"; the escape is the likely cause, so say so.
@@ -2562,7 +2587,7 @@ pub fn fs_error(
                 }),
             approval: None,
             did_you_mean: Vec::new(),
-            expected: format!("`{path}` to be readable"),
+            expected: format!("`{path}` to be {expected_access}"),
             got: e.kind().to_string(),
             extra: serde_json::Map::new(),
         }),

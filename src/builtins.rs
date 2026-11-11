@@ -49329,7 +49329,7 @@ fn write_file_atomically(builtin: &str, path: &str, content: &[u8]) -> Result<()
     let target: &std::path::Path = match fs::symlink_metadata(requested) {
         Ok(meta) if meta.file_type().is_symlink() => {
             resolved = fs::canonicalize(requested)
-                .map_err(|error| crate::safety::fs_error(builtin, path, &error))?;
+                .map_err(|error| crate::safety::fs_write_error(builtin, path, &error))?;
             &resolved
         }
         _ => requested,
@@ -49344,24 +49344,24 @@ fn write_file_atomically(builtin: &str, path: &str, content: &[u8]) -> Result<()
         .write(true)
         .create_new(true)
         .open(&temporary)
-        .map_err(|error| crate::safety::fs_error(builtin, path, &error))?;
+        .map_err(|error| crate::safety::fs_write_error(builtin, path, &error))?;
     let original_permissions = file.metadata().ok().map(|m| m.permissions());
     // The data must reach the disk before the rename publishes it, or a crash
     // can leave an empty or partial file under the target name.
     let written = file.write_all(content).and_then(|_| file.sync_all());
     drop(file);
     let result = written
-        .map_err(|error| crate::safety::fs_error(builtin, path, &error))
+        .map_err(|error| crate::safety::fs_write_error(builtin, path, &error))
         .and_then(|_| match fs::metadata(target) {
             // An existing target keeps its mode (Unix) and read-only attribute (Windows).
             Ok(existing) => fs::set_permissions(&temporary, existing.permissions())
-                .map_err(|error| crate::safety::fs_error(builtin, path, &error)),
+                .map_err(|error| crate::safety::fs_write_error(builtin, path, &error)),
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
-            Err(error) => Err(crate::safety::fs_error(builtin, path, &error)),
+            Err(error) => Err(crate::safety::fs_write_error(builtin, path, &error)),
         })
         .and_then(|_| {
             fs::rename(&temporary, target)
-                .map_err(|error| crate::safety::fs_error(builtin, path, &error))
+                .map_err(|error| crate::safety::fs_write_error(builtin, path, &error))
         });
     match result {
         Ok(()) => {

@@ -237,3 +237,18 @@ fn agent_mode_refusals_do_not_offer_allow_sh() {
     assert!(err.contains("compute in ish (ish -c)"), "{err}");
     assert!(!err.contains("IRONSHELL_ALLOW_SH"), "{err}");
 }
+
+// ── Item 5: a failed write says it failed to write ──
+
+/// An NTFS alternate-stream name the write cannot use is refused as a write,
+/// not reported as a failed read.
+#[cfg(windows)]
+#[test]
+fn a_failed_write_to_a_stream_name_says_cannot_write() {
+    let dir = scratch("stream_write");
+    let out = ish_agent(&dir, &["-c", r#"file_write("inside.txt:stream1", "x")"#]);
+    let err = stderr_of(&out);
+    assert!(!out.status.success(), "{err}");
+    assert!(err.contains("cannot write"), "{err}");
+    assert!(!err.contains("cannot read"), "{err}");
+}
