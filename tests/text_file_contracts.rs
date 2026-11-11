@@ -291,7 +291,7 @@ fn chown_native_calls_preserve_omitted_group_and_code_missing_files() {
             vec![s("audit-alias"), Value::Int(before.uid() as i64)],
             &mut env,
         ),
-        "E_OUTSIDE_WORKSPACE",
+        "E_POLICY_DENY",
     );
 }
 #[test]
@@ -2752,7 +2752,7 @@ fn symlink_guards_referred_targets_and_journals_transactions() {
             vec![s(&fixture.path("audit.log")), s(&destination)],
             &mut env,
         ),
-        "E_OUTSIDE_WORKSPACE",
+        "E_POLICY_DENY",
     );
     // Inside a transaction the new link is journaled, not refused (commit 1b55800):
     // rollback removes it and leaves the target alone. The target exists so that
@@ -2860,7 +2860,7 @@ fn symlink_unix_preserves_dangling_targets_and_protects_audit_aliases() {
     std::os::unix::fs::symlink(&audit, &alias).unwrap();
     code(
         call("fs_symlink", vec![s(&alias), s(&destination)], &mut env),
-        "E_OUTSIDE_WORKSPACE",
+        "E_POLICY_DENY",
     );
     assert!(std::fs::symlink_metadata(&destination).is_err());
     std::fs::remove_file(&alias).unwrap();

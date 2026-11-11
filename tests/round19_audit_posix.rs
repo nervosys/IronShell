@@ -67,3 +67,23 @@ fn a_script_refusal_names_sh_not_cat() {
         "the refused script must not run"
     );
 }
+
+// ── Item 2: a guarded write to the audit log is a protected-evidence refusal ──
+
+/// `.ironshell/audit.log` is inside the workspace, so the refusal is a policy
+/// decision (E_POLICY_DENY), not a containment failure (E_OUTSIDE_WORKSPACE).
+#[test]
+fn a_write_to_the_audit_log_is_refused_as_protected_policy() {
+    let dir = scratch("audit_tamper");
+    std::fs::create_dir_all(dir.join("proj").join(".ironshell")).unwrap();
+    let out = ish_agent(&dir, &["-c", r#"file_append(".ironshell/audit.log", "x")"#]);
+    let text = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        stderr_of(&out)
+    );
+    assert!(!out.status.success(), "the write must be refused: {text}");
+    assert!(text.contains("E_POLICY_DENY"), "{text}");
+    assert!(!text.contains("E_OUTSIDE_WORKSPACE"), "{text}");
+    assert!(text.contains("protected"), "the refusal says why: {text}");
+}

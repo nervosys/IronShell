@@ -252,10 +252,14 @@ fn every_file_writer_refuses_audit_aliases_and_leaves_the_log_alone() {
                 let own_refusal = label == "file_copy destination"
                     && text.contains("E_BAD_ARG")
                     && text.contains("symlink");
-                if !text.contains("E_OUTSIDE_WORKSPACE") && !own_refusal {
+                // A guarded write to the log inside the workspace is refused as
+                // E_POLICY_DENY (protected evidence); one outside is E_OUTSIDE_WORKSPACE.
+                let refused =
+                    text.contains("E_OUTSIDE_WORKSPACE") || text.contains("E_POLICY_DENY");
+                if !refused && !own_refusal {
                     let short: String = text.chars().take(200).collect();
                     problems.push(format!(
-                        "{label}: expected E_OUTSIDE_WORKSPACE, got: {short}"
+                        "{label}: expected E_OUTSIDE_WORKSPACE or E_POLICY_DENY, got: {short}"
                     ));
                 }
             }
