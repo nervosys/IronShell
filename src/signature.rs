@@ -14880,6 +14880,25 @@ pub fn validate(name: &str, args: &[Value], input: Option<&Value>) -> anyhow::Re
 
     let required = sig.params.iter().filter(|p| p.required).count();
     if supplied < required {
+        // The first argument was taken as the subject, so the count of
+        // parameters given reads as "0 of 1" for `pow(2)`. Name the parameter
+        // that is missing, and say where the subject came from.
+        if params_start == 1 {
+            if let Some(missing) = sig.params.iter().skip(supplied).find(|p| p.required) {
+                return Err(crate::safety::bad_arg_in(
+                    name,
+                    format!(
+                        "{name}: missing required argument '{}' (the first argument is the subject)",
+                        missing.name
+                    ),
+                    &format!(
+                        "pass '{}' as the argument after the subject: {}",
+                        missing.name,
+                        sig.render()
+                    ),
+                ));
+            }
+        }
         // `in` is a pipe stage far more often than a call with two arguments,
         // so the missing collection is the one thing worth saying in words.
         if name == "in" {

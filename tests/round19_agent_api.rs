@@ -90,3 +90,22 @@ fn item1_a_successful_call_still_exits_0() {
     assert_eq!(code, Some(0), "{v}");
     assert_eq!(v["result"], json!(2), "{v}");
 }
+
+// ── Item 2: the subject is not counted as a missing parameter ───────────────
+
+#[test]
+fn item2_an_array_whose_first_element_is_the_subject_names_the_missing_parameter() {
+    let (code, v) = execute_once(r#"{"action":"call","builtin":"pow","args":[2]}"#);
+    assert_eq!(code, Some(1), "{v}");
+    assert_eq!(v["error"]["code"], json!("E_BAD_ARG"), "{v}");
+    let message = v["error"]["message"].as_str().unwrap_or_default();
+    assert!(
+        message.contains("missing required argument 'exponent'"),
+        "{message}"
+    );
+    assert!(
+        message.contains("the first argument is the subject"),
+        "{message}"
+    );
+    assert!(!message.contains("0 of 1"), "{message}");
+}
