@@ -4483,21 +4483,31 @@ lazy_static! {
     static ref AUDIT_KEY: Option<Vec<u8>> = load_audit_key();
 }
 
+/// The variable that supplied a chain key which was set but too short to use
+/// (`IRONSHELL_AUDIT_KEY` or `IRONSHELL_AUDIT_KEY_FILE`), so `audit_verify` can
+/// say the key was set and rejected rather than report a plain unkeyed chain.
+static AUDIT_KEY_REJECTED: Mutex<Option<&'static str>> = Mutex::new(None);
+
+/// The variable name of a rejected (set, but too short) chain key, if any.
+pub fn audit_key_rejected() -> Option<&'static str> {
+    AUDIT_KEY_REJECTED.lock().ok().and_then(|g| *g)
+}
+
 /// Read the chain key from `IRONSHELL_AUDIT_KEY` (hex or raw bytes) or from the
-/// file named by `IRONSHELL_AUDIT_KEY_FILE`. A malformed or too-short key is a
-/// hard error rather than a silent downgrade to an unkeyed chain -- a security
-/// control that quietly turns itself off is worse than one that is off.
+/// file named by `IRONSHELL_AUDIT_KEY_FILE`. A key that is set but too short
+/// (fewer than 32 bytes) is not used: the chain is written unkeyed, one warning
+/// goes to stderr, and `audit_verify` reports the rejected key.
 fn load_audit_key() -> Option<Vec<u8>> {
     let from_env = std::env::var("IRONSHELL_AUDIT_KEY").ok();
     if from_env.is_some() {
         // Before anything else can spawn a child that would inherit it.
         std::env::remove_var("IRONSHELL_AUDIT_KEY");
     }
-    let raw = match from_env {
-        Some(v) => v,
+    let (raw, var) = match from_env {
+        Some(v) => (v, "IRONSHELL_AUDIT_KEY"),
         None => match std::env::var("IRONSHELL_AUDIT_KEY_FILE") {
             Ok(path) => match std::fs::read_to_string(&path) {
-                Ok(c) => c.trim().to_string(),
+                Ok(c) => (c.trim().to_string(), "IRONSHELL_AUDIT_KEY_FILE"),
                 Err(e) => {
                     tracing::error!(
                         target: "security_audit",
@@ -4519,10 +4529,22 @@ fn load_audit_key() -> Option<Vec<u8>> {
         _ => raw.trim().as_bytes().to_vec(),
     };
     if bytes.len() < AUDIT_KEY_MIN_BYTES {
+        if let Ok(mut g) = AUDIT_KEY_REJECTED.lock() {
+            *g = Some(var);
+        }
         tracing::error!(
             target: "security_audit",
             "audit chain key is {} bytes, below the {}-byte minimum; the chain is UNKEYED",
             bytes.len(), AUDIT_KEY_MIN_BYTES
+        );
+        let subject = if var == "IRONSHELL_AUDIT_KEY" {
+            "IRONSHELL_AUDIT_KEY is set but"
+        } else {
+            "IRONSHELL_AUDIT_KEY_FILE contents are"
+        };
+        eprintln!(
+            "{} shorter than {} characters, so the audit chain is not keyed",
+            subject, AUDIT_KEY_MIN_BYTES
         );
         return None;
     }
@@ -5061,7 +5083,7 @@ pub fn verify_audit_with(path: &PathBuf, key: Option<&[u8]>) -> Result<u64, Stri
             }
             (None, Some(_)) => {
                 return Err(format!(
-                    "line {}: entry is keyed but no chain key is configured; set                      IRONSHELL_AUDIT_KEY or IRONSHELL_AUDIT_KEY_FILE to verify it",
+                    "line {}: entry is keyed but no chain key is configured; set IRONSHELL_AUDIT_KEY or IRONSHELL_AUDIT_KEY_FILE to verify it",
                     lineno + 1
                 ))
             }

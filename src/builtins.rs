@@ -24660,10 +24660,14 @@ fn bi_audit_verify(args: Vec<Value>, _input: Option<Value>) -> Result<Value> {
     let keyed = crate::safety::audit_key().is_some();
     rec.insert("keyed".to_string(), Value::Bool(keyed));
     if !keyed {
-        rec.insert(
-            "note".to_string(),
-            Value::Str(UNKEYED_AUDIT_NOTE.to_string()),
-        );
+        let note = match crate::safety::audit_key_rejected() {
+            Some(var) => format!(
+                "{} is set, but the key it gives is shorter than 32 characters, so the chain is not keyed; {}",
+                var, UNKEYED_AUDIT_NOTE
+            ),
+            None => UNKEYED_AUDIT_NOTE.to_string(),
+        };
+        rec.insert("note".to_string(), Value::Str(note));
     }
     match crate::safety::verify_audit(&path) {
         // A log with no entries is what a truncation leaves behind, so it
