@@ -177,6 +177,43 @@ fn mv_of_a_file_to_a_new_name_still_moves_it() {
     );
 }
 
+// ── the CLI says where to look ──────────────────────────────────────────
+
+/// `ish` with its arguments, in a temporary session directory of its own.
+fn ish(args: &[&str]) -> std::process::Output {
+    let dir = std::env::temp_dir().join(format!("ae_r15_cli_{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("temp session dir");
+    std::process::Command::new(env!("CARGO_BIN_EXE_ish"))
+        .args(args)
+        .env("IRONSHELL_SESSION_DIR", &dir)
+        .output()
+        .expect("ish runs")
+}
+
+#[test]
+fn ish_help_names_the_per_builtin_help_in_one_line() {
+    let out = ish(&["--help"]);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("help(\"name\")"), "{stdout}");
+    assert!(stdout.contains("ontology_describe"), "{stdout}");
+}
+
+#[test]
+fn agent_schema_of_an_unknown_module_names_ontology_manifest_not_a_route() {
+    let out = ish(&["agent", "schema", "--module", "nosuch"]);
+    assert!(!out.status.success(), "an unknown module must fail");
+    let text = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        text.contains("ontology_manifest() lists every module"),
+        "{text}"
+    );
+    assert!(!text.contains("GET /api/v1/schema"), "{text}");
+}
+
 #[test]
 fn crypto_hash_file_of_a_directory_says_so_and_names_the_glob() {
     let out = text(run("let d = fs_tempdir(\"ae_r15_hash_dir\"); \

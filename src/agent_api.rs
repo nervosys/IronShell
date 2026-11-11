@@ -1025,9 +1025,12 @@ fn narrow_ontology(
                 ontology.modules.iter().map(|md| md.name.as_str()),
             );
             let hint = if did_you_mean.is_empty() {
-                "GET /api/v1/schema lists every module".to_string()
+                "ontology_manifest() lists every module".to_string()
             } else {
-                format!("did you mean {}?", did_you_mean.join(", "))
+                format!(
+                    "did you mean {}? ontology_manifest() lists every module",
+                    did_you_mean.join(", ")
+                )
             };
             return Err(AgentResponse {
                 code: Some("E_BAD_ARG".to_string()),
