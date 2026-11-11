@@ -1313,9 +1313,11 @@ fn args_to_code(builtin: &str, args: &JsonValue) -> Result<String> {
 /// A name that is not a parameter is refused, and the error lists the valid
 /// names. A parameter that is left out must be optional, and no later one may
 /// be given, since an omitted middle argument has no literal. A variadic last
-/// parameter given an array is spread over the positions. A builtin whose first
-/// argument is its piped subject has no name for that subject, so it takes its
-/// arguments as an array only.
+/// parameter given an array is spread over the positions.
+///
+/// A builtin with a piped subject takes that subject as its first argument, so
+/// in this form the subject is the first position. It is named `subject` (or
+/// `input`) and its declared parameters follow it.
 fn named_args_to_positional(
     builtin: &str,
     obj: &serde_json::Map<String, JsonValue>,
@@ -1334,48 +1336,61 @@ fn named_args_to_positional(
         None => (builtin.to_string(), Vec::new()),
     };
     let signature = crate::signature::signature_of(&canonical);
+    let has_subject = signature.is_some_and(|s| s.subject.is_some());
 
-    if signature.is_some_and(|s| s.subject.is_some()) {
-        return Err(anyhow!(
-            "'{}' takes its first argument from the pipeline, which has no name; \
-             pass its arguments as an array",
-            builtin
-        ));
+    // The positions, in order: the subject first when there is one, then the
+    // declared parameters. Each is a name and whether it must be given.
+    let mut positions: Vec<(String, bool)> = Vec::new();
+    if has_subject {
+        let required = signature.is_some_and(|s| s.subject_required);
+        positions.push(("subject".to_string(), required));
     }
+    positions.extend(params.iter().map(|p| (p.name.clone(), p.required)));
 
-    let valid = if params.is_empty() {
+    let valid = if positions.is_empty() {
         "none (pass its arguments as an array)".to_string()
     } else {
-        params
+        positions
             .iter()
-            .map(|p| p.name.as_str())
+            .map(|(name, _)| name.as_str())
             .collect::<Vec<_>>()
             .join(", ")
     };
-    let mut slots: Vec<Option<JsonValue>> = vec![None; params.len()];
+    let mut slots: Vec<Option<JsonValue>> = vec![None; positions.len()];
     for (key, value) in obj {
-        match params.iter().position(|p| p.name == *key) {
-            Some(i) => slots[i] = Some(value.clone()),
-            None => {
-                return Err(anyhow!(
-                    "unknown argument '{}' for '{}'; valid parameters: {}",
-                    key,
-                    builtin,
-                    valid
-                ))
-            }
+        // `input` names the subject too, when the builtin has one and no
+        // parameter of its own is called that.
+        let index = positions
+            .iter()
+            .position(|(name, _)| name == key)
+            .or_else(|| (has_subject && key == "input").then_some(0));
+        let Some(i) = index else {
+            return Err(anyhow!(
+                "unknown argument '{}' for '{}'; valid parameters: {}",
+                key,
+                builtin,
+                valid
+            ));
+        };
+        if slots[i].is_some() {
+            return Err(anyhow!(
+                "argument '{}' of '{}' is given twice",
+                positions[i].0,
+                builtin
+            ));
         }
+        slots[i] = Some(value.clone());
     }
 
-    if let Some(p) = params
+    if let Some((name, _)) = positions
         .iter()
         .zip(&slots)
-        .find(|(p, slot)| p.required && slot.is_none())
-        .map(|(p, _)| p)
+        .find(|((_, required), slot)| *required && slot.is_none())
+        .map(|(position, _)| position)
     {
         return Err(anyhow!(
             "missing required argument '{}' for '{}'",
-            p.name,
+            name,
             builtin
         ));
     }
@@ -1385,12 +1400,12 @@ fn named_args_to_positional(
     };
     let variadic_last = signature.is_some_and(|s| s.params.last().is_some_and(|p| p.variadic));
     let mut out = Vec::with_capacity(last + 1);
-    for (i, (param, slot)) in params.iter().zip(slots).enumerate() {
+    for (i, (slot, (name, _))) in slots.into_iter().zip(&positions).enumerate() {
         if i > last {
             break;
         }
         match slot {
-            Some(JsonValue::Array(items)) if variadic_last && i + 1 == params.len() => {
+            Some(JsonValue::Array(items)) if variadic_last && i + 1 == positions.len() => {
                 out.extend(items)
             }
             Some(value) => out.push(value),
@@ -1398,9 +1413,9 @@ fn named_args_to_positional(
                 return Err(anyhow!(
                     "argument '{}' of '{}' is optional, but a later argument is given; \
                      give '{}' a value too",
-                    param.name,
+                    name,
                     builtin,
-                    param.name
+                    name
                 ))
             }
         }
@@ -1479,7 +1494,7 @@ fn predicate_to_lambda(predicate: &str) -> String {
 /// is refused rather than written into the code.
 fn json_to_ae_literal(val: &JsonValue) -> Result<String> {
     Ok(match val {
-        JsonValue::Null => "None".to_string(),
+        JsonValue::Null => "null".to_string(),
         JsonValue::Bool(b) => if *b { "true" } else { "false" }.to_string(),
         JsonValue::Number(n) => n.to_string(),
         JsonValue::String(s) => ae_string_literal(s),

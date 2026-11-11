@@ -66,6 +66,29 @@ fn an_array_result_is_a_json_array_not_text() {
 }
 
 #[test]
+fn a_piped_subject_can_be_named_subject_or_input_in_object_args() {
+    let upper = execute(r#"{"action":"call","builtin":"upper","args":{"subject":"abc"}}"#);
+    assert_eq!(upper["result"], json!("ABC"), "{upper}");
+
+    let via_input = execute(r#"{"action":"call","builtin":"upper","args":{"input":"abc"}}"#);
+    assert_eq!(via_input["result"], json!("ABC"), "{via_input}");
+
+    let added = execute(
+        r#"{"action":"call","builtin":"date_add","args":{"subject":"2024-02-28","amount":1,"unit":"days"}}"#,
+    );
+    assert_eq!(added["result"], json!("2024-02-29"), "{added}");
+
+    let positional = execute(r#"{"action":"call","builtin":"upper","args":["abc"]}"#);
+    assert_eq!(positional["result"], json!("ABC"), "{positional}");
+}
+
+#[test]
+fn a_json_null_argument_is_the_null_value() {
+    let v = execute(r#"{"action":"call","builtin":"type_of","args":[null]}"#);
+    assert_eq!(v["result"], json!("Null"), "{v}");
+}
+
+#[test]
 fn schema_takes_the_cli_format_names_and_the_serde_names() {
     for format in [
         "openai",
