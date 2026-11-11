@@ -87,6 +87,7 @@ const EVIDENCE: &[(&str, &str)] = &[
     //
     // A marker must name something that *performs* the effect.
     (".append(true)", "opens a file to append"),
+    ("open_in_place(", "opens a file to write it in place"),
     (".create(true)", "opens a file to create"),
     (".write(true)", "opens a file to write"),
     ("fs::set_permissions", "changes file permissions"),
@@ -972,7 +973,7 @@ fn the_scanner_still_sees_a_file_being_appended_to() {
         .expect("bi_git_ignore should be parsed");
     assert!(
         direct_evidence(body).is_some(),
-        "git_ignore opens a file with .append(true)"
+        "git_ignore opens a file to append (open_in_place)"
     );
 }
 
