@@ -156,7 +156,12 @@ Remove specific lines from a file.
 
 ```ironshell
 file_delete_lines "output.txt" 3 5    # Remove lines 3-5
+delete_lines("output.txt", "# DEPRECATED")               # Every line containing this literal text
+delete_lines("output.txt", {regex: "^tmp[0-9]+$"})       # Every line matching a regular expression
 ```
+
+The `pattern`, `contains`, `matching` and `exact` selectors match literal text. Use
+`{regex: ...}` for a regular expression; an invalid one is refused.
 
 ## File Operations
 
