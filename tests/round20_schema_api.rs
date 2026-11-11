@@ -40,3 +40,51 @@ fn item1_subject_is_the_first_property_and_parameters_keep_declaration_order() {
         .collect();
     assert_eq!(keys, vec!["subject", "exponent"], "{pow}");
 }
+
+fn required_of(schema: &JsonValue) -> Vec<String> {
+    schema["required"]
+        .as_array()
+        .map(|a| {
+            a.iter()
+                .filter_map(|v| v.as_str().map(str::to_string))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+#[test]
+fn item2_a_subject_with_no_parameters_is_required_in_tool_schemas() {
+    // Each runs only with its subject: a direct call has no pipeline to supply it.
+    for name in [
+        "ironshell_sqrt",
+        "ironshell_upper",
+        "ironshell_len",
+        "ironshell_avg",
+    ] {
+        let schema = openai_tool_parameters(name);
+        assert!(
+            required_of(&schema).contains(&"subject".to_string()),
+            "{name} lists its subject as optional: {schema}"
+        );
+    }
+}
+
+#[test]
+fn item2_a_subject_with_only_optional_parameters_stays_optional() {
+    // `wc` takes its subject as text or a file, and its flags are optional.
+    let schema = openai_tool_parameters("ironshell_wc");
+    assert!(
+        !required_of(&schema).contains(&"subject".to_string()),
+        "wc: {schema}"
+    );
+}
+
+#[test]
+fn item2_a_parameter_that_defaults_to_the_pipeline_is_required() {
+    // `file_write`'s content is "omitted uses pipeline input", so a direct call
+    // that leaves it out has nothing to write: the schema requires it.
+    let schema = openai_tool_parameters("ironshell_file_write");
+    let required = required_of(&schema);
+    assert!(required.contains(&"path".to_string()), "{schema}");
+    assert!(required.contains(&"content".to_string()), "{schema}");
+}

@@ -3111,6 +3111,30 @@ fn infer_return_type(name: &str) -> String {
 const SUBJECT_PARAM_DOC: &str =
     "the value the builtin acts on; in a pipeline it is the piped value";
 
+/// Subject-taking builtins with no parameter that run with no subject at all.
+/// Every other such builtin refuses a missing subject in its body (`print`,
+/// `inspect`, `tokens`, `diagnose`, `sso_validate`, the `a2ui_*` builtins and
+/// the rest checked), so an agent must supply one and the tool schema requires
+/// it. Empty until a builtin is found that runs with nothing piped.
+const SUBJECT_OPTIONAL_WITHOUT_PARAMS: &[&str] = &[];
+
+/// Whether a tool schema requires the subject. A direct call has no pipeline,
+/// so the subject is the first argument: it is required when the builtin is
+/// pipeline-only, when a parameter is required (`pow(3)` reads its argument as
+/// the subject), or when the builtin has no parameter to take the value in
+/// (`sqrt(16)`), unless it is listed as running without one.
+fn subject_required_in_tools(sig: &crate::signature::Signature) -> bool {
+    sig.subject_required
+        || sig.params.iter().any(|p| p.required)
+        || (sig.params.is_empty() && !SUBJECT_OPTIONAL_WITHOUT_PARAMS.contains(&sig.name))
+}
+
+/// Whether a parameter's doc says it takes the pipeline input when omitted
+/// (`file_write`'s `content`). Such a parameter is required in a tool schema.
+fn defaults_to_pipeline(p: &crate::signature::Param) -> bool {
+    p.doc.contains("omitted uses pipeline input")
+}
+
 /// Build a catalogue entry from a declared signature, so the description an
 /// agent reads and the check the dispatcher runs come from one place.
 fn definition_from_signature(
@@ -3137,7 +3161,7 @@ fn definition_from_signature(
     // exponent without one. Without it here an agent following the schema had
     // no parameter to put the string in.
     let subject_param = sig.subject.map(|ty| {
-        let required = sig.subject_required || sig.params.iter().any(|p| p.required);
+        let required = subject_required_in_tools(sig);
         (ty.as_str(), required, SUBJECT_PARAM_DOC)
     });
     // The schema lists `subject` first, then the parameters in declaration
@@ -3158,11 +3182,18 @@ fn definition_from_signature(
             )
         }))
         .collect();
+    // The tool schema's required list. A direct call has no pipeline, so a
+    // parameter that takes the pipeline input when omitted is required here.
     let required: Vec<&str> = subject_param
         .iter()
         .filter(|(_, required, _)| *required)
         .map(|_| "subject")
-        .chain(sig.params.iter().filter(|p| p.required).map(|p| p.name))
+        .chain(
+            sig.params
+                .iter()
+                .filter(|p| p.required || defaults_to_pipeline(p))
+                .map(|p| p.name),
+        )
         .collect();
 
     BuiltinDefinition {

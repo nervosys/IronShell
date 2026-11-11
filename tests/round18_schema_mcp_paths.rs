@@ -47,15 +47,17 @@ fn required_of(schema: &JsonValue) -> Vec<String> {
 }
 
 #[test]
-fn item1_an_optional_subject_is_advertised_first_and_not_required() {
+fn item1_a_subject_with_no_parameters_is_advertised_first_and_required() {
+    // `upper` has no parameter to take its string in, so a direct call needs
+    // the subject as its argument (round 20).
     let schema = claude_tool_schema("ironshell_upper");
     assert_eq!(
         schema["properties"]["subject"]["type"], "String",
         "{schema}"
     );
     assert!(
-        !required_of(&schema).contains(&"subject".to_string()),
-        "upper has no required parameter and is not pipeline-only: {schema}"
+        required_of(&schema).contains(&"subject".to_string()),
+        "upper has no parameter, so its subject is the argument: {schema}"
     );
 }
 
