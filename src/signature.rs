@@ -7409,11 +7409,12 @@ pub static SIGNATURES: &[Signature] = &[
         subject_required: false,
         aliases: &[],
         subject: Some(Ty::Str),
-        params: &[req("b", Ty::Str, "the later ISO date or datetime"), opt("unit", Ty::Str, "days (the default: whole 24-hour periods), hours, minutes or seconds")],
+        params: &[req("b", Ty::Str, "the second ISO date or datetime; the answer is b minus a, so an earlier b is negative"), opt("unit", Ty::Str, "days (the default: whole 24-hour periods), hours, minutes or seconds")],
         returns: "Int",
-        doc: "The time from the first date to the second, b minus a, as a count of whole units truncated toward zero, so the sign is kept. The default unit, days, counts whole 24-hour periods of elapsed time: a partial day is dropped, so 23:00 to 01:00 the next day is 0 days. Hours, minutes and seconds count whole elapsed units. Dates are ISO strings as date_parse answers them; a date alone is midnight UTC, so two dates count calendar days. A bad unit is E_BAD_ARG. Direct date_diff(a, b, unit?) or text | date_diff(b, unit?).",
+        doc: "The time from the first date a to the second date b: the answer is b minus a, as a count of whole units truncated toward zero, so the sign is kept. date_diff(a, b) with a before b is positive, and with b before a it is negative: date_diff(\"2026-11-09\", \"2024-02-29\") is -984. The default unit, days, counts whole 24-hour periods of elapsed time: a partial day is dropped, so 23:00 to 01:00 the next day is 0 days. Hours, minutes and seconds count whole elapsed units. Dates are ISO strings as date_parse answers them; a date alone is midnight UTC, so two dates count calendar days. A bad unit is E_BAD_ARG. Direct date_diff(a, b, unit?) or text | date_diff(b, unit?).",
         examples: &[
             (r#"date_diff("2024-02-29", "2026-11-09")"#, "984"),
+            (r#"date_diff("2026-11-09", "2024-02-29")"#, "-984"),
             (r#"date_diff("2024-02-29", "2026-11-09", "hours")"#, "23616"),
             (r#""2024-02-29" | date_diff("2024-03-01")"#, "1"),
             (r#"date_diff("2026-11-01T23:00:00Z", "2026-11-02T01:00:00Z")"#, "0"),
@@ -7440,11 +7441,15 @@ pub static SIGNATURES: &[Signature] = &[
         subject_required: false,
         aliases: &[],
         subject: Some(Ty::Str),
-        params: &[req("amount", Ty::Int, "whole units; may be negative"), req("unit", Ty::Str, "days, hours, minutes or seconds")],
+        params: &[req("amount", Ty::Int, "whole units; may be negative"), req("unit", Ty::Str, "weeks, days, months, years, hours, minutes or seconds")],
         returns: "String",
-        doc: "Move an ISO date or datetime by a whole amount of days, hours, minutes or seconds. A date with the unit days is answered as a date; otherwise the answer is a UTC datetime ending in Z.",
+        doc: "Move an ISO date or datetime by a whole amount of weeks, days, months, years, hours, minutes or seconds. Months and years are calendar units: the day of the month is kept, or clamped to the last day of the month it lands in, so 2024-01-31 plus one month is 2024-02-29 and 2024-02-29 plus one year is 2025-02-28. The time of day is kept. A date with the unit weeks, days, months or years is answered as a date; otherwise the answer is a UTC datetime ending in Z. A bad unit is E_BAD_ARG.",
         examples: &[
             (r#"date_add("2024-02-28", 1, "days")"#, r#""2024-02-29""#),
+            (r#"date_add("2024-02-28", 1, "weeks")"#, r#""2024-03-06""#),
+            (r#"date_add("2024-01-31", 1, "months")"#, r#""2024-02-29""#),
+            (r#"date_add("2024-03-31", -1, "months")"#, r#""2024-02-29""#),
+            (r#"date_add("2024-02-29", 1, "years")"#, r#""2025-02-28""#),
             (r#"date_add("2024-02-28T23:00:00Z", 2, "hours")"#, r#""2024-02-29T01:00:00Z""#),
         ],
     },
@@ -14898,6 +14903,25 @@ pub fn validate(name: &str, args: &[Value], input: Option<&Value>) -> anyhow::Re
                 &format!("{supplied} of {required} required"),
                 "sql runs over piped rows ([{a: 1}] | sql(\"select * from t\")) or a file (sql_value(\"data.csv\", \"select ...\"))",
             ));
+        }
+        // The first argument was taken as the subject, so the count of
+        // parameters given reads as "0 of 1" for `pow(2)`. Name the parameter
+        // that is missing, and say where the subject came from.
+        if params_start == 1 {
+            if let Some(missing) = sig.params.iter().skip(supplied).find(|p| p.required) {
+                return Err(crate::safety::bad_arg_in(
+                    name,
+                    format!(
+                        "{name}: missing required argument '{}' (the first argument is the subject)",
+                        missing.name
+                    ),
+                    &format!(
+                        "pass '{}' as the argument after the subject: {}",
+                        missing.name,
+                        sig.render()
+                    ),
+                ));
+            }
         }
         // `expected` is the signature alone, with no "— missing x" tail. The
         // tail read well and cost twice: `diagnose` carries the signature in

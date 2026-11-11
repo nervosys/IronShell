@@ -290,19 +290,23 @@ impl From<AgentResponseWire> for AgentResponse {
 const DEFAULT_ERROR_HINT: &str = "read error.message; error.code names the class of failure, and error.retryable says whether a corrected call can succeed";
 
 /// Whether a failure with this code can succeed once the call is corrected.
-/// The same classes `ErrorCode::retryable` gives, by wire code.
+/// The same classes `ErrorCode::retryable` gives, by wire code, except the
+/// codes `same_request_fails_again` names.
 fn code_retryable(code: &str) -> bool {
     matches!(
         code,
-        "E_PARSE"
-            | "E_BAD_ARG"
-            | "E_UNKNOWN_BUILTIN"
-            | "E_UNKNOWN_FIELD"
-            | "E_UNKNOWN_NAME"
-            | "E_NOT_FOUND"
-            | "E_BAD_STATE"
-            | "E_NEEDS_APPROVAL"
-            | "E_NETWORK"
+        "E_UNKNOWN_FIELD" | "E_NOT_FOUND" | "E_BAD_STATE" | "E_NEEDS_APPROVAL" | "E_NETWORK"
+    )
+}
+
+/// Codes for which the same request fails the same way when it is sent again:
+/// the arguments, the source or the name are what is wrong, and a repeat of the
+/// request is never retryable. The structured error's own `retryable` does not
+/// change that.
+fn same_request_fails_again(code: &str) -> bool {
+    matches!(
+        code,
+        "E_PARSE" | "E_BAD_ARG" | "E_UNKNOWN_BUILTIN" | "E_UNKNOWN_NAME"
     )
 }
 
@@ -340,10 +344,11 @@ fn error_object(text: &str, code: Option<&str>, hint: Option<&str>) -> JsonValue
         .map(str::to_string)
         .or_else(|| hint.map(str::to_string))
         .unwrap_or_else(|| DEFAULT_ERROR_HINT.to_string());
-    let retryable = fields
-        .get("retryable")
-        .and_then(JsonValue::as_bool)
-        .unwrap_or_else(|| code_retryable(&code));
+    let retryable = !same_request_fails_again(&code)
+        && fields
+            .get("retryable")
+            .and_then(JsonValue::as_bool)
+            .unwrap_or_else(|| code_retryable(&code));
     fields.insert("code".to_string(), json!(code));
     fields.insert("hint".to_string(), json!(hint));
     fields.insert("retryable".to_string(), json!(retryable));
@@ -663,6 +668,41 @@ fn structured_error_fields(error: &str) -> Option<(String, Option<String>)> {
 /// Execute a single builtin call
 fn execute_call(builtin: &str, args: &JsonValue) -> AgentResponse {
     let started = std::time::Instant::now();
+    // A module-qualified name (`math.sqrt`) calls the builtin that module member
+    // is, as eval resolves it. Any other dotted name is refused, with the bare
+    // builtin name as the hint.
+    let resolved;
+    let builtin = match builtin.split_once('.') {
+        None => builtin,
+        Some((module, member)) => match crate::modules::builtin_for_member(module, member) {
+            Some(name) => {
+                resolved = name;
+                resolved.as_str()
+            }
+            None => {
+                crate::record::note_outcome(
+                    crate::record::Surface::Api,
+                    "",
+                    |_| vec![builtin.to_string()],
+                    Err(crate::safety::ErrorCode::BadArg),
+                    started.elapsed(),
+                );
+                return AgentResponse {
+                    code: Some("E_BAD_ARG".to_string()),
+                    hint: Some(format!(
+                        "drop the module prefix and name the bare builtin: {{\"action\":\"call\",\"builtin\":\"{member}\"}}, or describe \"{member}\" first to check it is one"
+                    )),
+                    success: false,
+                    result: None,
+                    error: Some(format!(
+                        "'{builtin}' is not a builtin name or a module member"
+                    )),
+                    result_type: None,
+                    metadata: Some(json!({"code": "E_BAD_ARG"})),
+                };
+            }
+        },
+    };
     // Convert JSON args to IronShell code
     let code = match args_to_code(builtin, args) {
         Ok(c) => c,
@@ -1484,7 +1524,7 @@ fn args_to_code(builtin: &str, args: &JsonValue) -> Result<String> {
 /// A builtin with a piped subject takes that subject as its first argument, so
 /// in this form the subject is the first position. It is named `subject` (or
 /// `input`) and its declared parameters follow it.
-fn named_args_to_positional(
+pub(crate) fn named_args_to_positional(
     builtin: &str,
     obj: &serde_json::Map<String, JsonValue>,
 ) -> Result<Vec<JsonValue>> {
@@ -7119,20 +7159,46 @@ const REQUEST_HINT: &str = "a request is {\"action\":\"call\",\"builtin\":NAME,\
 /// always has exactly one response to print.
 pub fn parse_request(text: &str) -> Result<AgentRequest, AgentResponse> {
     let text = text.strip_prefix('\u{feff}').unwrap_or(text);
-    let value: JsonValue = serde_json::from_str(text)
-        .map_err(|e| bad_request("E_PARSE", format!("Invalid JSON request: {e}")))?;
+    let value: JsonValue = serde_json::from_str(text).map_err(|e| {
+        // Text after the first request is what a second request on the same
+        // input looks like, so the hint says how requests are given.
+        let hint = if e.to_string().starts_with("trailing characters") {
+            several_requests_hint()
+        } else {
+            REQUEST_HINT.to_string()
+        };
+        bad_request("E_PARSE", format!("Invalid JSON request: {e}"), hint)
+    })?;
+    // A pipeline that does not parse is most often written with `stages` for
+    // `steps`, so its hint shows the shape.
+    let hint = if value.get("action").and_then(JsonValue::as_str) == Some("pipeline") {
+        PIPELINE_HINT.to_string()
+    } else {
+        REQUEST_HINT.to_string()
+    };
     serde_json::from_value(value)
-        .map_err(|e| bad_request("E_BAD_ARG", format!("Invalid request: {e}")))
+        .map_err(|e| bad_request("E_BAD_ARG", format!("Invalid request: {e}"), hint))
+}
+
+/// The hint for a pipeline request that does not parse: its shape, whose list
+/// is named `steps`.
+const PIPELINE_HINT: &str = "a pipeline is {\"action\":\"pipeline\",\"steps\":[{\"builtin\":NAME,\"args\":[...]}]}, with an optional \"input\"; the list is named steps, not stages";
+
+/// The hint for input that holds more than one request.
+fn several_requests_hint() -> String {
+    format!(
+        "execute takes one request; `ish agent interactive` takes one request per line. {REQUEST_HINT}"
+    )
 }
 
 /// The failure response for input that is not a request.
-fn bad_request(code: &str, message: String) -> AgentResponse {
+fn bad_request(code: &str, message: String, hint: String) -> AgentResponse {
     AgentResponse {
         success: false,
         result: None,
         error: Some(message),
         code: Some(code.to_string()),
-        hint: Some(REQUEST_HINT.to_string()),
+        hint: Some(hint),
         result_type: None,
         metadata: None,
     }

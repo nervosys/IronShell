@@ -14457,7 +14457,14 @@ fn bi_sqrt(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
     };
 
     if num < 0.0 {
-        return Err(crate::safety::arg_err("sqrt requires non-negative number"));
+        // A domain error, not a type error: the generic hint would restate the
+        // signature ("sqrt takes Number"), which the argument already matches.
+        return Err(crate::safety::bad_arg_with_hint(
+            "sqrt",
+            "a number >= 0",
+            &format!("{num}"),
+            "sqrt is undefined below zero: take sqrt of abs(x), or check the sign first",
+        ));
     }
 
     Ok(Value::Float(num.sqrt()))
@@ -15225,18 +15232,43 @@ fn bi_date_format(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
     Ok(Value::Str(out))
 }
 
+/// The date a whole number of calendar months from `instant`. The day of the
+/// month is kept, or clamped to the last day of the month it lands in, and the
+/// time of day is kept. None when the date would leave chrono's range.
+fn add_calendar_months(
+    instant: chrono::DateTime<chrono::Utc>,
+    months: i64,
+) -> Option<chrono::DateTime<chrono::Utc>> {
+    use chrono::Datelike as _;
+    let index = i64::from(instant.year())
+        .checked_mul(12)?
+        .checked_add(i64::from(instant.month0()))?
+        .checked_add(months)?;
+    let year = i32::try_from(index.div_euclid(12)).ok()?;
+    let month = u32::try_from(index.rem_euclid(12)).ok()? + 1;
+    let date = (1..=instant.day())
+        .rev()
+        .find_map(|day| chrono::NaiveDate::from_ymd_opt(year, month, day))?;
+    Some(date.and_time(instant.time()).and_utc())
+}
+
 /// date_add(iso, amount, unit) - Move a date or datetime by a whole amount.
 /// Args:
 ///   - iso: String (or the piped text) - an ISO date or datetime
 ///   - amount: Int - may be negative
-///   - unit: String - "days", "hours", "minutes" or "seconds"
-/// Returns: String - a date when the input is a date and the unit is days; otherwise a UTC datetime ending in Z
+///   - unit: String - "weeks", "days", "months", "years", "hours", "minutes" or "seconds"
+/// Returns: String - a date when the input is a date and the unit is weeks, days, months or years; otherwise a UTC datetime ending in Z
+///
+/// Months and years are calendar units: 2024-01-31 plus one month is
+/// 2024-02-29, the last day of the month it lands in. The time of day is kept.
 ///
 /// Example:
 ///   date_add("2024-02-28", 1, "days")                  # "2024-02-29"
 ///   date_add("2024-02-28T23:00:00Z", 2, "hours")       # "2024-02-29T01:00:00Z"
+///   date_add("2024-01-31", 1, "months")                # "2024-02-29"
 fn bi_date_add(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
     const B: &str = "date_add";
+    const UNITS: &str = "a unit String: weeks, days, months, years, hours, minutes or seconds";
     let (text, rest) = text_subject(B, args, input)?;
     let [amount, unit] = rest.as_slice() else {
         return Err(arity_error(B, "an amount Int and a unit", rest.len()));
@@ -15248,13 +15280,25 @@ fn bi_date_add(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
             amount.type_name(),
         ));
     };
-    let unit = string_arg(B, "a unit String: days, hours, minutes or seconds", unit)?;
-    let per = unit_seconds(B, unit)?;
+    let unit = string_arg(B, UNITS, unit)?;
+    // Months and years are calendar steps; the other units are fixed lengths.
+    let (months, per): (Option<i64>, i64) = match unit {
+        "months" => (Some(1), 0),
+        "years" => (Some(12), 0),
+        "weeks" => (None, 604_800),
+        "days" | "hours" | "minutes" | "seconds" => (None, unit_seconds(B, unit)?),
+        other => return Err(crate::safety::bad_arg(B, UNITS, other)),
+    };
     let (instant, date_only) = parse_iso(B, &text)?;
-    let moved = amount
-        .checked_mul(per)
-        .and_then(chrono::TimeDelta::try_seconds)
-        .and_then(|delta| instant.checked_add_signed(delta));
+    let moved = match months {
+        Some(per_unit) => amount
+            .checked_mul(per_unit)
+            .and_then(|total| add_calendar_months(instant, total)),
+        None => amount
+            .checked_mul(per)
+            .and_then(chrono::TimeDelta::try_seconds)
+            .and_then(|delta| instant.checked_add_signed(delta)),
+    };
     let Some(moved) = moved else {
         return Err(crate::safety::bad_arg_in(
             B,
@@ -15262,7 +15306,8 @@ fn bi_date_add(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
             "use a smaller amount",
         ));
     };
-    Ok(Value::Str(iso_text(moved, date_only && unit == "days")))
+    let whole_days = matches!(unit, "weeks" | "days" | "months" | "years");
+    Ok(Value::Str(iso_text(moved, date_only && whole_days)))
 }
 
 /// The path of a key under `path`, as a refusal names it: `app.servers[1].note`.

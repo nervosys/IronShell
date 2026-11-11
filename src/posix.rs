@@ -2641,8 +2641,9 @@ impl Shell {
         // The script is read and run, so it is held to the read jail as `cat`
         // holds a file it reads: a script outside the workspace is refused
         // before anything runs, through a link or a junction or by an absolute
-        // path alike (the jail resolves them).
-        if let Some(refusal) = jail_refusal("cat", script) {
+        // path alike (the jail resolves them). The refusal names `sh`, the
+        // command the script runs as, not `cat`, which is not what was run.
+        if let Some(refusal) = jail_refusal("sh", script) {
             sink.eline(&refusal);
             return 1;
         }

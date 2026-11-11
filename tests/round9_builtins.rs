@@ -433,7 +433,7 @@ fn date_add_answers_a_utc_datetime_for_hours_minutes_and_seconds() {
 
 #[test]
 fn date_add_refuses_a_bad_unit_amount_or_date() {
-    assert!(refusal(r#"date_add("2024-02-28", 1, "weeks")"#).contains("E_BAD_ARG"));
+    assert!(refusal(r#"date_add("2024-02-28", 1, "fortnights")"#).contains("E_BAD_ARG"));
     assert!(refusal(r#"date_add("2024-02-28", "1", "days")"#).contains("E_BAD_ARG"));
     assert!(refusal(r#"date_add("2024-02-28", 1)"#).contains("E_BAD_ARG"));
     assert!(refusal(r#"date_add("someday", 1, "days")"#).contains("E_BAD_VALUE"));

@@ -91,16 +91,19 @@ fn a_hard_link_to_the_audit_log_cannot_be_written() {
     let alias = ws.path("innocent.txt");
     std::fs::hard_link(&log, &alias).unwrap();
 
-    assert_refused(
-        "file_write",
-        vec![s(&alias), s("forged\n")],
-        "audit log or its directory",
-    );
-    assert_refused(
-        "file_append",
-        vec![s(&alias), s("forged\n")],
-        "audit log or its directory",
-    );
+    // Inside the workspace, so the refusal is the protected-evidence policy
+    // (E_POLICY_DENY), not containment.
+    for name in ["file_write", "file_append"] {
+        let shown = format!("{name} {alias}");
+        let e = call(name, vec![s(&alias), s("forged\n")])
+            .expect_err(&format!("{shown} must be refused"));
+        let text = e.to_string();
+        assert!(text.contains("E_POLICY_DENY"), "{shown}: {text}");
+        assert!(
+            text.contains("audit log or its directory"),
+            "{shown}: {text}"
+        );
+    }
     // The refusals themselves are recorded in the log, so only the forged
     // content is checked for absence and the original entry for presence.
     let text = std::fs::read_to_string(&log).unwrap();

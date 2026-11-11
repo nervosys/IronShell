@@ -7397,10 +7397,12 @@ pub fn guard(ctx: GuardCtx) -> Result<(), SafetyError> {
                     &resource,
                     json!({ "target": t }),
                 );
+                // The path is inside the workspace, so the refusal is a policy
+                // decision about protected evidence, not a containment failure.
                 return Err(SafetyError {
-                    code: ErrorCode::OutsideWorkspace,
+                    code: ErrorCode::PolicyDeny,
                     message: format!(
-                        "{}: '{}' is the audit log or its directory and cannot be written by a guarded builtin",
+                        "{}: '{}' is the audit log or its directory, which is protected and cannot be written by a guarded builtin",
                         ctx.builtin, t
                     ),
                     builtin: ctx.builtin.to_string(),

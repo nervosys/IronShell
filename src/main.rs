@@ -912,6 +912,12 @@ fn handle_agent_api_command(command: AgentApiCommands) -> Result<()> {
                 Ok(parsed) => {
                     let response = agent_api::process_request(&parsed);
                     println!("{}", serde_json::to_string_pretty(&response)?);
+                    // A failed call exits 1, as a malformed request does, so a
+                    // shell `&&` or a caller's exit check sees the failure.
+                    if !response.success {
+                        io::stdout().flush()?;
+                        std::process::exit(1);
+                    }
                     Ok(())
                 }
                 Err(response) => {
