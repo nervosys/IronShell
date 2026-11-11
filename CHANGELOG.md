@@ -45,6 +45,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - In agent mode, an approval refusal names only the out-of-band route (the operator re-runs with `IRONSHELL_APPROVE=<token>`); it no longer offers `approve()`, which agent mode refuses for the agent's own call.
 - `ontology_describe` of an unknown name fails with E_UNKNOWN_BUILTIN and `did_you_mean`, instead of exiting 0 with an `error` field.
 - A `(` at the start of a line starts a new statement. `x = 5` followed by `(x + 1) * 2` used to parse as `x = 5(x + 1) * 2`.
+- An `if` whose condition is not a Bool is E_BAD_ARG, with a hint for its type (`exists()` returns a Record: test `exists(p).exists`). It used to take the else branch silently. Null is still false. A hand-written `match c { true => a, _ => b }` is held to the same rule.
+- A statement that starts with a word followed by a shell flag (`ls --help`, `mkdir -p a/b`) is E_PARSE, with a hint to call `name(args)` and `help("name")`. A name assigned earlier is still subtracted from (`total -discount`).
+- `rm` and `crypto_hash_file` refuse a directory with E_BAD_ARG naming the call that fits it, and `mv` names a missing destination folder or a directory target, instead of a permissions error or a missing source.
 
 ### Added
 
@@ -72,6 +75,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `merge(a, b)` (or `a | merge(b)`) merges two Records shallowly, `b`'s fields winning; `format_number(x, decimals, separator?)` writes a number with fixed decimals and optional thousands grouping (`format_number(1234567.891, 2, ",")` is `1,234,567.89`).
 - `if a { 1 } else if b { 2 } else { 3 }` parses. `c ? a : b` and `a?.b` are refused with a hint naming the `if`/`else` and null-test forms.
 - `delete_lines(path, "text")` deletes the lines containing the text, as `{contains: "text"}` does.
+- `help("name")` describes one builtin, as `ontology_describe("name")` does; `help()` and `ish --help` point to it.
 
 ### Fixed
 
@@ -104,6 +108,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - An `rm` approval says `reversible: true` when the undo journal will keep the file.
 - `1.5 < 0` and the other Int/Float orderings compare as numbers instead of failing.
 - `split("")` splits into characters (`"abc"` gives `["a", "b", "c"]`, `""` gives `[]`) instead of adding an empty string at each end.
+- `tar_create` gzips a `.tar.gz` or `.tgz` archive; it wrote a plain tar, which `tar_list` then refused.
+- `undo` of a move puts the source back as well as an overwritten destination, as one step; a move onto an existing file says `overwrites: true` in its approval.
+- `undo` after a directory removal says it is not journaled, instead of "was absent before and is absent now".
+- `mkdir` declares its path parameter in the ontology, and `fs_walk` documents that it lists directories too. `ish agent schema --module` of an unknown module points at `ontology_manifest()`, not an HTTP route.
 
 
 ## [14.0.1] - 2026-11-08
