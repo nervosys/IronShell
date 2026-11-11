@@ -184,3 +184,27 @@ fn read_text_of_a_file_that_is_not_utf8_is_refused_at_the_bad_byte() {
     let out = ish_in(&proj, r#"read_text("bad.txt")"#);
     assert_not_utf8_refusal(&out, "read_text", "byte offset 3");
 }
+
+#[test]
+fn runaway_recursion_is_budget_exceeded_and_the_hint_covers_intended_depth() {
+    let dir = scratch("recursion_limit");
+    let proj = dir.join("proj");
+    let out = ish_in(
+        &proj,
+        "f = fn(n) => if n == 0 { 0 } else { 1 + f(n - 1) }; f(10000)",
+    );
+    assert!(!out.status.success(), "recursion past the limit must fail");
+    let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+    assert!(stderr.contains("E_BUDGET_EXCEEDED"), "code: {stderr}");
+    assert!(
+        stderr.contains("recursion too deep (limit 2000)"),
+        "message: {stderr}"
+    );
+    assert!(
+        stderr.contains(
+            "calls nest at most 2000 deep; if the recursion is intended, iterate instead \
+             with reduce over arr.range(n), or check the base case"
+        ),
+        "hint: {stderr}"
+    );
+}
