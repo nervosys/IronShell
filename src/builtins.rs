@@ -5397,10 +5397,18 @@ fn bi_where(args: Vec<Value>, input: Option<Value>, env: &mut Env) -> Result<Val
                 Value::Bool(true) => out.push(v),
                 Value::Bool(false) => {}
                 other => {
-                    return Err(crate::safety::arg_err(format!(
-                        "where predicate must return Bool, got {:?}",
-                        other
-                    )))
+                    // Plain display, not Debug: "got Int 0", not "got Int(0)".
+                    let got = match &other {
+                        Value::Null | Value::Int(_) | Value::Float(_) | Value::Bool(_) => {
+                            format!("{} {}", other.type_name(), other.to_display_string())
+                        }
+                        _ => other.type_name().to_string(),
+                    };
+                    return Err(crate::safety::bad_arg_in(
+                        "where",
+                        format!("where predicate must return Bool, got {got}"),
+                        "return a Bool from the predicate, e.g. fn(x) => x != 0",
+                    ));
                 }
             }
         }

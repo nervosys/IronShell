@@ -98,3 +98,19 @@ fn bool_operands_still_combine() {
         Value::Bool(true)
     ));
 }
+
+// ---- 2. where's non-Bool predicate ----
+
+#[test]
+fn where_names_the_value_it_got_and_how_to_fix_the_predicate() {
+    let text = run_refusal("[0] | where(fn(x) => x)");
+    assert!(
+        text.contains("where predicate must return Bool, got Int 0"),
+        "{text}"
+    );
+    assert!(
+        text.contains("return a Bool from the predicate, e.g. fn(x) => x != 0"),
+        "{text}"
+    );
+    assert!(!text.contains("Int(0)"), "Debug form leaked: {text}");
+}
