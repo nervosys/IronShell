@@ -3140,6 +3140,9 @@ fn definition_from_signature(
         let required = sig.subject_required || sig.params.iter().any(|p| p.required);
         (ty.as_str(), required, SUBJECT_PARAM_DOC)
     });
+    // The schema lists `subject` first, then the parameters in declaration
+    // order. That is the order the `properties` object keeps, because serde_json
+    // is built with `preserve_order`; without it the map would sort them.
     let properties: serde_json::Map<String, JsonValue> = subject_param
         .iter()
         .map(|(ty, _, doc)| {
