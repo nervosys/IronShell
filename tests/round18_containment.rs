@@ -128,3 +128,49 @@ fn a_plain_file_in_the_workspace_still_writes() {
     let text = std::fs::read_to_string(dir.join("proj").join("plain.txt")).unwrap();
     assert_eq!(text.trim(), "ok");
 }
+
+// ── Item 2: a script outside the workspace is refused before it runs ──
+
+/// A script in the workspace runs; the same script outside it is refused by
+/// every spelling, and nothing it would write appears in the workspace.
+#[cfg(windows)]
+#[test]
+fn a_script_outside_the_workspace_is_refused_before_it_runs() {
+    let dir = scratch("script_outside");
+    let script = "#!/bin/sh\necho ran > ran.txt\n";
+    std::fs::write(dir.join("outside").join("x.sh"), script).unwrap();
+    std::fs::write(
+        dir.join("proj").join("inside.sh"),
+        "#!/bin/sh\necho inside\n",
+    )
+    .unwrap();
+    let absolute = dir
+        .join("outside")
+        .join("x.sh")
+        .to_string_lossy()
+        .replace('\\', "/");
+
+    let inside = ish_agent(&dir, &["-b", "-c", "sh inside.sh"]);
+    assert!(
+        inside.status.success(),
+        "a script inside the workspace must still run: {}",
+        stderr_of(&inside)
+    );
+    assert_eq!(String::from_utf8_lossy(&inside.stdout).trim(), "inside");
+
+    for code in [
+        "sh ../outside/x.sh".to_string(),
+        "bash ../outside/x.sh".to_string(),
+        absolute.clone(),
+    ] {
+        let out = ish_agent(&dir, &["-b", "-c", code.as_str()]);
+        let err = stderr_of(&out);
+        assert!(!out.status.success(), "`{code}` must be refused");
+        assert!(err.contains("outside the workspace"), "`{code}`: {err}");
+        assert!(err.contains("x.sh"), "the refusal names the script: {err}");
+        assert!(
+            !dir.join("proj").join("ran.txt").exists(),
+            "`{code}` ran the script"
+        );
+    }
+}
