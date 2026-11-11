@@ -116,7 +116,7 @@ fn lambdas_after_a_field_assignment_read_the_new_field() {
 
 #[test]
 fn string_built_by_reduce_keeps_every_piece() {
-    let v = eval(r#"arr.range(20000) | reduce(fn(acc, i) => acc + "x", "")"#).unwrap();
+    let v = eval(r#"range(20000) | reduce(fn(acc, i) => acc + "x", "")"#).unwrap();
     assert_eq!(v, Value::Str("x".repeat(20000)));
 }
 
