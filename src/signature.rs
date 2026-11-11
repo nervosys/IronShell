@@ -2980,20 +2980,28 @@ pub static SIGNATURES: &[Signature] = &[
         subject_required: false,
         aliases: &["sqlite_query", "db_sqlite_query"],
         subject: Some(Ty::Any),
+        // `query` is variadic so that a trailing `params` Array is matched by
+        // its own type: the validator gives the last argument to the parameter
+        // after a variadic when that type accepts it, and to `query` otherwise.
         params: &[
             req(
                 "source_or_query",
                 Ty::Str,
                 "with rows piped in, the query (they are table `t`); otherwise a source: a .json/.jsonl/.csv file (a table named after the file, also `t`), a SQLite file, or \":memory:\"",
             ),
-            opt(
+            opt_rest(
                 "query",
                 Ty::Str,
-                "the read-only SQL to run against the source; bind parameters are not supported",
+                "the read-only SQL to run against the source; each ? in it takes the next value of params",
+            ),
+            opt(
+                "params",
+                Ty::Array,
+                "bind values for the ? placeholders, in order: Int, Float, String, Bool or null",
             ),
         ],
         returns: "Array",
-        doc: "Run a read-only SQL query over piped rows, a JSON/CSV file or a SQLite database, returning rows as records.",
+        doc: "Run a read-only SQL query over piped rows, a JSON/CSV file or a SQLite database, returning rows as records. A trailing params Array binds its values to the query's ? placeholders in order, so a value is never spliced into the query text.",
         examples: &[
             (
                 r#"[{n: 1}, {n: 2}, {n: 3}] | sql("select sum(n) as total from t") | first | fn(r) => r.total"#,
@@ -3004,6 +3012,14 @@ pub static SIGNATURES: &[Signature] = &[
                 "1",
             ),
             (r#"sql(":memory:", "SELECT 2 AS n") | len"#, "1"),
+            (
+                r#"[{n: 1}, {n: 2}, {n: 3}] | sql("select n from t where n > ?", [1]) | len"#,
+                "2",
+            ),
+            (
+                r#"sql(":memory:", "SELECT ? AS n", [7]) | first | fn(r) => r.n"#,
+                "7",
+            ),
         ],
     },
     Signature {
@@ -3066,19 +3082,28 @@ pub static SIGNATURES: &[Signature] = &[
         subject_required: false,
         aliases: &[],
         subject: Some(Ty::Any),
+        // `query` is variadic for the same reason as in `sql`: it lets a
+        // trailing params Array match its own type.
         params: &[
             req(
                 "source_or_query",
                 Ty::Str,
                 "with rows piped in, the query (they are table `t`); otherwise a source, as for sql",
             ),
-            opt("query", Ty::Str, "the read-only SQL to run against the source"),
+            opt_rest("query", Ty::Str, "the read-only SQL to run against the source; each ? in it takes the next value of params"),
+            opt(
+                "params",
+                Ty::Array,
+                "bind values for the ? placeholders, in order: Int, Float, String, Bool or null",
+            ),
         ],
         returns: "Any",
-        doc: "Run a read-only SQL query that yields exactly one row of one column, returning that value.",
+        doc: "Run a read-only SQL query that yields exactly one row of one column, returning that value. A trailing params Array binds its values to the query's ? placeholders in order, as for sql.",
         examples: &[
             (r#"[{n: 1}, {n: 2}, {n: 3}] | sql_value("select max(n) from t")"#, "3"),
             (r#"sql_value(":memory:", "select 6 * 7")"#, "42"),
+            (r#"sql_value(":memory:", "select ? * 6", [7])"#, "42"),
+            (r#"[{n: 1}, {n: 2}, {n: 3}] | sql_value("select count(*) from t where n > ?", [1])"#, "2"),
         ],
     },
     Signature {

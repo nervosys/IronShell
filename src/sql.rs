@@ -379,8 +379,50 @@ fn read_only_authorizer(ctx: AuthContext<'_>) -> Authorization {
     }
 }
 
-/// Run one read-only statement, returning column names and rows.
-fn run(builtin: &str, conn: &Connection, query: &str) -> Result<(Vec<String>, Vec<Vec<Value>>)> {
+/// A call's bind parameters: a trailing Array after the query, when something
+/// comes before it. A lone Array stays the query, so the refusal still says a
+/// query must be a String.
+fn split_params(args: &[Value]) -> (&[Value], &[Value]) {
+    match args.split_last() {
+        Some((Value::Array(values), rest)) if !rest.is_empty() => (rest, values.as_slice()),
+        _ => (args, &[]),
+    }
+}
+
+/// A bind parameter as the SQLite value it is bound as. Only the scalars a
+/// comparison can use are accepted; a Bool binds as 1 or 0, as it is stored.
+fn bind_value(builtin: &str, position: usize, v: &Value) -> Result<rusqlite::types::Value> {
+    use rusqlite::types::Value as S;
+    Ok(match v {
+        Value::Null => S::Null,
+        Value::Bool(b) => S::Integer(i64::from(*b)),
+        Value::Int(i) => S::Integer(*i),
+        Value::Float(f) => S::Real(*f),
+        Value::Str(s) => S::Text(s.clone()),
+        other => {
+            return Err(bad(
+                builtin,
+                format!(
+                    "bind parameter {} is {}, not a null, Bool, Int, Float or String",
+                    position + 1,
+                    other.type_name()
+                ),
+                "pass scalar values in the params array, one for each ? in the query".to_string(),
+                "Int, Float, String, Bool or null",
+                other.type_name().to_string(),
+            ))
+        }
+    })
+}
+
+/// Run one read-only statement, binding `params` to its `?` placeholders in
+/// order, and return column names and rows.
+fn run(
+    builtin: &str,
+    conn: &Connection,
+    query: &str,
+    params: &[Value],
+) -> Result<(Vec<String>, Vec<Vec<Value>>)> {
     conn.set_limit(Limit::SQLITE_LIMIT_ATTACHED, 0)
         .map_err(|e| internal(builtin, &e))?;
     conn.authorizer(Some(read_only_authorizer))
@@ -423,9 +465,30 @@ fn run(builtin: &str, conn: &Connection, query: &str) -> Result<(Vec<String>, Ve
             "a statement that writes".to_string(),
         ));
     }
+    // Placeholders are bound by position, so the counts must agree.
+    let wanted = stmt.parameter_count();
+    if wanted != params.len() {
+        return Err(bad(
+            builtin,
+            format!(
+                "the query has {wanted} placeholder(s) but {} bind parameter(s) were given",
+                params.len()
+            ),
+            "pass one value in the params array for each ? in the query, in order".to_string(),
+            &format!("{wanted} bind parameter(s)"),
+            params.len().to_string(),
+        ));
+    }
+    let bound = params
+        .iter()
+        .enumerate()
+        .map(|(i, v)| bind_value(builtin, i, v))
+        .collect::<Result<Vec<_>>>()?;
     let columns: Vec<String> = stmt.column_names().iter().map(|c| c.to_string()).collect();
     let mut rows_out = Vec::new();
-    let mut rows = stmt.query([]).map_err(query_err)?;
+    let mut rows = stmt
+        .query(rusqlite::params_from_iter(bound))
+        .map_err(query_err)?;
     while let Some(row) = rows.next().map_err(query_err)? {
         if rows_out.len() >= MAX_ROWS {
             return Err(crate::safety::budget_exceeded(
@@ -603,15 +666,17 @@ fn query_once(
     args: &[Value],
     subject: Option<Value>,
 ) -> Result<(Vec<String>, Vec<Vec<Value>>)> {
+    let (args, params) = split_params(args);
     let (conn, query, key) = connect(builtin, args, subject)?;
-    let result = run(builtin, &conn, &query);
+    let result = run(builtin, &conn, &query, params);
     if let Some(k) = key {
         cache_put(k, conn);
     }
     result
 }
 
-/// `sql` / `sqlite_query` / `db_sqlite_query`: rows as records.
+/// `sql` / `sqlite_query` / `db_sqlite_query`: rows as records. A trailing
+/// Array is the bind parameters for the query's `?` placeholders.
 pub fn sql(builtin: &str, args: Vec<Value>, subject: Option<Value>) -> Result<Value> {
     let (columns, rows) = query_once(builtin, &args, subject)?;
     Ok(Value::Array(

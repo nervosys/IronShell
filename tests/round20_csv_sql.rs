@@ -123,6 +123,98 @@ fn csv_columns_refuses_a_subject_that_is_not_text() {
     assert_eq!(code_of(&e), "E_BAD_ARG", "{e}");
 }
 
+// ── item 3: bind parameters ─────────────────────────────────────────────
+
+#[test]
+fn sql_binds_a_trailing_array_to_its_placeholders() {
+    assert_eq!(
+        eval(r#"[{n: 1}, {n: 2}, {n: 3}] | sql("select n from t where n > ?", [1]) | len"#)
+            .unwrap(),
+        Value::Int(2)
+    );
+    assert_eq!(
+        eval(r#"[{s: "open"}, {s: "closed"}] | sql_value("select count(*) from t where s = ?", ["open"])"#)
+            .unwrap(),
+        Value::Int(1)
+    );
+}
+
+#[test]
+fn each_scalar_kind_binds_as_its_sql_value() {
+    let cases = [
+        (
+            r#"sql_value(":memory:", "select ? is null", [null])"#,
+            Value::Int(1),
+        ),
+        (
+            r#"sql_value(":memory:", "select ? * 2", [1.5])"#,
+            Value::Float(3.0),
+        ),
+        (
+            r#"sql_value(":memory:", "select ?", [true])"#,
+            Value::Int(1),
+        ),
+        (
+            r#"sql_value(":memory:", "select ? || '!'", ["hi"])"#,
+            s("hi!"),
+        ),
+    ];
+    for (src, want) in cases {
+        assert_eq!(eval(src).unwrap(), want, "{src}");
+    }
+}
+
+#[test]
+fn a_bound_value_is_data_not_query_text() {
+    assert_eq!(
+        eval(r#"[{s: "it's"}] | sql_value("select count(*) from t where s = ?", ["it's"])"#)
+            .unwrap(),
+        Value::Int(1)
+    );
+}
+
+#[test]
+fn a_placeholder_count_mismatch_names_both_counts() {
+    let e = eval(r#"sql_value(":memory:", "select ?", [])"#).expect_err("no value for ?");
+    assert_eq!(code_of(&e), "E_BAD_ARG", "{e}");
+    let text = e.to_string();
+    assert!(
+        text.contains("1 placeholder") && text.contains("0 bind"),
+        "{text}"
+    );
+    let e = eval(r#"sql(":memory:", "select 1", [5])"#).expect_err("a value and no ?");
+    assert_eq!(code_of(&e), "E_BAD_ARG", "{e}");
+}
+
+#[test]
+fn a_bind_value_that_is_not_a_scalar_is_refused() {
+    let e = eval(r#"sql_value(":memory:", "select ?", [[1]])"#).expect_err("an Array binds");
+    assert_eq!(code_of(&e), "E_BAD_ARG", "{e}");
+}
+
+#[test]
+fn a_lone_array_is_still_refused_as_the_query() {
+    let e = eval("[{n: 1}] | sql([1])").expect_err("an Array is not a query");
+    assert_eq!(code_of(&e), "E_BAD_ARG", "{e}");
+}
+
+#[test]
+fn a_file_query_takes_bind_parameters() {
+    let dir = fresh_dir("bind");
+    let path = dir.join("rows.csv");
+    std::fs::write(&path, "id,status\n1,open\n2,closed\n3,open\n").unwrap();
+    let p = fwd(&path);
+    let got = eval(&format!(
+        r#"sql("{p}", "select id from rows where status = ?", ["open"]) | len"#
+    ));
+    let count = eval(&format!(
+        r#"sql_value("{p}", "select count(*) from rows where status = ?", ["open"])"#
+    ));
+    let _ = std::fs::remove_dir_all(&dir);
+    assert_eq!(got.unwrap(), Value::Int(2));
+    assert_eq!(count.unwrap(), Value::Int(2));
+}
+
 // ── item 2: blanks in numeric CSV columns ───────────────────────────────
 
 #[test]
