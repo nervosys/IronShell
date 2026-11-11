@@ -14457,7 +14457,14 @@ fn bi_sqrt(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
     };
 
     if num < 0.0 {
-        return Err(crate::safety::arg_err("sqrt requires non-negative number"));
+        // A domain error, not a type error: the generic hint would restate the
+        // signature ("sqrt takes Number"), which the argument already matches.
+        return Err(crate::safety::bad_arg_with_hint(
+            "sqrt",
+            "a number >= 0",
+            &format!("{num}"),
+            "sqrt is undefined below zero: take sqrt of abs(x), or check the sign first",
+        ));
     }
 
     Ok(Value::Float(num.sqrt()))

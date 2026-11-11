@@ -134,6 +134,21 @@ fn item3_an_unknown_module_member_says_to_drop_the_prefix() {
     assert!(hint.contains("nosuch_zz"), "{hint}");
 }
 
+// ── Item 6: sqrt of a negative number is a domain error ─────────────────────
+
+#[test]
+fn item6_sqrt_of_a_negative_states_the_bound_and_the_value_with_a_real_hint() {
+    let (code, v) = execute_once(r#"{"action":"call","builtin":"sqrt","args":[-1]}"#);
+    assert_eq!(code, Some(1), "{v}");
+    assert_eq!(v["error"]["code"], json!("E_BAD_ARG"), "{v}");
+    let message = v["error"]["message"].as_str().unwrap_or_default();
+    assert!(message.contains("a number >= 0"), "{message}");
+    assert!(message.contains("got -1"), "{message}");
+    let hint = v["error"]["hint"].as_str().unwrap_or_default();
+    assert!(hint.contains("abs(x)"), "{hint}");
+    assert!(!hint.contains("takes"), "{hint}");
+}
+
 // ── Item 5: request hints for a pipeline and for several requests ───────────
 
 #[test]
