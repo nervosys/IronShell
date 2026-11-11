@@ -2715,7 +2715,7 @@ pub static SIGNATURES: &[Signature] = &[
             opt("value", Ty::Any, "the value to save; piped, the input is the value instead"),
         ],
         returns: "Record",
-        doc: "Save a value as pretty-printed JSON to a file and return {path, bytes, overwrote, success}. The path is jailed to the workspace like every local write, so an absolute path outside it is refused. An existing file is replaced, and overwrote says so. Takes the value as an argument or piped, not both.",
+        doc: "Save a value as pretty-printed JSON to a file and return {path, bytes, overwrote, success}. In agent mode or when a workspace is set (`--workspace` or IRONSHELL_WORKSPACE) the path is jailed to the workspace like every local write, so an absolute path outside it is refused. An existing file is replaced, and overwrote says so. Takes the value as an argument or piped, not both.",
         examples: &[
             (r#"(try { save_json() } catch e { e.error.code })"#, "E_BAD_ARG"),
             (r#"(try { save_json("out.json", 1, 2) } catch e { e.error.code })"#, "E_BAD_ARG"),
@@ -10597,7 +10597,7 @@ pub static SIGNATURES: &[Signature] = &[
             },
         ],
         returns: "Bool",
-        doc: "Create a tar archive at a new path from the given members, and return true. The archive is streamed to a new file, so an existing one is refused rather than truncated; it is jailed to the workspace, capped in size and deadlined, and a partial archive is removed on failure. Names that could be read as options are refused. Piped input is refused.",
+        doc: "Create a tar archive at a new path from the given members, and return true. The archive is streamed to a new file, so an existing one is refused rather than truncated; in agent mode or when a workspace is set (`--workspace` or IRONSHELL_WORKSPACE) it is jailed to the workspace, and it is capped in size and deadlined; a partial archive is removed on failure. Names that could be read as options are refused. Piped input is refused.",
         examples: &[
             (r#"(try { tar_create("a.tar") } catch e { e.error.code })"#, "E_BAD_ARG"),
             (r#"(try { tar_create("-x.tar", "f") } catch e { e.error.code })"#, "E_BAD_ARG"),
@@ -11293,7 +11293,7 @@ pub static SIGNATURES: &[Signature] = &[
         subject: None,
         params: &[req("path", Ty::Str, "a .bz2 file that exists")],
         returns: "Bool",
-        doc: "Decompress a .bz2 file to a new file beside it, without the suffix, and return true. The output is jailed to the workspace, must not already exist, is capped at 1 GiB (a small archive can inflate without bound; a run past the cap is E_BUDGET_EXCEEDED and its partial output is removed), and has a deadline. Piped input is refused.",
+        doc: "Decompress a .bz2 file to a new file beside it, without the suffix, and return true. In agent mode or when a workspace is set (`--workspace` or IRONSHELL_WORKSPACE) the output is jailed to the workspace; it must not already exist, is capped at 1 GiB (a small archive can inflate without bound; a run past the cap is E_BUDGET_EXCEEDED and its partial output is removed), and has a deadline. Piped input is refused.",
         examples: &[
             (r#"(try { bzip2_decompress() } catch e { e.error.code })"#, "E_BAD_ARG"),
             (r#"(try { bzip2_decompress("archive.gz") } catch e { e.error.code })"#, "E_BAD_ARG"),

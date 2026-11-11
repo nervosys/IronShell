@@ -1167,7 +1167,7 @@ of structured errors rather than building or measuring it.
 Landed in `src/safety.rs` (native-gated, registered in `src/lib.rs`), with
 `guard()` wired into nine effecting builtins in `src/builtins.rs`:
 
-- **filesystem** (jailed to the workspace): `rm`, `rmdir`, `file_delete_lines`
+- **filesystem** (jailed to the workspace in agent mode or when one is set): `rm`, `rmdir`, `file_delete_lines`
 - **process**: `proc_kill`
 - **exec**: `sh`
 - **destructive non-path** (not jailed): `db_kv_delete`, `db_sqlite_delete`,
