@@ -885,6 +885,7 @@ fn classified_effect(name: &str) -> Option<Effect> {
         | "crypto_random_bytes"
         | "crypto_random_string"
         | "crypto_uuid"
+        | "csv_columns"
         | "db_csv_query"
         | "db_csv_to_json"
         | "db_json_query"

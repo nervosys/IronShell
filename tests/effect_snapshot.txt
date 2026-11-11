@@ -260,6 +260,7 @@ crypto_random_string	ReadLocal
 crypto_sign	ReadLocal
 crypto_uuid	ReadLocal
 crypto_verify_signature	ReadLocal
+csv_columns	ReadLocal
 curl	Network
 cut	Pure
 cut_columns	Pure

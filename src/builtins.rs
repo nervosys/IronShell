@@ -4231,6 +4231,7 @@ pub const FALLBACK_BUILTINS: &[(&str, &str)] = &[
     ("ai_usage", "bi_ai_usage"),
     ("columns", "bi_columns"),
     ("complete", "bi_ai_complete"),
+    ("csv_columns", "bi_csv_columns"),
     ("describe", "bi_describe"),
     ("explain", "bi_ai_explain"),
     ("explain_effects", "bi_explain_effects"),
@@ -4460,6 +4461,7 @@ fn call_with_input_inner(
         "to-json" | "to_json" => bi_to_json(args, input),
         "from-csv" | "from_csv" => bi_from_csv(args, input),
         "to-csv" | "to_csv" => bi_to_csv(args, input),
+        "csv_columns" => bi_csv_columns(args, input),
         "from-yaml" | "from_yaml" => bi_from_yaml(args, input),
         "to-yaml" | "to_yaml" => bi_to_yaml(args, input),
         "columns" => bi_columns(args, input),
@@ -10369,31 +10371,80 @@ fn bi_from_csv(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
 }
 
 /// to-csv: Convert structured data to CSV
+///
+/// The columns are the first record's keys, or the `columns` Array when one is
+/// given, in that order; a record without one of them writes an empty field.
 fn bi_to_csv(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
-    // Piped, the rows are the input; called directly, they are the first argument.
-    let input = input
-        .or_else(|| args.into_iter().next())
-        .ok_or_else(|| subject_refusal("to_csv", "an array of records"))?;
+    // Piped, the rows are the input and an optional columns Array the first
+    // argument; called directly, the rows come first and the columns second.
+    let mut args = args.into_iter();
+    let (input, columns) = match input {
+        Some(rows) => (rows, args.next()),
+        None => {
+            let rows = args
+                .next()
+                .ok_or_else(|| subject_refusal("to_csv", "an array of records"))?;
+            (rows, args.next())
+        }
+    };
+    let columns: Option<Vec<String>> = match columns {
+        None => None,
+        Some(Value::Array(names)) => {
+            let mut out = Vec::with_capacity(names.len());
+            for name in names {
+                match name {
+                    Value::Str(s) => out.push(s),
+                    other => {
+                        return Err(crate::safety::bad_arg(
+                            "to_csv",
+                            "columns: Array of String",
+                            other.type_name(),
+                        ))
+                    }
+                }
+            }
+            if out.is_empty() {
+                return Err(crate::safety::bad_arg(
+                    "to_csv",
+                    "columns: at least one column name",
+                    "an empty Array",
+                ));
+            }
+            Some(out)
+        }
+        Some(other) => {
+            return Err(crate::safety::bad_arg(
+                "to_csv",
+                "columns: Array of String",
+                other.type_name(),
+            ))
+        }
+    };
 
     match input {
         Value::Array(arr) => {
-            if arr.is_empty() {
-                return Ok(Value::Str(String::new()));
-            }
-
-            // Get headers from first record
-            let headers = if let Value::Record(first_record) = &arr[0] {
-                first_record.keys().cloned().collect::<Vec<_>>()
-            } else {
-                return Err(crate::safety::arg_err(
-                    "to-csv: input must be array of records",
-                ));
+            let headers: Vec<String> = match (columns, arr.first()) {
+                (Some(names), _) => names,
+                (None, None) => return Ok(Value::Str(String::new())),
+                (None, Some(Value::Record(first_record))) => first_record.keys().cloned().collect(),
+                (None, Some(_)) => {
+                    return Err(crate::safety::arg_err(
+                        "to-csv: input must be array of records",
+                    ))
+                }
             };
 
             let mut csv_output = String::new();
 
-            // Write headers
-            csv_output.push_str(&headers.join(","));
+            // Write headers, quoted as a value is, so a column name with a comma
+            // reads back as one column.
+            csv_output.push_str(
+                &headers
+                    .iter()
+                    .map(|h| csv_escape(h))
+                    .collect::<Vec<_>>()
+                    .join(","),
+            );
             csv_output.push('\n');
 
             // Write data rows
@@ -10437,6 +10488,53 @@ fn csv_escape(s: &str) -> String {
     } else {
         s.to_string()
     }
+}
+
+/// csv_columns(path_or_text): the header row, in file order.
+///
+/// A String that names an existing file is read as that file; any other String
+/// is CSV text. Quoting is parsed as `from_csv` parses it, so a quoted header
+/// with a comma is one column.
+fn bi_csv_columns(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
+    // Piped, the path or text is the input; called directly, it is the first argument.
+    let subject = match input.or_else(|| args.into_iter().next()) {
+        Some(Value::Str(s)) => s,
+        Some(other) => {
+            return Err(crate::safety::bad_arg(
+                "csv_columns",
+                "a path or CSV text: String",
+                other.type_name(),
+            ))
+        }
+        None => return Err(subject_refusal("csv_columns", "a CSV path or CSV text")),
+    };
+
+    // A remote-share string is never probed: exists() on it opens a connection.
+    if !crate::safety::names_a_remote_share(&subject) && std::path::Path::new(&subject).is_file() {
+        let validated = validate_read_path(&subject)?;
+        let file = std::fs::File::open(&validated)
+            .map_err(|e| crate::safety::fs_error("csv_columns", &validated, &e))?;
+        return csv_header_row(std::io::BufReader::new(file));
+    }
+    csv_header_row(subject.as_bytes())
+}
+
+/// The first record of a CSV source as its column names. Only the header is
+/// read, so a large file costs one row. A leading byte-order mark is not part
+/// of the first name.
+fn csv_header_row(source: impl std::io::Read) -> Result<Value> {
+    let mut reader = csv::Reader::from_reader(source);
+    let mut names: Vec<String> = reader
+        .headers()
+        .map_err(|e| crate::safety::bad_arg("csv_columns", "CSV text", &e.to_string()))?
+        .iter()
+        .map(str::to_string)
+        .collect();
+    if let Some(first) = names.first_mut() {
+        let unmarked = first.trim_start_matches('\u{feff}').to_string();
+        *first = unmarked;
+    }
+    Ok(Value::Array(names.into_iter().map(Value::Str).collect()))
 }
 
 /// from-yaml: Parse YAML into structured data.

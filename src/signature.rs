@@ -1748,9 +1748,27 @@ pub static SIGNATURES: &[Signature] = &[
     },
     Signature {
         name: "to_csv", category: None, subject_required: false, aliases: &["to-csv"],
-        subject: Some(Ty::Array), params: &[], returns: "String",
-        doc: "Serialize an array of records to CSV using the first record's columns. The rows are piped in or passed as the argument: to_csv(rows).",
-        examples: &[(r#"[{n: 7}] | to_csv | from_csv | len"#, "1"), (r#"to_csv([{n: 7}]) | from_csv | len"#, "1")],
+        subject: Some(Ty::Array), params: &[opt("columns", Ty::Array, "column names, in the order to write them; a record without one writes an empty field")], returns: "String",
+        doc: "Serialize an array of records to CSV. The columns are the first record's keys in sorted order, or the columns Array when one is given, in that order; a key a record lacks writes an empty field, and a null writes an empty field. The rows are piped in or passed as the argument: to_csv(rows), or rows | to_csv(columns).",
+        examples: &[
+            (r#"[{n: 7}] | to_csv | from_csv | len"#, "1"),
+            (r#"to_csv([{n: 7}]) | from_csv | len"#, "1"),
+            (r#"to_csv([{b: 2, a: 1}], ["b", "a"]) | lines | first"#, r#""b,a""#),
+            (r#"[{id: 1}, {id: 2, customer: "Ada"}] | to_csv(["id", "customer"]) | lines | last"#, r#""2,Ada""#),
+        ],
+    },
+    Signature {
+        // The header of a file, without reading its rows. An agent that opens a
+        // CSV and then writes it back needs the order the file had: records are
+        // sorted maps, so `open` alone cannot say it.
+        name: "csv_columns", category: None, subject_required: false, aliases: &[],
+        subject: Some(Ty::Str), params: &[], returns: "Array",
+        doc: "The header row of a CSV file or of CSV text, as an Array of Strings in file order, with quoting read as from_csv reads it. A String that names an existing file is read as that file; any other String is CSV text. The path or text is piped in or passed as the argument: csv_columns(path_or_text).",
+        examples: &[
+            (r#"csv_columns("id,customer\n1,Ada\n") | len"#, "2"),
+            (r#""id,customer\n1,Ada\n" | csv_columns | last"#, r#""customer""#),
+            (r#"let d = fs_tempdir("ae_csvcols"); let f = d + "/rows.csv"; file_write(f, "id,customer\n1,Ada\n"); let cols = csv_columns(f); rmdir(d, true); cols | first"#, r#""id""#),
+        ],
     },
     Signature {
         name: "from_yaml", category: None, subject_required: false, aliases: &["from-yaml"],
