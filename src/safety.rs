@@ -1198,7 +1198,7 @@ fn classified_effect(name: &str) -> Option<Effect> {
         // `file_mkdir` is the same dispatch index as `mkdir`; without it the
         // `file_*` prefix rule below claimed the directory-creating spelling only
         // read. `tests/effect_alias_agreement.rs` is what noticed.
-        "file_write" | "file_append" | "file_copy" | "mkdir" | "mkdirp" | "file_mkdir" | "touch"
+        "file_write" | "json_set" | "file_append" | "file_copy" | "mkdir" | "mkdirp" | "file_mkdir" | "touch"
         // `file_edit`, `file_insert` and `file_patch` read a file, change it and
         // write it back — the `file_*` prefix rule below saw only the read. The
         // jail keys on `WriteLocal`, so all three modified files anywhere on disk

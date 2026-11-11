@@ -262,3 +262,97 @@ fn grep_refuses_an_option_it_does_not_take() {
     let e = eval(r#""a" | grep("a", {line_numbers: 1})"#).expect_err("not a Bool");
     assert!(e.to_string().contains("E_BAD_ARG"), "{e}");
 }
+
+// ── item 6: JSON indent and json_set ────────────────────────────────────
+
+#[test]
+fn to_json_and_json_stringify_indent_by_the_given_spaces() {
+    assert_eq!(eval(r#"to_json([1, 2], 2)"#).unwrap(), s("[\n  1,\n  2\n]"));
+    assert_eq!(
+        eval(r#"[1, 2] | to_json(2)"#).unwrap(),
+        s("[\n  1,\n  2\n]")
+    );
+    assert_eq!(
+        eval(r#"json_stringify({a: 1}, 4)"#).unwrap(),
+        s("{\n    \"a\": 1\n}")
+    );
+    assert_eq!(eval(r#"to_json([1, 2], 0)"#).unwrap(), s("[1,2]"));
+}
+
+#[test]
+fn an_indent_outside_zero_to_eight_is_refused() {
+    for src in [r#"to_json([1], 9)"#, r#"json_stringify([1], -1)"#] {
+        let e = eval(src).expect_err(src);
+        assert!(e.to_string().contains("E_BAD_ARG"), "{src}: {e}");
+    }
+}
+
+#[test]
+fn json_set_keeps_key_order_and_four_space_indentation() {
+    let dir = fresh_dir("json_four");
+    let path = dir.join("c.json");
+    let before = "{\n    \"name\": \"x\",\n    \"items\": [\n        {\n            \"name\": \"a\"\n        }\n    ]\n}\n";
+    std::fs::write(&path, before).unwrap();
+    let p = fwd(&path);
+    let got = eval(&format!(r#"json_set("{p}", "items.0.name", "b")"#));
+    let after = std::fs::read_to_string(&path).unwrap();
+    let _ = std::fs::remove_dir_all(&dir);
+    got.unwrap();
+    assert_eq!(
+        after,
+        "{\n    \"name\": \"x\",\n    \"items\": [\n        {\n            \"name\": \"b\"\n        }\n    ]\n}\n"
+    );
+}
+
+#[test]
+fn json_set_keeps_a_tab_indented_file_tabbed() {
+    let dir = fresh_dir("json_tab");
+    let path = dir.join("c.json");
+    std::fs::write(&path, "{\n\t\"a\": 1,\n\t\"b\": 2\n}\n").unwrap();
+    let p = fwd(&path);
+    eval(&format!(r#"json_set("{p}", "a", 5)"#)).unwrap();
+    let after = std::fs::read_to_string(&path).unwrap();
+    let _ = std::fs::remove_dir_all(&dir);
+    assert_eq!(after, "{\n\t\"a\": 5,\n\t\"b\": 2\n}\n");
+}
+
+#[test]
+fn json_set_writes_a_minified_file_minified_and_creates_missing_keys() {
+    let dir = fresh_dir("json_min");
+    let path = dir.join("c.json");
+    std::fs::write(&path, r#"{"z":1,"a":2}"#).unwrap();
+    let p = fwd(&path);
+    eval(&format!(r#"json_set("{p}", "c.d", 3)"#)).unwrap();
+    let after = std::fs::read_to_string(&path).unwrap();
+    let _ = std::fs::remove_dir_all(&dir);
+    // Key order is kept: z stays before a, and the new key goes last.
+    assert_eq!(after, r#"{"z":1,"a":2,"c":{"d":3}}"#);
+}
+
+#[test]
+fn json_set_refuses_to_create_through_a_non_object_and_leaves_the_file() {
+    let dir = fresh_dir("json_refuse");
+    let path = dir.join("c.json");
+    let before = r#"{"a": "x"}"#;
+    std::fs::write(&path, before).unwrap();
+    let p = fwd(&path);
+    let e = eval(&format!(r#"json_set("{p}", "a.b", 1)"#)).expect_err("a string");
+    let after = std::fs::read_to_string(&path).unwrap();
+    let _ = std::fs::remove_dir_all(&dir);
+    assert!(e.to_string().contains("E_BAD_ARG"), "{e}");
+    assert!(e.to_string().contains("a.b"), "{e}");
+    assert_eq!(after, before);
+}
+
+#[test]
+fn json_set_refuses_a_missing_array_index_and_a_missing_file() {
+    let dir = fresh_dir("json_index");
+    let path = dir.join("c.json");
+    std::fs::write(&path, r#"{"items": []}"#).unwrap();
+    let p = fwd(&path);
+    let e = eval(&format!(r#"json_set("{p}", "items.3", 1)"#)).expect_err("no index 3");
+    let _ = std::fs::remove_dir_all(&dir);
+    assert!(e.to_string().contains("E_BAD_ARG"), "{e}");
+    let e = eval(r#"json_set("/nonexistent_ae_round22/none.json", "a", 1)"#).expect_err("missing");
+    assert!(e.to_string().contains("E_NOT_FOUND"), "{e}");
+}

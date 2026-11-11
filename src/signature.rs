@@ -2757,10 +2757,10 @@ pub static SIGNATURES: &[Signature] = &[
         subject_required: false,
         aliases: &["to-json"],
         subject: Some(Ty::Any),
-        params: &[],
+        params: &[opt_range("indent", Ty::Int, 0, 8, "spaces per nesting level, 0 to 8; 0 is compact")],
         returns: "String",
-        doc: "Render a value as JSON text. The value is piped in or passed as the argument: to_json(v).",
-        examples: &[(r#"[1, 2] | to_json"#, r#""[1,2]""#), (r#"to_json([1, 2])"#, r#""[1,2]""#)],
+        doc: "Render a value as JSON text, compact, or indented by 1 to 8 spaces per level with an indent argument (0 is compact). The value is piped in or passed as the argument: to_json(v) or to_json(v, indent).",
+        examples: &[(r#"[1, 2] | to_json"#, r#""[1,2]""#), (r#"to_json([1, 2])"#, r#""[1,2]""#), (r#"to_json([1, 2], 2) | lines | len"#, "4"), (r#"to_json([1, 2], 0)"#, r#""[1,2]""#)],
     },
     Signature {
         name: "ls",
@@ -7018,11 +7018,34 @@ pub static SIGNATURES: &[Signature] = &[
         subject_required: false,
         aliases: &[],
         subject: Some(Ty::Any),
-        params: &[],
+        params: &[opt_range("indent", Ty::Int, 0, 8, "spaces per nesting level, 0 to 8; 0 is compact")],
         returns: "String",
-        doc: "A value as compact JSON.",
+        doc: "A value as JSON: compact, or indented by 1 to 8 spaces per level with an indent argument (0 is compact). The value is piped in or passed as the argument: json_stringify(v, indent).",
         examples: &[
             (r#"json_stringify({a: 1})"#, r#"{"a":1}"#),
+            (r#"json_stringify({a: 1}, 2) | lines | len"#, "3"),
+            (r#"json_stringify({a: 1}, 0)"#, r#"{"a":1}"#),
+        ],
+    },
+    Signature {
+        // Edits one key of a JSON file in place. Its effect is file_write's: the
+        // path is guarded and the write is atomic, and the key order and
+        // indentation of the file are kept.
+        name: "json_set",
+        category: None,
+        subject_required: false,
+        aliases: &[],
+        subject: None,
+        params: &[
+            req("path", Ty::Str, "the JSON file to edit; it must exist"),
+            req("key_path", Ty::Str, "dot-separated keys, such as version or a.b.c or items.0.name; a missing object key is created, an array index must exist"),
+            req("value", Ty::Any, "the value to set at key_path, as JSON"),
+        ],
+        returns: "Record",
+        doc: "Set one key of a JSON file and write it back in place. The file keeps its key order and its indentation (a tab, two or four spaces, or compact). A path that would create a key inside a value that is not an object is E_BAD_ARG, naming the path.",
+        examples: &[
+            (r#"let d = fs_tempdir("ae_jsonset"); let f = d + "/c.json"; file_write(f, "{\n  \"version\": \"1\"\n}\n"); json_set(f, "version", "2"); let v = open(f).version; rmdir(d, true); v"#, r#""2""#),
+            (r#"let d = fs_tempdir("ae_jsonset"); let f = d + "/c.json"; file_write(f, "{\"a\": {}}"); json_set(f, "a.b", 2); let v = open(f).a.b; rmdir(d, true); v"#, "2"),
         ],
     },
     Signature {

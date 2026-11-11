@@ -633,6 +633,7 @@ jq	Pure
 jq_filter	Exec
 jq_query	Pure
 json_parse	Pure
+json_set	WriteLocal
 json_stringify	Pure
 just	Exec
 just_list	ReadLocal

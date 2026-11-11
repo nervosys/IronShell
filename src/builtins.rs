@@ -4257,6 +4257,7 @@ pub const FALLBACK_BUILTINS: &[(&str, &str)] = &[
     ("is_type", "bi_is_type"),
     ("journal", "bi_journal"),
     ("journal_clear", "bi_journal_clear"),
+    ("json_set", "bi_json_set"),
     ("lines", "bi_lines"),
     ("measure", "bi_measure_object"),
     ("measure-object", "bi_measure_object"),
@@ -4464,6 +4465,7 @@ fn call_with_input_inner(
         "to-csv" | "to_csv" => bi_to_csv(args, input),
         "csv_columns" => bi_csv_columns(args, input),
         "enumerate" => bi_enumerate(args, input),
+        "json_set" => bi_json_set(args, input),
         "from-yaml" | "from_yaml" => bi_from_yaml(args, input),
         "to-yaml" | "to_yaml" => bi_to_yaml(args, input),
         "columns" => bi_columns(args, input),
@@ -10322,6 +10324,12 @@ fn bi_to_json(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
         },
     };
 
+    let json_val = value_to_json(value);
+    // An Int is the indent in spaces, 0 to 8; 0 is compact.
+    if let Some(Value::Int(indent)) = flags.first() {
+        return Ok(Value::Str(json_indented("to_json", &json_val, *indent)?));
+    }
+
     let pretty = flags
         .first()
         .and_then(|arg| match arg {
@@ -10331,7 +10339,6 @@ fn bi_to_json(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
         })
         .unwrap_or(false);
 
-    let json_val = value_to_json(value);
     let json_str = if pretty {
         serde_json::to_string_pretty(&json_val)?
     } else {
@@ -16186,16 +16193,197 @@ fn bi_json_parse(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
 /// Example:
 ///   {a: 1} | json_stringify()     # Returns "{\"a\":1}"
 fn bi_json_stringify(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
-    let val = if args.is_empty() {
-        input.ok_or_else(|| crate::safety::arg_err("json_stringify requires value"))?
-    } else {
-        args[0].clone()
+    // Piped, the value is the input and an optional indent the first argument;
+    // called directly, the value is the first argument and the indent the second.
+    let (val, rest) = match input {
+        Some(value) => (value, args.as_slice()),
+        None => match args.split_first() {
+            Some((value, rest)) => (value.clone(), rest),
+            None => return Err(crate::safety::arg_err("json_stringify requires value")),
+        },
     };
 
     let json_val = value_to_json(val);
-    let json_str = serde_json::to_string(&json_val).context("Failed to stringify to JSON")?;
+    let json_str = match rest.first() {
+        Some(Value::Int(indent)) => json_indented("json_stringify", &json_val, *indent)?,
+        _ => serde_json::to_string(&json_val).context("Failed to stringify to JSON")?,
+    };
 
     Ok(Value::Str(json_str))
+}
+
+/// `json` as text with each nesting level indented by `indent` spaces. An indent
+/// of 0 is compact JSON. An indent outside 0 to 8 is a bad argument.
+fn json_indented(builtin: &str, json: &serde_json::Value, indent: i64) -> Result<String> {
+    if !(0..=8).contains(&indent) {
+        return Err(crate::safety::bad_arg_in(
+            builtin,
+            format!("{builtin}: indent must be 0 to 8 spaces, got {indent}"),
+            "pass an indent from 0 to 8, or leave it out for compact JSON",
+        ));
+    }
+    if indent == 0 {
+        return Ok(serde_json::to_string(json)?);
+    }
+    let unit = vec![b' '; indent as usize];
+    Ok(String::from_utf8(serialize_with_unit(json, &unit)?)?)
+}
+
+/// `json` as bytes, each nesting level indented by `unit`.
+fn serialize_with_unit(json: &serde_json::Value, unit: &[u8]) -> Result<Vec<u8>> {
+    let mut buf = Vec::new();
+    let formatter = serde_json::ser::PrettyFormatter::with_indent(unit);
+    let mut serializer = serde_json::Serializer::with_formatter(&mut buf, formatter);
+    serde::Serialize::serialize(json, &mut serializer)?;
+    Ok(buf)
+}
+
+/// json_set(path, key_path, value): set one key of a JSON file and write the
+/// file back in place.
+///
+/// The file keeps its key order and its indentation: a tab, two or four spaces,
+/// or none for compact JSON, read from the text. `key_path` is dot-separated:
+/// "version", "a.b.c", "items.0.name". A missing object key is created; an
+/// array index must already exist. A path that would create a key inside a
+/// value that is not an object is refused. The write is guarded and atomic, as
+/// file_write's is.
+fn bi_json_set(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
+    if input.is_some() {
+        return Err(crate::safety::bad_arg(
+            "json_set",
+            "no pipeline input: json_set(path, key_path, value)",
+            "a piped value",
+        ));
+    }
+    let (Some(Value::Str(path)), Some(Value::Str(key_path)), Some(value)) =
+        (args.first(), args.get(1), args.get(2))
+    else {
+        return Err(crate::safety::arg_err(
+            "json_set requires a file path, a key path and a value",
+        ));
+    };
+    let segments: Vec<&str> = key_path.split('.').collect();
+    if segments.iter().any(|segment| segment.is_empty()) {
+        return Err(crate::safety::bad_arg_in(
+            "json_set",
+            format!("json_set: key path '{key_path}' has an empty key"),
+            "name keys separated by dots, such as version or a.b.c or items.0.name",
+        ));
+    }
+
+    let path = crate::safety::resolve_path_str(path);
+    crate::safety::guard(crate::safety::GuardCtx {
+        builtin: "json_set",
+        effect: crate::safety::Effect::WriteLocal,
+        what: "write",
+        targets: vec![path.clone()],
+        blast_radius: serde_json::json!({ "key": key_path }),
+        reversible: true,
+        fs_paths: true,
+    })?;
+
+    let text = std::fs::read_to_string(&path).map_err(|e| {
+        if e.kind() == std::io::ErrorKind::NotFound {
+            crate::safety::not_found("json_set", "file", &path)
+        } else {
+            crate::safety::fs_error("json_set", &path, &e)
+        }
+    })?;
+    // serde_json's Map keeps insertion order here, so a set key stays where it was.
+    let mut json: serde_json::Value = serde_json::from_str(&text).map_err(|e| {
+        crate::safety::bad_value(
+            format!("json_set: {path} is not valid JSON: {e}"),
+            "json_set edits well-formed JSON only; fix the file's syntax first",
+        )
+    })?;
+    if let Err(reason) = set_json_path(&mut json, &segments, value_to_json(value.clone())) {
+        return Err(crate::safety::bad_arg_in(
+            "json_set",
+            format!("json_set: cannot set '{key_path}' in {path}: {reason}"),
+            "only object keys are created, and an array index must already exist; the path must lead through objects and arrays",
+        ));
+    }
+
+    // Written as the file was indented, with its line endings and its final newline.
+    let newline = if text.contains("\r\n") { "\r\n" } else { "\n" };
+    let mut bytes = match json_indent_unit(&text) {
+        Some(unit) => serialize_with_unit(&json, &unit)?,
+        None => serde_json::to_vec(&json)?,
+    };
+    if newline != "\n" {
+        bytes = String::from_utf8(bytes)?
+            .replace('\n', newline)
+            .into_bytes();
+    }
+    if text.ends_with('\n') {
+        bytes.extend_from_slice(newline.as_bytes());
+    }
+
+    crate::tx::snapshot(&path); // record pre-write state if a transaction is active
+    write_file_atomically("json_set", &path, &bytes)?;
+
+    let mut result = BTreeMap::new();
+    result.insert("path".to_string(), Value::Str(path));
+    result.insert("key".to_string(), Value::Str(key_path.clone()));
+    result.insert("success".to_string(), Value::Bool(true));
+    Ok(Value::Record(result))
+}
+
+/// Set the value at `segments` inside `node`. An object gets a missing key; an
+/// array's index must already exist; any other value refuses, and the reason
+/// names the segment.
+fn set_json_path(
+    node: &mut serde_json::Value,
+    segments: &[&str],
+    value: serde_json::Value,
+) -> std::result::Result<(), String> {
+    let Some((segment, rest)) = segments.split_first() else {
+        *node = value;
+        return Ok(());
+    };
+    match node {
+        serde_json::Value::Object(map) => {
+            let child = map
+                .entry(segment.to_string())
+                .or_insert_with(|| serde_json::Value::Object(serde_json::Map::new()));
+            set_json_path(child, rest, value)
+        }
+        serde_json::Value::Array(items) => {
+            let index = segment
+                .parse::<usize>()
+                .ok()
+                .filter(|index| *index < items.len())
+                .ok_or_else(|| format!("'{segment}' is not an index of this array"))?;
+            set_json_path(&mut items[index], rest, value)
+        }
+        other => {
+            let kind = match other {
+                serde_json::Value::Null => "null",
+                serde_json::Value::Bool(_) => "boolean",
+                serde_json::Value::Number(_) => "number",
+                _ => "string",
+            };
+            Err(format!(
+                "'{segment}' would be created inside a {kind} value, which is not an object"
+            ))
+        }
+    }
+}
+
+/// The indentation a JSON text uses: a tab, or the spaces of its least-indented
+/// line. None when no line is indented, which is compact JSON.
+fn json_indent_unit(text: &str) -> Option<Vec<u8>> {
+    let mut spaces: Option<usize> = None;
+    for line in text.lines() {
+        if line.starts_with('\t') {
+            return Some(b"\t".to_vec());
+        }
+        let indent = line.len() - line.trim_start_matches(' ').len();
+        if indent > 0 {
+            spaces = Some(spaces.map_or(indent, |least| least.min(indent)));
+        }
+    }
+    spaces.map(|n| vec![b' '; n])
 }
 
 // ==================== Syntax Knowledge Base Functions ====================
