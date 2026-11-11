@@ -35678,6 +35678,15 @@ fn bi_tar_create(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
             ));
         }
     }
+    // tar is run on the resolved paths, and on Windows a missing one comes back
+    // as a garbled "Couldn't visit directory" line. Each member must exist first,
+    // checked as tar sees it. symlink_metadata, not exists: tar archives a link
+    // itself, so a dangling link is a member. A remote share is left to tar.
+    for (f, m) in files.iter().zip(&members) {
+        if !crate::safety::names_a_remote_share(m) && std::fs::symlink_metadata(m).is_err() {
+            return Err(crate::safety::not_found("tar_create", "file", f));
+        }
+    }
 
     let out = guard_local_write("tar_create", &archive)?;
     let mut argv: Vec<&str> = vec!["-c", "-f", "-", "--"];

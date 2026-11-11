@@ -1,0 +1,70 @@
+//! Round 16 fixes for `tar_create` and `delete_lines`.
+//!
+//! `tar_create` checks that every member exists before tar runs, so a missing
+//! one is E_NOT_FOUND naming the path the caller wrote. It refuses an archive
+//! name that is not .tar, .tar.gz or .tgz with E_BAD_ARG.
+//!
+//! `delete_lines` takes a `{regex: ...}` selector. A literal selector that
+//! deletes nothing, and holds regex metacharacters, says so in a `note`.
+
+use std::path::{Path, PathBuf};
+use std::process::{Command, Output};
+
+/// A fresh scratch directory: `proj` is the working directory, `session` holds
+/// the journal, so no test shares state with another.
+fn scratch(name: &str) -> PathBuf {
+    let dir = Path::new(env!("CARGO_TARGET_TMPDIR"))
+        .join("round16_tar_delete_lines")
+        .join(name);
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("proj")).expect("project dir");
+    std::fs::create_dir_all(dir.join("session")).expect("session dir");
+    dir
+}
+
+/// Run `code` by `ish -c` with `dir` as the working directory.
+fn ish_in(dir: &Path, code: &str) -> Output {
+    Command::new(env!("CARGO_BIN_EXE_ish"))
+        .args(["-c", code])
+        .current_dir(dir)
+        .env("IRONSHELL_SESSION_DIR", dir.join("session"))
+        .env("NO_COLOR", "1")
+        .env_remove("IRONSHELL_MODE")
+        .env_remove("IRONSHELL_AGENT")
+        .env_remove("IRONSHELL_WORKSPACE")
+        .env_remove("IRONSHELL_APPROVE")
+        .output()
+        .expect("run ish")
+}
+
+/// The structured refusal on the first stderr line.
+fn first_error(out: &Output) -> serde_json::Value {
+    let err = String::from_utf8_lossy(&out.stderr);
+    let line = err.lines().next().unwrap_or("");
+    serde_json::from_str(line).unwrap_or_else(|e| panic!("not JSON ({e}): {err:?}"))
+}
+
+#[test]
+fn tar_create_refuses_a_missing_member_before_running_tar() {
+    let dir = scratch("tar_missing_member");
+    let proj = dir.join("proj");
+    std::fs::create_dir_all(proj.join("work")).unwrap();
+    let out = ish_in(&proj, r#"tar_create("work/m.tar.gz", "work/nope.txt")"#);
+    assert!(!out.status.success(), "a missing member must fail");
+    let json = first_error(&out);
+    assert_eq!(json["error"]["code"], "E_NOT_FOUND", "{json}");
+    let message = json["error"]["message"].as_str().unwrap_or_default();
+    assert!(
+        message.contains("no file named 'work/nope.txt'"),
+        "the message names the member as written: {message}"
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        !stderr.contains("Couldn't visit") && !stderr.contains("E_TOOL_FAILED"),
+        "tar must not run: {stderr}"
+    );
+    assert!(
+        !proj.join("work").join("m.tar.gz").exists(),
+        "no archive is written"
+    );
+}
