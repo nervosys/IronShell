@@ -373,3 +373,27 @@ fn json_set_refuses_a_missing_array_index_and_a_missing_file() {
     let e = eval(r#"json_set("/nonexistent_ae_round22/none.json", "a", 1)"#).expect_err("missing");
     assert!(e.to_string().contains("E_NOT_FOUND"), "{e}");
 }
+
+#[test]
+fn a_column_of_true_and_false_is_bool() {
+    let v = eval(r#"from_csv("a,b\ntrue,x\n,y\nfalse,z") | map(fn(r) => r.a)"#).unwrap();
+    assert_eq!(
+        v,
+        Value::Array(vec![Value::Bool(true), Value::Null, Value::Bool(false)])
+    );
+    let mixed = eval(r#"from_csv("a\ntrue\nmaybe") | map(fn(r) => r.a)"#).unwrap();
+    assert_eq!(
+        mixed,
+        Value::Array(vec![Value::Str("true".into()), Value::Str("maybe".into())])
+    );
+}
+
+#[test]
+fn an_unknown_path_module_does_not_suggest_math() {
+    let e = eval(r#"path.ext("a.txt")"#).expect_err("no path module");
+    let text = format!("{e:#}");
+    assert!(!text.contains("math"), "{text}");
+    assert!(text.contains("path_exists"), "{text}");
+    let e = eval(r#"path.exists("a.txt")"#).expect_err("no path module");
+    assert!(format!("{e:#}").contains("path_exists"), "{e:#}");
+}

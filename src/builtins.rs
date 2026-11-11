@@ -3970,6 +3970,12 @@ pub fn mapped_module_spelling(module: &str, member: &str) -> Vec<String> {
         ("regex" | "re", "search") => &["regex_find"],
         ("regex" | "re", "findall" | "find_all") => &["regex_find_all"],
         ("regex" | "re", "sub") => &["regex_replace"],
+        ("path", "exists" | "isfile" | "isdir") => &["path_exists"],
+        ("path", "realpath" | "abspath" | "resolve" | "canonicalize") => &["fs_realpath"],
+        ("path", "normpath" | "normalize") => &["platform_normalize_path"],
+        // Python's and Node's path module has no IronShell counterpart: these
+        // name what does exist, rather than `math`, one edit from `path`.
+        ("path", _) => &["path_exists", "fs_realpath", "platform_normalize_path"],
         _ => &[],
     };
     names.iter().map(|name| name.to_string()).collect()
@@ -10501,22 +10507,30 @@ pub(crate) fn csv_rows(
     headers: &[String],
     records: &[csv::StringRecord],
 ) -> Vec<BTreeMap<String, Value>> {
-    // Per column: None for text, Some(all_int) for a numeric column.
-    let kinds: Vec<Option<bool>> = (0..headers.len())
+    // Per column: None for text, Some(Some(all_int)) for a numeric column,
+    // Some(None) for a column of true and false.
+    let kinds: Vec<Option<Option<bool>>> = (0..headers.len())
         .map(|column| {
-            let mut any = false;
+            let mut numbers = 0usize;
+            let mut flags = 0usize;
             let mut all_int = true;
             for record in records {
                 match record.get(column) {
                     Some("") | None => {}
+                    Some("true" | "false") => flags += 1,
                     Some(field) if is_number(field) => {
-                        any = true;
+                        numbers += 1;
                         all_int &= field.parse::<i64>().is_ok();
                     }
                     Some(_) => return None,
                 }
             }
-            any.then_some(all_int)
+            match (numbers, flags) {
+                (0, 0) => None,
+                (_, 0) => Some(Some(all_int)),
+                (0, _) => Some(None),
+                _ => None,
+            }
         })
         .collect();
 
@@ -10528,7 +10542,8 @@ pub(crate) fn csv_rows(
                 if let Some(header) = headers.get(i) {
                     let value = match kinds[i] {
                         Some(_) if field.is_empty() => Value::Null,
-                        Some(all_int) => numeric_cell(field, all_int),
+                        Some(Some(all_int)) => numeric_cell(field, all_int),
+                        Some(None) => Value::Bool(field == "true"),
                         None => Value::Str(field.to_string()),
                     };
                     row.insert(header.clone(), value);
