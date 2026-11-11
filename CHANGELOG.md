@@ -13,6 +13,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `ish -b` runs `tee` in-process, and each file it names is judged as a `>` redirection is. `tee` used to run as the real program, so with an approval token `echo x | tee ../f` wrote outside the workspace: an approved program is not confined by the jail.
 - An alias whose implementation guards itself (`mv` for `file_move`, and every other such alias) is judged under the implementation's name, so the workspace jail is checked before any approval token is issued: a target outside the workspace is E_OUTSIDE_WORKSPACE, never a token.
 - A redirection the jail refuses in `ish -b` no longer runs its command; its status is 1 and `set -e` applies. The command used to run, with its output going to stderr, and the script exited 0.
+- An audit entry for a write the central gate does not judge names only its path arguments, never its content: `file_replace(".env", old, new)` logged both secrets in plain text.
 
 ### Changed
 
@@ -48,6 +49,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - An `if` whose condition is not a Bool is E_BAD_ARG, with a hint for its type (`exists()` returns a Record: test `exists(p).exists`). It used to take the else branch silently. Null is still false. A hand-written `match c { true => a, _ => b }` is held to the same rule.
 - A statement that starts with a word followed by a shell flag (`ls --help`, `mkdir -p a/b`) is E_PARSE, with a hint to call `name(args)` and `help("name")`. A name assigned earlier is still subtracted from (`total -discount`).
 - `rm` and `crypto_hash_file` refuse a directory with E_BAD_ARG naming the call that fits it, and `mv` names a missing destination folder or a directory target, instead of a permissions error or a missing source.
+- A `-` after an operand on the same line is subtraction, even after a space: `n = 4` then `r = n -1` is 3. It used to read `-1` as a literal, so `r = n -1` set `r` to 4 and `n -1` called `n`. A word call no longer takes a negative literal argument; write `f(-1)`.
+- `take` refuses a negative count instead of returning `[]`. `tar_create` refuses an archive name other than `.tar`, `.tar.gz` or `.tgz` (a `.zip` name points at `zip_create`).
 
 ### Added
 
@@ -76,6 +79,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `if a { 1 } else if b { 2 } else { 3 }` parses. `c ? a : b` and `a?.b` are refused with a hint naming the `if`/`else` and null-test forms.
 - `delete_lines(path, "text")` deletes the lines containing the text, as `{contains: "text"}` does.
 - `help("name")` describes one builtin, as `ontology_describe("name")` does; `help()` and `ish --help` point to it.
+- `[1, 2] + [3]` concatenates Arrays.
+- `delete_lines(path, {regex: "..."})` deletes the lines a regular expression matches. A literal selector holding regex syntax that deletes nothing says so in a `note`.
+- `head` and `tail` take an Array as their first argument, as they do piped.
 
 ### Fixed
 
@@ -112,6 +118,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `undo` of a move puts the source back as well as an overwritten destination, as one step; a move onto an existing file says `overwrites: true` in its approval.
 - `undo` after a directory removal says it is not journaled, instead of "was absent before and is absent now".
 - `mkdir` declares its path parameter in the ontology, and `fs_walk` documents that it lists directories too. `ish agent schema --module` of an unknown module points at `ontology_manifest()`, not an HTTP route.
+- `cat` over several files keeps a file without a trailing newline apart from the next, so `cat("src/*.js") | lines | len` counts every line.
+- Redacting a JSON text ends a secret value at a JSON escape, so `"API_KEY=x\nDB_PASSWORD=y"` keeps the second line (redacted) instead of dropping it.
+- `audit_stats` and `audit_query` read the chained audit log `audit_verify` reads; `audit_query` takes `builtin`, with `action` as an alias.
+- `group_by` keeps Int `1` and String `"1"` in different groups.
+- `tar_create` names a missing member (E_NOT_FOUND) instead of a garbled tar error. Its docs say the workspace jail applies in agent mode or when a workspace is set.
+- `help("")` is refused as an empty name; `format_number`'s decimals error names the range and the value; `delete_lines` errors name `delete_lines` and list its selector forms.
 
 
 ## [14.0.1] - 2026-11-08
