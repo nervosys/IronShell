@@ -846,10 +846,12 @@ pub static SIGNATURES: &[Signature] = &[
     Signature {
         name: "file_append", category: None, subject_required: false, aliases: &["append_file"],
         subject: None, params: &[req("path", Ty::Str, "file to append or create"), opt("content", Ty::Any, "content; omitted uses pipeline input")], returns: "Record",
-        doc: "Append content and return path, bytes appended and success. Arrays are joined as lines.",
+        doc: "Append content exactly as given, and return path, bytes appended and success. No newline is added before or after the content, so a line that should end needs its own newline. An Array is joined with newlines, with none after its last item.",
         examples: &[
             (r#"let d = fs_tempdir("ae_append"); let f = d + "/x"; let result = file_append(f, "hello"); rmdir(d, true); result.bytes_appended"#, "5"),
             (r#"let d = fs_tempdir("ae_append"); let f = d + "/x"; let result = "hi" | file_append(f); rmdir(d, true); result.bytes_appended"#, "2"),
+            (r#"let d = fs_tempdir("ae_append"); let f = d + "/x"; file_write(f, "one"); file_append(f, "\ntwo\n"); let n = cat(f) | lines | len; rmdir(d, true); n"#, "2"),
+            (r#"let d = fs_tempdir("ae_append"); let f = d + "/x"; file_write(f, "one"); file_append(f, "two"); let n = cat(f) | lines | len; rmdir(d, true); n"#, "1"),
         ],
     },
     Signature {
