@@ -35705,6 +35705,30 @@ fn bi_tar_create(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
     refuse_option("tar_create", &archive)?;
     crate::safety::reject_option_like("tar_create", &files)?;
 
+    // The archive is a plain tar, or gzipped tar for .tar.gz and .tgz. Any other
+    // extension would name a file that is not what it says, so it is refused.
+    // A name with no extension is still a plain tar.
+    let file_name = archive.rsplit(['/', '\\']).next().unwrap_or(&archive);
+    if let Some((_, ext)) = file_name
+        .rsplit_once('.')
+        .filter(|(stem, _)| !stem.is_empty())
+    {
+        let lower = file_name.to_ascii_lowercase();
+        if !(lower.ends_with(".tar") || lower.ends_with(".tar.gz") || lower.ends_with(".tgz")) {
+            let hint = if ext.eq_ignore_ascii_case("zip") {
+                "tar_create writes tar, not zip; use zip_create(archive, members) for a .zip archive"
+            } else {
+                "name the archive .tar, .tar.gz or .tgz (tar_create writes gzip only for .tar.gz and .tgz)"
+            };
+            return Err(crate::safety::bad_arg_with_hint(
+                "tar_create",
+                "an archive named .tar, .tar.gz or .tgz",
+                &format!("'{archive}'"),
+                hint,
+            ));
+        }
+    }
+
     let enforce = crate::safety::current_mode() == crate::safety::Mode::Agent
         || std::env::var("IRONSHELL_WORKSPACE").is_ok();
     let members: Vec<String> = files
@@ -35718,6 +35742,15 @@ fn bi_tar_create(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
                 format!("member '{m}' is outside the workspace"),
                 "archive only paths inside the workspace",
             ));
+        }
+    }
+    // tar is run on the resolved paths, and on Windows a missing one comes back
+    // as a garbled "Couldn't visit directory" line. Each member must exist first,
+    // checked as tar sees it. symlink_metadata, not exists: tar archives a link
+    // itself, so a dangling link is a member. A remote share is left to tar.
+    for (f, m) in files.iter().zip(&members) {
+        if !crate::safety::names_a_remote_share(m) && std::fs::symlink_metadata(m).is_err() {
+            return Err(crate::safety::not_found("tar_create", "file", f));
         }
     }
 
@@ -49957,7 +49990,13 @@ fn bi_file_delete_lines(args: Vec<Value>, input: Option<Value>) -> Result<Value>
     enum Selection {
         Range(usize, usize),
         Pattern(String, bool),
+        Regex(regex::Regex),
     }
+    // The forms a selection takes, for the refusals below. The generic hint for
+    // a bad argument would name only the signature's types.
+    const SELECTION_FORMS: &str = "delete_lines takes a line Int, or a start and an end Int, \
+        a String (every line containing that text), or a record {contains|pattern|exact|matching: text} \
+        for literal text, or {regex: pattern} for a regular expression";
     fn line_index(value: Value) -> Result<usize> {
         match value {
             Value::Int(n) if n > 0 => usize::try_from(n - 1)
@@ -49978,8 +50017,10 @@ fn bi_file_delete_lines(args: Vec<Value>, input: Option<Value>) -> Result<Value>
             let start = line_index(value)?;
             let end = args.next().map(line_index).transpose()?.unwrap_or(start);
             if end < start {
-                return Err(crate::safety::arg_err(
-                    "file_delete_lines range end must not precede start",
+                return Err(crate::safety::bad_arg_in(
+                    "delete_lines",
+                    "delete_lines range end must not precede start",
+                    "give the first line, then a last line at or after it",
                 ));
             }
             Selection::Range(start, end)
@@ -49989,9 +50030,15 @@ fn bi_file_delete_lines(args: Vec<Value>, input: Option<Value>) -> Result<Value>
                 return Err(crate::safety::arg_err("file_delete_lines pattern record requires exactly one selector and no range end"));
             }
             let (key, value) = record.into_iter().next().expect("one selector checked");
-            if !matches!(key.as_str(), "matching" | "contains" | "pattern" | "exact") {
-                return Err(crate::safety::arg_err(
-                    "file_delete_lines selector must be matching, contains, pattern or exact",
+            if !matches!(
+                key.as_str(),
+                "matching" | "contains" | "pattern" | "exact" | "regex"
+            ) {
+                return Err(crate::safety::bad_arg_with_hint(
+                    "delete_lines",
+                    "a selector record with one of matching, contains, pattern, exact or regex",
+                    &format!("{key:?}"),
+                    SELECTION_FORMS,
                 ));
             }
             let Value::Str(pattern) = value else {
@@ -49999,7 +50046,18 @@ fn bi_file_delete_lines(args: Vec<Value>, input: Option<Value>) -> Result<Value>
                     "file_delete_lines pattern must be String",
                 ));
             };
-            Selection::Pattern(pattern, key == "exact")
+            if key == "regex" {
+                let re = regex::Regex::new(&pattern).map_err(|e| {
+                    crate::safety::bad_arg(
+                        "delete_lines",
+                        "a regular expression (Rust regex syntax)",
+                        &regex_error_detail(&e),
+                    )
+                })?;
+                Selection::Regex(re)
+            } else {
+                Selection::Pattern(pattern, key == "exact")
+            }
         }
         // A String is the `contains` form of the pattern record: every line that
         // holds this literal text goes, as `{contains: text}` does.
@@ -50015,7 +50073,7 @@ fn bi_file_delete_lines(args: Vec<Value>, input: Option<Value>) -> Result<Value>
             return Err(crate::safety::bad_arg_in(
                 "file_delete_lines",
                 "file_delete_lines selection must be a positive Int, a String, or a pattern Record",
-                "file_delete_lines takes a positive Int (one line, or a range with an end), a String (every line containing that text), or a pattern Record such as {contains: text}",
+                SELECTION_FORMS,
             ))
         }
     };
@@ -50043,6 +50101,7 @@ fn bi_file_delete_lines(args: Vec<Value>, input: Option<Value>) -> Result<Value>
                     line.contains(pattern)
                 }
             }
+            Selection::Regex(re) => re.is_match(line),
         };
         if remove {
             deleted += 1;
@@ -50054,12 +50113,23 @@ fn bi_file_delete_lines(args: Vec<Value>, input: Option<Value>) -> Result<Value>
     }
     crate::tx::snapshot(&path);
     write_file_atomically("file_delete_lines", &path, new_content.as_bytes())?;
-    Ok(Value::Record(BTreeMap::from([
+    let mut result: BTreeMap<String, Value> = BTreeMap::from([
         ("path".into(), Value::Str(path)),
         ("lines_deleted".into(), Value::Int(deleted)),
         ("lines_remaining".into(), Value::Int(remaining)),
         ("success".into(), Value::Bool(true)),
-    ])))
+    ]);
+    // A literal selector that holds regex syntax and deletes nothing is the
+    // usual regex mistake (`t.*` as a pattern); say so rather than leave it silent.
+    if let Selection::Pattern(text, _) = &selection {
+        if deleted == 0 && text.chars().any(|c| ".*+?^$[](){}|\\".contains(c)) {
+            result.insert(
+                "note".into(),
+                Value::Str("matched literally; use {regex: ...} for a regular expression".into()),
+            );
+        }
+    }
+    Ok(Value::Record(result))
 }
 
 /// Apply a validated batch in descending line order, then publish once.
