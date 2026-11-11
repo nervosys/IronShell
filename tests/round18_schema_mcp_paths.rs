@@ -326,9 +326,31 @@ fn item3_the_outside_refusal_names_the_builtin() {
     let (_, text) = agent_workspace_run(&ws, r#"read_text("../missing.txt")"#);
     assert!(text.contains("read_text: `"), "{text}");
     assert!(
-        !text.contains(": `"),
+        !text.contains("\"message\":\": `"),
         "a refusal with an empty name: {text}"
     );
+}
+
+#[cfg(unix)]
+#[test]
+fn item3_a_dangling_link_to_a_missing_file_outside_is_outside() {
+    let ws = fresh_workspace("dangling_out");
+    let outside = ws
+        .parent()
+        .unwrap()
+        .join(format!("r18_out_{}", std::process::id()));
+    std::os::unix::fs::symlink(outside.join("target.txt"), ws.join("out")).unwrap();
+    let (_, text) = agent_workspace_run(&ws, r#"read_text("out")"#);
+    assert!(text.contains("E_OUTSIDE_WORKSPACE"), "{text}");
+}
+
+#[cfg(unix)]
+#[test]
+fn item3_a_dangling_link_to_a_missing_file_inside_is_not_found() {
+    let ws = fresh_workspace("dangling_in");
+    std::os::unix::fs::symlink(ws.join("missing.txt"), ws.join("in")).unwrap();
+    let (_, text) = agent_workspace_run(&ws, r#"read_text("in")"#);
+    assert!(text.contains("E_NOT_FOUND"), "{text}");
 }
 
 #[test]

@@ -466,7 +466,13 @@ pub fn validate_safe_path(path: &str) -> Result<PathBuf> {
         };
         match canonical_for_missing(&absolute) {
             Some(landing) => landing,
-            None => return Err(anyhow!("Failed to canonicalize path")),
+            None => {
+                return Err(crate::safety::not_found_with(
+                    "",
+                    format!("`{path}` cannot be resolved: its links nest too deeply"),
+                    "check the path for a link loop",
+                ))
+            }
         }
     };
 
@@ -611,15 +617,32 @@ pub fn check_read_jail(builtin: &str, path: &str) -> Result<()> {
 /// exists, so no link can sit in the rest, and the rest is appended after `.`
 /// and `..` are normalized lexically. A `..` that climbs above the prefix climbs
 /// the canonical path, so `nosuchdir/../../x` lands above the workspace and is
-/// refused by the caller. `None` when the prefix is a link that does not resolve
-/// (a dangling link), which the caller refuses rather than follows.
+/// refused by the caller. A prefix that is a dangling link lands where its
+/// target would, found the same way, so a write through a link to a missing file
+/// outside the workspace is judged outside. `None` when links nest past 40.
 fn canonical_for_missing(absolute: &Path) -> Option<PathBuf> {
+    canonical_for_missing_within(absolute, 40)
+}
+
+fn canonical_for_missing_within(absolute: &Path, links_left: u32) -> Option<PathBuf> {
     let comps: Vec<std::path::Component> = absolute.components().collect();
     let mut k = comps.len();
     while k > 0 {
         let prefix: PathBuf = comps[..k].iter().collect();
-        if fs::symlink_metadata(&prefix).is_ok() {
-            let mut landing = fs::canonicalize(&prefix).ok()?;
+        if let Ok(meta) = fs::symlink_metadata(&prefix) {
+            let mut landing = match fs::canonicalize(&prefix) {
+                Ok(c) => c,
+                Err(_) if meta.file_type().is_symlink() && links_left > 0 => {
+                    let target = fs::read_link(&prefix).ok()?;
+                    let target = if target.is_absolute() {
+                        target
+                    } else {
+                        prefix.parent()?.join(target)
+                    };
+                    canonical_for_missing_within(&target, links_left - 1)?
+                }
+                Err(_) => return None,
+            };
             for comp in &comps[k..] {
                 match comp {
                     std::path::Component::Normal(name) => landing.push(name),
