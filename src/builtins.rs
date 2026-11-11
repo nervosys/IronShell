@@ -14078,7 +14078,7 @@ fn bi_range(args: Vec<Value>, _input: Option<Value>) -> Result<Value> {
         return Err(crate::safety::budget_exceeded(
             "range",
             format!("{count} elements exceed the {RANGE_MAX} element limit"),
-            "iterate in chunks, or use a smaller range",
+            "split the range: e.g. arr.range(0, 10000000) then arr.range(10000000, 20000000), or reduce the count",
         ));
     }
 

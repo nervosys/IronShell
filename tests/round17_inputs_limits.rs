@@ -253,3 +253,23 @@ fn open_of_a_json_file_nested_past_the_limit_says_so_and_gives_a_hint() {
         "hint: {stderr}"
     );
 }
+
+#[test]
+fn arr_range_over_the_element_limit_names_a_split_that_works() {
+    let dir = scratch("range_limit");
+    let proj = dir.join("proj");
+    let out = ish_in(&proj, "arr.range(0, 10000001)");
+    assert!(
+        !out.status.success(),
+        "a range past the limit must be refused"
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+    assert!(stderr.contains("E_BUDGET_EXCEEDED"), "code: {stderr}");
+    assert!(
+        stderr.contains(
+            "split the range: e.g. arr.range(0, 10000000) then arr.range(10000000, 20000000), \
+             or reduce the count"
+        ),
+        "hint: {stderr}"
+    );
+}
