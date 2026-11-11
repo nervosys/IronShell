@@ -3461,10 +3461,14 @@ fn redacted(bytes: &[u8]) -> std::borrow::Cow<'_, [u8]> {
 }
 
 fn jail_refusal(tool: &str, path: &str) -> Option<String> {
-    crate::security::outside_read_jail(path).then(|| {
+    if crate::security::outside_read_jail(path) {
         crate::security::audit_read_refusal(tool, path);
-        crate::safety::outside_workspace(tool, path).to_string()
-    })
+        return Some(crate::safety::outside_workspace(tool, path).to_string());
+    }
+    // Off unless the operator set IRONSHELL_REFUSE_LINKED_READS=1.
+    crate::safety::refuse_hard_linked_read(tool, path)
+        .err()
+        .map(|e| e.to_string())
 }
 
 fn read_inputs(

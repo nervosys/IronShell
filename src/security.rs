@@ -606,6 +606,7 @@ pub fn check_read_jail(builtin: &str, path: &str) -> Result<()> {
             path,
         ));
     }
+    crate::safety::refuse_hard_linked_read(builtin, path)?;
     Ok(())
 }
 

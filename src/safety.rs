@@ -2186,6 +2186,8 @@ const CONFINING_ENV: &[&str] = &[
     "IRONSHELL_PRINCIPAL",
     "IRONSHELL_AUDIT_LOG",
     "IRONSHELL_AUDIT_REQUIRED",
+    // An operator's refusal of reads through hard links; a child keeps it.
+    "IRONSHELL_REFUSE_LINKED_READS",
     // The script nesting depth (posix.rs). Kept, so a child `ish` started by a
     // program rather than by a script still counts its depth from the parent.
     "IRONSHELL_SCRIPT_DEPTH",
@@ -3807,6 +3809,39 @@ pub(crate) fn hard_link_count(_path: &Path) -> Option<u64> {
 }
 
 /// The refusal for an in-place write to a file with `links` hard links.
+/// The operator setting that refuses reads through a hard link under the jail.
+pub(crate) const REFUSE_LINKED_READS_ENV: &str = "IRONSHELL_REFUSE_LINKED_READS";
+
+/// Refuse a read of a file with more than one hard link, when the jail is
+/// enforced and the operator set `IRONSHELL_REFUSE_LINKED_READS=1`.
+///
+/// Off by default. A hard link inside the workspace to a file outside it lets a
+/// read see that file, and the jail cannot tell where a file's other names are
+/// (Unix keeps no list of them). But package stores such as pnpm's hard-link
+/// `node_modules` into a store outside the project, so refusing every linked
+/// read would break ordinary installs. An operator whose workspace holds no
+/// such store, or who must not let a planted link leak a file, turns it on.
+pub(crate) fn refuse_hard_linked_read(builtin: &str, path: &str) -> anyhow::Result<()> {
+    if std::env::var(REFUSE_LINKED_READS_ENV).as_deref() != Ok("1")
+        || !jail_enforced(current_mode())
+    {
+        return Ok(());
+    }
+    let resolved = resolve_path_str(path);
+    for candidate in [path.to_string(), resolved] {
+        if let Some(links) = hard_link_count(Path::new(&candidate)).filter(|n| *n > 1) {
+            return Err(policy_deny(
+                builtin,
+                format!(
+                    "'{path}' has {links} hard links, and {REFUSE_LINKED_READS_ENV} refuses reads through a hard link"
+                ),
+                "read a copy that is not linked, or ask the operator to unset the setting",
+            ));
+        }
+    }
+    Ok(())
+}
+
 fn hard_link_refusal(builtin: &str, path: &str, links: u64) -> anyhow::Error {
     policy_deny(
         builtin,
