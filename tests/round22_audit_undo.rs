@@ -280,3 +280,16 @@ fn a_write_after_undoing_the_last_two_steps_gets_the_next_id_not_a_freed_one() {
         "[]"
     );
 }
+
+#[test]
+fn a_bare_step_count_error_says_what_an_id_is() {
+    let d = Dirs::new("stephint");
+    let out = d.ish(&["-c", "undo(-1)"]);
+    let text = both(&out);
+    assert!(
+        text.contains(
+            "undo(n) undoes the last n steps; to undo the step with id n, write undo({id: n})"
+        ),
+        "{out:?}"
+    );
+}

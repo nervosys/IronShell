@@ -22313,6 +22313,11 @@ pub fn render_agent(v: &Value, budget: Option<usize>) -> Option<String> {
     }
 }
 
+/// The hint for a bad bare step count. A bare Int counts steps; an id needs the
+/// Record form. Spelled out because the two read alike.
+const UNDO_STEP_HINT: &str =
+    "undo(n) undoes the last n steps; to undo the step with id n, write undo({id: n})";
+
 /// `undo(n = 1)` — put back what the last `n` mutating steps overwrote.
 ///
 /// Returns one record per step, **including the ones it could not reverse**.
@@ -22337,15 +22342,23 @@ fn bi_undo(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
     let n = match args.iter().find(|v| !matches!(v, Value::Record(_))) {
         None => 1,
         Some(Value::Int(n)) if *n < 0 => {
-            return Err(crate::safety::bad_arg(
+            return Err(crate::safety::bad_arg_with_hint(
                 "undo",
                 "a step count from 0",
                 &n.to_string(),
+                UNDO_STEP_HINT,
             ))
         }
         Some(v) => v
             .as_int()
-            .map_err(|_| crate::safety::bad_arg("undo", "a step count", "a non-integer"))?
+            .map_err(|_| {
+                crate::safety::bad_arg_with_hint(
+                    "undo",
+                    "a step count",
+                    "a non-integer",
+                    UNDO_STEP_HINT,
+                )
+            })?
             .max(0) as usize,
     };
     let force = undo_force("undo", &args)?;
