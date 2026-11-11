@@ -2139,7 +2139,7 @@ impl Shell {
     /// file first, so a refused file is a failed redirection: the command does
     /// not run and the status is 1 (and errexit applies, as for any failure).
     fn refuse_write(&mut self, sink: &mut Sink, path: &str) -> Result<String, Flow> {
-        check_write(path).map_err(|msg| {
+        check_write_in_place(path).map_err(|msg| {
             sink.eline(&msg);
             self.last = 1;
             Flow::Next(1)
@@ -2931,6 +2931,16 @@ fn check_write(path: &str) -> Result<String, String> {
         fs_paths: true,
     })
     .map_err(|e| e.to_string())?;
+    Ok(resolved)
+}
+
+/// [`check_write`] for a writer that writes the existing file in place (a `>`
+/// or `>>` redirection, `tee`, `touch`): it also refuses a file with other hard
+/// links, since writing through one could change a file outside the workspace.
+/// `mkdir` creates nothing in place and uses [`check_write`].
+fn check_write_in_place(path: &str) -> Result<String, String> {
+    let resolved = check_write(path)?;
+    crate::safety::guard_in_place_write("posix", path).map_err(|e| e.to_string())?;
     Ok(resolved)
 }
 
@@ -4064,7 +4074,7 @@ fn tee(args: &[String], stdin: &mut Input, sink: &mut Sink) -> Util {
         if f == "/dev/null" {
             continue;
         }
-        let resolved = match check_write(f) {
+        let resolved = match check_write_in_place(f) {
             Ok(p) => p,
             Err(msg) => {
                 sink.eline(&msg);
@@ -4131,7 +4141,7 @@ fn touch(args: &[String], sink: &mut Sink) -> Util {
     }
     let mut status = 0;
     for f in &files {
-        let resolved = match check_write(f) {
+        let resolved = match check_write_in_place(f) {
             Ok(p) => p,
             Err(msg) => {
                 sink.eline(&msg);

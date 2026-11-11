@@ -3677,34 +3677,47 @@ fn same_existing_file(_a: &Path, _b: &Path) -> bool {
 /// the call is declared here rather than adding a crate for one function.
 #[cfg(windows)]
 fn windows_file_id(path: &Path) -> Option<(u32, u64)> {
+    let info = by_handle_information(path)?;
+    let index = (u64::from(info.file_index_high) << 32) | u64::from(info.file_index_low);
+    Some((info.volume_serial_number, index))
+}
+
+/// `BY_HANDLE_FILE_INFORMATION` from the Windows SDK, laid out to match.
+/// Every field is part of the layout; only some of them are read.
+#[cfg(windows)]
+#[repr(C)]
+#[derive(Default)]
+#[allow(dead_code)]
+struct ByHandleFileInformation {
+    file_attributes: u32,
+    creation_time: [u32; 2],
+    last_access_time: [u32; 2],
+    last_write_time: [u32; 2],
+    volume_serial_number: u32,
+    file_size_high: u32,
+    file_size_low: u32,
+    number_of_links: u32,
+    file_index_high: u32,
+    file_index_low: u32,
+}
+
+#[cfg(windows)]
+#[link(name = "kernel32")]
+extern "system" {
+    fn GetFileInformationByHandle(
+        h: *mut std::ffi::c_void,
+        info: *mut ByHandleFileInformation,
+    ) -> i32;
+}
+
+/// The `BY_HANDLE_FILE_INFORMATION` of `path`, following links. Std does not
+/// expose these on stable Rust, so the call is declared here rather than adding
+/// a crate for one function. Shared by [`windows_file_id`] and
+/// [`hard_link_count`].
+#[cfg(windows)]
+fn by_handle_information(path: &Path) -> Option<ByHandleFileInformation> {
     use std::os::windows::fs::OpenOptionsExt;
     use std::os::windows::io::AsRawHandle;
-
-    /// `BY_HANDLE_FILE_INFORMATION` from the Windows SDK, laid out to match.
-    /// Every field is part of the layout; only two of them are read.
-    #[repr(C)]
-    #[derive(Default)]
-    #[allow(dead_code)]
-    struct ByHandleFileInformation {
-        file_attributes: u32,
-        creation_time: [u32; 2],
-        last_access_time: [u32; 2],
-        last_write_time: [u32; 2],
-        volume_serial_number: u32,
-        file_size_high: u32,
-        file_size_low: u32,
-        number_of_links: u32,
-        file_index_high: u32,
-        file_index_low: u32,
-    }
-
-    #[link(name = "kernel32")]
-    extern "system" {
-        fn GetFileInformationByHandle(
-            h: *mut std::ffi::c_void,
-            info: *mut ByHandleFileInformation,
-        ) -> i32;
-    }
 
     // Access 0 asks for metadata only, so a locked or read-only file still
     // opens. Sharing read, write and delete does not block its owner. The
@@ -3723,8 +3736,66 @@ fn windows_file_id(path: &Path) -> Option<(u32, u64)> {
     if ok == 0 {
         return None;
     }
-    let index = (u64::from(info.file_index_high) << 32) | u64::from(info.file_index_low);
-    Some((info.volume_serial_number, index))
+    Some(info)
+}
+
+/// The number of hard links to `path` when it is an existing regular file, else
+/// `None`. Links are followed, so a symbolic link reports its target's count.
+#[cfg(unix)]
+pub(crate) fn hard_link_count(path: &Path) -> Option<u64> {
+    use std::os::unix::fs::MetadataExt;
+    let meta = std::fs::metadata(path).ok()?;
+    meta.is_file().then(|| meta.nlink())
+}
+
+/// The number of hard links to `path` when it is an existing regular file, else
+/// `None`, from the file's `GetFileInformationByHandle` record.
+#[cfg(windows)]
+pub(crate) fn hard_link_count(path: &Path) -> Option<u64> {
+    if !std::fs::metadata(path).ok()?.is_file() {
+        return None;
+    }
+    by_handle_information(path).map(|info| u64::from(info.number_of_links))
+}
+
+#[cfg(not(any(unix, windows)))]
+pub(crate) fn hard_link_count(_path: &Path) -> Option<u64> {
+    None
+}
+
+/// Refuse an in-place write to a file with more than one hard link, when the
+/// jail is enforced. The other names of such a file may lie outside the
+/// workspace, and writing through one changes all of them. An atomic replace
+/// (write a temporary file, rename it over the target) breaks the link instead,
+/// so only in-place writers need this: a redirection, `tee`, `touch`, and the
+/// builtins that open an existing file for append or truncate.
+///
+/// The path is judged as given and as the workspace resolves it, since a builtin
+/// may open either form. Reads are not refused: a package store such as pnpm's
+/// hard-links node_modules into its store, and reading through a link changes
+/// nothing. This is a known limit: a link planted after a file was judged is not
+/// seen again here, as the check and the write are separate calls.
+pub(crate) fn guard_in_place_write(builtin: &str, path: &str) -> anyhow::Result<()> {
+    if !jail_enforced(current_mode()) {
+        return Ok(());
+    }
+    let resolved = resolve_path_str(path);
+    let mut candidates = vec![path.to_string()];
+    if resolved != path {
+        candidates.push(resolved);
+    }
+    for candidate in &candidates {
+        if let Some(links) = hard_link_count(Path::new(candidate)).filter(|n| *n > 1) {
+            return Err(policy_deny(
+                builtin,
+                format!(
+                    "'{path}' has {links} hard links, so writing it in place could change a file outside the workspace"
+                ),
+                "remove the link or write a new file",
+            ));
+        }
+    }
+    Ok(())
 }
 
 /// Whether the jail is enforced. Enforced in agent mode, or whenever the

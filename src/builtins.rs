@@ -23009,15 +23009,24 @@ fn bi_apply(args: Vec<Value>, _input: Option<Value>) -> Result<Value> {
             }
             "append" => {
                 use std::io::Write;
-                std::fs::OpenOptions::new()
-                    .create(true)
-                    .append(true)
-                    .open(path)
-                    .and_then(|mut f| f.write_all(content.as_deref().unwrap_or("").as_bytes()))
+                crate::safety::guard_in_place_write("apply", path)
+                    .map_err(|e| std::io::Error::other(e.to_string()))
+                    .and_then(|()| {
+                        std::fs::OpenOptions::new()
+                            .create(true)
+                            .append(true)
+                            .open(path)
+                            .and_then(|mut f| {
+                                f.write_all(content.as_deref().unwrap_or("").as_bytes())
+                            })
+                    })
             }
             "rm" => std::fs::remove_file(path),
             "mkdir" => std::fs::create_dir_all(path),
-            "copy" => std::fs::copy(path, dest.as_deref().unwrap_or("")).map(|_| ()),
+            // std::fs::copy truncates an existing destination and writes it in place.
+            "copy" => crate::safety::guard_in_place_write("apply", dest.as_deref().unwrap_or(""))
+                .map_err(|e| std::io::Error::other(e.to_string()))
+                .and_then(|()| std::fs::copy(path, dest.as_deref().unwrap_or("")).map(|_| ())),
             "move" => std::fs::rename(path, dest.as_deref().unwrap_or("")),
             _ => Ok(()),
         };
@@ -40769,6 +40778,7 @@ fn bi_gui_screenshot_window(args: Vec<Value>, input: Option<Value>) -> Result<Va
                 "its output was not a PNG image",
             ));
         }
+        crate::safety::guard_in_place_write(NAME, &path)?;
         crate::tx::snapshot(&path); // record pre-capture state if a transaction is active
         fs::write(&path, &shot.stdout).map_err(|e| crate::safety::fs_error(NAME, &path, &e))?;
         Ok(Value::Str(path))
@@ -49530,6 +49540,7 @@ fn bi_file_append(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
         reversible: true,
         fs_paths: true,
     })?;
+    crate::safety::guard_in_place_write("file_append", &path)?;
 
     crate::tx::snapshot(&path); // record pre-append state if a transaction is active
 
@@ -52280,6 +52291,7 @@ fn bi_git_ignore(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
     }
     text.push_str(pattern.trim());
     text.push('\n');
+    crate::safety::guard_in_place_write("git_ignore", &path)?;
     crate::tx::snapshot(&path);
     std::fs::write(&path, text).map_err(|e| crate::safety::fs_error("git_ignore", &path, &e))?;
     Ok(Value::Bool(true))
@@ -63322,6 +63334,7 @@ fn bi_touch(args: Vec<Value>, _input: Option<Value>) -> Result<Value> {
     // that already existed; errors were uncoded. It also skipped the
     // workspace jail the other writers go through.
     let path = guard_local_write("touch", &path)?;
+    crate::safety::guard_in_place_write("touch", &path)?;
     // An existing file gets only its timestamp changed, so its metadata is what
     // is recorded; a file this call creates is recorded as absent so rollback
     // removes it.
@@ -64608,6 +64621,8 @@ fn bi_dd_copy(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
     };
     let src = text(0, "source")?;
     let dst = text(1, "destination")?;
+    // dd truncates and writes the destination in place, on every platform.
+    crate::safety::guard_in_place_write("dd_copy", &dst)?;
     let mut operands = vec![format!("if={src}"), format!("of={dst}")];
     match args.get(2) {
         None => {}
@@ -72153,6 +72168,7 @@ fn bi_tee_output(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
     crate::tx::snapshot(&path);
     if append {
         use std::io::Write;
+        crate::safety::guard_in_place_write("tee", &path)?;
         let mut file = fs::OpenOptions::new()
             .create(true)
             .append(true)
