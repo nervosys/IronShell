@@ -12,6 +12,15 @@ fn run(src: &str) -> Value {
     iron_shell::eval::eval_program(&stmts, &mut env).expect("runs")
 }
 
+/// The error code of `src`, caught by the language's own `try`.
+fn error_code(src: &str) -> String {
+    let wrapped = format!("try {{ {src} }} catch e {{ e.code }}");
+    match run(&wrapped) {
+        Value::Str(code) => code,
+        other => panic!("expected an error code, got {other:?}"),
+    }
+}
+
 fn ints(v: &[i64]) -> Value {
     Value::Array(v.iter().map(|i| Value::Int(*i)).collect())
 }
@@ -65,4 +74,38 @@ fn a_negative_literal_in_a_match_arm_stays_a_literal() {
 #[test]
 fn ls_with_a_spaced_one_still_parses_as_subtraction() {
     assert!(iron_shell::parser::parse_program("ls -1").is_ok());
+}
+
+// Item 2: take refuses a negative count; head and tail take an Array first.
+
+#[test]
+fn take_with_a_negative_count_is_refused() {
+    assert_eq!(error_code("take([1, 2, 3], -1)"), "E_BAD_ARG");
+}
+
+#[test]
+fn a_piped_take_with_a_negative_count_is_refused() {
+    assert_eq!(error_code("[1, 2, 3] | take(-2)"), "E_BAD_ARG");
+}
+
+#[test]
+fn take_still_takes_a_nonnegative_count() {
+    assert_eq!(run("take([1, 2, 3], 2)"), ints(&[1, 2]));
+    assert_eq!(run("[1, 2, 3] | take(0)"), ints(&[]));
+}
+
+#[test]
+fn head_takes_an_array_as_its_first_argument() {
+    assert_eq!(run("head([1, 2, 3], 2)"), ints(&[1, 2]));
+    assert_eq!(run("head([1, 2, 3])"), ints(&[1, 2, 3]));
+}
+
+#[test]
+fn tail_takes_an_array_as_its_first_argument() {
+    assert_eq!(run("tail([1, 2, 3], 2)"), ints(&[2, 3]));
+}
+
+#[test]
+fn head_with_a_negative_count_is_refused() {
+    assert_eq!(error_code("[1, 2, 3] | head(-1)"), "E_BAD_ARG");
 }

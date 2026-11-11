@@ -5454,8 +5454,14 @@ fn bi_take(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
     )?;
     let arr = expect_array("take", &arr_val)?;
 
-    let take_n = if n < 0 { 0 } else { n as usize };
-    Ok(Value::Array(arr.iter().take(take_n).cloned().collect()))
+    // A negative count was taken as 0 and returned [] with no error, which is
+    // the silent wrong answer; head and tail refuse it the same way.
+    if n < 0 {
+        return Err(crate::safety::arg_err(
+            "take count must be a nonnegative Int",
+        ));
+    }
+    Ok(Value::Array(arr.iter().take(n as usize).cloned().collect()))
 }
 
 fn bi_keys(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
@@ -8823,6 +8829,15 @@ fn bi_read_text(args: Vec<Value>, _input: Option<Value>) -> Result<Value> {
 }
 
 fn bi_head(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
+    // An Array as the first argument, `head([1, 2, 3], 2)`: the same as piping
+    // it in, which is `take(n)`.
+    if input.is_none() && matches!(args.first(), Some(Value::Array(_))) {
+        let count = match args.get(1) {
+            None => 10,
+            Some(value) => line_count("head", value)?,
+        };
+        return bi_take(vec![Value::Int(count as i64)], args.into_iter().next());
+    }
     // An Array piped in: its first n elements, the same as `take(n)`.
     if matches!(input, Some(Value::Array(_))) {
         let count = match args.first() {
@@ -8969,6 +8984,14 @@ fn line_read(builtin: &str, path: &str) -> Result<String> {
 }
 
 fn bi_tail(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
+    // An Array as the first argument, `tail([1, 2, 3], 2)`: as piping it in.
+    if input.is_none() && matches!(args.first(), Some(Value::Array(_))) {
+        let count = match args.get(1) {
+            None => 10,
+            Some(value) => line_count("tail", value)?,
+        };
+        return bi_last(vec![Value::Int(count as i64)], args.into_iter().next());
+    }
     // An Array piped in: its last n elements, the same as `last(n)`.
     if matches!(input, Some(Value::Array(_))) {
         let count = match args.first() {

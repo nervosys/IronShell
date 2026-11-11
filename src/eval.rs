@@ -293,8 +293,10 @@ fn stage_kind(e: &Expr) -> StageKind {
     };
     match name.as_str() {
         "map" | "where" | "filter" => StageKind::Elementwise,
+        // A negative count is a barrier, so the builtin refuses it; as a prefix
+        // it would take nothing and end the stream with no error.
         "take" => match args.first() {
-            Some(Expr::LitInt(n)) => StageKind::Prefix(*n),
+            Some(Expr::LitInt(n)) if *n >= 0 => StageKind::Prefix(*n),
             _ => StageKind::Barrier,
         },
         _ => StageKind::Barrier,
