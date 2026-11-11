@@ -8462,9 +8462,16 @@ pub fn enter_call() -> anyhow::Result<CallDepthGuard> {
     if depth > MAX_CALL_DEPTH {
         // Release immediately; the caller gets an error, not a guard.
         CALL_DEPTH.with(|d| d.set(d.get().saturating_sub(1)));
-        return Err(anyhow::anyhow!(
-            "recursion too deep (limit {MAX_CALL_DEPTH}) — a function is most \
-             likely calling itself without a base case"
+        return Err(budget_exceeded(
+            "call",
+            format!(
+                "recursion too deep (limit {MAX_CALL_DEPTH}) — a function is most \
+                 likely calling itself without a base case"
+            ),
+            &format!(
+                "calls nest at most {MAX_CALL_DEPTH} deep; if the recursion is intended, \
+                 iterate instead with reduce over arr.range(n), or check the base case"
+            ),
         ));
     }
     Ok(CallDepthGuard)
