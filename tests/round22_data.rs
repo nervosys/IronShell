@@ -263,6 +263,23 @@ fn grep_refuses_an_option_it_does_not_take() {
     assert!(e.to_string().contains("E_BAD_ARG"), "{e}");
 }
 
+// ── item 7: did-you-mean for delete spellings ───────────────────────────
+
+#[test]
+fn a_file_delete_spelling_is_suggested_as_rm() {
+    let members = ["delete_lines", "copy", "move"];
+    let got = iron_shell::builtins::module_member_candidates("file", "delete", &members);
+    assert_eq!(got.first().map(String::as_str), Some("rm"), "{got:?}");
+    for spelling in ["remove", "unlink", "file_delete", "delete_file"] {
+        let got = iron_shell::builtins::did_you_mean(spelling);
+        assert_eq!(
+            got.first().map(String::as_str),
+            Some("rm"),
+            "{spelling}: {got:?}"
+        );
+    }
+}
+
 // ── item 6: JSON indent and json_set ────────────────────────────────────
 
 #[test]

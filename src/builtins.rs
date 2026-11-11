@@ -3944,6 +3944,9 @@ fn mapped_spelling(name: &str) -> Vec<String> {
             vec!["read_text".to_string(), "file.read".to_string()]
         }
         "exists_file" => vec!["exists".to_string()],
+        // Deleting a file is rm, which takes the path. No builtin is named delete.
+        "delete" | "remove" | "unlink" | "file_delete" | "file_remove" | "remove_file"
+        | "delete_file" => vec!["rm".to_string()],
         // No repeat builtin. For one character, pad_left repeats it:
         // "-" | pad_left(10, "-") is ten dashes.
         "repeat" | "str_repeat" => vec!["pad_left".to_string()],
