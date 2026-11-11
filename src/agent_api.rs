@@ -705,8 +705,6 @@ fn run_pipeline_steps_unrecorded(
     Ok((output, joined))
 }
 
-/// The response for an evaluated value. Agent mode renders tabular results as
-/// AECON text; everything else is native JSON.
 /// `value` as an agent may see it: secrets scrubbed in agent mode unless
 /// `IRONSHELL_REDACT=off`, as `ish --agent` scrubs them. The Agent API and
 /// MCP returned records and scalars as they were, so a password that
@@ -721,46 +719,131 @@ pub fn redact_for_agent(value: Value) -> Value {
     }
 }
 
+/// The response for an evaluated value. The result is always JSON, so an Array,
+/// a Record or a Table is an array or an object to the caller, never a string.
+/// In agent mode a tabular result is paged to `IRONSHELL_TOKEN_BUDGET` when
+/// that is set, or kept as a handle when it is too large to send whole.
 fn response_from_value(value: Value, code: &str) -> AgentResponse {
     let value = redact_for_agent(value);
     let result_type = value_type_name(&value);
-    // Agent mode mirrors the CLI default: tabular results (Array/Table,
-    // where keys would otherwise repeat per row) are returned as compact
-    // AECON text instead of verbose JSON, paged to IRONSHELL_TOKEN_BUDGET when
-    // set. Scalars/records/strings stay native JSON (a bare number must
-    // not become a quoted string). Non-agent consumers are unchanged.
-    // Deterministic mode wins over the AECON renderer, as it does in `ish -c`,
-    // so the result is the canonical JSON the response carries instead.
-    if !deterministic_mode()
+    // Deterministic output is the whole value in canonical form, so the
+    // paging and handles of agent mode apply only when it is off.
+    let paged = !deterministic_mode()
         && crate::safety::current_mode() == crate::safety::Mode::Agent
-        && matches!(value, Value::Array(_) | Value::Table(_))
-    {
-        let budget = std::env::var("IRONSHELL_TOKEN_BUDGET")
-            .ok()
-            .and_then(|s| s.parse::<usize>().ok())
-            .filter(|m| *m > 0);
-        if let Some(text) = crate::builtins::render_agent(&value, budget) {
-            return AgentResponse {
-                code: None,
-                hint: None,
-                success: true,
-                result: Some(JsonValue::String(text)),
-                error: None,
-                result_type: Some("aecon".to_string()),
-                metadata: Some(json!({ "code_executed": code, "render": "aecon" })),
-            };
+        && matches!(value, Value::Array(_) | Value::Table(_));
+    let mut metadata = serde_json::Map::new();
+    metadata.insert("code_executed".to_string(), json!(code));
+    let result = if paged {
+        match tabular_result(&value, &mut metadata) {
+            Ok(result) => result,
+            Err(e) => {
+                return AgentResponse {
+                    code: None,
+                    hint: None,
+                    success: false,
+                    result: None,
+                    error: Some(e.to_string()),
+                    result_type: None,
+                    metadata: Some(JsonValue::Object(metadata)),
+                }
+            }
         }
-    }
+    } else {
+        value_to_json(&value)
+    };
     AgentResponse {
         code: None,
         hint: None,
         success: true,
-        result: Some(value_to_json(&value)),
+        result: Some(result),
         error: None,
         result_type: Some(result_type),
-        metadata: Some(json!({
-            "code_executed": code
-        })),
+        metadata: Some(JsonValue::Object(metadata)),
+    }
+}
+
+/// Rows a handled result shows in its preview.
+const HANDLE_PREVIEW_ROWS: usize = 3;
+
+/// The JSON `result` for an Array or Table in agent mode. With
+/// `IRONSHELL_TOKEN_BUDGET` set, the rows that fit the budget are returned and
+/// the count left out is stated in `metadata`. Without a budget, a result too
+/// large to send whole is stored as a handle (`metadata.handle`), and its first
+/// rows are returned; `handle("<id>")` gives the whole value back.
+fn tabular_result(
+    value: &Value,
+    metadata: &mut serde_json::Map<String, JsonValue>,
+) -> Result<JsonValue> {
+    let full = value_to_json(value);
+    let total = table_rows(&full).len();
+    let budget = std::env::var("IRONSHELL_TOKEN_BUDGET")
+        .ok()
+        .and_then(|s| s.parse::<usize>().ok())
+        .filter(|m| *m > 0);
+    if let Some(max) = budget {
+        let shown = rows_within_budget(&full, max);
+        if shown < total {
+            metadata.insert("total".to_string(), json!(total));
+            metadata.insert("shown".to_string(), json!(shown));
+            metadata.insert("omitted".to_string(), json!(total - shown));
+        }
+        return Ok(first_rows(&full, shown));
+    }
+    let full_bytes = full.to_string().len();
+    if crate::handles::worth_handling(value, full_bytes) {
+        let shown = total.min(HANDLE_PREVIEW_ROWS);
+        let handle = crate::handles::put(value.clone(), full_bytes)?;
+        metadata.insert("handle".to_string(), json!(handle.id));
+        metadata.insert("shape".to_string(), json!(handle.shape));
+        metadata.insert("items".to_string(), json!(handle.items));
+        metadata.insert("bytes".to_string(), json!(handle.bytes));
+        metadata.insert("total".to_string(), json!(total));
+        metadata.insert("shown".to_string(), json!(shown));
+        metadata.insert("omitted".to_string(), json!(total - shown));
+        return Ok(first_rows(&full, shown));
+    }
+    Ok(full)
+}
+
+/// The rows of an Array, or of a Table's JSON form.
+fn table_rows(full: &JsonValue) -> &[JsonValue] {
+    match full {
+        JsonValue::Array(rows) => rows.as_slice(),
+        JsonValue::Object(obj) => match obj.get("rows") {
+            Some(JsonValue::Array(rows)) => rows.as_slice(),
+            _ => &[],
+        },
+        _ => &[],
+    }
+}
+
+/// How many leading rows fit in `max` estimated tokens. One row is always
+/// shown, so a single large row still makes progress.
+fn rows_within_budget(full: &JsonValue, max: usize) -> usize {
+    let mut used = 0usize;
+    let mut shown = 0usize;
+    for row in table_rows(full) {
+        let tokens = crate::builtins::est_token_count(&row.to_string());
+        if shown > 0 && used.saturating_add(tokens) > max {
+            break;
+        }
+        used = used.saturating_add(tokens);
+        shown += 1;
+    }
+    shown
+}
+
+/// `full` with only its first `n` rows.
+fn first_rows(full: &JsonValue, n: usize) -> JsonValue {
+    match full {
+        JsonValue::Array(rows) => JsonValue::Array(rows.iter().take(n).cloned().collect()),
+        JsonValue::Object(obj) => {
+            let mut obj = obj.clone();
+            let page: Vec<JsonValue> = table_rows(full).iter().take(n).cloned().collect();
+            obj.insert("rows".to_string(), JsonValue::Array(page));
+            JsonValue::Object(obj)
+        }
+        other => other.clone(),
     }
 }
 
