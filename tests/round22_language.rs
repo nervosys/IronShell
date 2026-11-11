@@ -170,3 +170,40 @@ fn a_nested_field_assignment_through_an_int_names_the_replacement() {
         "{text}"
     );
 }
+
+// ---- 5. appending in a loop is linear ----
+
+#[test]
+fn appending_50000_elements_one_statement_at_a_time() {
+    // The REPL runs each top-level statement on its own, with `discard` set for
+    // all but the last, which is the path the quadratic copy used to take.
+    let mut src = String::from("mut a = []\n");
+    for _ in 0..50_000 {
+        src.push_str("a = a + [1]\n");
+    }
+    src.push_str("a\n");
+    let stmts = parse_program(&src).expect("parse");
+    let mut env = Env::new();
+    let n = stmts.len();
+    let mut last = Value::Null;
+    for (i, s) in stmts.iter().enumerate() {
+        last = eval_program_statement(s, i + 1 < n, &mut env).expect("statement");
+    }
+    match last {
+        Value::Array(items) => assert_eq!(items.len(), 50_000),
+        other => panic!("expected an Array, got {other:?}"),
+    }
+}
+
+#[test]
+fn appending_50000_elements_in_one_program() {
+    let mut src = String::from("mut a = []\n");
+    for _ in 0..50_000 {
+        src.push_str("a = a + [1]\n");
+    }
+    src.push_str("a\n");
+    match eval(&src).expect("program") {
+        Value::Array(items) => assert_eq!(items.len(), 50_000),
+        other => panic!("expected an Array, got {other:?}"),
+    }
+}
