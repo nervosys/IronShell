@@ -10572,8 +10572,9 @@ fn csv_escape(s: &str) -> String {
 /// csv_columns(path_or_text): the header row, in file order.
 ///
 /// A String that names an existing file is read as that file; any other String
-/// is CSV text. Quoting is parsed as `from_csv` parses it, so a quoted header
-/// with a comma is one column.
+/// is CSV text. A single line that ends in .csv, .tsv or .txt and names no file
+/// is E_NOT_FOUND, not a header. Quoting is parsed as `from_csv` parses it, so a
+/// quoted header with a comma is one column.
 fn bi_csv_columns(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
     // Piped, the path or text is the input; called directly, it is the first argument.
     let subject = match input.or_else(|| args.into_iter().next()) {
@@ -10589,11 +10590,26 @@ fn bi_csv_columns(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
     };
 
     // A remote-share string is never probed: exists() on it opens a connection.
-    if !crate::safety::names_a_remote_share(&subject) && std::path::Path::new(&subject).is_file() {
+    let is_file =
+        !crate::safety::names_a_remote_share(&subject) && std::path::Path::new(&subject).is_file();
+    if is_file {
         let validated = validate_read_path(&subject)?;
         let file = std::fs::File::open(&validated)
             .map_err(|e| crate::safety::fs_error("csv_columns", &validated, &e))?;
         return csv_header_row(std::io::BufReader::new(file));
+    }
+    // One line that ends like a file name and names no file is a mistyped path,
+    // not a header: refuse it rather than return the name as the only column.
+    let lower = subject.to_ascii_lowercase();
+    let names_a_file = [".csv", ".tsv", ".txt"]
+        .iter()
+        .any(|ext| lower.ends_with(ext));
+    if names_a_file && !subject.contains(['\n', '\r']) {
+        return Err(crate::safety::not_found_with(
+            "csv_columns",
+            format!("csv_columns: no file named '{subject}'"),
+            "pass CSV text with a newline, or an existing file",
+        ));
     }
     csv_header_row(subject.as_bytes())
 }

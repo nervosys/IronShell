@@ -90,3 +90,31 @@ fn to_csv_keeps_a_key_that_only_a_later_row_has() {
         s("a,b,c\n1,,\n,2,\n3,,4\n")
     );
 }
+
+// ── item 3: a file name that is not a file ──────────────────────────────
+
+#[test]
+fn csv_columns_refuses_a_one_line_file_name_that_is_not_a_file() {
+    for name in ["nofile.csv", "nofile.TSV", "nofile.txt"] {
+        let e = eval(&format!(r#"csv_columns("{name}")"#)).expect_err(name);
+        let text = e.to_string();
+        assert!(text.contains("E_NOT_FOUND"), "{text}");
+        assert!(text.contains(name), "{text}");
+        assert!(
+            text.contains("pass CSV text with a newline, or an existing file"),
+            "{text}"
+        );
+    }
+}
+
+#[test]
+fn csv_columns_still_reads_one_line_text_and_multi_line_text() {
+    assert_eq!(
+        eval(r#"csv_columns("id,customer")"#).unwrap(),
+        Value::Array(vec![s("id"), s("customer")])
+    );
+    assert_eq!(
+        eval(r#"csv_columns("name\nAda\n")"#).unwrap(),
+        Value::Array(vec![s("name")])
+    );
+}

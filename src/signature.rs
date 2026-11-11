@@ -1772,9 +1772,10 @@ pub static SIGNATURES: &[Signature] = &[
         // sorted maps, so `open` alone cannot say it.
         name: "csv_columns", category: None, subject_required: false, aliases: &[],
         subject: Some(Ty::Str), params: &[], returns: "Array",
-        doc: "The header row of a CSV file or of CSV text, as an Array of Strings in file order, with quoting read as from_csv reads it. A String that names an existing file is read as that file; any other String is CSV text. The path or text is piped in or passed as the argument: csv_columns(path_or_text).",
+        doc: "The header row of a CSV file or of CSV text, as an Array of Strings in file order, with quoting read as from_csv reads it. A String that names an existing file is read as that file; a single line that ends in .csv, .tsv or .txt and names no file is E_NOT_FOUND; any other String is CSV text. The path or text is piped in or passed as the argument: csv_columns(path_or_text).",
         examples: &[
             (r#"csv_columns("id,customer\n1,Ada\n") | len"#, "2"),
+            (r#"(try { csv_columns("nofile.csv") } catch e { e.error.code })"#, "E_NOT_FOUND"),
             (r#""id,customer\n1,Ada\n" | csv_columns | last"#, r#""customer""#),
             (r#"let d = fs_tempdir("ae_csvcols"); let f = d + "/rows.csv"; file_write(f, "id,customer\n1,Ada\n"); let cols = csv_columns(f); rmdir(d, true); cols | first"#, r#""id""#),
         ],
