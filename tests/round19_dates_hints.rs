@@ -97,3 +97,17 @@ fn date_add_answers_a_date_for_calendar_units_and_refuses_unknown_units() {
     let msg = format!("{err:#}");
     assert!(msg.contains("weeks, days, months, years"), "{msg}");
 }
+
+// --- date_diff: b minus a ----------------------------------------------------
+
+#[test]
+fn date_diff_answers_b_minus_a_so_a_reversed_pair_is_negative() {
+    assert_eq!(
+        eval(r#"date_diff("2024-02-29", "2026-11-09")"#).unwrap(),
+        Value::Int(984)
+    );
+    assert_eq!(
+        eval(r#"date_diff("2026-11-09", "2024-02-29")"#).unwrap(),
+        Value::Int(-984)
+    );
+}
