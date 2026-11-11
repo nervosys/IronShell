@@ -3428,25 +3428,49 @@ fn utility(name: &str, args: &[String], stdin: &mut Input, sink: &mut Sink) -> U
     }
 }
 
-fn unescape_echo(s: &str) -> (String, bool) {
-    let mut out = String::new();
+/// The bytes of `s` with its backslash escapes decoded, as `echo -e` and `%b`
+/// decode them, and whether a `\c` stopped the text. A `\xHH` (one or two hex
+/// digits) or `\0NNN` is one raw byte, so `\xc3\xa9` is the UTF-8 for `é`. A
+/// `\x` with no hex digit after it is kept as written, as bash does.
+fn unescape_echo(s: &str) -> (Vec<u8>, bool) {
+    let mut out: Vec<u8> = Vec::new();
     let mut it = s.chars().peekable();
     while let Some(c) = it.next() {
         if c != '\\' {
-            out.push(c);
+            let mut utf8 = [0u8; 4];
+            out.extend_from_slice(c.encode_utf8(&mut utf8).as_bytes());
             continue;
         }
         match it.next() {
-            Some('n') => out.push('\n'),
-            Some('t') => out.push('\t'),
-            Some('r') => out.push('\r'),
-            Some('\\') => out.push('\\'),
-            Some('a') => out.push('\x07'),
-            Some('b') => out.push('\x08'),
-            Some('e') => out.push('\x1b'),
-            Some('f') => out.push('\x0c'),
-            Some('v') => out.push('\x0b'),
+            Some('n') => out.push(b'\n'),
+            Some('t') => out.push(b'\t'),
+            Some('r') => out.push(b'\r'),
+            Some('\\') => out.push(b'\\'),
+            Some('a') => out.push(0x07),
+            Some('b') => out.push(0x08),
+            Some('e') => out.push(0x1b),
+            Some('f') => out.push(0x0c),
+            Some('v') => out.push(0x0b),
             Some('c') => return (out, true),
+            Some('x') => {
+                let mut v = 0u32;
+                let mut digits = 0;
+                while digits < 2 {
+                    match it.peek().and_then(|d| d.to_digit(16)) {
+                        Some(d) => {
+                            v = v * 16 + d;
+                            it.next();
+                            digits += 1;
+                        }
+                        None => break,
+                    }
+                }
+                if digits == 0 {
+                    out.extend_from_slice(b"\\x");
+                } else {
+                    out.push(v as u8);
+                }
+            }
             Some('0') => {
                 let mut v = 0u32;
                 for _ in 0..3 {
@@ -3458,13 +3482,14 @@ fn unescape_echo(s: &str) -> (String, bool) {
                         _ => break,
                     }
                 }
-                out.push(char::from_u32(v).unwrap_or('\0'));
+                out.push(v as u8);
             }
             Some(o) => {
-                out.push('\\');
-                out.push(o);
+                out.push(b'\\');
+                let mut utf8 = [0u8; 4];
+                out.extend_from_slice(o.encode_utf8(&mut utf8).as_bytes());
             }
-            None => out.push('\\'),
+            None => out.push(b'\\'),
         }
     }
     (out, false)
@@ -3489,15 +3514,17 @@ fn echo(args: &[String], sink: &mut Sink) -> Util {
             break;
         }
     }
-    let mut text = args[k..].join(" ");
-    if escapes {
+    let text = args[k..].join(" ");
+    let bytes = if escapes {
         let (t, stop) = unescape_echo(&text);
-        text = t;
         if stop {
             newline = false;
         }
-    }
-    sink.out.extend_from_slice(text.as_bytes());
+        t
+    } else {
+        text.into_bytes()
+    };
+    sink.out.extend_from_slice(&bytes);
     if newline {
         sink.out.push(b'\n');
     }
@@ -3524,10 +3551,16 @@ fn printf(args: &[String], sink: &mut Sink) -> Util {
         while i < fmt.len() {
             let c = fmt[i];
             if c == '\\' {
-                let (e, _) =
-                    unescape_echo(&fmt[i..(i + 2).min(fmt.len())].iter().collect::<String>());
-                out.push_str(&e);
-                i += 2;
+                // `\xHH` takes up to two hex digits after the `x`.
+                let mut end = (i + 2).min(fmt.len());
+                if fmt.get(i + 1) == Some(&'x') {
+                    while end < fmt.len() && end < i + 4 && fmt[end].is_ascii_hexdigit() {
+                        end += 1;
+                    }
+                }
+                let (e, _) = unescape_echo(&fmt[i..end].iter().collect::<String>());
+                out.push_str(&String::from_utf8_lossy(&e));
+                i = end;
                 continue;
             }
             if c != '%' {
@@ -3591,7 +3624,7 @@ fn printf(args: &[String], sink: &mut Sink) -> Util {
             let body = match conv {
                 's' | 'b' => {
                     let text = if conv == 'b' {
-                        unescape_echo(&arg).0
+                        String::from_utf8_lossy(&unescape_echo(&arg).0).into_owned()
                     } else {
                         arg
                     };

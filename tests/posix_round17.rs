@@ -66,3 +66,30 @@ fn braced_positional_past_nine_under_nounset_is_unbound() {
     assert!(out.is_empty(), "ran something: {out:?}");
     assert!(err.contains("12: unbound variable"), "{err}");
 }
+
+#[test]
+fn echo_e_decodes_hex_escapes() {
+    let dir = scratch("echo_hex");
+    let s = script(
+        &dir,
+        "e.sh",
+        "echo -e '\\x41\\x7e'\necho -e '\\x411'\necho -e '\\xg'\necho -e '\\xc3\\xa9'\n",
+    );
+    let (code, out, err) = ish(&dir, &["-b", &s]);
+    assert_eq!(code, 0, "{err}");
+    // `\x` takes at most two hex digits, and a `\x` with none stays as written.
+    assert_eq!(out, "A~\nA1\n\\xg\n\u{e9}");
+}
+
+#[test]
+fn printf_decodes_hex_in_format_and_in_b() {
+    let dir = scratch("printf_hex");
+    let s = script(
+        &dir,
+        "p.sh",
+        "printf '\\x41\\x42\\n'\nprintf '%b|' '\\x43\\x0a'\necho\n",
+    );
+    let (code, out, err) = ish(&dir, &["-b", &s]);
+    assert_eq!(code, 0, "{err}");
+    assert_eq!(out, "AB\nC\n|");
+}
