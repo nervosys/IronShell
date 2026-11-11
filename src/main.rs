@@ -869,9 +869,11 @@ fn handle_agent_api_command(command: AgentApiCommands) -> Result<()> {
             Ok(())
         }
         AgentApiCommands::Interactive => {
-            println!("🤖 IronShell Agent API - Interactive Mode");
-            println!("Send JSON requests (one per line), receive JSON responses");
-            println!("Press Ctrl+D to exit\n");
+            // The banner goes to stderr, so stdout carries only responses: one
+            // compact JSON line per request line.
+            eprintln!("🤖 IronShell Agent API - Interactive Mode");
+            eprintln!("Send JSON requests (one per line), receive JSON responses");
+            eprintln!("Press Ctrl+D to exit\n");
 
             let stdin = io::stdin();
             let mut stdout = io::stdout();
@@ -879,16 +881,8 @@ fn handle_agent_api_command(command: AgentApiCommands) -> Result<()> {
             for line in stdin.lock().lines() {
                 match line {
                     Ok(json_str) if !json_str.trim().is_empty() => {
-                        match agent_api::process_json_request(&json_str) {
-                            Ok(output) => println!("{}", output),
-                            Err(e) => {
-                                let error = serde_json::json!({
-                                    "success": false,
-                                    "error": e.to_string()
-                                });
-                                println!("{}", serde_json::to_string(&error)?);
-                            }
-                        }
+                        let response = agent_api::process_json_response(&json_str);
+                        println!("{}", serde_json::to_string(&response)?);
                         stdout.flush()?;
                     }
                     Ok(_) => {} // Empty line, skip

@@ -101,6 +101,30 @@ fn every_malformed_request_gets_one_json_error_and_exit_status_1() {
 }
 
 #[test]
+fn interactive_prints_the_banner_on_stderr_and_one_compact_line_per_request() {
+    let input = concat!(
+        "{\"action\":\"eval\",\"code\":\"[1, 2]\"}\n",
+        "\n",
+        "{}\n",
+        "{\"action\":\"describe\",\"builtin\":\"no_such_builtin_zz\"}\n",
+    );
+    let (code, out, err) = run_agent(&["interactive"], input.as_bytes());
+    assert_eq!(code, Some(0), "stderr: {err}");
+    assert!(err.contains("Interactive Mode"), "banner on stderr: {err}");
+    assert!(!out.contains("Interactive Mode"), "banner on stdout: {out}");
+
+    let lines: Vec<&str> = out.lines().collect();
+    assert_eq!(lines.len(), 3, "one line per non-empty request: {out}");
+    let responses: Vec<Value> = lines
+        .iter()
+        .map(|line| serde_json::from_str(line).unwrap_or_else(|e| panic!("{e}: {line}")))
+        .collect();
+    assert_eq!(responses[0]["result"], json!([1, 2]), "{out}");
+    assert_error_object(&responses[1], "E_BAD_ARG");
+    assert_error_object(&responses[2], "E_UNKNOWN_BUILTIN");
+}
+
+#[test]
 fn a_leading_byte_order_mark_is_ignored() {
     let request = "\u{feff}{\"action\":\"eval\",\"code\":\"1 + 1\"}";
     let v = execute(request);
