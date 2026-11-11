@@ -22,9 +22,16 @@ fn scratch_dir() -> std::path::PathBuf {
 /// Run `ish agent <args>` with `stdin` as its input. Returns the exit code,
 /// stdout and stderr.
 fn run_agent(args: &[&str], stdin: &[u8]) -> (Option<i32>, String, String) {
+    let mut full = vec!["agent"];
+    full.extend_from_slice(args);
+    run_ish(&full, stdin)
+}
+
+/// Run `ish <args>` with `stdin` as its input. Returns the exit code, stdout
+/// and stderr.
+fn run_ish(args: &[&str], stdin: &[u8]) -> (Option<i32>, String, String) {
     let dir = scratch_dir();
     let mut child = Command::new(env!("CARGO_BIN_EXE_ish"))
-        .arg("agent")
         .args(args)
         .env("IRONSHELL_SESSION_DIR", &dir)
         .env_remove("IRONSHELL_DETERMINISTIC")
@@ -122,6 +129,22 @@ fn interactive_prints_the_banner_on_stderr_and_one_compact_line_per_request() {
     assert_eq!(responses[0]["result"], json!([1, 2]), "{out}");
     assert_error_object(&responses[1], "E_BAD_ARG");
     assert_error_object(&responses[2], "E_UNKNOWN_BUILTIN");
+}
+
+#[test]
+fn global_flags_before_the_subcommand_reach_it() {
+    let request = br#"{"action":"eval","code":"1 + 1"}"#;
+    for args in [
+        &["--agent", "agent", "execute"][..],
+        &["--budget", "5000", "agent", "execute"][..],
+        &["--budget=5000", "--agent", "agent", "execute"][..],
+    ] {
+        let (code, out, err) = run_ish(args, request);
+        assert_eq!(code, Some(0), "{args:?}: stderr {err}");
+        let v: Value = serde_json::from_str(&out).unwrap_or_else(|e| panic!("{e}: {out}"));
+        assert_eq!(v["result"], json!(2), "{args:?}: {v}");
+        assert!(!err.contains("failed to read"), "{args:?}: {err}");
+    }
 }
 
 #[test]

@@ -297,8 +297,113 @@ fn main() -> Result<()> {
     // Parsing argv here rather than inside the closure keeps `--help` and
     // argument errors on the real main thread, so their exit codes and output
     // are unchanged.
-    let cli = Cli::parse();
+    let cli = parse_cli();
     iron_shell::safety::with_eval_stack(move || run(cli))
+}
+
+impl Cli {
+    /// The global flags that came before the subcommand, applied to it.
+    fn with_leading_globals(mut self, leading: Cli) -> Cli {
+        self.bash |= leading.bash;
+        self.zsh |= leading.zsh;
+        self.pwsh |= leading.pwsh;
+        self.agentic |= leading.agentic;
+        self.agent |= leading.agent;
+        self.explain |= leading.explain;
+        self.deterministic |= leading.deterministic;
+        self.budget = leading.budget.or(self.budget);
+        self.workspace = leading.workspace.or(self.workspace);
+        self.policy = leading.policy.or(self.policy);
+        self.command = leading.command.or(self.command);
+        self
+    }
+}
+
+/// Global flags that take no value.
+const GLOBAL_SWITCHES: &[&str] = &[
+    "-b",
+    "--bash",
+    "-z",
+    "--zsh",
+    "-p",
+    "--pwsh",
+    "-a",
+    "--agentic",
+    "--agent",
+    "--explain",
+    "--deterministic",
+];
+
+/// Global flags that take a value, as `--flag VALUE` or `--flag=VALUE`.
+const GLOBAL_VALUED: &[&str] = &["--budget", "--workspace", "--policy"];
+
+/// The subcommand names and aliases `Commands` declares.
+const SUBCOMMANDS: &[&str] = &[
+    "tui",
+    "ai",
+    "model",
+    "mcp",
+    "mcp-server",
+    "agent",
+    "agent-api",
+    "assist",
+    "ai-assist",
+];
+
+/// Parse the command line. Clap takes a word as a subcommand only when no
+/// argument before it is a value, so `ish --agent agent execute` would read
+/// `agent` as a script path. The global flags that come before a subcommand
+/// are split off and parsed beside the subcommand, and applied to it.
+fn parse_cli() -> Cli {
+    let argv: Vec<std::ffi::OsString> = env::args_os().collect();
+    match split_leading_globals(&argv) {
+        None => Cli::parse(),
+        Some((leading, rest)) => {
+            let leading = Cli::parse_from(leading);
+            Cli::parse_from(rest).with_leading_globals(leading)
+        }
+    }
+}
+
+/// Split `argv` into the global flags before its first subcommand, and the
+/// command line from the subcommand on (with the program name in front). None
+/// unless a global flag comes before a subcommand: a command string (`-c`), a
+/// script, or any other word leaves the command line to clap as it was.
+fn split_leading_globals(
+    argv: &[std::ffi::OsString],
+) -> Option<(Vec<std::ffi::OsString>, Vec<std::ffi::OsString>)> {
+    let program = argv.first()?;
+    let mut leading = vec![program.clone()];
+    let mut i = 1;
+    while i < argv.len() {
+        let word = argv[i].to_str()?;
+        if SUBCOMMANDS.contains(&word) {
+            if i == 1 {
+                return None;
+            }
+            let mut rest = vec![program.clone()];
+            rest.extend(argv[i..].iter().cloned());
+            return Some((leading, rest));
+        }
+        if GLOBAL_SWITCHES.contains(&word) {
+            leading.push(argv[i].clone());
+            i += 1;
+        } else if GLOBAL_VALUED.contains(&word) {
+            let value = argv.get(i + 1)?;
+            leading.push(argv[i].clone());
+            leading.push(value.clone());
+            i += 2;
+        } else if GLOBAL_VALUED
+            .iter()
+            .any(|flag| word.starts_with(&format!("{flag}=")))
+        {
+            leading.push(argv[i].clone());
+            i += 1;
+        } else {
+            return None;
+        }
+    }
+    None
 }
 
 /// Whether this invocation exists to serve an AI agent rather than a person.
