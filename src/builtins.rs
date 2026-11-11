@@ -22168,6 +22168,17 @@ pub fn render_agent(v: &Value, budget: Option<usize>) -> Option<String> {
 // tests/fallback_dispatch.rs reads the arms as `name => bi_fn(..)` pairs.
 fn bi_undo(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
     refuse_pipeline_input("undo", &input)?;
+    if let Some(id) = undo_id("undo", &args)? {
+        // An id names one step, so a step count next to it would say what else to take.
+        if args.iter().any(|v| !matches!(v, Value::Record(_))) {
+            return Err(crate::safety::arg_err(
+                "undo takes a step count or an id, not both",
+            ));
+        }
+        let force = undo_force("undo", &args)?;
+        refuse_unless_recording("undo")?;
+        return undo_by_id_record("undo", id, force);
+    }
     let n = match args.iter().find(|v| !matches!(v, Value::Record(_))) {
         None => 1,
         Some(Value::Int(n)) if *n < 0 => {
@@ -22204,6 +22215,8 @@ fn undo_force(builtin: &str, args: &[Value]) -> Result<bool> {
                             other.type_name(),
                         ))
                     }
+                    // Read by undo_id, which takes the id of one step.
+                    ("id", _) if builtin == "undo" => {}
                     _ => {
                         return Err(crate::safety::arg_err(format!(
                             "{builtin} unknown option {key}"
@@ -22219,22 +22232,82 @@ fn undo_force(builtin: &str, args: &[Value]) -> Result<bool> {
 /// Undo `n` steps and render the record. A refused first step is an error that
 /// names the file and the way past the refusal; nothing was undone.
 fn undo_record(builtin: &str, n: usize, force: bool) -> Result<Value> {
-    let outcomes = crate::journal::undo(n, force).map_err(|(path, removed)| {
-        if removed {
-            crate::safety::bad_state_with_hint(
-                builtin,
-                &format!("{path} was removed after this step; undoing would recreate it"),
-                &format!("{builtin}({{force: true}}) recreates it anyway"),
-            )
-        } else {
-            crate::safety::bad_state_with_hint(
-                builtin,
-                &format!("{path} changed after this step; undoing would discard those changes"),
-                &format!("read the file, or {builtin}({{force: true}}) to restore it anyway"),
-            )
+    let force_call = format!("{builtin}({{force: true}})");
+    let outcomes = crate::journal::undo(n, force)
+        .map_err(|(path, removed)| changed_refusal(builtin, &path, removed, &force_call))?;
+    Ok(Value::Record(rewind_record(&outcomes, "restored")))
+}
+
+/// The `id` option of undo: `undo({id: N})` names one journal entry by the `seq`
+/// its journal row shows. `None` when no argument names an id.
+fn undo_id(builtin: &str, args: &[Value]) -> Result<Option<usize>> {
+    let mut id = None;
+    for arg in args {
+        let Value::Record(options) = arg else {
+            continue;
+        };
+        let Some(value) = options.get("id") else {
+            continue;
+        };
+        let parsed = match value {
+            Value::Int(n) if *n >= 1 => Some(*n as usize),
+            Value::Str(s) => s.trim().parse::<usize>().ok().filter(|n| *n >= 1),
+            _ => None,
+        };
+        match parsed {
+            Some(n) => id = Some(n),
+            None => {
+                return Err(crate::safety::bad_arg(
+                    builtin,
+                    "id: the Int id a journal row shows, from 1",
+                    &format!("{value}"),
+                ))
+            }
+        }
+    }
+    Ok(id)
+}
+
+/// Undo the one journal entry `seq`, and render the record as `undo` does.
+fn undo_by_id_record(builtin: &str, seq: usize, force: bool) -> Result<Value> {
+    use crate::journal::UndoRefusal;
+    let force_call = format!("{builtin}({{id: {seq}, force: true}})");
+    let outcomes = crate::journal::undo_by_id(seq, force).map_err(|refusal| match refusal {
+        UndoRefusal::NotFound => {
+            crate::safety::not_found(builtin, "journal entry", &seq.to_string())
+        }
+        UndoRefusal::LaterStep { seq: later, path } => crate::safety::bad_state_with_hint(
+            builtin,
+            &format!(
+                "entry {seq} changed {path}, and later entry {later} changed it too; undoing {seq} would also undo that change"
+            ),
+            &format!(
+                "{builtin}({{id: {later}}}) first, or {force_call} to undo {seq} anyway"
+            ),
+        ),
+        UndoRefusal::Changed { path, removed } => {
+            changed_refusal(builtin, &path, removed, &force_call)
         }
     })?;
     Ok(Value::Record(rewind_record(&outcomes, "restored")))
+}
+
+/// The refusal for a file that changed (or was removed) after its step. `force_call`
+/// is the call that restores the file anyway, named in the hint.
+fn changed_refusal(builtin: &str, path: &str, removed: bool, force_call: &str) -> anyhow::Error {
+    if removed {
+        crate::safety::bad_state_with_hint(
+            builtin,
+            &format!("{path} was removed after this step; undoing would recreate it"),
+            &format!("{force_call} recreates it anyway"),
+        )
+    } else {
+        crate::safety::bad_state_with_hint(
+            builtin,
+            &format!("{path} changed after this step; undoing would discard those changes"),
+            &format!("read the file, or {force_call} to restore it anyway"),
+        )
+    }
 }
 
 /// Refuse an undo or a redo when the journal is not recording in this session.

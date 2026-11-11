@@ -513,6 +513,14 @@ fn held_bytes(s: &State) -> usize {
     total_bytes(&s.journal) + redo_bytes(&s.redo)
 }
 
+/// The id for a new journal entry: one more than the largest id held. An entry
+/// can be undone out of order (see [`undo_by_id`]), so the count of entries is
+/// not a free id: the next entry would take the id of a newer one, and its
+/// persisted file would overwrite that one's.
+fn next_seq(s: &State) -> usize {
+    s.journal.iter().map(|e| e.seq).max().unwrap_or(0) + 1
+}
+
 /// The argument that names the file a builtin writes, for the builtins that
 /// write one named file.
 ///
@@ -695,7 +703,7 @@ pub fn record_group(builtin: &str, effect: Effect, paths: Vec<String>) {
     }
     let mut s = state();
     discard_redo(&mut s);
-    let group = Some(s.journal.len() + 1);
+    let group = Some(next_seq(&s));
     for path in paths {
         push_capture(&mut s, builtin, effect, path, group);
     }
@@ -727,7 +735,7 @@ fn push_capture(s: &mut State, builtin: &str, effect: Effect, path: String, grou
         Ok(before) => before,
         Err(why) => Before::Irreversible(why),
     };
-    let seq = s.journal.len() + 1;
+    let seq = next_seq(s);
     let entry = Entry {
         seq,
         builtin: builtin.to_string(),
@@ -768,7 +776,7 @@ pub fn record_irreversible(builtin: &str, effect: Effect, why: &str) {
     }
     let mut s = state();
     discard_redo(&mut s);
-    let seq = s.journal.len() + 1;
+    let seq = next_seq(&s);
     let entry = Entry {
         seq,
         builtin: builtin.to_string(),
@@ -871,136 +879,222 @@ pub fn undo(n: usize, force: bool) -> Result<Vec<Outcome>, (String, bool)> {
     let mut steps = 0;
     let mut group: Option<usize> = None;
     while let Some(top) = s.journal.last() {
-        if group.is_none() || top.group != group {
+        let top_group = top.group;
+        if group.is_none() || top_group != group {
             if steps == n {
                 break;
             }
             steps += 1;
-            group = top.group;
+            group = top_group;
         }
-        // Checked before anything is taken: a step left alone stays in the
-        // journal, and nothing older is undone past it, so the order is kept.
-        if let Some(why) = s
+        let index = s.journal.len() - 1;
+        match undo_at(&mut s, index, force, &mut out) {
+            Step::Next => {}
+            Step::Stop => break,
+            Step::Refused(refusal) => return Err(refusal),
+        }
+    }
+    Ok(out)
+}
+
+/// What one call to [`undo_at`] did, and what the caller does next.
+enum Step {
+    /// The entry was undone, or finished with, and left the journal.
+    Next,
+    /// The undo ends here: a step was left alone, or its restore failed.
+    Stop,
+    /// The first step in line was refused because its file changed: the path,
+    /// and whether it was removed since the step.
+    Refused((String, bool)),
+}
+
+/// Undo the journal entry at `index`, which the caller has checked is in the
+/// journal. The outcome is pushed onto `out`; the entry leaves the journal when
+/// it is finished with.
+fn undo_at(s: &mut State, index: usize, force: bool, out: &mut Vec<Outcome>) -> Step {
+    // Checked before anything is taken: a step left alone stays in the
+    // journal, and nothing older is undone past it, so the order is kept.
+    if let Some(why) = s
+        .journal
+        .get(index)
+        .and_then(|e| crate::safety::rewind_refused(&e.path))
+    {
+        let what = s
             .journal
-            .last()
-            .and_then(|e| crate::safety::rewind_refused(&e.path))
-        {
-            let what = s.journal.last().map(|e| e.path.clone()).unwrap_or_default();
-            out.push(Outcome::Skipped { what, why });
-            break;
-        }
-        // Cloned, not popped. The entry stays in the journal and on disk until
-        // its restore has succeeded, because it holds the only copy of what the
-        // file held before the step: a failed restore that had already dropped
-        // it would leave the caller nothing to retry with.
-        let Some(entry) = s.journal.last().cloned() else {
-            break;
-        };
-        // The entry is still counted in held_bytes, so it is taken out for the
-        // capture below: the budget is what it was when the entry was popped.
-        let used = held_bytes(&s).saturating_sub(total_bytes(std::slice::from_ref(&entry)));
-        let what = if entry.path.is_empty() {
-            entry.builtin.clone()
+            .get(index)
+            .map(|e| e.path.clone())
+            .unwrap_or_default();
+        out.push(Outcome::Skipped { what, why });
+        return Step::Stop;
+    }
+    // Cloned, not popped. The entry stays in the journal and on disk until
+    // its restore has succeeded, because it holds the only copy of what the
+    // file held before the step: a failed restore that had already dropped
+    // it would leave the caller nothing to retry with.
+    let Some(entry) = s.journal.get(index).cloned() else {
+        return Step::Stop;
+    };
+    // The entry is still counted in held_bytes, so it is taken out for the
+    // capture below: the budget is what it was when the entry was popped.
+    let used = held_bytes(s).saturating_sub(total_bytes(std::slice::from_ref(&entry)));
+    let what = if entry.path.is_empty() {
+        entry.builtin.clone()
+    } else {
+        entry.path.clone()
+    };
+    // The file is not restored over what a later hand edit (or a step the
+    // journal did not see) put there. Nothing is undone when that is the
+    // first step; otherwise the refusal ends the undo as an outcome.
+    // A file the step left in place that is now absent was removed since:
+    // undoing would recreate it, so that is a change too. A step that
+    // removed the file (sealed absent) and finds it still absent is the
+    // ordinary undo, and is not refused.
+    if let (false, Some(sealed)) = (force, &entry.after) {
+        let now = Fingerprint::of_path(&entry.path);
+        // Only an undo that writes the file back recreates it. Undoing a step
+        // that created the file removes nothing, and nothing is recreated.
+        let restores = matches!(entry.before, Before::Contents(_));
+        let removed =
+            restores && now == Some(Fingerprint::Absent) && *sealed != Fingerprint::Absent;
+        let changed = if now == Some(Fingerprint::Absent) {
+            removed
         } else {
-            entry.path.clone()
+            now.as_ref() != Some(sealed)
         };
-        // The file is not restored over what a later hand edit (or a step the
-        // journal did not see) put there. Nothing is undone when that is the
-        // first step; otherwise the refusal ends the undo as an outcome.
-        // A file the step left in place that is now absent was removed since:
-        // undoing would recreate it, so that is a change too. A step that
-        // removed the file (sealed absent) and finds it still absent is the
-        // ordinary undo, and is not refused.
-        if let (false, Some(sealed)) = (force, &entry.after) {
-            let now = Fingerprint::of_path(&entry.path);
-            // Only an undo that writes the file back recreates it. Undoing a step
-            // that created the file removes nothing, and nothing is recreated.
-            let restores = matches!(entry.before, Before::Contents(_));
-            let removed =
-                restores && now == Some(Fingerprint::Absent) && *sealed != Fingerprint::Absent;
-            let changed = if now == Some(Fingerprint::Absent) {
-                removed
-            } else {
-                now.as_ref() != Some(sealed)
-            };
-            if changed {
-                if out.is_empty() {
-                    return Err((entry.path.clone(), removed));
-                }
-                out.push(Outcome::Skipped {
-                    what,
-                    why: if removed {
-                        REMOVED_SINCE_STEP.to_string()
-                    } else {
-                        CHANGED_SINCE_STEP.to_string()
-                    },
-                });
-                break;
+        if changed {
+            if out.is_empty() {
+                return Step::Refused((entry.path.clone(), removed));
             }
+            out.push(Outcome::Skipped {
+                what,
+                why: if removed {
+                    REMOVED_SINCE_STEP.to_string()
+                } else {
+                    CHANGED_SINCE_STEP.to_string()
+                },
+            });
+            return Step::Stop;
         }
-        let after = capture(&entry.path, used);
-        // As in redo: a file is not overwritten or removed unless what it holds
-        // now is first kept. A path that is not a file is not touched by this
-        // check; the restore below reports it.
-        if !matches!(entry.before, Before::Irreversible(_)) && Path::new(&entry.path).is_file() {
-            if let Err(why) = &after {
-                out.push(Outcome::Skipped {
+    }
+    let after = capture(&entry.path, used);
+    // As in redo: a file is not overwritten or removed unless what it holds
+    // now is first kept. A path that is not a file is not touched by this
+    // check; the restore below reports it.
+    if !matches!(entry.before, Before::Irreversible(_)) && Path::new(&entry.path).is_file() {
+        if let Err(why) = &after {
+            out.push(Outcome::Skipped {
                     what,
                     why: format!(
                         "current contents could not be kept for redo, so left as they are:                          {why}. Move the file away to undo this step"
                     ),
                 });
-                break;
-            }
+            return Step::Stop;
         }
-        let outcome = match &entry.before {
-            Before::Contents(bytes) => match std::fs::write(&entry.path, bytes) {
-                Ok(()) => {
-                    push_redo(&mut s, &entry, after);
-                    Outcome::Restored(what)
-                }
-                Err(e) => Outcome::Failed {
-                    what,
-                    why: e.to_string(),
-                },
-            },
-            Before::Absent => {
-                let p = Path::new(&entry.path);
-                if p.is_file() {
-                    match std::fs::remove_file(p) {
-                        Ok(()) => {
-                            push_redo(&mut s, &entry, after);
-                            Outcome::Removed(what)
-                        }
-                        Err(e) => Outcome::Failed {
-                            what,
-                            why: e.to_string(),
-                        },
-                    }
-                } else {
-                    // Never created, so there is nothing to take back.
-                    Outcome::Skipped {
-                        what,
-                        why: "was absent before and is absent now".into(),
-                    }
-                }
+    }
+    let outcome = match &entry.before {
+        Before::Contents(bytes) => match std::fs::write(&entry.path, bytes) {
+            Ok(()) => {
+                push_redo(s, &entry, after);
+                Outcome::Restored(what)
             }
-            Before::Irreversible(why) => Outcome::Skipped {
+            Err(e) => Outcome::Failed {
                 what,
-                why: why.clone(),
+                why: e.to_string(),
             },
-        };
-        if matches!(outcome, Outcome::Failed { .. }) {
-            // The step stays where it was, for a retry. Older steps are not
-            // undone past it.
-            out.push(outcome);
-            break;
+        },
+        Before::Absent => {
+            let p = Path::new(&entry.path);
+            if p.is_file() {
+                match std::fs::remove_file(p) {
+                    Ok(()) => {
+                        push_redo(s, &entry, after);
+                        Outcome::Removed(what)
+                    }
+                    Err(e) => Outcome::Failed {
+                        what,
+                        why: e.to_string(),
+                    },
+                }
+            } else {
+                // Never created, so there is nothing to take back.
+                Outcome::Skipped {
+                    what,
+                    why: "was absent before and is absent now".into(),
+                }
+            }
         }
-        // Restored, removed, or finished with (nothing to take back): the step
-        // is done with, so it leaves the journal and the disk now.
-        s.journal.pop();
-        forget_persisted(entry.seq);
+        Before::Irreversible(why) => Outcome::Skipped {
+            what,
+            why: why.clone(),
+        },
+    };
+    if matches!(outcome, Outcome::Failed { .. }) {
+        // The step stays where it was, for a retry. Older steps are not
+        // undone past it.
         out.push(outcome);
+        return Step::Stop;
+    }
+    // Restored, removed, or finished with (nothing to take back): the step
+    // is done with, so it leaves the journal and the disk now.
+    s.journal.remove(index);
+    forget_persisted(entry.seq);
+    out.push(outcome);
+    Step::Next
+}
+
+/// Why [`undo_by_id`] leaves a step alone.
+#[derive(Debug)]
+pub enum UndoRefusal {
+    /// No journal entry has that id.
+    NotFound,
+    /// A later step recorded one of the same paths, so putting this step's
+    /// file back would undo that later change too.
+    LaterStep { seq: usize, path: String },
+    /// The file changed after the step (or was removed), as [`undo`] refuses.
+    Changed { path: String, removed: bool },
+}
+
+/// Undo one journal entry, by its id (the `seq` the journal listing shows), and
+/// leave the other steps in place.
+///
+/// An entry that shares its group with others (a move) is undone with the whole
+/// group, as [`undo`] counts a group as one step. Unless `force` is set, the step
+/// is refused when a later entry recorded one of its paths: restoring that path
+/// would also undo the later change. The same checks as [`undo`] apply to each
+/// entry undone.
+pub fn undo_by_id(seq: usize, force: bool) -> Result<Vec<Outcome>, UndoRefusal> {
+    let mut s = state();
+    let first = s
+        .journal
+        .iter()
+        .position(|e| e.seq == seq)
+        .ok_or(UndoRefusal::NotFound)?;
+    let group = s.journal[first].group;
+    let members: Vec<usize> = match group {
+        None => vec![first],
+        Some(g) => (0..s.journal.len())
+            .filter(|&i| s.journal[i].group == Some(g))
+            .collect(),
+    };
+    let last = members.last().copied().unwrap_or(first);
+    if !force {
+        for later in s.journal.iter().skip(last + 1) {
+            if !later.path.is_empty() && members.iter().any(|&m| s.journal[m].path == later.path) {
+                return Err(UndoRefusal::LaterStep {
+                    seq: later.seq,
+                    path: later.path.clone(),
+                });
+            }
+        }
+    }
+    let mut out = Vec::new();
+    // Newest first, so removing an entry does not move the ones still to undo.
+    for &index in members.iter().rev() {
+        match undo_at(&mut s, index, force, &mut out) {
+            Step::Next => {}
+            Step::Stop => break,
+            Step::Refused((path, removed)) => return Err(UndoRefusal::Changed { path, removed }),
+        }
     }
     Ok(out)
 }
@@ -1127,7 +1221,7 @@ pub fn redo(n: usize) -> Vec<Outcome> {
             // Only a write that actually happened is recorded, so the redo is
             // itself undoable.
             let entry = Entry {
-                seq: s.journal.len() + 1,
+                seq: next_seq(&s),
                 builtin: r.builtin,
                 effect: r.effect,
                 path: r.path,

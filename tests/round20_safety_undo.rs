@@ -144,3 +144,75 @@ fn a_replace_of_a_plain_file_has_no_link_note() {
         "{out:?}"
     );
 }
+
+#[test]
+fn undo_by_id_takes_back_one_step_and_leaves_a_later_step_on_another_file() {
+    let d = Dirs::new("undoid");
+    let a = d.workspace.join("a.txt");
+    let b = d.workspace.join("b.txt");
+    std::fs::write(&a, "A1\n").unwrap();
+    std::fs::write(&b, "B1\n").unwrap();
+    let first = d.ish(&["-c", r#"file_write("a.txt", "A2\n")"#]);
+    assert!(first.status.success(), "{first:?}");
+    let second = d.ish(&["-c", r#"file_write("b.txt", "B2\n")"#]);
+    assert!(second.status.success(), "{second:?}");
+
+    let undone = d.ish(&["-c", "undo({id: 1})"]);
+    assert!(undone.status.success(), "{undone:?}");
+    assert_eq!(read(&a), "A1\n", "{undone:?}");
+    assert_eq!(read(&b), "B2\n", "{undone:?}");
+}
+
+#[test]
+fn undo_by_id_is_refused_when_a_later_step_changed_the_same_file() {
+    let d = Dirs::new("undoid-same");
+    let a = d.workspace.join("a.txt");
+    std::fs::write(&a, "A0\n").unwrap();
+    assert!(d
+        .ish(&["-c", r#"file_write("a.txt", "A1\n")"#])
+        .status
+        .success());
+    assert!(d
+        .ish(&["-c", r#"file_write("a.txt", "A2\n")"#])
+        .status
+        .success());
+
+    let refused = d.ish(&["-c", "undo({id: 1})"]);
+    assert!(!refused.status.success(), "{refused:?}");
+    assert_eq!(read(&a), "A2\n", "{refused:?}");
+    let text = format!(
+        "{}{}",
+        String::from_utf8_lossy(&refused.stdout),
+        String::from_utf8_lossy(&refused.stderr)
+    );
+    assert!(text.contains("later entry 2"), "{text}");
+    assert!(text.contains("a.txt"), "{text}");
+
+    // The way the hint names: undo the later step, then the earlier one.
+    assert!(d.ish(&["-c", "undo({id: 2})"]).status.success());
+    assert_eq!(read(&a), "A1\n");
+    assert!(d.ish(&["-c", "undo({id: 1})"]).status.success());
+    assert_eq!(read(&a), "A0\n");
+}
+
+#[test]
+fn undo_by_id_with_force_undoes_past_a_later_step_and_an_unknown_id_is_refused() {
+    let d = Dirs::new("undoid-force");
+    let a = d.workspace.join("a.txt");
+    std::fs::write(&a, "A0\n").unwrap();
+    assert!(d
+        .ish(&["-c", r#"file_write("a.txt", "A1\n")"#])
+        .status
+        .success());
+    assert!(d
+        .ish(&["-c", r#"file_write("a.txt", "A2\n")"#])
+        .status
+        .success());
+
+    let forced = d.ish(&["-c", "undo({id: 1, force: true})"]);
+    assert!(forced.status.success(), "{forced:?}");
+    assert_eq!(read(&a), "A0\n", "{forced:?}");
+
+    let missing = d.ish(&["-c", "undo({id: 99})"]);
+    assert!(!missing.status.success(), "{missing:?}");
+}
