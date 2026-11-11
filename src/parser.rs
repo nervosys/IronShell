@@ -958,17 +958,24 @@ fn lex_marked(src: &str) -> Result<(Vec<Spanned>, std::collections::HashSet<usiz
                 });
             }
             '-' => {
-                // A `-` written directly after an operand (`5-1`, `x-1`, `"s"-1`,
-                // `a[i]-1`, `f(x)-1`) is binary minus. Only whitespace or an
-                // operator before it makes a negative literal, so `f -1` still
-                // passes -1 as an argument and `[1, -1]` keeps its literal.
+                // A `-` directly after an operand is binary minus, with or
+                // without a space: `5-1`, `x-1`, `n -1`, `"s" - 1`, `a[i]-1`,
+                // `f(x)-1`. So `n -1` is n - 1 and `r = n -3 * 2` is n - (3 * 2).
+                // Only when no operand precedes it on the same line (no token,
+                // an operator, `(`, `[`, `{`, `,`, `:`, `=`, `=>`, `|`, or a
+                // token on an earlier line) is `-1` a negative literal, so
+                // `[1, -1]`, `f(-1)`, `x = -1`, `a - -1` and a statement-start
+                // `-1` keep their sign. A word call therefore cannot take a
+                // negative literal argument: write `f(-1)`.
                 let glued_to_operand = pos > 0
                     && (is_ident_part(chars[pos - 1])
                         || matches!(chars[pos - 1], '"' | ')' | ']' | '}'));
+                let after_operand =
+                    glued_to_operand || out.last().is_some_and(|t| ends_operand(t, start_line));
                 advance(&chars, &mut pos, &mut line, &mut col);
                 // negative number if followed by digit
                 if let Some(d) = peek(&chars, pos) {
-                    if d.is_ascii_digit() && !glued_to_operand {
+                    if d.is_ascii_digit() && !after_operand {
                         let (kind, text) =
                             read_number(&chars, &mut pos, &mut line, &mut col, "-".to_string())?;
                         out.push(Spanned {
@@ -1323,6 +1330,29 @@ fn eof_position(src: &str, line: usize, col: usize) -> (usize, usize) {
     {
         Some((index, text)) => (index + 1, text.chars().count() + 1),
         None => (line, col),
+    }
+}
+
+/// Whether `prev`, the last token emitted, ends an operand on line `line`, so
+/// a `-` after it is binary minus. A token on an earlier line ends a statement
+/// (or a list item already closed), so it does not count. `else` is a word
+/// token that opens a branch, not an operand.
+fn ends_operand(prev: &Spanned, line: usize) -> bool {
+    if prev.line != line {
+        return false;
+    }
+    match prev.kind {
+        Tok::Ident => prev.text != "else",
+        Tok::String
+        | Tok::Int
+        | Tok::Float
+        | Tok::RParen
+        | Tok::RBracket
+        | Tok::RBrace
+        | Tok::True
+        | Tok::False
+        | Tok::Null => true,
+        _ => false,
     }
 }
 

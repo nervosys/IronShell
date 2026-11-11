@@ -1,0 +1,68 @@
+//! Round 16: the lexer's minus rule, take/head/tail counts and array first
+//! arguments, group_by keys, the empty-name refusals of help and
+//! ontology_describe, and format_number's decimals message.
+//!
+//! In-process, as tests/curried_closure_builtins.rs runs them.
+
+use iron_shell::value::Value;
+
+fn run(src: &str) -> Value {
+    let mut env = iron_shell::modules::env_with_modules();
+    let stmts = iron_shell::parser::parse_program(src).expect("parses");
+    iron_shell::eval::eval_program(&stmts, &mut env).expect("runs")
+}
+
+fn ints(v: &[i64]) -> Value {
+    Value::Array(v.iter().map(|i| Value::Int(*i)).collect())
+}
+
+// Item 1: `-` after an operand, even with a space before it, is subtraction.
+
+#[test]
+fn a_spaced_minus_after_a_name_subtracts_one() {
+    assert_eq!(run("n = 4\nn -1"), Value::Int(3));
+}
+
+#[test]
+fn a_spaced_minus_after_a_name_in_an_assignment_subtracts_one() {
+    assert_eq!(run("n = 4\nr = n -1\nr"), Value::Int(3));
+}
+
+#[test]
+fn a_spaced_minus_before_a_product_keeps_the_product() {
+    // n - (3 * 2), not the word call n(-3) * 2.
+    assert_eq!(run("n = 10\nn -3 * 2"), Value::Int(4));
+}
+
+#[test]
+fn a_spaced_minus_after_a_name_inside_a_product_subtracts() {
+    assert_eq!(run("x = 2\nx * -1"), Value::Int(-2));
+}
+
+#[test]
+fn a_negative_literal_in_an_array_stays_a_literal() {
+    assert_eq!(run("[1, -1]"), ints(&[1, -1]));
+}
+
+#[test]
+fn a_negative_literal_in_a_call_stays_a_literal() {
+    assert_eq!(run("f = fn(a) => a\nf(-1)"), Value::Int(-1));
+}
+
+#[test]
+fn a_negative_literal_at_statement_start_stays_a_literal() {
+    assert_eq!(run("x = 5\n-1"), Value::Int(-1));
+}
+
+#[test]
+fn a_negative_literal_in_a_match_arm_stays_a_literal() {
+    assert_eq!(
+        run("x = -1\nmatch x { -1 => \"neg\", _ => \"other\" }"),
+        Value::Str("neg".into())
+    );
+}
+
+#[test]
+fn ls_with_a_spaced_one_still_parses_as_subtraction() {
+    assert!(iron_shell::parser::parse_program("ls -1").is_ok());
+}

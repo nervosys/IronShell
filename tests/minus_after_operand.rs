@@ -5,8 +5,9 @@
 //! negative literal after `5`), `x = 5` then `x-1` was E_BAD_ARG "expected a
 //! function in `x`, got Int" (the word call `x(-1)`), `(5-1)` and `a[x-1]`
 //! were E_PARSE. The forms that must stay as they were (a literal at statement
-//! start, after `=`, after a comma, a call argument, the word call `f -1`) are
-//! pinned here too. A script echoes its last value, so each one ends in a bare
+//! start, after `=`, after a comma, a call argument) are pinned here too. A
+//! space does not change this: `n -1` is subtraction (round 16), not the word
+//! call `n(-1)`. A script echoes its last value, so each one ends in a bare
 //! expression.
 
 use std::path::PathBuf;
@@ -109,10 +110,10 @@ fn a_spaced_minus_is_subtraction() {
 }
 
 #[test]
-fn a_word_call_with_a_space_before_a_negative_argument_is_still_a_call() {
-    assert_prints("wordcall", "f = fn(a) => a\nf -1\n", "-1");
+fn a_spaced_minus_before_a_number_after_a_name_is_subtraction() {
+    // Was the word call `n(-1)` before round 16: `n -1` is now n - 1.
+    assert_prints("spacedname", "n = 4\nn -1\n", "3");
 }
-
 #[test]
 fn a_negative_literal_after_a_multiplication_operator_is_still_a_literal() {
     assert_prints("mul", "2*-3\n", "-6");
