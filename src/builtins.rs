@@ -23067,10 +23067,8 @@ fn bi_apply(args: Vec<Value>, _input: Option<Value>) -> Result<Value> {
                 crate::safety::refuse_hard_linked_write("apply", path)
                     .map_err(|e| std::io::Error::other(e.to_string()))
                     .and_then(|()| {
-                        std::fs::OpenOptions::new()
-                            .create(true)
-                            .append(true)
-                            .open(path)
+                        crate::safety::open_in_place("apply", std::path::Path::new(path), true)
+                            .map_err(|e| std::io::Error::other(e.to_string()))
                             .and_then(|mut f| {
                                 f.write_all(content.as_deref().unwrap_or("").as_bytes())
                             })
@@ -40837,7 +40835,13 @@ fn bi_gui_screenshot_window(args: Vec<Value>, input: Option<Value>) -> Result<Va
         }
         crate::safety::refuse_hard_linked_write(NAME, &path)?;
         crate::tx::snapshot(&path); // record pre-capture state if a transaction is active
-        fs::write(&path, &shot.stdout).map_err(|e| crate::safety::fs_error(NAME, &path, &e))?;
+        {
+            use std::io::Write as _;
+            let mut file = crate::safety::open_in_place(NAME, std::path::Path::new(&path), false)
+                .map_err(|e| crate::safety::in_place_error(NAME, &path, e))?;
+            file.write_all(&shot.stdout)
+                .map_err(|e| crate::safety::fs_error(NAME, &path, &e))?;
+        }
         Ok(Value::Str(path))
     }
     #[cfg(target_os = "windows")]
@@ -49602,11 +49606,8 @@ fn bi_file_append(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
     crate::tx::snapshot(&path); // record pre-append state if a transaction is active
 
     use std::io::Write;
-    let mut file = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&path)
-        .map_err(|error| crate::safety::fs_error("file_append", &path, &error))?;
+    let mut file = crate::safety::open_in_place("file_append", std::path::Path::new(&path), true)
+        .map_err(|e| crate::safety::in_place_error("file_append", &path, e))?;
 
     file.write_all(content.as_bytes())
         .map_err(|error| crate::safety::fs_error("file_append", &path, &error))?;
@@ -52350,7 +52351,11 @@ fn bi_git_ignore(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
     text.push('\n');
     crate::safety::refuse_hard_linked_write("git_ignore", &path)?;
     crate::tx::snapshot(&path);
-    std::fs::write(&path, text).map_err(|e| crate::safety::fs_error("git_ignore", &path, &e))?;
+    use std::io::Write as _;
+    let mut file = crate::safety::open_in_place("git_ignore", std::path::Path::new(&path), false)
+        .map_err(|e| crate::safety::in_place_error("git_ignore", &path, e))?;
+    file.write_all(text.as_bytes())
+        .map_err(|e| crate::safety::fs_error("git_ignore", &path, &e))?;
     Ok(Value::Bool(true))
 }
 
@@ -63404,13 +63409,11 @@ fn bi_touch(args: Vec<Value>, _input: Option<Value>) -> Result<Value> {
     // append failed with "is a directory".
     let file = if std::path::Path::new(&path).is_dir() {
         crate::tx::open_for_times(std::path::Path::new(&path))
+            .map_err(|e| crate::safety::fs_error("touch", &path, &e))
     } else {
-        std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&path)
-    }
-    .map_err(|e| crate::safety::fs_error("touch", &path, &e))?;
+        crate::safety::open_in_place("touch", std::path::Path::new(&path), true)
+            .map_err(|e| crate::safety::in_place_error("touch", &path, e))
+    }?;
     file.set_modified(std::time::SystemTime::now())
         .map_err(|e| crate::safety::fs_error("touch", &path, &e))?;
     Ok(Value::Str(path))
@@ -64724,6 +64727,12 @@ fn bi_dd_copy(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
     {
         // dd writes the destination in place, as the in-process copy does.
         crate::tx::snapshot(&dst);
+        // dd opens the destination itself, after this. The link check runs on a
+        // handle here, just before dd, so a link planted in between is not seen.
+        drop(
+            crate::safety::open_in_place("dd_copy", std::path::Path::new(&dst), false)
+                .map_err(|e| crate::safety::in_place_error("dd_copy", &dst, e))?,
+        );
         let argv: Vec<&str> = operands.iter().map(String::as_str).collect();
         let run = tool_run(
             "dd_copy",
@@ -64816,7 +64825,14 @@ fn dd_copy_in_process(src: &str, dst: &str, operands: &[String]) -> Result<Value
     let mut input = std::fs::File::open(src).map_err(|e| dd_io(NAME, src, &e))?;
     // Record dst's pre-image (or its absence) before File::create truncates it.
     crate::tx::snapshot(dst);
-    let mut output = std::fs::File::create(dst).map_err(|e| dd_io(NAME, dst, &e))?;
+    // Judged on its handle, then truncated: the copy starts with an empty file.
+    let mut output =
+        crate::safety::open_in_place(NAME, std::path::Path::new(dst), false).map_err(|e| {
+            match e.downcast::<std::io::Error>() {
+                Ok(io) => dd_io(NAME, dst, &io),
+                Err(other) => other,
+            }
+        })?;
     let started = std::time::Instant::now();
     let limit = std::time::Duration::from_secs(TOOL_LONG_DEADLINE_SECS);
     let mut buf = vec![0u8; block as usize];
@@ -72226,11 +72242,8 @@ fn bi_tee_output(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
     if append {
         use std::io::Write;
         crate::safety::refuse_hard_linked_write("tee", &path)?;
-        let mut file = fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&path)
-            .map_err(|e| crate::safety::fs_error("tee", &path, &e))?;
+        let mut file = crate::safety::open_in_place("tee", std::path::Path::new(&path), true)
+            .map_err(|e| crate::safety::in_place_error("tee", &path, e))?;
         file.write_all(text.as_bytes())
             .map_err(|e| crate::safety::fs_error("tee", &path, &e))?;
     } else {

@@ -2998,17 +2998,14 @@ fn write_file(path: &str, data: &[u8], append: bool) -> Result<(), String> {
         crate::safety::Effect::WriteLocal,
         &[crate::value::Value::Str(path.to_string())],
     );
-    let res = if append {
-        std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(path)
-            .and_then(|mut f| f.write_all(data))
-    } else {
-        std::fs::write(path, data)
-    };
+    // The handle is judged for hard links and truncated only after that check.
+    let res = crate::safety::open_in_place("posix", Path::new(path), append)
+        .and_then(|mut f| f.write_all(data).map_err(anyhow::Error::from));
     crate::journal::settle(mark, res.is_ok());
-    res.map_err(|e| format!("{SHELL_NAME}: {path}: {}", io_reason(&e)))
+    res.map_err(|e| match e.downcast_ref::<std::io::Error>() {
+        Some(io) => format!("{SHELL_NAME}: {path}: {}", io_reason(io)),
+        None => e.to_string(),
+    })
 }
 
 /// The message GNU tools print for an I/O error.
@@ -4194,11 +4191,15 @@ fn touch(args: &[String], sink: &mut Sink) -> Util {
             }
         };
         let res = if Path::new(&resolved).exists() {
-            std::fs::OpenOptions::new()
-                .append(true)
-                .open(&resolved)
-                .and_then(|file| file.set_modified(std::time::SystemTime::now()))
-                .map_err(|e| format!("touch: cannot touch '{f}': {}", io_reason(&e)))
+            crate::safety::open_in_place("posix", Path::new(&resolved), true)
+                .and_then(|file| {
+                    file.set_modified(std::time::SystemTime::now())
+                        .map_err(Into::into)
+                })
+                .map_err(|e| match e.downcast_ref::<std::io::Error>() {
+                    Some(io) => format!("touch: cannot touch '{f}': {}", io_reason(io)),
+                    None => e.to_string(),
+                })
         } else {
             write_file(&resolved, b"", true)
                 .map_err(|_| format!("touch: cannot touch '{f}': No such file or directory"))
