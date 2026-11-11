@@ -801,9 +801,20 @@ fn handle_agent_api_command(command: AgentApiCommands) -> Result<()> {
                 buffer
             };
 
-            let output = agent_api::process_json_request(&json_str)?;
-            println!("{}", output);
-            Ok(())
+            // Every input gets one JSON response on stdout. Input that is not a
+            // request is answered with its failure, and the exit status is 1.
+            match agent_api::parse_request(&json_str) {
+                Ok(parsed) => {
+                    let response = agent_api::process_request(&parsed);
+                    println!("{}", serde_json::to_string_pretty(&response)?);
+                    Ok(())
+                }
+                Err(response) => {
+                    println!("{}", serde_json::to_string_pretty(&response)?);
+                    io::stdout().flush()?;
+                    std::process::exit(1);
+                }
+            }
         }
         AgentApiCommands::Schema {
             format,

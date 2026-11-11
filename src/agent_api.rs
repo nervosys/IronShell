@@ -7075,6 +7075,44 @@ pub fn process_json_request(json_str: &str) -> Result<String> {
     Ok(serde_json::to_string_pretty(&response)?)
 }
 
+/// The hint for input that is not an agent request.
+const REQUEST_HINT: &str = "a request is {\"action\":\"call\",\"builtin\":NAME,\"args\":[...]}; actions: call, pipeline, eval, describe, list_builtins, schema, type_info";
+
+/// Parse one request from its JSON text. A leading byte-order mark is ignored.
+/// Text that is not JSON is `E_PARSE`, and JSON that is not a request is
+/// `E_BAD_ARG`. Either is returned as the failure response itself, so a caller
+/// always has exactly one response to print.
+pub fn parse_request(text: &str) -> Result<AgentRequest, AgentResponse> {
+    let text = text.strip_prefix('\u{feff}').unwrap_or(text);
+    let value: JsonValue = serde_json::from_str(text)
+        .map_err(|e| bad_request("E_PARSE", format!("Invalid JSON request: {e}")))?;
+    serde_json::from_value(value)
+        .map_err(|e| bad_request("E_BAD_ARG", format!("Invalid request: {e}")))
+}
+
+/// The failure response for input that is not a request.
+fn bad_request(code: &str, message: String) -> AgentResponse {
+    AgentResponse {
+        success: false,
+        result: None,
+        error: Some(message),
+        code: Some(code.to_string()),
+        hint: Some(REQUEST_HINT.to_string()),
+        result_type: None,
+        metadata: None,
+    }
+}
+
+/// The one response to a request's JSON text: the result of the request, or the
+/// failure for input that is not one. For a caller that prints a response per
+/// request, as `ish agent execute` and `ish agent interactive` do.
+pub fn process_json_response(text: &str) -> AgentResponse {
+    match parse_request(text) {
+        Ok(request) => process_request(&request),
+        Err(response) => response,
+    }
+}
+
 /// The names `ish agent schema <format>` and `GET /api/v1/schema/:format`
 /// accept, matched case-insensitively. None for a name neither knows, so
 /// that a typo is reported rather than answered with some other format.

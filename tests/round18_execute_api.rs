@@ -57,6 +57,56 @@ fn execute(request: &str) -> Value {
     serde_json::from_str(&out).unwrap_or_else(|e| panic!("stdout is not JSON ({e}): {out}"))
 }
 
+/// Run `ish agent execute` on raw stdin bytes. A malformed request is answered
+/// on stdout as JSON and exits 1; nothing goes to stderr.
+fn malformed(input: &[u8]) -> Value {
+    let (code, out, err) = run_agent(&["execute"], input);
+    assert_eq!(code, Some(1), "exit status; stdout: {out}; stderr: {err}");
+    assert!(err.is_empty(), "stderr must stay empty: {err}");
+    serde_json::from_str(&out).unwrap_or_else(|e| panic!("stdout is not JSON ({e}): {out}"))
+}
+
+#[test]
+fn every_malformed_request_gets_one_json_error_and_exit_status_1() {
+    let shape_cases: [&str; 8] = [
+        "{}",
+        r#"{"builtin":"len","args":[]}"#,
+        r#"{"action":"frobnicate"}"#,
+        r#"{"action":"call","builtin":42}"#,
+        "[1, 2]",
+        "null",
+        r#"{"action":"call","builtin":"len","args":[]} trailing"#,
+        "",
+    ];
+    for case in shape_cases {
+        let v = malformed(case.as_bytes());
+        assert_eq!(v["success"], json!(false), "{case}: {v}");
+        assert!(v["error"]["code"].is_string(), "{case}: {v}");
+        assert!(v["error"]["message"].is_string(), "{case}: {v}");
+        assert!(
+            v["error"]["hint"]
+                .as_str()
+                .is_some_and(|h| h.contains("actions: call")),
+            "{case}: {v}"
+        );
+    }
+    let parse = malformed(br#"{"action":"call","builtin":"len","args":[]} trailing"#);
+    assert_eq!(parse["error"]["code"], json!("E_PARSE"), "{parse}");
+    let shape = malformed(b"{}");
+    assert_eq!(shape["error"]["code"], json!("E_BAD_ARG"), "{shape}");
+
+    let deep = format!("{}{}", "[".repeat(5000), "]".repeat(5000));
+    let v = malformed(deep.as_bytes());
+    assert_eq!(v["error"]["code"], json!("E_PARSE"), "{v}");
+}
+
+#[test]
+fn a_leading_byte_order_mark_is_ignored() {
+    let request = "\u{feff}{\"action\":\"eval\",\"code\":\"1 + 1\"}";
+    let v = execute(request);
+    assert_eq!(v["result"], json!(2), "{v}");
+}
+
 #[test]
 fn an_array_result_is_a_json_array_not_text() {
     let v = execute(r#"{"action":"call","builtin":"split","args":["a,b,c",","]}"#);
