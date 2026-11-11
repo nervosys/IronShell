@@ -111,3 +111,69 @@ fn lambdas_after_a_field_assignment_read_the_new_field() {
     .unwrap();
     assert_eq!(rows, Value::Array(vec![Value::Int(4), Value::Int(5)]));
 }
+
+// ---------- `x = x + e` appends in place ----------
+
+#[test]
+fn string_built_by_reduce_keeps_every_piece() {
+    let v = eval(r#"arr.range(20000) | reduce(fn(acc, i) => acc + "x", "")"#).unwrap();
+    assert_eq!(v, Value::Str("x".repeat(20000)));
+}
+
+#[test]
+fn string_built_by_repeated_assignment_keeps_every_piece() {
+    let mut src = String::from("mut s = \"\"\n");
+    for _ in 0..20000 {
+        src.push_str("s = s + \"x\"\n");
+    }
+    src.push_str("s");
+    assert_eq!(eval(&src).unwrap(), Value::Str("x".repeat(20000)));
+}
+
+#[test]
+fn int_reassignment_with_addition_still_works() {
+    let v = eval("mut x = 1\nx = x + 1\nx = x + 2\nx").unwrap();
+    assert_eq!(v, Value::Int(4));
+}
+
+#[test]
+fn array_reassignment_with_addition_appends() {
+    let v = eval("mut a = [1]\na = a + [2]\na = a + [3, 4]\na").unwrap();
+    assert_eq!(
+        v,
+        Value::Array(vec![
+            Value::Int(1),
+            Value::Int(2),
+            Value::Int(3),
+            Value::Int(4)
+        ])
+    );
+}
+
+#[test]
+fn failing_operand_leaves_the_string_unchanged() {
+    let mut env = Env::new();
+    eval_in(&mut env, "mut x = \"a\"").unwrap();
+    assert!(eval_in(&mut env, "x = x + undefined_name").is_err());
+    assert_eq!(eval_in(&mut env, "x").unwrap(), Value::Str("a".into()));
+}
+
+#[test]
+fn reassignment_of_an_immutable_string_is_still_refused() {
+    let mut env = Env::new();
+    eval_in(&mut env, "x = \"a\"").unwrap();
+    assert!(eval_in(&mut env, "x = x + \"b\"").is_err());
+    assert_eq!(eval_in(&mut env, "x").unwrap(), Value::Str("a".into()));
+}
+
+#[test]
+fn string_past_the_size_limit_is_refused_and_leaves_the_binding() {
+    // 2^23 bytes is the largest string a doubling can reach under the 8 MiB limit.
+    let mut env = Env::new();
+    eval_in(&mut env, "mut s = \"a\"").unwrap();
+    for _ in 0..23 {
+        eval_in(&mut env, "s = s + s").unwrap();
+    }
+    assert!(eval_in(&mut env, "s = s + s").is_err());
+    assert_eq!(eval_in(&mut env, "len(s)").unwrap(), Value::Int(1 << 23));
+}
