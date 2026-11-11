@@ -10360,47 +10360,63 @@ fn bi_from_csv(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
     Ok(Value::Array(rows.into_iter().map(Value::Record).collect()))
 }
 
-/// A CSV cell, typed as its text parses: an Int, a Float or a Bool, else a
-/// String.
-fn csv_cell(field: &str) -> Value {
-    if let Ok(i) = field.parse::<i64>() {
-        Value::Int(i)
-    } else if let Ok(f) = field.parse::<f64>() {
-        Value::Float(f)
-    } else if let Ok(b) = field.parse::<bool>() {
-        Value::Bool(b)
-    } else {
-        Value::Str(field.to_string())
-    }
-}
-
-/// Whether a cell reads as a number, by the same parsers `csv_cell` uses.
+/// Whether a cell is a number a numeric column can hold: it parses as an Int or
+/// a Float, has no leading "+", and has no leading zero before another digit.
+/// So "0", "0.5" and "-0.5" are numbers, while "007", "00" and "-01" are not:
+/// their zeros are part of an identifier or a code, not a magnitude.
 fn is_number(field: &str) -> bool {
+    if field.starts_with('+') {
+        return false;
+    }
+    let unsigned = field.strip_prefix('-').unwrap_or(field).as_bytes();
+    if unsigned.len() > 1 && unsigned[0] == b'0' && unsigned[1].is_ascii_digit() {
+        return false;
+    }
     field.parse::<i64>().is_ok() || field.parse::<f64>().is_ok()
 }
 
-/// The rows of a parsed CSV table, each cell typed by its column.
+/// One numeric cell as its column's type: an Int when every non-empty cell of
+/// the column is an integer (`all_int`), else a Float.
+fn numeric_cell(field: &str, all_int: bool) -> Value {
+    if all_int {
+        if let Ok(i) = field.parse::<i64>() {
+            return Value::Int(i);
+        }
+    }
+    match field.parse::<f64>() {
+        Ok(f) => Value::Float(f),
+        Err(_) => Value::Str(field.to_string()),
+    }
+}
+
+/// The rows of a parsed CSV table, each column typed as a whole.
 ///
-/// In a column whose non-empty cells are all numbers, an empty cell is Null,
-/// not `""`: the column is numeric, so a sum or a count over it does not meet
-/// a blank String. Any other column keeps `""` for a blank, because a blank
-/// there is text. A column with no non-empty cell keeps `""` too, since
-/// nothing in it says what type it is.
+/// A column is numeric only when every non-empty cell is a number (see
+/// `is_number`). Its cells are then Int when all of them are integers, else
+/// Float, and an empty cell is Null, so a sum or a count over it does not meet a
+/// blank String. Every other column is all Strings, a blank being `""`: one
+/// cell such as "007" or "NA" makes the whole column text. A column with no
+/// non-empty cell is text too, since nothing in it says what type it is.
 pub(crate) fn csv_rows(
     headers: &[String],
     records: &[csv::StringRecord],
 ) -> Vec<BTreeMap<String, Value>> {
-    let numeric: Vec<bool> = (0..headers.len())
+    // Per column: None for text, Some(all_int) for a numeric column.
+    let kinds: Vec<Option<bool>> = (0..headers.len())
         .map(|column| {
             let mut any = false;
+            let mut all_int = true;
             for record in records {
                 match record.get(column) {
                     Some("") | None => {}
-                    Some(field) if is_number(field) => any = true,
-                    Some(_) => return false,
+                    Some(field) if is_number(field) => {
+                        any = true;
+                        all_int &= field.parse::<i64>().is_ok();
+                    }
+                    Some(_) => return None,
                 }
             }
-            any
+            any.then_some(all_int)
         })
         .collect();
 
@@ -10410,10 +10426,10 @@ pub(crate) fn csv_rows(
             let mut row = BTreeMap::new();
             for (i, field) in record.iter().enumerate() {
                 if let Some(header) = headers.get(i) {
-                    let value = if field.is_empty() && numeric[i] {
-                        Value::Null
-                    } else {
-                        csv_cell(field)
+                    let value = match kinds[i] {
+                        Some(_) if field.is_empty() => Value::Null,
+                        Some(all_int) => numeric_cell(field, all_int),
+                        None => Value::Str(field.to_string()),
                     };
                     row.insert(header.clone(), value);
                 }
