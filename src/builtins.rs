@@ -35663,6 +35663,30 @@ fn bi_tar_create(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
     refuse_option("tar_create", &archive)?;
     crate::safety::reject_option_like("tar_create", &files)?;
 
+    // The archive is a plain tar, or gzipped tar for .tar.gz and .tgz. Any other
+    // extension would name a file that is not what it says, so it is refused.
+    // A name with no extension is still a plain tar.
+    let file_name = archive.rsplit(['/', '\\']).next().unwrap_or(&archive);
+    if let Some((_, ext)) = file_name
+        .rsplit_once('.')
+        .filter(|(stem, _)| !stem.is_empty())
+    {
+        let lower = file_name.to_ascii_lowercase();
+        if !(lower.ends_with(".tar") || lower.ends_with(".tar.gz") || lower.ends_with(".tgz")) {
+            let hint = if ext.eq_ignore_ascii_case("zip") {
+                "tar_create writes tar, not zip; use zip_create(archive, members) for a .zip archive"
+            } else {
+                "name the archive .tar, .tar.gz or .tgz (tar_create writes gzip only for .tar.gz and .tgz)"
+            };
+            return Err(crate::safety::bad_arg_with_hint(
+                "tar_create",
+                "an archive named .tar, .tar.gz or .tgz",
+                &format!("'{archive}'"),
+                hint,
+            ));
+        }
+    }
+
     let enforce = crate::safety::current_mode() == crate::safety::Mode::Agent
         || std::env::var("IRONSHELL_WORKSPACE").is_ok();
     let members: Vec<String> = files

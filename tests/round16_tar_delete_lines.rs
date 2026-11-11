@@ -68,3 +68,33 @@ fn tar_create_refuses_a_missing_member_before_running_tar() {
         "no archive is written"
     );
 }
+
+#[test]
+fn tar_create_refuses_a_zip_name_and_points_at_zip_create() {
+    let dir = scratch("tar_zip_name");
+    let proj = dir.join("proj");
+    std::fs::write(proj.join("a.txt"), "alpha\n").unwrap();
+    let out = ish_in(&proj, r#"tar_create("x.zip", "a.txt")"#);
+    assert!(!out.status.success(), "a .zip name must be refused");
+    let json = first_error(&out);
+    assert_eq!(json["error"]["code"], "E_BAD_ARG", "{json}");
+    let hint = json["error"]["hint"].as_str().unwrap_or_default();
+    assert!(
+        hint.contains("zip_create"),
+        "the hint names zip_create: {hint}"
+    );
+    assert!(!proj.join("x.zip").exists(), "nothing is written");
+}
+
+#[test]
+fn tar_create_refuses_any_other_extension() {
+    let dir = scratch("tar_other_ext");
+    let proj = dir.join("proj");
+    std::fs::write(proj.join("a.txt"), "alpha\n").unwrap();
+    for name in ["x.bz2", "x.tar.bz2", "x.7z"] {
+        let out = ish_in(&proj, &format!(r#"tar_create("{name}", "a.txt")"#));
+        let json = first_error(&out);
+        assert_eq!(json["error"]["code"], "E_BAD_ARG", "{name}: {json}");
+        assert!(!proj.join(name).exists(), "{name}: nothing is written");
+    }
+}
