@@ -424,6 +424,11 @@ fn eval_binop(op: &BinOp, left: &Value, right: &Value) -> Result<Value, String> 
         (BinOp::Add, Value::Int(a), Value::Float(b)) => Ok(Value::Float(*a as f64 + b)),
         (BinOp::Add, Value::Float(a), Value::Int(b)) => Ok(Value::Float(a + *b as f64)),
         (BinOp::Add, Value::Str(a), Value::Str(b)) => Ok(Value::Str(format!("{}{}", a, b))),
+        (BinOp::Add, Value::Array(a), Value::Array(b)) => {
+            let mut out = a.clone();
+            out.extend(b.iter().cloned());
+            Ok(Value::Array(out))
+        }
         (BinOp::Sub, Value::Int(a), Value::Int(b)) => Ok(Value::Int(a - b)),
         (BinOp::Sub, Value::Float(a), Value::Float(b)) => Ok(Value::Float(a - b)),
         (BinOp::Sub, Value::Int(a), Value::Float(b)) => Ok(Value::Float(*a as f64 - b)),

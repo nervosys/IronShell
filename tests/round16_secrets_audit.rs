@@ -93,3 +93,22 @@ fn cat_of_files_without_trailing_newlines_keeps_their_lines_apart() {
     let n = run_in_process(&format!(r#"cat("{glob}") | lines | len"#));
     assert_eq!(n, iron_shell::value::Value::Int(2));
 }
+
+// ── Item 4: `+` concatenates two Arrays ──
+
+#[test]
+fn plus_concatenates_two_arrays_into_a_new_array() {
+    use iron_shell::value::Value;
+    let v = run_in_process("[1, 2] + [3]");
+    assert_eq!(
+        v,
+        Value::Array(vec![Value::Int(1), Value::Int(2), Value::Int(3)])
+    );
+}
+
+#[test]
+fn the_typechecker_accepts_array_plus_array() {
+    use iron_shell::types::Type;
+    let t = iron_shell::typecheck::infer_last_type("[1] + [2]").expect("typechecks");
+    assert_eq!(t, Type::Array(Box::new(Type::Int)));
+}
