@@ -663,6 +663,41 @@ fn structured_error_fields(error: &str) -> Option<(String, Option<String>)> {
 /// Execute a single builtin call
 fn execute_call(builtin: &str, args: &JsonValue) -> AgentResponse {
     let started = std::time::Instant::now();
+    // A module-qualified name (`math.sqrt`) calls the builtin that module member
+    // is, as eval resolves it. Any other dotted name is refused, with the bare
+    // builtin name as the hint.
+    let resolved;
+    let builtin = match builtin.split_once('.') {
+        None => builtin,
+        Some((module, member)) => match crate::modules::builtin_for_member(module, member) {
+            Some(name) => {
+                resolved = name;
+                resolved.as_str()
+            }
+            None => {
+                crate::record::note_outcome(
+                    crate::record::Surface::Api,
+                    "",
+                    |_| vec![builtin.to_string()],
+                    Err(crate::safety::ErrorCode::BadArg),
+                    started.elapsed(),
+                );
+                return AgentResponse {
+                    code: Some("E_BAD_ARG".to_string()),
+                    hint: Some(format!(
+                        "drop the module prefix and name the bare builtin: {{\"action\":\"call\",\"builtin\":\"{member}\"}}, or describe \"{member}\" first to check it is one"
+                    )),
+                    success: false,
+                    result: None,
+                    error: Some(format!(
+                        "'{builtin}' is not a builtin name or a module member"
+                    )),
+                    result_type: None,
+                    metadata: Some(json!({"code": "E_BAD_ARG"})),
+                };
+            }
+        },
+    };
     // Convert JSON args to IronShell code
     let code = match args_to_code(builtin, args) {
         Ok(c) => c,

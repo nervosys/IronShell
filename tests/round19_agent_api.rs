@@ -109,3 +109,26 @@ fn item2_an_array_whose_first_element_is_the_subject_names_the_missing_parameter
     );
     assert!(!message.contains("0 of 1"), "{message}");
 }
+
+// ── Item 3: a module-qualified call name resolves as eval resolves it ───────
+
+#[test]
+fn item3_a_module_qualified_call_runs_its_builtin() {
+    let (code, v) = execute_once(r#"{"action":"call","builtin":"math.sqrt","args":[16]}"#);
+    assert_eq!(code, Some(0), "{v}");
+    assert_eq!(v["result"], json!(4.0), "{v}");
+
+    let (code, v) = execute_once(r#"{"action":"call","builtin":"str.upper","args":["abc"]}"#);
+    assert_eq!(code, Some(0), "{v}");
+    assert_eq!(v["result"], json!("ABC"), "{v}");
+}
+
+#[test]
+fn item3_an_unknown_module_member_says_to_drop_the_prefix() {
+    let (code, v) = execute_once(r#"{"action":"call","builtin":"math.nosuch_zz","args":[1]}"#);
+    assert_eq!(code, Some(1), "{v}");
+    assert_eq!(v["error"]["code"], json!("E_BAD_ARG"), "{v}");
+    let hint = v["error"]["hint"].as_str().unwrap_or_default();
+    assert!(hint.contains("drop the module prefix"), "{hint}");
+    assert!(hint.contains("nosuch_zz"), "{hint}");
+}
