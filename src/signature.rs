@@ -1743,8 +1743,13 @@ pub static SIGNATURES: &[Signature] = &[
     Signature {
         name: "from_csv", category: None, subject_required: false, aliases: &["from-csv"],
         subject: Some(Ty::Str), params: &[], returns: "Array",
-        doc: "Parse a CSV string with headers, inferring numeric and boolean cells. The text is piped in or passed as the argument: from_csv(text).",
-        examples: &[(r#"("n\n7\n" | from_csv | first).n"#, "7"), (r#"from_csv("n\n7\n") | len"#, "1")],
+        doc: "Parse a CSV string with headers, inferring numeric and boolean cells. In a column whose non-empty cells are all numbers, an empty cell is null; in any other column it is an empty String. The text is piped in or passed as the argument: from_csv(text).",
+        examples: &[
+            (r#"("n\n7\n" | from_csv | first).n"#, "7"),
+            (r#"from_csv("n\n7\n") | len"#, "1"),
+            (r#"from_csv("n,m\n7,\n8,2\n") | first | fn(r) => r.m"#, "null"),
+            (r#"from_csv("n,s\n7,\n8,x\n") | first | fn(r) => r.s"#, r#""""#),
+        ],
     },
     Signature {
         name: "to_csv", category: None, subject_required: false, aliases: &["to-csv"],

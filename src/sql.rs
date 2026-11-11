@@ -131,19 +131,6 @@ fn tables_from_subject(builtin: &str, subject: Value) -> Result<Vec<Loaded>> {
     }
 }
 
-/// A CSV cell, typed the way `from_csv` types it.
-fn csv_cell(field: &str) -> Value {
-    if let Ok(i) = field.parse::<i64>() {
-        Value::Int(i)
-    } else if let Ok(f) = field.parse::<f64>() {
-        Value::Float(f)
-    } else if let Ok(b) = field.parse::<bool>() {
-        Value::Bool(b)
-    } else {
-        Value::Str(field.to_string())
-    }
-}
-
 /// The file extension, lower-cased, if the path names a tabular text format.
 fn tabular_kind(path: &str) -> Option<&'static str> {
     let ext = std::path::Path::new(path)
@@ -227,15 +214,12 @@ fn table_from_file(builtin: &str, path: &str, kind: &str) -> Result<Vec<Loaded>>
                 .iter()
                 .map(str::to_string)
                 .collect();
-            let mut rows = Vec::new();
+            // Typed as from_csv and open type them, blanks in numeric columns included.
+            let mut records = Vec::new();
             for (i, record) in reader.records().enumerate() {
-                let record = record.map_err(|e| parse_err(Some(i + 2), &e))?;
-                let mut row = BTreeMap::new();
-                for (h, field) in headers.iter().zip(record.iter()) {
-                    row.insert(h.clone(), csv_cell(field));
-                }
-                rows.push(row);
+                records.push(record.map_err(|e| parse_err(Some(i + 2), &e))?);
             }
+            let rows = crate::builtins::csv_rows(&headers, &records);
             vec![Loaded { name: stem, rows }]
         }
     };

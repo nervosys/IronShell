@@ -10341,33 +10341,80 @@ fn bi_from_csv(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
         .map(|h| h.to_string())
         .collect();
 
-    let mut results = Vec::new();
+    let mut records = Vec::new();
     for record in reader.records() {
         // A malformed row (unequal field counts, bad quoting) is the caller's
         // text, so E_BAD_ARG; it was an uncoded csv::Error, E_UNKNOWN.
-        let record =
-            record.map_err(|e| crate::safety::bad_arg("from-csv", "CSV text", &e.to_string()))?;
-        let mut row = BTreeMap::new();
-
-        for (i, field) in record.iter().enumerate() {
-            if let Some(header) = headers.get(i) {
-                // Try to parse as number, otherwise keep as string
-                let value = if let Ok(int_val) = field.parse::<i64>() {
-                    Value::Int(int_val)
-                } else if let Ok(float_val) = field.parse::<f64>() {
-                    Value::Float(float_val)
-                } else if let Ok(bool_val) = field.parse::<bool>() {
-                    Value::Bool(bool_val)
-                } else {
-                    Value::Str(field.to_string())
-                };
-                row.insert(header.clone(), value);
-            }
-        }
-        results.push(Value::Record(row));
+        records.push(
+            record.map_err(|e| crate::safety::bad_arg("from-csv", "CSV text", &e.to_string()))?,
+        );
     }
 
-    Ok(Value::Array(results))
+    let rows = csv_rows(&headers, &records);
+    Ok(Value::Array(rows.into_iter().map(Value::Record).collect()))
+}
+
+/// A CSV cell, typed as its text parses: an Int, a Float or a Bool, else a
+/// String.
+fn csv_cell(field: &str) -> Value {
+    if let Ok(i) = field.parse::<i64>() {
+        Value::Int(i)
+    } else if let Ok(f) = field.parse::<f64>() {
+        Value::Float(f)
+    } else if let Ok(b) = field.parse::<bool>() {
+        Value::Bool(b)
+    } else {
+        Value::Str(field.to_string())
+    }
+}
+
+/// Whether a cell reads as a number, by the same parsers `csv_cell` uses.
+fn is_number(field: &str) -> bool {
+    field.parse::<i64>().is_ok() || field.parse::<f64>().is_ok()
+}
+
+/// The rows of a parsed CSV table, each cell typed by its column.
+///
+/// In a column whose non-empty cells are all numbers, an empty cell is Null,
+/// not `""`: the column is numeric, so a sum or a count over it does not meet
+/// a blank String. Any other column keeps `""` for a blank, because a blank
+/// there is text. A column with no non-empty cell keeps `""` too, since
+/// nothing in it says what type it is.
+pub(crate) fn csv_rows(
+    headers: &[String],
+    records: &[csv::StringRecord],
+) -> Vec<BTreeMap<String, Value>> {
+    let numeric: Vec<bool> = (0..headers.len())
+        .map(|column| {
+            let mut any = false;
+            for record in records {
+                match record.get(column) {
+                    Some("") | None => {}
+                    Some(field) if is_number(field) => any = true,
+                    Some(_) => return false,
+                }
+            }
+            any
+        })
+        .collect();
+
+    records
+        .iter()
+        .map(|record| {
+            let mut row = BTreeMap::new();
+            for (i, field) in record.iter().enumerate() {
+                if let Some(header) = headers.get(i) {
+                    let value = if field.is_empty() && numeric[i] {
+                        Value::Null
+                    } else {
+                        csv_cell(field)
+                    };
+                    row.insert(header.clone(), value);
+                }
+            }
+            row
+        })
+        .collect()
 }
 
 /// to-csv: Convert structured data to CSV

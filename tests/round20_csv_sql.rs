@@ -122,3 +122,66 @@ fn csv_columns_refuses_a_subject_that_is_not_text() {
     let e = eval("csv_columns(5)").expect_err("an Int is not a path or text");
     assert_eq!(code_of(&e), "E_BAD_ARG", "{e}");
 }
+
+// ── item 2: blanks in numeric CSV columns ───────────────────────────────
+
+#[test]
+fn a_blank_cell_in_a_numeric_column_is_null() {
+    assert_eq!(
+        eval(r#"from_csv("n,m\n7,\n8,2\n") | first | fn(r) => r.m"#).unwrap(),
+        Value::Null
+    );
+}
+
+#[test]
+fn a_blank_cell_in_a_text_column_is_still_an_empty_string() {
+    assert_eq!(
+        eval(r#"from_csv("n,s\n7,\n8,x\n") | first | fn(r) => r.s"#).unwrap(),
+        s("")
+    );
+    // A column with no non-empty cell does not say it is numeric.
+    assert_eq!(
+        eval(r#"from_csv("n,s\n7,\n8,\n") | first | fn(r) => r.s"#).unwrap(),
+        s("")
+    );
+}
+
+#[test]
+fn a_numeric_column_with_a_blank_round_trips_through_to_csv() {
+    assert_eq!(
+        eval(r#"from_csv("n,m\n7,\n8,2\n") | to_csv(csv_columns("n,m\n7,\n8,2\n"))"#).unwrap(),
+        s("n,m\n7,\n8,2\n")
+    );
+}
+
+#[test]
+fn sql_counts_skip_the_blank_in_a_numeric_column_and_not_in_a_text_one() {
+    let dir = fresh_dir("blanks");
+    let path = dir.join("rows.csv");
+    std::fs::write(
+        &path,
+        "id,amount,status,note,mixed\n1,3,open,,\n2,,,,abc\n3,4,,,\n",
+    )
+    .unwrap();
+    let p = fwd(&path);
+    let answers = [
+        ("select count(amount) from rows", Value::Int(2)),
+        ("select sum(amount) from rows", Value::Int(7)),
+        ("select count(*) from rows where status = ''", Value::Int(2)),
+        // `note` has no non-empty cell, so it stays text.
+        ("select count(*) from rows where note = ''", Value::Int(3)),
+        // `mixed` has a non-number, so its blank stays text too.
+        ("select count(*) from rows where mixed = ''", Value::Int(2)),
+    ];
+    let results: Vec<(String, Value)> = answers
+        .iter()
+        .map(|(q, _)| {
+            let got = eval(&format!(r#"sql_value("{p}", "{q}")"#)).unwrap();
+            (q.to_string(), got)
+        })
+        .collect();
+    let _ = std::fs::remove_dir_all(&dir);
+    for ((q, want), (_, got)) in answers.iter().zip(&results) {
+        assert_eq!(got, want, "{q}");
+    }
+}
