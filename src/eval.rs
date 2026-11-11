@@ -970,6 +970,18 @@ pub fn eval_expr(expr: &Expr, env: &mut Env) -> Result<Value> {
         Expr::Match { scrutinee, arms } => {
             let value = eval_expr(scrutinee, env)?;
 
+            // `if` desugars to this two-arm shape (parse_if_expr). Its condition
+            // must be a Bool; Null is false. Any other value used to fall through
+            // to the else branch silently.
+            if is_if_desugar(arms) && !matches!(value, Value::Bool(_) | Value::Null) {
+                return Err(crate::safety::bad_arg_with_hint(
+                    "if",
+                    "a Bool condition",
+                    value.type_name(),
+                    if_condition_hint(&value),
+                ));
+            }
+
             for arm in arms {
                 // Try to match the pattern
                 if let Some(bindings) = match_pattern(&arm.pattern, &value) {
@@ -1333,6 +1345,31 @@ fn resolve_index(index: i64, len: usize, kind: &str, from_args: bool) -> Result<
 
 use crate::ast::Pattern;
 use std::collections::HashMap;
+
+/// True for the two-arm shape `parse_if_expr` builds: `true => then, _ => else`,
+/// with no guards. A user `match` written the same way is checked too.
+fn is_if_desugar(arms: &[crate::ast::MatchArm]) -> bool {
+    match arms {
+        [first, second] => {
+            first.guard.is_none()
+                && second.guard.is_none()
+                && matches!(first.pattern, Pattern::LitBool(true))
+                && matches!(second.pattern, Pattern::Wildcard)
+        }
+        _ => false,
+    }
+}
+
+/// How to turn a non-Bool `if` condition into a Bool, named per type.
+fn if_condition_hint(value: &Value) -> &'static str {
+    match value {
+        Value::Record(_) => "test a field of the record, e.g. exists(p).exists",
+        Value::Int(_) | Value::Float(_) => "compare it, e.g. n != 0",
+        Value::Str(_) | Value::Uri(_) => "compare it, e.g. s != \"\"",
+        Value::Array(_) | Value::Table(_) => "test the length, e.g. len(a) > 0",
+        _ => "compare it to a value, e.g. x == \"ok\"",
+    }
+}
 
 /// Attempt to match a pattern against a value.
 /// Returns Some(bindings) if successful, None if no match.
