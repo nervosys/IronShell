@@ -7989,7 +7989,12 @@ lazy_static! {
     /// value ≥6 chars to skip trivial placeholders). Group 1 (key + separator)
     /// is kept; group 2 (the value) is redacted.
     static ref SECRET_ASSIGN_RE: regex::Regex = regex::Regex::new(
-        r#"(?i)((?:password|passwd|pwd|secret|token|api[_-]?key|access[_-]?key|client[_-]?secret|auth[_-]?token)["']?\s*[:=]\s*["']?)([^\s"',}]{6,})"#
+        // A backslash ends the value when it begins a JSON escape (`\n`, `\t`,
+        // `\"`, `\\`, `\u`...): in JSON text a newline is the two characters `\n`,
+        // and a value that ran through it swallowed the next line. A backslash
+        // before any other character is still part of the value, so a Windows
+        // path or a password containing `\x` stays whole.
+        r#"(?i)((?:password|passwd|pwd|secret|token|api[_-]?key|access[_-]?key|client[_-]?secret|auth[_-]?token)["']?\s*[:=]\s*["']?)((?:[^\s"',}\\]|\\[^nrtbfu"\\/\s]){6,})"#
     ).unwrap();
 }
 
@@ -9140,6 +9145,19 @@ mod tests {
         // A mixed-case value is still a secret.
         let (r, _) = redact_str("token: Ab_Cd_EfGh123");
         assert_eq!(r, "token: [REDACTED]");
+        // In JSON text a newline is the two characters `\n`. The value stops
+        // there, so the second assignment is redacted on its own, not swallowed.
+        let env = r#"{"x":"API_KEY=sk-test-123456789\nDB_PASSWORD=hunter2hunter2"}"#;
+        let (r, c) = redact_str(env);
+        assert!(c);
+        assert!(r.contains(r"\nDB_PASSWORD=[REDACTED]"), "{r}");
+        assert!(
+            !r.contains("sk-test-123456789") && !r.contains("hunter2hunter2"),
+            "{r}"
+        );
+        // A backslash that is not a JSON escape stays inside the value.
+        let (r, _) = redact_str(r"password=ab\cdefgh");
+        assert_eq!(r, "password=[REDACTED]");
     }
 
     #[test]
