@@ -419,7 +419,7 @@ fn bind_value(builtin: &str, position: usize, v: &Value) -> Result<rusqlite::typ
 /// order, and return column names and rows.
 fn run(
     builtin: &str,
-    conn: &Connection,
+    conn: &mut Connection,
     query: &str,
     params: &[Value],
 ) -> Result<(Vec<String>, Vec<Vec<Value>>)> {
@@ -667,8 +667,8 @@ fn query_once(
     subject: Option<Value>,
 ) -> Result<(Vec<String>, Vec<Vec<Value>>)> {
     let (args, params) = split_params(args);
-    let (conn, query, key) = connect(builtin, args, subject)?;
-    let result = run(builtin, &conn, &query, params);
+    let (mut conn, query, key) = connect(builtin, args, subject)?;
+    let result = run(builtin, &mut conn, &query, params);
     if let Some(k) = key {
         cache_put(k, conn);
     }
