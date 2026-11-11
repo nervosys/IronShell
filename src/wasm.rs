@@ -179,6 +179,7 @@ fn eval_stmt_wasm(stmt: &Stmt, env: &mut Env) -> Result<Value, String> {
             Ok(v)
         }
         Stmt::Expr(e) => eval_expr_wasm(e, env),
+        Stmt::SetField { .. } => Err("field assignment not supported in WASM".to_string()),
         Stmt::Import { .. } => Err("import not supported in WASM".to_string()),
         Stmt::Export { .. } => Err("export not supported in WASM".to_string()),
         Stmt::Cfg { .. } => Err("cfg not supported in WASM".to_string()),

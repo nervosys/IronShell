@@ -285,6 +285,23 @@ pub struct McpServerInfo {
     pub version: String,
 }
 
+/// The MCP protocol versions this server speaks, newest first.
+pub const SUPPORTED_PROTOCOL_VERSIONS: &[&str] = &["2025-06-18", "2025-03-26", "2024-11-05"];
+
+/// The protocol version `initialize` answers with: the client's requested
+/// version when the server supports it, otherwise the newest version it
+/// supports. A missing or unknown request gets the newest.
+pub fn negotiate_protocol_version(requested: Option<&str>) -> &'static str {
+    requested
+        .and_then(|r| {
+            SUPPORTED_PROTOCOL_VERSIONS
+                .iter()
+                .copied()
+                .find(|v| *v == r)
+        })
+        .unwrap_or(SUPPORTED_PROTOCOL_VERSIONS[0])
+}
+
 /// MCP Initialize response
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct McpInitializeResult {
@@ -421,7 +438,7 @@ impl McpServer {
     /// Handle MCP initialize request
     pub fn initialize(&self) -> McpInitializeResult {
         McpInitializeResult {
-            protocol_version: "2024-11-05".to_string(),
+            protocol_version: negotiate_protocol_version(None).to_string(),
             capabilities: McpCapabilities {
                 tools: Some(McpToolsCapability { list_changed: true }),
                 resources: Some(McpResourcesCapability {
@@ -847,7 +864,7 @@ impl McpServer {
         };
         let method = req.get("method").and_then(|m| m.as_str()).unwrap_or("");
         let response = match method {
-            "initialize" => Self::rpc_ok(id, self.stdio_initialize()),
+            "initialize" => Self::rpc_ok(id, self.stdio_initialize(req.get("params"))),
             "tools/list" => Self::rpc_ok(
                 id,
                 serde_json::json!({
@@ -865,9 +882,12 @@ impl McpServer {
         Some(response)
     }
 
-    fn stdio_initialize(&self) -> JsonValue {
+    fn stdio_initialize(&self, params: Option<&JsonValue>) -> JsonValue {
+        let requested = params
+            .and_then(|p| p.get("protocolVersion"))
+            .and_then(JsonValue::as_str);
         serde_json::json!({
-            "protocolVersion": "2024-11-05",
+            "protocolVersion": negotiate_protocol_version(requested),
             "capabilities": { "tools": { "listChanged": false } },
             "serverInfo": { "name": "ironshell", "version": env!("CARGO_PKG_VERSION") },
         })
@@ -1842,7 +1862,7 @@ pub mod server {
         }
 
         println!("🚀 IronShell MCP Server starting on http://{}", addr);
-        println!("   Protocol: MCP 2024-11-05");
+        println!("   Protocol: MCP {}", SUPPORTED_PROTOCOL_VERSIONS[0]);
         println!("   Safety level: {:?}", config.safety_level);
         // MCP's own `--safety` level gates which *tools* are exposed. It is a
         // different question from the effect gate and the workspace jail, which
@@ -1884,7 +1904,7 @@ pub mod server {
         Json(json!({
             "name": "ironshell-mcp",
             "version": env!("CARGO_PKG_VERSION"),
-            "protocol": "MCP 2024-11-05",
+            "protocol": format!("MCP {}", SUPPORTED_PROTOCOL_VERSIONS[0]),
             "description": "IronShell Model Context Protocol Server"
         }))
     }
@@ -2034,7 +2054,7 @@ mod tests {
     fn test_mcp_initialize() {
         let server = McpServer::new();
         let result = server.initialize();
-        assert_eq!(result.protocol_version, "2024-11-05");
+        assert_eq!(result.protocol_version, "2025-06-18");
         assert_eq!(result.server_info.name, "ironshell-mcp");
     }
 

@@ -3752,7 +3752,6 @@ extern "system" {
 #[cfg(windows)]
 fn by_handle_information(path: &Path) -> Option<ByHandleFileInformation> {
     use std::os::windows::fs::OpenOptionsExt;
-    use std::os::windows::io::AsRawHandle;
 
     // Access 0 asks for metadata only, so a locked or read-only file still
     // opens. Sharing read, write and delete does not block its owner. The
@@ -3764,6 +3763,15 @@ fn by_handle_information(path: &Path) -> Option<ByHandleFileInformation> {
         .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
         .open(path)
         .ok()?;
+    handle_information(&file)
+}
+
+/// The `BY_HANDLE_FILE_INFORMATION` of an open handle, or `None` when the call
+/// fails.
+#[cfg(windows)]
+fn handle_information(file: &std::fs::File) -> Option<ByHandleFileInformation> {
+    use std::os::windows::io::AsRawHandle;
+
     let mut info = ByHandleFileInformation::default();
     // SAFETY: `file` holds a valid open handle for the whole call, and `info`
     // is a writable value whose layout matches BY_HANDLE_FILE_INFORMATION.
@@ -3798,6 +3806,39 @@ pub(crate) fn hard_link_count(_path: &Path) -> Option<u64> {
     None
 }
 
+/// The refusal for an in-place write to a file with `links` hard links.
+fn hard_link_refusal(builtin: &str, path: &str, links: u64) -> anyhow::Error {
+    policy_deny(
+        builtin,
+        format!(
+            "'{path}' has {links} hard links, so writing it in place could change a file outside the workspace"
+        ),
+        "remove the link or write a new file",
+    )
+}
+
+/// The number of hard links of an open regular file, or `None` for anything else.
+#[cfg(unix)]
+fn handle_link_count(file: &std::fs::File) -> Option<u64> {
+    use std::os::unix::fs::MetadataExt;
+    let meta = file.metadata().ok()?;
+    meta.is_file().then(|| meta.nlink())
+}
+
+/// The number of hard links of an open regular file, from its handle.
+#[cfg(windows)]
+fn handle_link_count(file: &std::fs::File) -> Option<u64> {
+    if !file.metadata().ok()?.is_file() {
+        return None;
+    }
+    handle_information(file).map(|info| u64::from(info.number_of_links))
+}
+
+#[cfg(not(any(unix, windows)))]
+fn handle_link_count(_file: &std::fs::File) -> Option<u64> {
+    None
+}
+
 /// Refuse an in-place write to a file with more than one hard link, when the
 /// jail is enforced. The other names of such a file may lie outside the
 /// workspace, and writing through one changes all of them. An atomic replace
@@ -3808,8 +3849,9 @@ pub(crate) fn hard_link_count(_path: &Path) -> Option<u64> {
 /// The path is judged as given and as the workspace resolves it, since a builtin
 /// may open either form. Reads are not refused: a package store such as pnpm's
 /// hard-links node_modules into its store, and reading through a link changes
-/// nothing. This is a known limit: a link planted after a file was judged is not
-/// seen again here, as the check and the write are separate calls.
+/// nothing. This check is the fast early refusal by path. The in-place writers
+/// also judge the handle they write through, in [`open_in_place`], which catches
+/// a link planted after this check.
 pub(crate) fn refuse_hard_linked_write(builtin: &str, path: &str) -> anyhow::Result<()> {
     if !jail_enforced(current_mode()) {
         return Ok(());
@@ -3821,16 +3863,58 @@ pub(crate) fn refuse_hard_linked_write(builtin: &str, path: &str) -> anyhow::Res
     }
     for candidate in &candidates {
         if let Some(links) = hard_link_count(Path::new(candidate)).filter(|n| *n > 1) {
-            return Err(policy_deny(
-                builtin,
-                format!(
-                    "'{path}' has {links} hard links, so writing it in place could change a file outside the workspace"
-                ),
-                "remove the link or write a new file",
-            ));
+            return Err(hard_link_refusal(builtin, path, links));
         }
     }
     Ok(())
+}
+
+/// Open `path` for an in-place write, judging the link count of the open handle.
+///
+/// The file is opened without truncation, and created when missing, so a refused
+/// open leaves its contents alone. When the jail is enforced, a regular file with
+/// more than one hard link is refused as [`refuse_hard_linked_write`] refuses it.
+/// Only then is the file truncated (`append` false) or positioned at its end
+/// (`append` true). The check and the truncation share one handle, so a link
+/// planted after the path check cannot be missed. An I/O failure comes back as
+/// an `io::Error` inside the `anyhow::Error`; [`in_place_error`] names it.
+pub(crate) fn open_in_place(
+    builtin: &str,
+    path: &Path,
+    append: bool,
+) -> anyhow::Result<std::fs::File> {
+    use std::io::{Seek, SeekFrom};
+    let mut file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(path)?;
+    if jail_enforced(current_mode()) {
+        if let Some(links) = handle_link_count(&file).filter(|n| *n > 1) {
+            return Err(hard_link_refusal(
+                builtin,
+                &path.display().to_string(),
+                links,
+            ));
+        }
+    }
+    if append {
+        file.seek(SeekFrom::End(0))?;
+    } else if file.metadata()?.is_file() {
+        // Only a regular file is truncated: a device such as /dev/null refuses it.
+        file.set_len(0)?;
+    }
+    Ok(file)
+}
+
+/// Name the I/O failure inside an [`open_in_place`] error as a write error for
+/// `path`. A refusal passes through unchanged.
+pub(crate) fn in_place_error(builtin: &str, path: &str, e: anyhow::Error) -> anyhow::Error {
+    match e.downcast::<std::io::Error>() {
+        Ok(io) => fs_write_error(builtin, path, &io),
+        Err(other) => other,
+    }
 }
 
 /// Whether the jail is enforced. Enforced in agent mode, or whenever the

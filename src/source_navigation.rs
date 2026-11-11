@@ -399,7 +399,7 @@ pub(super) fn analyze(name: &str, args: Vec<Value>, input: Option<Value>) -> Res
                         },
                         value,
                     ),
-                    Stmt::Expr(expr) => ("<top-level>", expr),
+                    Stmt::Expr(expr) | Stmt::SetField { value: expr, .. } => ("<top-level>", expr),
                     Stmt::Cfg { body, .. } => {
                         inspect(body, target, found);
                         return;

@@ -70,6 +70,12 @@ pub fn type_of_stmt(stmt: &Stmt, env: &mut TypeEnv) -> Result<(), TypeError> {
             let _ = type_of_expr(e, env)?;
             Ok(())
         }
+        Stmt::SetField { value, .. } => {
+            // The field's new value is checked; the binding keeps its type, since
+            // a Record's field types are not tracked here.
+            let _ = type_of_expr(value, env)?;
+            Ok(())
+        }
         Stmt::Import { .. } => {
             // Import statements don't contribute to type checking in this pass
             // The imported module's types would be resolved at runtime
@@ -642,6 +648,10 @@ pub fn infer_last_type(src: &str) -> anyhow::Result<Type> {
             }
             Stmt::Expr(e) => {
                 last_ty = type_of_expr(e, &mut env).map_err(|e| anyhow::anyhow!(e.to_string()))?;
+            }
+            Stmt::SetField { value, .. } => {
+                last_ty =
+                    type_of_expr(value, &mut env).map_err(|e| anyhow::anyhow!(e.to_string()))?;
             }
             Stmt::Import { .. } | Stmt::Export { .. } => {
                 // Import/Export statements don't affect the type of the last expression

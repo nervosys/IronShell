@@ -47,15 +47,17 @@ fn required_of(schema: &JsonValue) -> Vec<String> {
 }
 
 #[test]
-fn item1_an_optional_subject_is_advertised_first_and_not_required() {
+fn item1_a_subject_with_no_parameters_is_advertised_first_and_required() {
+    // `upper` has no parameter to take its string in, so a direct call needs
+    // the subject as its argument (round 20).
     let schema = claude_tool_schema("ironshell_upper");
     assert_eq!(
         schema["properties"]["subject"]["type"], "String",
         "{schema}"
     );
     assert!(
-        !required_of(&schema).contains(&"subject".to_string()),
-        "upper has no required parameter and is not pipeline-only: {schema}"
+        required_of(&schema).contains(&"subject".to_string()),
+        "upper has no parameter, so its subject is the argument: {schema}"
     );
 }
 
@@ -99,12 +101,14 @@ fn item1_a_subject_is_required_when_a_parameter_is_required() {
 
 #[test]
 fn item1_ontology_describe_lists_the_subject_and_marks_it_piped() {
+    // A builtin with no parameters cannot run without its subject, so a
+    // direct call (a tool call) must give it: required since round 20.
     let def = ontology_describe_json("upper");
     let params = def["parameters"].as_array().expect("parameters");
     assert_eq!(params.len(), 1, "{def}");
     assert_eq!(params[0]["name"], "subject", "{def}");
     assert_eq!(params[0]["type"], "String", "{def}");
-    assert_eq!(params[0]["required"], false, "{def}");
+    assert_eq!(params[0]["required"], true, "{def}");
     assert_eq!(params[0]["subject"], true, "{def}");
     assert_eq!(def["signature"], "String | upper() -> String", "{def}");
 
@@ -251,11 +255,13 @@ fn item2_a_missing_tool_name_is_invalid_params() {
 }
 
 #[test]
-fn item2_the_server_keeps_its_announced_protocol_version() {
+fn item2_the_server_answers_its_newest_version_when_none_is_requested() {
+    // No protocolVersion in the request: the newest supported version (round 20
+    // negotiates; the request's own version is covered in round20_schema_api).
     let res = McpServer::new()
         .handle_rpc(&serde_json::json!({"jsonrpc":"2.0","id":3,"method":"initialize"}))
         .expect("response");
-    assert_eq!(res["result"]["protocolVersion"], "2024-11-05");
+    assert_eq!(res["result"]["protocolVersion"], "2025-06-18");
 }
 
 // ── Item 3: a missing path is judged by where it would land ─────────────────

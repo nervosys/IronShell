@@ -126,10 +126,23 @@ fn note_failed_lambda_call(name: &str) {
 
 pub fn eval_program(stmts: &[Stmt], env: &mut Env) -> Result<Value> {
     let mut last = Value::Null;
-    for s in stmts {
+    for (i, s) in stmts.iter().enumerate() {
         // Clear any pipe input between statements to prevent leakage
         env.set_input(None);
-        last = eval_stmt(s, env)?;
+        last = match s {
+            // Only the last statement's value is the program's, so a binding
+            // before it does not copy its value out (`s = s + "x"` stays linear).
+            Stmt::Let {
+                name,
+                value,
+                is_mut,
+                visibility,
+                ty,
+            } if i + 1 < stmts.len() => {
+                eval_let(name, value, *is_mut, *visibility, ty.as_deref(), env, false)?
+            }
+            _ => eval_stmt(s, env)?,
+        };
         note_lambda_binding(s);
         // An error value that a statement *produces* and nothing binds or
         // catches is an uncaught error. `throw` and `assert` produce error
@@ -564,25 +577,23 @@ pub fn eval_stmt(stmt: &Stmt, env: &mut Env) -> Result<Value> {
             is_mut,
             visibility,
             ty,
-        } => {
+        } => eval_let(name, value, *is_mut, *visibility, ty.as_deref(), env, true),
+        Stmt::Expr(e) => eval_expr(e, env),
+        Stmt::SetField { name, path, value } => {
+            // The new value is evaluated while `name` is still bound, so
+            // `r.a = r.a + 1` reads the old `a`. The Record is copied, changed
+            // and stored back, so a refusal anywhere leaves `name` as it was.
             let v = eval_expr(value, env)?;
-            if let Some(declared) = ty {
-                check_declared_type(name, declared, &v)?;
-            }
-            env.declare_var(name, v.clone(), *is_mut).map_err(|e| {
-                // `bad_state` would read this as a builtin to call first, which
-                // is how "call `use a different name...` first" came about.
-                crate::safety::bad_state_with_hint("let", &e, &env.rebind_hint(name))
+            let mut updated = match env.get_var(name) {
+                Some(root) => root.clone(),
+                None => return Err(unknown_name_error(name, env)),
+            };
+            set_field_path(&mut updated, name, path, v.clone())?;
+            env.set_var(name, updated).map_err(|e| {
+                crate::safety::bad_state_with_hint("assign", &e, &env.rebind_hint(name))
             })?;
-
-            // Mark as public if visibility is Pub
-            if *visibility == Visibility::Pub {
-                env.set_public(name);
-            }
-
             Ok(v)
         }
-        Stmt::Expr(e) => eval_expr(e, env),
         Stmt::Import {
             items,
             source,
@@ -606,6 +617,114 @@ pub fn eval_stmt(stmt: &Stmt, env: &mut Env) -> Result<Value> {
                 Ok(Value::Null)
             }
         }
+    }
+}
+
+/// `let name = value`, `name = value` and `name := value`. With `keep` the bound
+/// value is returned; without it the result is Null, so a binding whose value
+/// nothing reads is not copied out (see `eval_program`).
+fn eval_let(
+    name: &str,
+    value: &Expr,
+    is_mut: bool,
+    visibility: Visibility,
+    ty: Option<&str>,
+    env: &mut Env,
+    keep: bool,
+) -> Result<Value> {
+    if let Some(right) = in_place_append_operand(name, value, ty, visibility, env) {
+        let operand = eval_expr(right, env)?;
+        let operand = match append_in_place(env, name, operand) {
+            Ok(()) => {
+                let kept = if keep {
+                    env.get_var(name).cloned().unwrap_or(Value::Null)
+                } else {
+                    Value::Null
+                };
+                return Ok(kept);
+            }
+            Err(operand) => operand,
+        };
+        // Not a case the fast path covers (a mismatched operand, or a string past
+        // the size limit): the general rule for `+` decides it, and when it
+        // refuses, `name` is left as it was.
+        let lhs = env.get_var(name).cloned().unwrap_or(Value::Null);
+        let v = binop(&BinOp::Add, lhs, operand)?;
+        return bind_value(name, v, is_mut, visibility, env, keep);
+    }
+    let v = eval_expr(value, env)?;
+    if let Some(declared) = ty {
+        check_declared_type(name, declared, &v)?;
+    }
+    bind_value(name, v, is_mut, visibility, env, keep)
+}
+
+/// Stores `v` as `name`, marks it public when asked, and returns it when `keep`.
+fn bind_value(
+    name: &str,
+    v: Value,
+    is_mut: bool,
+    visibility: Visibility,
+    env: &mut Env,
+    keep: bool,
+) -> Result<Value> {
+    let kept = keep.then(|| v.clone());
+    env.declare_var(name, v, is_mut).map_err(|e| {
+        // `bad_state` would read this as a builtin to call first, which
+        // is how "call `use a different name...` first" came about.
+        crate::safety::bad_state_with_hint("let", &e, &env.rebind_hint(name))
+    })?;
+
+    // Mark as public if visibility is Pub
+    if visibility == Visibility::Pub {
+        env.set_public(name);
+    }
+    Ok(kept.unwrap_or(Value::Null))
+}
+
+/// The right operand of `name = name + e` when that statement may append in
+/// place: a plain `=` (no annotation, not `pub`) to a mutable binding that holds
+/// a String or an Array. Anything else takes the general path.
+fn in_place_append_operand<'a>(
+    name: &str,
+    value: &'a Expr,
+    ty: Option<&str>,
+    visibility: Visibility,
+    env: &Env,
+) -> Option<&'a Expr> {
+    let Expr::Binary {
+        left,
+        op: BinOp::Add,
+        right,
+    } = value
+    else {
+        return None;
+    };
+    let Expr::Ident(lhs) = &**left else {
+        return None;
+    };
+    let fits = lhs.as_str() == name
+        && ty.is_none()
+        && visibility == Visibility::Private
+        && env.is_mutable(name)
+        && matches!(env.get_var(name), Some(Value::Str(_) | Value::Array(_)));
+    fits.then_some(&**right)
+}
+
+/// Appends `operand` to the String or Array bound to `name`, in place, so the
+/// binding is not copied out and back. Gives the operand back when the two do
+/// not both fit: a different kind, or a string past the size limit.
+fn append_in_place(env: &mut Env, name: &str, operand: Value) -> std::result::Result<(), Value> {
+    match (env.get_var_mut(name), operand) {
+        (Some(Value::Str(a)), Value::Str(b)) if a.len() + b.len() <= MAX_STRING_BYTES => {
+            a.push_str(&b);
+            Ok(())
+        }
+        (Some(Value::Array(a)), Value::Array(b)) => {
+            a.extend(b);
+            Ok(())
+        }
+        (_, operand) => Err(operand),
     }
 }
 
@@ -1108,6 +1227,29 @@ fn unknown_name_error(name: &str, env: &Env) -> anyhow::Error {
     // with the bound variables added to the candidates.
     let candidates = builtins::did_you_mean_among(name, env.vars().keys().map(|k| k.as_str()));
     crate::safety::unknown_name(name, candidates)
+}
+
+/// Sets the field at `path` inside `target`, which is the Record `label` names.
+/// Every field but the last must already hold a Record; the last is created
+/// when missing. A refusal names the path up to the field that failed.
+fn set_field_path(target: &mut Value, label: &str, path: &[String], new: Value) -> Result<()> {
+    let Some((field, rest)) = path.split_first() else {
+        *target = new;
+        return Ok(());
+    };
+    let kind = target.type_name();
+    let Value::Record(map) = target else {
+        return Err(crate::safety::bad_arg(label, "a Record", kind));
+    };
+    if rest.is_empty() {
+        map.insert(field.clone(), new);
+        return Ok(());
+    }
+    let child_label = format!("{label}.{field}");
+    match map.get_mut(field) {
+        Some(child) => set_field_path(child, &child_label, rest, new),
+        None => Err(crate::safety::bad_arg(&child_label, "a Record", "nothing")),
+    }
 }
 
 /// Resolve only identifiers and field chains, which cannot mutate the env.
@@ -2167,7 +2309,11 @@ fn binop(op: &BinOp, a: Value, b: Value) -> Result<Value> {
         (Add, Value::Float(x), Value::Int(y)) => Value::Float(x + (y as f64)),
         // String concatenation. A number and a String do not combine: see the
         // refusal arm below, which is what `"a" + 1` now reaches.
-        (Add, Value::Str(x), Value::Str(y)) => checked_string(format!("{}{}", x, y))?,
+        // The left String is owned here, so it is extended rather than copied.
+        (Add, Value::Str(mut x), Value::Str(y)) => {
+            x.push_str(&y);
+            checked_string(x)?
+        }
         // Array concatenation: `[1, 2] + [3]` is `[1, 2, 3]`, a new Array.
         (Add, Value::Array(mut x), Value::Array(y)) => {
             x.extend(y);

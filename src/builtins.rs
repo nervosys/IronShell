@@ -22313,6 +22313,17 @@ pub fn render_agent(v: &Value, budget: Option<usize>) -> Option<String> {
 // tests/fallback_dispatch.rs reads the arms as `name => bi_fn(..)` pairs.
 fn bi_undo(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
     refuse_pipeline_input("undo", &input)?;
+    if let Some(id) = undo_id("undo", &args)? {
+        // An id names one step, so a step count next to it would say what else to take.
+        if args.iter().any(|v| !matches!(v, Value::Record(_))) {
+            return Err(crate::safety::arg_err(
+                "undo takes a step count or an id, not both",
+            ));
+        }
+        let force = undo_force("undo", &args)?;
+        refuse_unless_recording("undo")?;
+        return undo_by_id_record("undo", id, force);
+    }
     let n = match args.iter().find(|v| !matches!(v, Value::Record(_))) {
         None => 1,
         Some(Value::Int(n)) if *n < 0 => {
@@ -22349,6 +22360,8 @@ fn undo_force(builtin: &str, args: &[Value]) -> Result<bool> {
                             other.type_name(),
                         ))
                     }
+                    // Read by undo_id, which takes the id of one step.
+                    ("id", _) if builtin == "undo" => {}
                     _ => {
                         return Err(crate::safety::arg_err(format!(
                             "{builtin} unknown option {key}"
@@ -22364,22 +22377,82 @@ fn undo_force(builtin: &str, args: &[Value]) -> Result<bool> {
 /// Undo `n` steps and render the record. A refused first step is an error that
 /// names the file and the way past the refusal; nothing was undone.
 fn undo_record(builtin: &str, n: usize, force: bool) -> Result<Value> {
-    let outcomes = crate::journal::undo(n, force).map_err(|(path, removed)| {
-        if removed {
-            crate::safety::bad_state_with_hint(
-                builtin,
-                &format!("{path} was removed after this step; undoing would recreate it"),
-                &format!("{builtin}({{force: true}}) recreates it anyway"),
-            )
-        } else {
-            crate::safety::bad_state_with_hint(
-                builtin,
-                &format!("{path} changed after this step; undoing would discard those changes"),
-                &format!("read the file, or {builtin}({{force: true}}) to restore it anyway"),
-            )
+    let force_call = format!("{builtin}({{force: true}})");
+    let outcomes = crate::journal::undo(n, force)
+        .map_err(|(path, removed)| changed_refusal(builtin, &path, removed, &force_call))?;
+    Ok(Value::Record(rewind_record(&outcomes, "restored")))
+}
+
+/// The `id` option of undo: `undo({id: N})` names one journal entry by the `seq`
+/// its journal row shows. `None` when no argument names an id.
+fn undo_id(builtin: &str, args: &[Value]) -> Result<Option<usize>> {
+    let mut id = None;
+    for arg in args {
+        let Value::Record(options) = arg else {
+            continue;
+        };
+        let Some(value) = options.get("id") else {
+            continue;
+        };
+        let parsed = match value {
+            Value::Int(n) if *n >= 1 => Some(*n as usize),
+            Value::Str(s) => s.trim().parse::<usize>().ok().filter(|n| *n >= 1),
+            _ => None,
+        };
+        match parsed {
+            Some(n) => id = Some(n),
+            None => {
+                return Err(crate::safety::bad_arg(
+                    builtin,
+                    "id: the Int id a journal row shows, from 1",
+                    &format!("{value}"),
+                ))
+            }
+        }
+    }
+    Ok(id)
+}
+
+/// Undo the one journal entry `seq`, and render the record as `undo` does.
+fn undo_by_id_record(builtin: &str, seq: usize, force: bool) -> Result<Value> {
+    use crate::journal::UndoRefusal;
+    let force_call = format!("{builtin}({{id: {seq}, force: true}})");
+    let outcomes = crate::journal::undo_by_id(seq, force).map_err(|refusal| match refusal {
+        UndoRefusal::NotFound => {
+            crate::safety::not_found(builtin, "journal entry", &seq.to_string())
+        }
+        UndoRefusal::LaterStep { seq: later, path } => crate::safety::bad_state_with_hint(
+            builtin,
+            &format!(
+                "entry {seq} changed {path}, and later entry {later} changed it too; undoing {seq} would also undo that change"
+            ),
+            &format!(
+                "{builtin}({{id: {later}}}) first, or {force_call} to undo {seq} anyway"
+            ),
+        ),
+        UndoRefusal::Changed { path, removed } => {
+            changed_refusal(builtin, &path, removed, &force_call)
         }
     })?;
     Ok(Value::Record(rewind_record(&outcomes, "restored")))
+}
+
+/// The refusal for a file that changed (or was removed) after its step. `force_call`
+/// is the call that restores the file anyway, named in the hint.
+fn changed_refusal(builtin: &str, path: &str, removed: bool, force_call: &str) -> anyhow::Error {
+    if removed {
+        crate::safety::bad_state_with_hint(
+            builtin,
+            &format!("{path} was removed after this step; undoing would recreate it"),
+            &format!("{force_call} recreates it anyway"),
+        )
+    } else {
+        crate::safety::bad_state_with_hint(
+            builtin,
+            &format!("{path} changed after this step; undoing would discard those changes"),
+            &format!("read the file, or {force_call} to restore it anyway"),
+        )
+    }
 }
 
 /// Refuse an undo or a redo when the journal is not recording in this session.
@@ -23212,10 +23285,8 @@ fn bi_apply(args: Vec<Value>, _input: Option<Value>) -> Result<Value> {
                 crate::safety::refuse_hard_linked_write("apply", path)
                     .map_err(|e| std::io::Error::other(e.to_string()))
                     .and_then(|()| {
-                        std::fs::OpenOptions::new()
-                            .create(true)
-                            .append(true)
-                            .open(path)
+                        crate::safety::open_in_place("apply", std::path::Path::new(path), true)
+                            .map_err(|e| std::io::Error::other(e.to_string()))
                             .and_then(|mut f| {
                                 f.write_all(content.as_deref().unwrap_or("").as_bytes())
                             })
@@ -24532,9 +24603,13 @@ fn bi_approve(args: Vec<Value>, _input: Option<Value>) -> Result<Value> {
     Ok(Value::Record(rec))
 }
 
+/// The note on an `audit_verify` record whose chain is not keyed.
+const UNKEYED_AUDIT_NOTE: &str = "the chain is not keyed: set IRONSHELL_AUDIT_KEY so an edited log cannot be re-chained; set IRONSHELL_AUDIT_LOG to keep the log outside the workspace";
+
 /// audit_verify(path?) - Verify the tamper-evident, hash-chained audit log
 /// (§7.5). With no argument, verifies the currently active log. Returns a
-/// record {valid, entries, path} or {valid: false, error, path}.
+/// record {valid, entries, path, keyed} or {valid: false, error, path, keyed}.
+/// An unkeyed chain also carries a note.
 fn bi_audit_verify(args: Vec<Value>, _input: Option<Value>) -> Result<Value> {
     let path = match args.first() {
         Some(Value::Str(s)) if !s.is_empty() => std::path::PathBuf::from(s),
@@ -24566,10 +24641,14 @@ fn bi_audit_verify(args: Vec<Value>, _input: Option<Value>) -> Result<Value> {
     // Whether the chain is keyed says how much a `valid` answer proves: an
     // unkeyed chain can be rewritten end to end by anyone who can write the
     // file, so it shows corruption, not tampering.
-    rec.insert(
-        "keyed".to_string(),
-        Value::Bool(crate::safety::audit_key().is_some()),
-    );
+    let keyed = crate::safety::audit_key().is_some();
+    rec.insert("keyed".to_string(), Value::Bool(keyed));
+    if !keyed {
+        rec.insert(
+            "note".to_string(),
+            Value::Str(UNKEYED_AUDIT_NOTE.to_string()),
+        );
+    }
     match crate::safety::verify_audit(&path) {
         // A log with no entries is what a truncation leaves behind, so it
         // attests to nothing and must not read as valid.
@@ -40982,7 +41061,13 @@ fn bi_gui_screenshot_window(args: Vec<Value>, input: Option<Value>) -> Result<Va
         }
         crate::safety::refuse_hard_linked_write(NAME, &path)?;
         crate::tx::snapshot(&path); // record pre-capture state if a transaction is active
-        fs::write(&path, &shot.stdout).map_err(|e| crate::safety::fs_error(NAME, &path, &e))?;
+        {
+            use std::io::Write as _;
+            let mut file = crate::safety::open_in_place(NAME, std::path::Path::new(&path), false)
+                .map_err(|e| crate::safety::in_place_error(NAME, &path, e))?;
+            file.write_all(&shot.stdout)
+                .map_err(|e| crate::safety::fs_error(NAME, &path, &e))?;
+        }
         Ok(Value::Str(path))
     }
     #[cfg(target_os = "windows")]
@@ -49663,6 +49748,7 @@ fn bi_file_write(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
 
     crate::tx::snapshot(&path); // record pre-write state if a transaction is active
 
+    let shared = shared_link_count(&path);
     write_file_atomically("file_write", &path, content.as_bytes())?;
 
     let mut result = BTreeMap::new();
@@ -49673,8 +49759,21 @@ fn bi_file_write(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
         Value::Int(content.lines().count() as i64),
     );
     result.insert("success".to_string(), Value::Bool(true));
+    if shared.is_some() {
+        result.insert("note".to_string(), Value::Str(SHARED_LINK_NOTE.to_string()));
+    }
 
     Ok(Value::Record(result))
+}
+
+/// The note on a result whose atomic replace broke a hard link: the rename
+/// gives the target a new file, so its other names keep the old content.
+const SHARED_LINK_NOTE: &str = "replaced a hard-linked file; its other links keep the old content";
+
+/// The link count of `path` when it has more than one hard link, read before an
+/// atomic replace of it. `None` for a file with one name or none.
+fn shared_link_count(path: &str) -> Option<u64> {
+    crate::safety::hard_link_count(std::path::Path::new(path)).filter(|n| *n > 1)
 }
 
 /// file_append(path, content) - Append content to a file
@@ -49747,11 +49846,8 @@ fn bi_file_append(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
     crate::tx::snapshot(&path); // record pre-append state if a transaction is active
 
     use std::io::Write;
-    let mut file = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&path)
-        .map_err(|error| crate::safety::fs_error("file_append", &path, &error))?;
+    let mut file = crate::safety::open_in_place("file_append", std::path::Path::new(&path), true)
+        .map_err(|e| crate::safety::in_place_error("file_append", &path, e))?;
 
     file.write_all(content.as_bytes())
         .map_err(|error| crate::safety::fs_error("file_append", &path, &error))?;
@@ -50008,9 +50104,11 @@ fn bi_file_patch(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
         ));
     }
     let written = !applied.is_empty();
+    let mut shared = None;
     if written {
         // Write back atomically
         crate::tx::snapshot(&path); // record pre-patch state if a transaction is active
+        shared = shared_link_count(&path);
         write_file_atomically(builtin, &path, content.as_bytes())?;
     } else {
         crate::journal::report_no_change();
@@ -50040,6 +50138,9 @@ fn bi_file_patch(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
         "patches_failed".to_string(),
         Value::Int(failed.len() as i64),
     );
+    if shared.is_some() {
+        result.insert("note".to_string(), Value::Str(SHARED_LINK_NOTE.to_string()));
+    }
 
     Ok(Value::Record(result))
 }
@@ -52495,7 +52596,11 @@ fn bi_git_ignore(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
     text.push('\n');
     crate::safety::refuse_hard_linked_write("git_ignore", &path)?;
     crate::tx::snapshot(&path);
-    std::fs::write(&path, text).map_err(|e| crate::safety::fs_error("git_ignore", &path, &e))?;
+    use std::io::Write as _;
+    let mut file = crate::safety::open_in_place("git_ignore", std::path::Path::new(&path), false)
+        .map_err(|e| crate::safety::in_place_error("git_ignore", &path, e))?;
+    file.write_all(text.as_bytes())
+        .map_err(|e| crate::safety::fs_error("git_ignore", &path, &e))?;
     Ok(Value::Bool(true))
 }
 
@@ -63549,13 +63654,11 @@ fn bi_touch(args: Vec<Value>, _input: Option<Value>) -> Result<Value> {
     // append failed with "is a directory".
     let file = if std::path::Path::new(&path).is_dir() {
         crate::tx::open_for_times(std::path::Path::new(&path))
+            .map_err(|e| crate::safety::fs_error("touch", &path, &e))
     } else {
-        std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&path)
-    }
-    .map_err(|e| crate::safety::fs_error("touch", &path, &e))?;
+        crate::safety::open_in_place("touch", std::path::Path::new(&path), true)
+            .map_err(|e| crate::safety::in_place_error("touch", &path, e))
+    }?;
     file.set_modified(std::time::SystemTime::now())
         .map_err(|e| crate::safety::fs_error("touch", &path, &e))?;
     Ok(Value::Str(path))
@@ -64869,6 +64972,12 @@ fn bi_dd_copy(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
     {
         // dd writes the destination in place, as the in-process copy does.
         crate::tx::snapshot(&dst);
+        // dd opens the destination itself, after this. The link check runs on a
+        // handle here, just before dd, so a link planted in between is not seen.
+        drop(
+            crate::safety::open_in_place("dd_copy", std::path::Path::new(&dst), false)
+                .map_err(|e| crate::safety::in_place_error("dd_copy", &dst, e))?,
+        );
         let argv: Vec<&str> = operands.iter().map(String::as_str).collect();
         let run = tool_run(
             "dd_copy",
@@ -64961,7 +65070,14 @@ fn dd_copy_in_process(src: &str, dst: &str, operands: &[String]) -> Result<Value
     let mut input = std::fs::File::open(src).map_err(|e| dd_io(NAME, src, &e))?;
     // Record dst's pre-image (or its absence) before File::create truncates it.
     crate::tx::snapshot(dst);
-    let mut output = std::fs::File::create(dst).map_err(|e| dd_io(NAME, dst, &e))?;
+    // Judged on its handle, then truncated: the copy starts with an empty file.
+    let mut output =
+        crate::safety::open_in_place(NAME, std::path::Path::new(dst), false).map_err(|e| {
+            match e.downcast::<std::io::Error>() {
+                Ok(io) => dd_io(NAME, dst, &io),
+                Err(other) => other,
+            }
+        })?;
     let started = std::time::Instant::now();
     let limit = std::time::Duration::from_secs(TOOL_LONG_DEADLINE_SECS);
     let mut buf = vec![0u8; block as usize];
@@ -72371,11 +72487,8 @@ fn bi_tee_output(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
     if append {
         use std::io::Write;
         crate::safety::refuse_hard_linked_write("tee", &path)?;
-        let mut file = fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&path)
-            .map_err(|e| crate::safety::fs_error("tee", &path, &e))?;
+        let mut file = crate::safety::open_in_place("tee", std::path::Path::new(&path), true)
+            .map_err(|e| crate::safety::in_place_error("tee", &path, e))?;
         file.write_all(text.as_bytes())
             .map_err(|e| crate::safety::fs_error("tee", &path, &e))?;
     } else {
