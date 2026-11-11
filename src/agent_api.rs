@@ -2773,6 +2773,10 @@ fn infer_return_type(name: &str) -> String {
     }
 }
 
+/// The doc of the `subject` parameter a subject-taking builtin advertises.
+const SUBJECT_PARAM_DOC: &str =
+    "the value the builtin acts on; in a pipeline it is the piped value";
+
 /// Build a catalogue entry from a declared signature, so the description an
 /// agent reads and the check the dispatcher runs come from one place.
 fn definition_from_signature(
@@ -2792,21 +2796,36 @@ fn definition_from_signature(
         })
         .unwrap_or_default();
 
-    let properties: serde_json::Map<String, JsonValue> = sig
-        .params
+    // A builtin with a declared subject takes it first. In a pipeline it is the
+    // piped value. It is required when the builtin is pipeline-only
+    // (`subject_required`), and also when it has a required parameter: a direct
+    // call's first argument is read as the subject, so `pow(3)` cannot give the
+    // exponent without one. Without it here an agent following the schema had
+    // no parameter to put the string in.
+    let subject_param = sig.subject.map(|ty| {
+        let required = sig.subject_required || sig.params.iter().any(|p| p.required);
+        (ty.as_str(), required, SUBJECT_PARAM_DOC)
+    });
+    let properties: serde_json::Map<String, JsonValue> = subject_param
         .iter()
-        .map(|p| {
+        .map(|(ty, _, doc)| {
+            (
+                "subject".to_string(),
+                json!({ "type": ty, "description": doc }),
+            )
+        })
+        .chain(sig.params.iter().map(|p| {
             (
                 p.name.to_string(),
                 json!({ "type": p.ty.as_str(), "description": p.doc }),
             )
-        })
+        }))
         .collect();
-    let required: Vec<&str> = sig
-        .params
+    let required: Vec<&str> = subject_param
         .iter()
-        .filter(|p| p.required)
-        .map(|p| p.name)
+        .filter(|(_, required, _)| *required)
+        .map(|_| "subject")
+        .chain(sig.params.iter().filter(|p| p.required).map(|p| p.name))
         .collect();
 
     BuiltinDefinition {
@@ -2821,16 +2840,22 @@ fn definition_from_signature(
             .map(str::to_string)
             .unwrap_or_else(|| categorize_builtin(primary_name)),
         signature: sig.render(),
-        parameters: sig
-            .params
+        parameters: subject_param
             .iter()
-            .map(|p| ParameterDefinition {
+            .map(|(ty, required, doc)| ParameterDefinition {
+                name: "subject".to_string(),
+                param_type: ty.to_string(),
+                description: doc.to_string(),
+                required: *required,
+                default: None,
+            })
+            .chain(sig.params.iter().map(|p| ParameterDefinition {
                 name: p.name.to_string(),
                 param_type: p.ty.as_str().to_string(),
                 description: p.doc.to_string(),
                 required: p.required,
                 default: None,
-            })
+            }))
             .collect(),
         return_type: sig.returns.to_string(),
         examples: sig
@@ -3237,16 +3262,27 @@ pub fn ontology_describe_json(query: &str) -> JsonValue {
             defs.iter().find(|d| d.name == member)
         });
     if let Some(d) = found {
+        // The subject is the first parameter of a subject-taking builtin, and
+        // in a pipeline it is the piped value. Marked so a reader knows it may
+        // be piped rather than written out.
+        let has_subject = crate::signature::signature_of(&d.name)
+            .is_some_and(|s| s.subject.is_some() && !s.params.iter().any(|p| p.name == "subject"));
         let params: Vec<JsonValue> = d
             .parameters
             .iter()
-            .map(|p| {
-                json!({
+            .enumerate()
+            .map(|(i, p)| {
+                let piped = has_subject && i == 0 && p.name == "subject";
+                let mut param = json!({
                     "name": p.name,
                     "type": p.param_type,
                     "required": p.required,
                     "description": p.description,
-                })
+                });
+                if piped {
+                    param["subject"] = json!(true);
+                }
+                param
             })
             .collect();
         let examples: Vec<JsonValue> = d
