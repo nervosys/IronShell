@@ -1519,7 +1519,7 @@ fn args_to_code(builtin: &str, args: &JsonValue) -> Result<String> {
 /// A builtin with a piped subject takes that subject as its first argument, so
 /// in this form the subject is the first position. It is named `subject` (or
 /// `input`) and its declared parameters follow it.
-fn named_args_to_positional(
+pub(crate) fn named_args_to_positional(
     builtin: &str,
     obj: &serde_json::Map<String, JsonValue>,
 ) -> Result<Vec<JsonValue>> {

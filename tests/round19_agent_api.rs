@@ -6,6 +6,7 @@
 //! session directory in a temp folder, so nothing is written under the
 //! repository.
 
+use iron_shell::mcp::McpServer;
 use serde_json::{json, Value};
 use std::io::Write;
 use std::process::{Command, Stdio};
@@ -131,4 +132,96 @@ fn item3_an_unknown_module_member_says_to_drop_the_prefix() {
     let hint = v["error"]["hint"].as_str().unwrap_or_default();
     assert!(hint.contains("drop the module prefix"), "{hint}");
     assert!(hint.contains("nosuch_zz"), "{hint}");
+}
+
+// ── Item 4: the MCP `ironshell` meta-tool's arguments ───────────────────────
+
+/// One `tools/call` through the stdio dispatcher, as a JSON-RPC response.
+fn mcp_call(name: &str, arguments: Value) -> Value {
+    McpServer::new()
+        .handle_rpc(&json!({
+            "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+            "params": { "name": name, "arguments": arguments }
+        }))
+        .expect("tools/call has a response")
+}
+
+/// The text of a `tools/call` result, which must be a result and not an error.
+fn mcp_text(res: &Value) -> String {
+    assert!(
+        res.get("error").is_none(),
+        "unexpected JSON-RPC error: {res}"
+    );
+    res["result"]["content"][0]["text"]
+        .as_str()
+        .unwrap_or_default()
+        .to_string()
+}
+
+#[test]
+fn item4_the_meta_tool_takes_an_args_object_as_named_arguments() {
+    let res = mcp_call(
+        "ironshell",
+        json!({"name": "upper", "args": {"subject": "hi"}}),
+    );
+    assert_eq!(res["result"]["isError"], false, "{res}");
+    assert_eq!(mcp_text(&res), "HI", "{res}");
+
+    let res = mcp_call(
+        "ironshell",
+        json!({"name": "date_add", "args": {"subject": "2024-02-28", "amount": 1, "unit": "days"}}),
+    );
+    assert_eq!(mcp_text(&res), "2024-02-29", "{res}");
+}
+
+#[test]
+fn item4_a_key_beside_args_is_refused_and_the_valid_keys_are_named() {
+    let res = mcp_call(
+        "ironshell",
+        json!({"name": "upper", "args": ["hi"], "bogus": 1}),
+    );
+    assert_eq!(res["result"]["isError"], true, "{res}");
+    let text = mcp_text(&res);
+    assert!(
+        text.contains("unknown argument 'bogus' for 'ironshell'"),
+        "{text}"
+    );
+    assert!(text.contains("valid arguments: name, args"), "{text}");
+
+    let res = mcp_call("ontology_describe", json!({"args": ["upper"], "bogus": 1}));
+    assert_eq!(res["result"]["isError"], true, "{res}");
+    let text = mcp_text(&res);
+    assert!(
+        text.contains("unknown argument 'bogus' for 'ontology_describe'"),
+        "{text}"
+    );
+    assert!(text.contains("valid arguments: args"), "{text}");
+}
+
+#[test]
+fn item4_a_missing_meta_tool_name_is_a_json_rpc_error_object() {
+    let res = mcp_call("ironshell", json!({"args": ["hi"]}));
+    assert!(res.get("result").is_none(), "{res}");
+    assert_eq!(res["error"]["code"], -32602, "{res}");
+    assert!(
+        res["error"]["message"]
+            .as_str()
+            .is_some_and(|m| m.contains("missing 'name'")),
+        "{res}"
+    );
+}
+
+#[test]
+fn item4_the_meta_tool_advertises_args_as_an_array_or_an_object() {
+    let tools = McpServer::new().list_builtin_tools();
+    let tool = tools
+        .iter()
+        .find(|t| t.name == "ironshell")
+        .expect("the ironshell tool");
+    assert_eq!(
+        tool.input_schema["properties"]["args"]["type"],
+        json!(["array", "object"]),
+        "{}",
+        tool.input_schema
+    );
 }

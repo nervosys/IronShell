@@ -490,6 +490,7 @@ impl McpServer {
                 input_schema: serde_json::json!({
                     "type": "object",
                     "properties": {
+                        "name": { "type": "string", "description": "a category or builtin name" },
                         "args": { "type": "array", "description": "[query]: a category or builtin name" }
                     },
                 }),
@@ -501,7 +502,10 @@ impl McpServer {
                     "type": "object",
                     "properties": {
                         "name": { "type": "string", "description": "builtin name to invoke" },
-                        "args": { "type": "array", "description": "positional arguments" }
+                        "args": {
+                            "type": ["array", "object"],
+                            "description": "the arguments: an array in parameter order, or an object keyed by parameter name (subject is the piped value)"
+                        }
                     },
                     "required": ["name"],
                 }),
@@ -625,6 +629,16 @@ impl McpServer {
                     is_error: Some(true),
                 };
             }
+            // With `args`, the builtin's arguments are all in `args`, so a key
+            // beside it is refused rather than dropped.
+            if let Some(map) = arguments.as_object() {
+                if map.contains_key("args") {
+                    if let Some(extra) = map.keys().find(|k| !matches!(k.as_str(), "name" | "args"))
+                    {
+                        return Self::unknown_argument("ironshell", extra, "name, args");
+                    }
+                }
+            }
             let mut rest = arguments.clone();
             if let Some(map) = rest.as_object_mut() {
                 map.remove("name");
@@ -648,7 +662,25 @@ impl McpServer {
             return self.call_builtin(name, arguments);
         };
         if let Some(args) = map.get("args") {
-            return self.call_builtin(name, args);
+            if let Some(extra) = map.keys().find(|k| k.as_str() != "args") {
+                return Self::unknown_argument(name, extra, "args");
+            }
+            // An object here is named, as in agent execute: each key is a
+            // parameter, mapped by the same conversion that `args` objects use.
+            return match args {
+                JsonValue::Object(named) => {
+                    match crate::agent_api::named_args_to_positional(name, named) {
+                        Ok(positional) => self.call_builtin(name, &JsonValue::Array(positional)),
+                        Err(e) => McpToolResult {
+                            content: vec![McpContent::Text {
+                                text: format!("{}", e),
+                            }],
+                            is_error: Some(true),
+                        },
+                    }
+                }
+                _ => self.call_builtin(name, args),
+            };
         }
         if map.is_empty() {
             return self.call_builtin(name, &JsonValue::Array(vec![]));
@@ -664,6 +696,16 @@ impl McpServer {
                 }],
                 is_error: Some(true),
             },
+        }
+    }
+
+    /// The refusal for a key the tool does not take, naming the keys it does.
+    fn unknown_argument(tool: &str, key: &str, valid: &str) -> McpToolResult {
+        McpToolResult {
+            content: vec![McpContent::Text {
+                text: format!("unknown argument '{key}' for '{tool}'; valid arguments: {valid}"),
+            }],
+            is_error: Some(true),
         }
     }
 
@@ -858,6 +900,21 @@ impl McpServer {
             .get("arguments")
             .cloned()
             .unwrap_or_else(|| JsonValue::Array(vec![]));
+        // The meta-tool without a builtin name is a protocol error too, in the
+        // same error object as an unknown tool, not a tool result.
+        if name == Self::META_INVOKE_TOOL
+            && arguments
+                .get("name")
+                .and_then(JsonValue::as_str)
+                .unwrap_or("")
+                .is_empty()
+        {
+            return Err((
+                -32602,
+                "ironshell: missing 'name' (the builtin to invoke)".to_string(),
+                Some(json!({ "code": "E_BAD_ARG" })),
+            ));
+        }
         let result = self.route_tool_call(name, &arguments);
         serde_json::to_value(result).map_err(|e| (-32603, format!("serialize result: {}", e), None))
     }
