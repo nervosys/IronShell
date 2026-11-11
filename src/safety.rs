@@ -2136,6 +2136,22 @@ pub fn not_found(builtin: &str, kind: &str, name: &str) -> anyhow::Error {
     })
 }
 
+/// `E_NOT_FOUND` for a journal step id that no step has. The journal's own
+/// word is "step": an id names a step, and "entry" is the file-edit term.
+pub fn journal_step_not_found(builtin: &str, id: usize) -> anyhow::Error {
+    anyhow::Error::new(SafetyError {
+        code: ErrorCode::NotFound,
+        message: format!("{builtin}: no journal step with id {id}"),
+        builtin: builtin.to_string(),
+        hint: "list the available journal steps with journal() and use an id from them".to_string(),
+        approval: None,
+        did_you_mean: Vec::new(),
+        expected: "an existing journal step".to_string(),
+        got: id.to_string(),
+        extra: serde_json::Map::new(),
+    })
+}
+
 /// A file edit whose target does not exist: E_NOT_FOUND, checked before any
 /// pattern is looked for, so a missing file is not reported as a missing
 /// pattern.

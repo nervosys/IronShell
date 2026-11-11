@@ -5932,7 +5932,11 @@ fn config_value_ok(path: &str, value: &Value) -> Result<()> {
         "history.enabled",
     ];
     let refuse = |expected: String| {
-        crate::safety::bad_arg(B, &expected, &format!("{} {value}", value.type_name()))
+        crate::safety::bad_arg(
+            B,
+            &expected,
+            &format!("{} {}", value.type_name(), value.to_display_string()),
+        )
     };
     if BOOL_PATHS.contains(&path) {
         return match value {
@@ -11823,7 +11827,7 @@ fn weighted_strategy(
                 return Err(crate::safety::bad_arg(
                     builtin,
                     &format!("weight for {key}: a whole number from 0 to {}", u32::MAX),
-                    &other.to_string(),
+                    &other.to_display_string(),
                 ))
             }
         };
@@ -22411,7 +22415,7 @@ fn undo_id(builtin: &str, args: &[Value]) -> Result<Option<usize>> {
                 return Err(crate::safety::bad_arg(
                     builtin,
                     "id: the Int id a journal row shows, from 1",
-                    &format!("{value}"),
+                    &value.to_display_string(),
                 ))
             }
         }
@@ -22424,9 +22428,7 @@ fn undo_by_id_record(builtin: &str, seq: usize, force: bool) -> Result<Value> {
     use crate::journal::UndoRefusal;
     let force_call = format!("{builtin}({{id: {seq}, force: true}})");
     let outcomes = crate::journal::undo_by_id(seq, force).map_err(|refusal| match refusal {
-        UndoRefusal::NotFound => {
-            crate::safety::not_found(builtin, "journal entry", &seq.to_string())
-        }
+        UndoRefusal::NotFound => crate::safety::journal_step_not_found(builtin, seq),
         UndoRefusal::LaterStep { seq: later, path } => crate::safety::bad_state_with_hint(
             builtin,
             &format!(

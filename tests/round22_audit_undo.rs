@@ -160,3 +160,33 @@ fn an_edited_keyed_entry_is_still_called_tampering() {
     let stdout = String::from_utf8_lossy(&out.stdout).to_string();
     assert!(stdout.contains("entry_hash mismatch (tampered)"), "{out:?}");
 }
+
+/// Stdout and stderr together, so a test does not care which one carries an error.
+fn both(out: &Output) -> String {
+    format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    )
+}
+
+#[test]
+fn an_undo_id_error_names_the_bad_value_without_ansi_codes() {
+    let d = Dirs::new("ansi");
+    let out = d.ish(&["-c", "undo({id: 0})"]);
+    let text = both(&out);
+    assert!(!text.contains('\u{1b}'), "{out:?}");
+    assert!(text.contains("got 0"), "{out:?}");
+}
+
+#[test]
+fn an_unknown_undo_id_says_journal_step_not_entry() {
+    let d = Dirs::new("unknownid");
+    let out = d.ish(&["-c", "undo({id: 6})"]);
+    let text = both(&out);
+    assert!(text.contains("no journal step with id 6"), "{out:?}");
+    assert!(text.contains("journal steps"), "{out:?}");
+    assert!(!text.contains("entrys"), "{out:?}");
+    assert!(!text.contains("no journal entry"), "{out:?}");
+    assert!(!text.contains('\u{1b}'), "{out:?}");
+}
