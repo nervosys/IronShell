@@ -2439,7 +2439,7 @@ impl Shell {
                     }
                 };
             }
-            "read" => return Flow::Next(self.read_builtin(args, stdin)),
+            "read" => return Flow::Next(self.read_builtin(args, env, stdin)),
             "pwd" => {
                 sink.out.extend_from_slice(logical_pwd().as_bytes());
                 sink.out.push(b'\n');
@@ -2456,7 +2456,16 @@ impl Shell {
         Flow::Next(self.external(argv, env, stdin, sink))
     }
 
-    fn read_builtin(&mut self, args: &[String], stdin: &mut Input) -> i32 {
+    /// `read [-r] [NAME...]`. The line is split into the names with the IFS in
+    /// force for this command: a prefix assignment (`IFS=, read`) for this
+    /// command only, else the shell's own IFS, else the default. Nothing is
+    /// stored in IFS by `read` itself.
+    fn read_builtin(
+        &mut self,
+        args: &[String],
+        env: &[(String, String)],
+        stdin: &mut Input,
+    ) -> i32 {
         let mut raw = false;
         let mut names = Vec::new();
         for a in args {
@@ -2473,7 +2482,9 @@ impl Shell {
                 names.push(a.clone());
             }
         }
-        if names.is_empty() {
+        // With no name, the line goes to REPLY whole, without field splitting.
+        let default_reply = names.is_empty();
+        if default_reply {
             names.push("REPLY".into());
         }
         if let Some(name) = names.iter().find(|n| crate::safety::env_change_refused(n)) {
@@ -2515,23 +2526,20 @@ impl Shell {
             }
             line = s;
         }
-        if names.len() == 1 && names[0] == "REPLY" {
+        if default_reply {
             self.set_var("REPLY", line);
             return 0;
         }
-        let trimmed = line.trim_matches(|c| c == ' ' || c == '\t');
-        let mut rest = trimmed;
-        for (k, n) in names.iter().enumerate() {
-            if k + 1 == names.len() {
-                self.set_var(n, rest.to_string());
-            } else {
-                let (head, tail) = match rest.find([' ', '\t']) {
-                    Some(p) => (&rest[..p], rest[p..].trim_start_matches([' ', '\t'])),
-                    None => (rest, ""),
-                };
-                self.set_var(n, head.to_string());
-                rest = tail;
-            }
+        let ifs = match env.iter().rev().find(|(n, _)| n == "IFS") {
+            Some((_, v)) => v.clone(),
+            None => self
+                .vars
+                .get("IFS")
+                .cloned()
+                .unwrap_or_else(|| " \t\n".to_string()),
+        };
+        for (n, v) in names.iter().zip(read_fields(&line, &ifs, names.len())) {
+            self.set_var(n, v);
         }
         0
     }
@@ -3499,6 +3507,30 @@ fn unescape_echo(s: &str) -> (Vec<u8>, bool) {
         }
     }
     (out, false)
+}
+
+/// `read`'s field splitting, as POSIX gives it: the line as `count` values.
+/// Leading and trailing IFS white space is dropped; each run of IFS white space
+/// delimits, and each non-white IFS character delimits on its own, so two in a
+/// row make an empty field. The last value takes the rest of the line with its
+/// trailing IFS white space dropped. An empty IFS splits nothing.
+fn read_fields(line: &str, ifs: &str, count: usize) -> Vec<String> {
+    let is_ws = |c: char| matches!(c, ' ' | '\t' | '\n') && ifs.contains(c);
+    let is_sep = |c: char| ifs.contains(c);
+    let mut out = Vec::with_capacity(count);
+    let mut rest = line.trim_start_matches(|c: char| is_ws(c));
+    for _ in 1..count {
+        let end = rest.find(|c: char| is_sep(c)).unwrap_or(rest.len());
+        out.push(rest[..end].to_string());
+        rest = rest[end..].trim_start_matches(|c: char| is_ws(c));
+        if let Some(c) = rest.chars().next() {
+            if is_sep(c) && !is_ws(c) {
+                rest = rest[c.len_utf8()..].trim_start_matches(|c: char| is_ws(c));
+            }
+        }
+    }
+    out.push(rest.trim_end_matches(|c: char| is_ws(c)).to_string());
+    out
 }
 
 fn echo(args: &[String], sink: &mut Sink) -> Util {

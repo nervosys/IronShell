@@ -95,6 +95,52 @@ fn printf_decodes_hex_in_format_and_in_b() {
 }
 
 #[test]
+fn read_splits_on_a_prefix_ifs_and_gives_the_rest_to_the_last_name() {
+    let dir = scratch("read_ifs_prefix");
+    std::fs::write(dir.join("row.csv"), "a,b c,\"d\"\n").expect("write row");
+    let s = script(
+        &dir,
+        "r.sh",
+        "IFS=, read -r a b c < row.csv\necho \"[$a][$b][$c]\"\n",
+    );
+    let (code, out, err) = ish(&dir, &["-b", &s]);
+    assert_eq!(code, 0, "{err}");
+    assert_eq!(out, "[a][b c][\"d\"]");
+}
+
+#[test]
+fn an_ifs_prefix_is_for_one_read_and_a_plain_ifs_holds() {
+    let dir = scratch("read_ifs_scope");
+    std::fs::write(dir.join("row.csv"), "a,b c,\"d\"\n").expect("write row");
+    std::fs::write(dir.join("words.txt"), "p q r\n").expect("write words");
+    let s = script(
+        &dir,
+        "r.sh",
+        "IFS=, read -r x < row.csv\nread -r a b c < words.txt\nIFS=,\nread -r d e < row.csv\necho \"[$a][$b][$c] [$d][$e] ifs=[$IFS]\"\n",
+    );
+    let (code, out, err) = ish(&dir, &["-b", &s]);
+    assert_eq!(code, 0, "{err}");
+    // The prefix `IFS=,` ended with its read, so the second read splits on
+    // blanks. The later `IFS=,` is an assignment, which stays for the third.
+    assert_eq!(out, "[p][q][r] [a][b c,\"d\"] ifs=[,]");
+}
+
+#[test]
+fn read_collapses_blank_ifs_and_keeps_empty_fields_for_a_comma() {
+    let dir = scratch("read_ifs_fields");
+    std::fs::write(dir.join("ws.txt"), "  x   y z  \n").expect("write ws");
+    std::fs::write(dir.join("gap.txt"), "1,,3\n").expect("write gap");
+    let s = script(
+        &dir,
+        "r.sh",
+        "read a b < ws.txt\necho \"[$a][$b]\"\nIFS=, read a b c < gap.txt\necho \"[$a][$b][$c]\"\n",
+    );
+    let (code, out, err) = ish(&dir, &["-b", &s]);
+    assert_eq!(code, 0, "{err}");
+    assert_eq!(out, "[x][y z]\n[1][][3]");
+}
+
+#[test]
 fn a_here_string_is_named_and_refused_before_anything_runs() {
     let dir = scratch("here_string");
     let s = script(&dir, "h.sh", "echo before\ngrep -c b <<< \"abc\"\n");
