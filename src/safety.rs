@@ -5093,10 +5093,16 @@ pub fn verify_audit_with(path: &PathBuf, key: Option<&[u8]>) -> Result<u64, Stri
         let recomputed = chain_tag(key, &obj.to_string())
             .map_err(|e| format!("line {}: chain tag refused: {e}", lineno + 1))?;
         if !ironcrypto::core_types::ct::verify(stored.as_bytes(), recomputed.as_bytes()) {
-            return Err(format!(
-                "line {}: entry_hash mismatch (tampered)",
-                lineno + 1
-            ));
+            // An unkeyed chain is plain SHA-256 that anyone can recompute, so
+            // a mismatch there cannot be attributed to tampering.
+            return Err(if key.is_some() {
+                format!("line {}: entry_hash mismatch (tampered)", lineno + 1)
+            } else {
+                format!(
+                    "line {}: entry_hash mismatch (the log was edited or corrupted; an unkeyed chain cannot tell which)",
+                    lineno + 1
+                )
+            });
         }
 
         let prev_hash = obj.get("prev_hash").and_then(|v| v.as_str()).unwrap_or("");

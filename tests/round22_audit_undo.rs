@@ -121,3 +121,42 @@ fn a_chain_key_of_the_minimum_length_is_used_without_a_warning() {
         "{out:?}"
     );
 }
+
+#[test]
+fn an_edited_unkeyed_entry_is_not_called_tampering() {
+    let d = Dirs::new("unkeyedmismatch");
+    let log = d.root.join("audit.log");
+    // One entry whose stored hash cannot match its contents. No `mac` field, so
+    // the chain is read as unkeyed.
+    std::fs::write(
+        &log,
+        "{\"entry_hash\":\"00\",\"prev_hash\":\"\",\"seq\":1}\n",
+    )
+    .unwrap();
+
+    let out = d.ish_keyed(&["-c", verify_call(&log).as_str()], None);
+    let stdout = String::from_utf8_lossy(&out.stdout).to_string();
+    assert!(
+        stdout.contains(
+            "entry_hash mismatch (the log was edited or corrupted; an unkeyed chain cannot tell which)"
+        ),
+        "{out:?}"
+    );
+    assert!(!stdout.contains("(tampered)"), "{out:?}");
+}
+
+#[test]
+fn an_edited_keyed_entry_is_still_called_tampering() {
+    let d = Dirs::new("keyedmismatch");
+    let log = d.root.join("audit.log");
+    std::fs::write(
+        &log,
+        "{\"entry_hash\":\"00\",\"mac\":\"hmac-sha256\",\"prev_hash\":\"\",\"seq\":1}\n",
+    )
+    .unwrap();
+
+    let key = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+    let out = d.ish_keyed(&["-c", verify_call(&log).as_str()], Some(key));
+    let stdout = String::from_utf8_lossy(&out.stdout).to_string();
+    assert!(stdout.contains("entry_hash mismatch (tampered)"), "{out:?}");
+}
