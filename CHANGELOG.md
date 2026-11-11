@@ -18,6 +18,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - On Windows, a script run as a command in `ish -b` is judged by the read jail before its child shell starts, so a script outside the workspace is refused. Script nesting stops at 32 levels.
 - A path that does not exist is judged by where it would land: `sub/../missing.txt` inside the workspace is E_NOT_FOUND, `nosuchdir/../../x` is E_OUTSIDE_WORKSPACE, and a dangling link is judged by its target, so a link to a missing file outside the workspace is refused.
 - Agent-mode hints no longer suggest setting `IRONSHELL_ALLOW_SH`.
+- An in-place write in agent mode (a redirection, `tee`, `touch`, `file_append`, `dd_copy` on Windows, `git_ignore`) reads the link count from the file it opened, before truncating, so a hard link planted between the check and the write is refused too. The HTTP `execute` endpoints parse their body as stdin does, so they refuse a repeated top-level key and answer a malformed body with a coded JSON error.
 
 ### Changed
 
@@ -63,6 +64,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `&&` and `||` short-circuit: the right operand runs only when the left one does not decide the result, so `r.amount != "" && r.amount > 100` no longer fails on the empty row it guards.
 - `ish agent execute` exits 1 whenever the response has `success: false`, not only for a malformed request. `retryable` is false for E_PARSE, E_BAD_ARG, E_UNKNOWN_BUILTIN and E_UNKNOWN_NAME in Agent API responses.
 - A write to the audit log is refused as E_POLICY_DENY (the log is protected), not E_OUTSIDE_WORKSPACE. A script outside the workspace refused in `ish -b` names `sh`, not `cat`.
+- An empty cell in a CSV column whose other cells are all numbers reads as null, so `sum`, `avg` and SQL `count(column)` skip it. Text columns keep "".
+- Tool schemas list a builtin's subject first and its parameters in declaration order. A subject is required in tool schemas when the builtin has no parameters, and so is a parameter that defaults to the pipeline input (`file_write`'s `content`): a tool call has no pipeline.
+- MCP `initialize` answers the client's protocol version when it is 2025-06-18, 2025-03-26 or 2024-11-05, and 2025-06-18 otherwise. An agent request that repeats a top-level key is refused as E_PARSE.
 
 ### Added
 
@@ -100,6 +104,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - An unknown builtin guessed from another tool (`file_read`, `read_file`) names the real one (`read_text`).
 - `date_add` takes `weeks`, `months` and `years`. Months and years are calendar steps that clamp to the month's last day: `date_add("2024-01-31", 1, "months")` is `2024-02-29`.
 - Agent API `call` accepts a module-qualified name (`math.sqrt`), as `eval` does. The MCP `ironshell` tool takes `args` as an object of named parameters too.
+- `r.field = value` (and `r.a.b = value`) on a `mut` record rebinds it with the field set; other copies keep their value.
+- `sql` and `sql_value` take a trailing Array of bind parameters for `?` placeholders: `rows | sql("select * from t where amount > ?", [100])`.
+- `to_csv(rows, columns)` writes the named columns in that order; `csv_columns(path_or_text)` returns a CSV header in file order.
+- `undo({id: N})` undoes one journal step out of order; it is refused (E_BAD_STATE) when a later step changed the same file, unless `force: true`.
+- `audit_verify` notes when the audit chain has no key, naming IRONSHELL_AUDIT_KEY and IRONSHELL_AUDIT_LOG.
+- `file_write`, `file_patch` and `file_replace` add a `note` when the file they replaced was hard-linked: its other links keep the old content.
 
 ### Fixed
 
@@ -151,6 +161,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - A missing parameter after a subject given as the first argument names the parameter (`pow: missing required argument 'exponent'`), not "0 of 1 required". `sqrt` of a negative number says the value must be at least 0.
 - A number added to or compared with an empty String says the String is empty, the usual sign of a blank CSV field. `date_diff`'s docs say it answers b minus a.
 - A pipeline request without `steps`, and several requests on one `execute` stdin, get hints showing the right shape.
+- `x = x + e` on a mutable String or Array, and a lambda body `acc + e` (as in `reduce`), append in place instead of copying, so building a string step by step is linear.
+- `apply`'s copy step, and `dd_copy` under the jail on every platform, write through a destination handle whose link count was checked, closing the last check-then-write windows.
+- `ontology_describe` of a builtin carries the same `json_schema` the `describe` action returns. `file_append`'s docs say content is appended exactly as given, with no newline added.
 
 
 ## [14.0.1] - 2026-11-08
