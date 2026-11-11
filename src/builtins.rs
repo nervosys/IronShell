@@ -12676,7 +12676,8 @@ fn bi_type_fields(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
                         }
                         Value::Array(a) => format!("[…] ({} items)", a.len()),
                         Value::Record(r) => format!("{{…}} ({} fields)", r.len()),
-                        other => format!("{}", other),
+                        Value::Str(s) => format!("\"{s}\""),
+                        other => other.to_display_string(),
                     };
                     r.insert("preview".to_string(), Value::Str(preview));
                     Value::Record(r)
@@ -72493,9 +72494,10 @@ fn bi_tee_output(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
             append = *flag;
         }
     }
+    // Plain text, never the coloured terminal rendering: the file is data.
     let text = match value {
         Value::Str(text) => text,
-        other => format!("{other}"),
+        other => other.to_display_string(),
     };
     crate::safety::guard(crate::safety::GuardCtx {
         builtin: "tee_output",
