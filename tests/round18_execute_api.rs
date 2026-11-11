@@ -193,13 +193,21 @@ fn assert_error_object(v: &Value, code: &str) {
     assert!(v["error"]["retryable"].is_boolean(), "{v}");
 }
 
+/// Run `ish agent execute` with one request that fails, and parse its stdout as
+/// JSON. A failed call exits 1, as a malformed request does.
+fn execute_failure(request: &str) -> Value {
+    let (code, out, err) = run_agent(&["execute"], request.as_bytes());
+    assert_eq!(code, Some(1), "stdout: {out}; stderr: {err}");
+    serde_json::from_str(&out).unwrap_or_else(|e| panic!("stdout is not JSON ({e}): {out}"))
+}
+
 #[test]
 fn every_failure_has_an_error_object_with_code_message_hint_and_retryable() {
-    let describe = execute(r#"{"action":"describe","builtin":"no_such_builtin_zz"}"#);
+    let describe = execute_failure(r#"{"action":"describe","builtin":"no_such_builtin_zz"}"#);
     assert_error_object(&describe, "E_UNKNOWN_BUILTIN");
     assert_eq!(describe["code"], json!("E_UNKNOWN_BUILTIN"), "{describe}");
 
-    let convert = execute(r#"{"action":"call","builtin":"upper","args":{"bogus":1}}"#);
+    let convert = execute_failure(r#"{"action":"call","builtin":"upper","args":{"bogus":1}}"#);
     assert_error_object(&convert, "E_BAD_ARG");
     assert!(
         convert["error"]["message"]
@@ -208,7 +216,7 @@ fn every_failure_has_an_error_object_with_code_message_hint_and_retryable() {
         "{convert}"
     );
 
-    let parse = execute(r#"{"action":"eval","code":"((("}"#);
+    let parse = execute_failure(r#"{"action":"eval","code":"((("}"#);
     assert_error_object(&parse, "E_PARSE");
 }
 
