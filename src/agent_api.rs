@@ -103,7 +103,7 @@ pub struct PipelineStep {
 }
 
 /// Schema output format
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum SchemaFormat {
     /// JSON Schema format
@@ -165,6 +165,22 @@ pub enum SchemaFormat {
     OwlTurtle,
     /// SHACL validation shapes
     SHACL,
+}
+
+/// A schema format is read from the name `ish agent schema -f` takes (`openai`,
+/// `claude`, ...). The serde names of the variants (`open_a_i`, `json_schema`)
+/// are accepted too, as `parse_schema_format` accepts them.
+impl<'de> Deserialize<'de> for SchemaFormat {
+    fn deserialize<D: serde::Deserializer<'de>>(
+        deserializer: D,
+    ) -> std::result::Result<Self, D::Error> {
+        let name = String::deserialize(deserializer)?;
+        parse_schema_format(&name).ok_or_else(|| {
+            serde::de::Error::custom(format!(
+                "unknown format '{name}'; expected one of: {SCHEMA_FORMATS_HINT}"
+            ))
+        })
+    }
 }
 
 /// Agent API response
@@ -6869,8 +6885,10 @@ pub fn process_json_request(json_str: &str) -> Result<String> {
 pub fn parse_schema_format(format: &str) -> Option<SchemaFormat> {
     match format.to_lowercase().as_str() {
         // OpenAI family
-        "openai" | "gpt" | "chatgpt" => Some(SchemaFormat::OpenAI),
-        "azure" | "azure_openai" | "azureopenai" => Some(SchemaFormat::AzureOpenAI),
+        "openai" | "gpt" | "chatgpt" | "open_a_i" => Some(SchemaFormat::OpenAI),
+        "azure" | "azure_openai" | "azureopenai" | "azure_open_a_i" => {
+            Some(SchemaFormat::AzureOpenAI)
+        }
 
         // Anthropic
         "claude" | "anthropic" => Some(SchemaFormat::Claude),
@@ -6891,7 +6909,7 @@ pub fn parse_schema_format(format: &str) -> Option<SchemaFormat> {
         "grok" | "xai" => Some(SchemaFormat::Grok),
 
         // DeepSeek
-        "deepseek" | "deepseek-r1" => Some(SchemaFormat::DeepSeek),
+        "deepseek" | "deepseek-r1" | "deep_seek" => Some(SchemaFormat::DeepSeek),
 
         // AWS
         "bedrock" | "aws" | "amazon" => Some(SchemaFormat::Bedrock),
@@ -6903,31 +6921,31 @@ pub fn parse_schema_format(format: &str) -> Option<SchemaFormat> {
         "ollama" => Some(SchemaFormat::Ollama),
         // LM Studio serves the OpenAI chat-completions API.
         "lmstudio" | "lm-studio" | "lm_studio" => Some(SchemaFormat::OpenAI),
-        "vllm" => Some(SchemaFormat::VLLM),
+        "vllm" | "v_llm" => Some(SchemaFormat::VLLM),
 
         // Platforms
-        "huggingface" | "hf" | "tgi" => Some(SchemaFormat::HuggingFace),
-        "openrouter" => Some(SchemaFormat::OpenRouter),
+        "huggingface" | "hugging_face" | "hf" | "tgi" => Some(SchemaFormat::HuggingFace),
+        "openrouter" | "open_router" => Some(SchemaFormat::OpenRouter),
 
         // Chinese AI providers
         "kimi" | "moonshot" => Some(SchemaFormat::Kimi),
         "yi" | "01ai" | "lingyiwanwu" => Some(SchemaFormat::Yi),
-        "glm" | "chatglm" | "zhipu" => Some(SchemaFormat::GLM),
+        "glm" | "g_l_m" | "chatglm" | "zhipu" => Some(SchemaFormat::GLM),
 
         // Additional SOTA providers
         "reka" => Some(SchemaFormat::Reka),
-        "ai21" | "jamba" | "jurassic" => Some(SchemaFormat::AI21),
+        "ai21" | "a_i21" | "jamba" | "jurassic" => Some(SchemaFormat::AI21),
         "perplexity" | "sonar" => Some(SchemaFormat::Perplexity),
         "together" | "together-ai" => Some(SchemaFormat::Together),
         "groq" => Some(SchemaFormat::Groq),
         "fireworks" | "fireworks-ai" => Some(SchemaFormat::Fireworks),
 
         // Standard formats
-        "json" | "jsonschema" | "full" => Some(SchemaFormat::JsonSchema),
+        "json" | "jsonschema" | "json_schema" | "full" => Some(SchemaFormat::JsonSchema),
         "compact" | "ontology" => Some(SchemaFormat::Ontology),
-        "jsonld" | "json-ld" | "linked_data" => Some(SchemaFormat::JsonLD),
+        "jsonld" | "json-ld" | "json_ld" | "linked_data" => Some(SchemaFormat::JsonLD),
         "owl" | "rdf" | "turtle" | "owl_turtle" => Some(SchemaFormat::OwlTurtle),
-        "shacl" | "shapes" => Some(SchemaFormat::SHACL),
+        "shacl" | "shapes" | "s_h_a_c_l" => Some(SchemaFormat::SHACL),
 
         _ => None,
     }

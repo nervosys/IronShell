@@ -66,6 +66,22 @@ fn an_array_result_is_a_json_array_not_text() {
 }
 
 #[test]
+fn schema_takes_the_cli_format_names_and_the_serde_names() {
+    for format in [
+        "openai",
+        "claude",
+        "azure_openai",
+        "deepseek",
+        "vllm",
+        "json_schema",
+        "open_a_i",
+    ] {
+        let v = execute(&format!(r#"{{"action":"schema","format":"{format}"}}"#));
+        assert_eq!(v["success"], json!(true), "format {format}: {v}");
+    }
+}
+
+#[test]
 fn a_record_result_is_a_json_object_and_scalars_keep_their_types() {
     let v = execute(r#"{"action":"eval","code":"{x: 1, y: \"two\"}"}"#);
     assert_eq!(v["result"], json!({"x": 1, "y": "two"}), "{v}");
