@@ -4,6 +4,7 @@
 //! `json_schema`, a request that repeats a top-level key is refused, and MCP
 //! `initialize` negotiates the protocol version.
 
+use iron_shell::agent_api::{ontology_describe_json, parse_request, process_request};
 use serde_json::Value as JsonValue;
 
 /// The OpenAI function parameters the tool `name` is given.
@@ -87,4 +88,21 @@ fn item2_a_parameter_that_defaults_to_the_pipeline_is_required() {
     let required = required_of(&schema);
     assert!(required.contains(&"path".to_string()), "{schema}");
     assert!(required.contains(&"content".to_string()), "{schema}");
+}
+
+#[test]
+fn item3_ontology_describe_carries_the_json_schema_the_describe_action_gives() {
+    for name in ["pow", "upper", "split", "file_write"] {
+        let described = ontology_describe_json(name);
+        let text = format!(r#"{{"action":"describe","builtin":"{name}"}}"#);
+        let request = parse_request(&text)
+            .unwrap_or_else(|_| panic!("describe request for {name} does not parse"));
+        let response = process_request(&request);
+        let result = response
+            .result
+            .expect("describe action answers a definition");
+
+        assert!(!described["json_schema"].is_null(), "{name}: {described}");
+        assert_eq!(described["json_schema"], result["json_schema"], "{name}");
+    }
 }

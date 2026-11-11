@@ -3668,6 +3668,10 @@ pub fn ontology_describe_json(query: &str) -> JsonValue {
             "parameters": params,
             "examples": examples,
             "aliases": d.aliases,
+            // The same schema the `describe` action returns for this builtin:
+            // both read the one catalogue entry, so the tool schema and the
+            // description cannot disagree.
+            "json_schema": d.json_schema.clone(),
         });
         // An alias is documented as one: when the signature names a different
         // builtin, that is the one the call runs (`delete_lines` runs
