@@ -7884,6 +7884,7 @@ pub const SELF_GUARDED: &[&str] = &[
     "gzip_compress",
     "gzip_decompress",
     "http_get",
+    "json_set",
     "k8s_delete",
     "k8s_exec",
     "ltrace_cmd",
