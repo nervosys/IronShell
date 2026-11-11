@@ -10034,7 +10034,7 @@ fn bi_group_object(args: Vec<Value>, input: Option<Value>, env: &mut Env) -> Res
             // in the same order as before.
             let mut groups: BTreeMap<(String, &'static str), Vec<Value>> = BTreeMap::new();
             for (key, item) in keyed {
-                groups.entry(key).or_insert_with(Vec::new).push(item);
+                groups.entry(key).or_default().push(item);
             }
 
             let mut result = Vec::new();
