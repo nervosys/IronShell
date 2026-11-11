@@ -22488,14 +22488,18 @@ fn refuse_unless_recording(builtin: &str) -> Result<()> {
 /// applied. The counts are kept apart because "3 restored" and "3 restored, 1
 /// skipped" call for different decisions.
 fn rewind_record(
-    outcomes: &[crate::journal::Outcome],
+    outcomes: &[crate::journal::Rewound],
     applied_key: &str,
 ) -> std::collections::BTreeMap<String, Value> {
     let (mut applied, mut removed, mut skipped, mut failed) = (0, 0, 0, 0);
     let mut rows = Vec::with_capacity(outcomes.len());
-    for o in outcomes {
+    for r in outcomes {
         let mut m = std::collections::BTreeMap::new();
-        let (action, what, why) = match o {
+        // The step's id, as journal() and session_history() name it.
+        if let Some(seq) = r.seq {
+            m.insert("seq".to_string(), Value::Int(seq as i64));
+        }
+        let (action, what, why) = match &r.outcome {
             crate::journal::Outcome::Restored(w) => {
                 applied += 1;
                 ("restored", w.clone(), String::new())
@@ -54668,10 +54672,11 @@ fn bi_session_undo(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
 fn bi_session_redo(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
     let n = step_count_arg("session_redo", &args, &input)?;
     refuse_unless_recording("session_redo")?;
-    Ok(Value::Record(rewind_record(
-        &crate::journal::redo(n),
-        "reapplied",
-    )))
+    let outcomes: Vec<crate::journal::Rewound> = crate::journal::redo(n)
+        .into_iter()
+        .map(|outcome| crate::journal::Rewound { seq: None, outcome })
+        .collect();
+    Ok(Value::Record(rewind_record(&outcomes, "reapplied")))
 }
 
 fn bi_session_checkpoint(args: Vec<Value>, input: Option<Value>) -> Result<Value> {

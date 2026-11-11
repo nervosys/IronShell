@@ -190,3 +190,93 @@ fn an_unknown_undo_id_says_journal_step_not_entry() {
     assert!(!text.contains("no journal entry"), "{out:?}");
     assert!(!text.contains('\u{1b}'), "{out:?}");
 }
+
+/// The stdout of `ish -c expr` in the session `d`, with whitespace removed, so
+/// that pretty and compact printing of the same value compare equal.
+fn probe(d: &Dirs, expr: &str) -> String {
+    let out = d.ish(&["-c", expr]);
+    assert!(out.status.success(), "{out:?}");
+    String::from_utf8_lossy(&out.stdout)
+        .chars()
+        .filter(|c| !c.is_whitespace())
+        .collect()
+}
+
+/// Four writes in one session: p (id 1), q (2), p again (3), r (4).
+fn four_writes(d: &Dirs) {
+    for call in [
+        r#"file_write("p.txt", "one\n")"#,
+        r#"file_write("q.txt", "two\n")"#,
+        r#"file_write("p.txt", "three\n")"#,
+        r#"file_write("r.txt", "four\n")"#,
+    ] {
+        let out = d.ish(&["-c", call]);
+        assert!(out.status.success(), "{out:?}");
+    }
+}
+
+#[test]
+fn an_undone_step_keeps_its_id_in_every_listing() {
+    let d = Dirs::new("ids");
+    four_writes(&d);
+    assert_eq!(
+        probe(&d, "journal().entries | map(fn(r) => r.seq)"),
+        "[1,2,3,4]"
+    );
+
+    let undone = d.ish(&["-c", "undo({id: 2})"]);
+    assert!(undone.status.success(), "{undone:?}");
+    assert!(!d.workspace.join("q.txt").exists(), "{undone:?}");
+    assert_eq!(
+        probe(&d, "journal().entries | map(fn(r) => r.seq)"),
+        "[1,3,4]"
+    );
+    // The undone step is listed under the id it was recorded with, not the
+    // position it had in the undone list (which was 1).
+    assert_eq!(
+        probe(&d, "session_history().undone | map(fn(r) => r.seq)"),
+        "[2]"
+    );
+    assert_eq!(
+        probe(&d, "session_history().done | map(fn(r) => r.seq)"),
+        "[1,3,4]"
+    );
+}
+
+#[test]
+fn the_undo_record_names_each_step_by_its_id() {
+    let d = Dirs::new("undorecord");
+    four_writes(&d);
+    assert_eq!(
+        probe(&d, "undo({id: 3}).steps | map(fn(r) => r.seq)"),
+        "[3]"
+    );
+    assert_eq!(
+        probe(&d, "journal().entries | map(fn(r) => r.seq)"),
+        "[1,2,4]"
+    );
+}
+
+#[test]
+fn a_write_after_undoing_the_last_two_steps_gets_the_next_id_not_a_freed_one() {
+    let d = Dirs::new("nextid");
+    four_writes(&d);
+    let undone = d.ish(&["-c", "undo(2)"]);
+    assert!(undone.status.success(), "{undone:?}");
+    assert_eq!(
+        probe(&d, "journal().entries | map(fn(r) => r.seq)"),
+        "[1,2]"
+    );
+
+    let write = d.ish(&["-c", r#"file_write("s.txt", "five\n")"#]);
+    assert!(write.status.success(), "{write:?}");
+    assert_eq!(
+        probe(&d, "journal().entries | map(fn(r) => r.seq)"),
+        "[1,2,5]"
+    );
+    // A new step ends the undone future, so nothing is left to re-apply.
+    assert_eq!(
+        probe(&d, "session_history().undone | map(fn(r) => r.seq)"),
+        "[]"
+    );
+}
