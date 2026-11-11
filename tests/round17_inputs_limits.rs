@@ -126,3 +126,61 @@ fn a_file_without_a_bom_is_read_unchanged() {
     let out = ish_in(&proj, r#"cat("plain.txt") == "hello\n""#);
     assert_eq!(ok_stdout(&out), "true");
 }
+
+/// A text reader's refusal of bytes that are not UTF-8: E_BAD_VALUE, named for
+/// the builtin, with the byte offset of the first bad byte and a hint that
+/// says what to do. It is not an I/O failure.
+fn assert_not_utf8_refusal(out: &Output, builtin: &str, offset: &str) {
+    assert!(!out.status.success(), "non-UTF-8 text must be refused");
+    let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+    assert!(stderr.contains("E_BAD_VALUE"), "code: {stderr}");
+    assert!(
+        stderr.contains(&format!("{builtin}: `")),
+        "builtin: {stderr}"
+    );
+    assert!(stderr.contains(offset), "offset: {stderr}");
+    assert!(
+        stderr.contains("the file is not UTF-8 text; convert it to UTF-8 first"),
+        "hint: {stderr}"
+    );
+    assert!(
+        !stderr.contains("stream did not contain") && !stderr.contains("E_IO"),
+        "not an I/O failure: {stderr}"
+    );
+}
+
+#[test]
+fn cat_of_a_file_that_is_not_utf8_names_the_first_bad_byte() {
+    let dir = scratch("not_utf8_cat");
+    let proj = dir.join("proj");
+    std::fs::write(proj.join("bad.txt"), b"ok\n\xFF\n").unwrap();
+    let out = ish_in(&proj, r#"cat("bad.txt")"#);
+    assert_not_utf8_refusal(&out, "cat", "byte offset 3");
+}
+
+#[test]
+fn file_read_of_a_latin1_file_is_refused_at_the_bad_byte() {
+    let dir = scratch("not_utf8_file_read");
+    let proj = dir.join("proj");
+    std::fs::write(proj.join("latin1.txt"), b"caf\xE9\n").unwrap();
+    let out = ish_in(&proj, r#"file.read("latin1.txt")"#);
+    assert_not_utf8_refusal(&out, "cat", "byte offset 3");
+}
+
+#[test]
+fn open_of_a_file_that_is_not_utf8_is_refused_at_the_bad_byte() {
+    let dir = scratch("not_utf8_open");
+    let proj = dir.join("proj");
+    std::fs::write(proj.join("bad.txt"), b"C\xC3\x28").unwrap();
+    let out = ish_in(&proj, r#"open("bad.txt")"#);
+    assert_not_utf8_refusal(&out, "open", "byte offset 1");
+}
+
+#[test]
+fn read_text_of_a_file_that_is_not_utf8_is_refused_at_the_bad_byte() {
+    let dir = scratch("not_utf8_read_text");
+    let proj = dir.join("proj");
+    std::fs::write(proj.join("bad.txt"), b"ok\n\xFF\n").unwrap();
+    let out = ish_in(&proj, r#"read_text("bad.txt")"#);
+    assert_not_utf8_refusal(&out, "read_text", "byte offset 3");
+}

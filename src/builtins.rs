@@ -8810,9 +8810,9 @@ fn read_named_file(builtin: &str, path_str: &str) -> Result<String> {
         .map_err(|e| crate::safety::fs_error(builtin, &validated_path, &e))?;
     check_file_size_limit(metadata.len()).context(format!("{builtin}: file too large"))?;
 
-    fs::read_to_string(&validated_path)
-        .map(without_bom)
-        .map_err(|e| crate::safety::fs_error(builtin, &validated_path, &e))
+    let bytes = fs::read(&validated_path)
+        .map_err(|e| crate::safety::fs_error(builtin, &validated_path, &e))?;
+    decode_text(builtin, &validated_path, bytes).map(without_bom)
 }
 
 fn bi_read_text(args: Vec<Value>, _input: Option<Value>) -> Result<Value> {
@@ -8839,9 +8839,9 @@ fn bi_read_text(args: Vec<Value>, _input: Option<Value>) -> Result<Value> {
         .map_err(|e| crate::safety::fs_error("read_text", &validated_path, &e))?;
     check_file_size_limit(metadata.len()).context("read_text: file too large")?;
 
-    let content = fs::read_to_string(&validated_path)
-        .map(without_bom)
+    let bytes = fs::read(&validated_path)
         .map_err(|e| crate::safety::fs_error("read_text", &validated_path, &e))?;
+    let content = decode_text("read_text", &validated_path, bytes).map(without_bom)?;
 
     Ok(Value::Str(content))
 }
@@ -8907,16 +8907,22 @@ fn read_text_capped(builtin: &str, path: impl AsRef<std::path::Path>) -> Result<
 }
 
 fn read_text_capped_at(builtin: &str, path: &std::path::Path, max: u64) -> Result<String> {
-    let bytes = read_bytes_capped_at(builtin, path, max)?;
-    // The error `read_to_string` gave for bytes that are not UTF-8, unchanged.
-    String::from_utf8(bytes).map_err(|_| {
-        crate::safety::fs_error(
+    decode_text(builtin, path, read_bytes_capped_at(builtin, path, max)?)
+}
+
+/// The text of the bytes a text reader read from `path`. Bytes that are not
+/// UTF-8 are a bad value in the file, not an I/O failure, so the error is
+/// E_BAD_VALUE and gives the offset of the first byte that is not UTF-8.
+fn decode_text(builtin: &str, path: &std::path::Path, bytes: Vec<u8>) -> Result<String> {
+    String::from_utf8(bytes).map_err(|e| {
+        let offset = e.utf8_error().valid_up_to();
+        crate::safety::value_not_representable(
             builtin,
-            path,
-            &std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                "stream did not contain valid UTF-8",
+            format!(
+                "{builtin}: `{}` is not UTF-8 text: the first byte that is not UTF-8 is at byte offset {offset}",
+                crate::safety::strip_verbatim_prefix(path).display()
             ),
+            "the file is not UTF-8 text; convert it to UTF-8 first",
         )
     })
 }
@@ -29690,9 +29696,9 @@ fn bi_open(args: Vec<Value>, _input: Option<Value>) -> Result<Value> {
     let md =
         fs::metadata(&validated).map_err(|e| crate::safety::fs_error("open", &validated, &e))?;
     check_file_size_limit(md.len()).context("open: file too large")?;
-    let text = fs::read_to_string(&validated)
-        .map(without_bom)
-        .map_err(|e| crate::safety::fs_error("open", &validated, &e))?;
+    let bytes =
+        fs::read(&validated).map_err(|e| crate::safety::fs_error("open", &validated, &e))?;
+    let text = decode_text("open", &validated, bytes).map(without_bom)?;
     let ext = std::path::Path::new(&path)
         .extension()
         .map(|e| e.to_string_lossy().to_ascii_lowercase())
