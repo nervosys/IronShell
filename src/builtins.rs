@@ -15326,12 +15326,16 @@ fn bi_date_parse(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
 /// Args:
 ///   - a: String (or the piped text) - an ISO date or datetime, as date_parse answers
 ///   - b: String - the later date, in the same form
-///   - unit: String (optional) - "days" (the default: whole 24-hour periods of elapsed time), "hours", "minutes" or "seconds"
+///   - unit: String (optional) - "days" (the default: whole 24-hour periods of elapsed time), "weeks", "months", "years", "hours", "minutes" or "seconds"
 /// Returns: Int - b minus a, in whole units, truncated toward zero
+///
+/// Months and years are calendar units, the inverse of date_add: the count is
+/// the most whole months n for which date_add(a, n, "months") does not pass b.
 ///
 /// Example:
 ///   date_diff("2024-02-29", "2026-11-09")                                # 984
 ///   date_diff("2024-02-29", "2026-11-09", "hours")                       # 23616
+///   date_diff("2024-01-31", "2024-02-29", "months")                      # 1
 ///   date_diff("2026-11-01T23:00:00Z", "2026-11-02T01:00:00Z")            # 0
 ///   date_diff("2026-11-01T23:00:00Z", "2026-11-02T01:00:00Z", "hours")   # 2
 fn bi_date_diff(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
@@ -15341,7 +15345,11 @@ fn bi_date_diff(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
         [second] => (string_arg(B, "a second ISO date String", second)?, "days"),
         [second, unit] => (
             string_arg(B, "a second ISO date String", second)?,
-            string_arg(B, "a unit String: days, hours, minutes or seconds", unit)?,
+            string_arg(
+                B,
+                "a unit String: days, weeks, months, years, hours, minutes or seconds",
+                unit,
+            )?,
         ),
         _ => {
             return Err(arity_error(
@@ -15351,10 +15359,44 @@ fn bi_date_diff(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
             ))
         }
     };
-    let per = unit_seconds(B, unit)?;
     let (a, _) = parse_iso(B, &first)?;
     let (b, _) = parse_iso(B, second)?;
-    Ok(Value::Int((b - a).num_seconds() / per))
+    match unit {
+        "weeks" => Ok(Value::Int((b - a).num_seconds() / (7 * 86_400))),
+        "months" => Ok(Value::Int(whole_calendar_months(a, b))),
+        "years" => Ok(Value::Int(whole_calendar_months(a, b) / 12)),
+        _ => {
+            let per = unit_seconds(B, unit).map_err(|_| {
+                crate::safety::bad_arg(
+                    B,
+                    "a unit: days, weeks, months, years, hours, minutes or seconds",
+                    unit,
+                )
+            })?;
+            Ok(Value::Int((b - a).num_seconds() / per))
+        }
+    }
+}
+
+/// The whole calendar months from `a` to `b`, truncated toward zero: the
+/// largest n (by magnitude, with b's sign) for which add_calendar_months(a, n)
+/// does not pass b. The inverse of date_add's "months".
+fn whole_calendar_months(
+    a: chrono::DateTime<chrono::Utc>,
+    b: chrono::DateTime<chrono::Utc>,
+) -> i64 {
+    use chrono::Datelike as _;
+    let index = |d: chrono::DateTime<chrono::Utc>| i64::from(d.year()) * 12 + i64::from(d.month0());
+    let mut n = index(b) - index(a);
+    let passes = |n: i64| match add_calendar_months(a, n) {
+        Some(d) if n >= 0 => d > b,
+        Some(d) => d < b,
+        None => true,
+    };
+    while n != 0 && passes(n) {
+        n -= n.signum();
+    }
+    n
 }
 
 /// date_format(iso, format) - Format a date or datetime with a strftime layout.
