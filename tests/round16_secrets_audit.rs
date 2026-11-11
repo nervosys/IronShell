@@ -106,6 +106,45 @@ fn plus_concatenates_two_arrays_into_a_new_array() {
     );
 }
 
+// ── Item 5: the audit statistics and query read the log audit_verify reads ──
+
+#[test]
+fn audit_stats_and_audit_query_count_the_chained_log() {
+    let dir = scratch("audit_counts");
+    let ws = dir.join("proj");
+    let out = ish_agent(
+        &dir,
+        r#"file_write("f.txt", "a"); file_replace("f.txt", "a", "b"); v = audit_verify(); s = audit_stats(); q = audit_query({builtin: "file_replace"}); a = audit_query({action: "file_replace"}); n = q | len; m = a | len; "${v.entries}|${s.total}|${s.by_decision.allow_unguarded}|${n}|${m}""#,
+    );
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let parts: Vec<&str> = stdout.trim().split('|').collect();
+    assert_eq!(parts.len(), 5, "{stdout}");
+    let num = |i: usize| -> i64 { parts[i].trim().parse().unwrap_or(-1) };
+    let (entries, total, unguarded, by_builtin, by_action) =
+        (num(0), num(1), num(2), num(3), num(4));
+    assert!(entries >= 2, "{stdout}");
+    assert_eq!(
+        total, entries,
+        "audit_stats counts what audit_verify verifies: {stdout}"
+    );
+    assert!(unguarded >= 1, "{stdout}");
+    assert!(by_builtin >= 1, "{stdout}");
+    assert_eq!(
+        by_action, by_builtin,
+        "action is an alias of builtin: {stdout}"
+    );
+    let log = std::fs::read_to_string(ws.join(".ironshell").join("audit.log")).expect("log");
+    assert_eq!(
+        log.lines().filter(|l| !l.trim().is_empty()).count() as i64,
+        entries
+    );
+}
+
 #[test]
 fn the_typechecker_accepts_array_plus_array() {
     use iron_shell::types::Type;

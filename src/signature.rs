@@ -4368,7 +4368,7 @@ pub static SIGNATURES: &[Signature] = &[
         subject: None,
         params: &[],
         returns: "Record",
-        doc: "Audit entry counts by severity.",
+        doc: "Counts for the active chained audit log: total and by_decision (a Record of decision name to count, such as allow or deny) count the entries audit_verify checks. info, warning and critical count the audit_log assertions made in this process by severity. With no active log, total counts those assertions.",
         examples: &[("typeof(audit_stats())", "Record")],
     },
     Signature {
@@ -8104,7 +8104,7 @@ pub static SIGNATURES: &[Signature] = &[
         subject: None,
         params: &[opt("filter", Ty::Record, "field values an entry must match")],
         returns: "Array",
-        doc: "Audit log entries, optionally only those whose action or resource contains the filter's value. Any other field of the filter, or a filter that is not a record, is E_BAD_ARG.",
+        doc: "Audit log entries, optionally only those whose builtin (action is an alias) or resource contains the filter's value. With an audit log active these are the chained entries audit_verify checks, as records with builtin, decision, resource and detail fields. Any other field of the filter, or a filter that is not a record, is E_BAD_ARG.",
         examples: &[
             (r#"typeof(audit_query())"#, r#"Array"#),
             (r#"typeof(audit_query({action: "nobody"}))"#, r#"Array"#),
