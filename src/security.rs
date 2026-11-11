@@ -436,11 +436,6 @@ pub fn validate_safe_path(path: &str) -> Result<PathBuf> {
     let canonical = if requested_path.exists() {
         fs::canonicalize(requested_path).context("Failed to canonicalize path")?
     } else {
-        // For non-existent paths, canonicalize the parent and append the filename
-        let parent = requested_path
-            .parent()
-            .ok_or_else(|| anyhow!("Invalid path: no parent directory"))?;
-
         let filename = requested_path
             .file_name()
             .ok_or_else(|| anyhow!("Invalid path: no filename"))?;
@@ -458,25 +453,21 @@ pub fn validate_safe_path(path: &str) -> Result<PathBuf> {
             ));
         }
 
-        let canonical_parent = if parent.as_os_str().is_empty() {
-            // Relative path in current directory
-            std::env::current_dir().context("Failed to get current directory")?
+        // A path that does not exist is judged by where it would land, not by
+        // whether its parent can be canonicalized: `sub/../missing.txt` has no
+        // canonical parent while `sub` is missing, and the parent's canonical
+        // form on Windows is not the form the workspace root has.
+        let absolute = if requested_path.is_absolute() {
+            requested_path.to_path_buf()
         } else {
-            fs::canonicalize(parent).context("Failed to canonicalize parent directory")?
+            std::env::current_dir()
+                .context("Failed to get current directory")?
+                .join(requested_path)
         };
-
-        let joined = canonical_parent.join(filename);
-
-        // Verify the joined path would still be within canonical_parent
-        if !joined.starts_with(&canonical_parent) {
-            return Err(crate::safety::bad_arg(
-                "",
-                "a filename that stays in its directory",
-                "a traversal",
-            ));
+        match canonical_for_missing(&absolute) {
+            Some(landing) => landing,
+            None => return Err(anyhow!("Failed to canonicalize path")),
         }
-
-        joined
     };
 
     // Path containment (the "workspace jail") applies ONLY when sandboxing is
@@ -610,6 +601,39 @@ pub fn check_read_jail(builtin: &str, path: &str) -> Result<()> {
         ));
     }
     Ok(())
+}
+
+/// Where a path that may not exist would land, in the same canonical namespace
+/// as a canonicalized base directory.
+///
+/// The longest prefix of `absolute` that exists as an entry is canonicalized,
+/// which resolves its links and the Windows spellings. Nothing after that prefix
+/// exists, so no link can sit in the rest, and the rest is appended after `.`
+/// and `..` are normalized lexically. A `..` that climbs above the prefix climbs
+/// the canonical path, so `nosuchdir/../../x` lands above the workspace and is
+/// refused by the caller. `None` when the prefix is a link that does not resolve
+/// (a dangling link), which the caller refuses rather than follows.
+fn canonical_for_missing(absolute: &Path) -> Option<PathBuf> {
+    let comps: Vec<std::path::Component> = absolute.components().collect();
+    let mut k = comps.len();
+    while k > 0 {
+        let prefix: PathBuf = comps[..k].iter().collect();
+        if fs::symlink_metadata(&prefix).is_ok() {
+            let mut landing = fs::canonicalize(&prefix).ok()?;
+            for comp in &comps[k..] {
+                match comp {
+                    std::path::Component::Normal(name) => landing.push(name),
+                    std::path::Component::ParentDir => {
+                        landing.pop();
+                    }
+                    _ => {}
+                }
+            }
+            return Some(landing);
+        }
+        k -= 1;
+    }
+    None
 }
 
 /// Validate a path for read operations (less strict)

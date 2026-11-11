@@ -257,3 +257,94 @@ fn item2_the_server_keeps_its_announced_protocol_version() {
         .expect("response");
     assert_eq!(res["result"]["protocolVersion"], "2024-11-05");
 }
+
+// ── Item 3: a missing path is judged by where it would land ─────────────────
+
+/// `ish --agent --workspace . -c <src>` run from `ws`. Returns (exit, output).
+fn agent_workspace_run(ws: &std::path::Path, src: &str) -> (i32, String) {
+    let session = ws.join("session");
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_ish"))
+        .args(["--agent", "--workspace", ".", "-c", src])
+        .current_dir(ws)
+        .env("IRONSHELL_SESSION_DIR", &session)
+        .env("NO_COLOR", "1")
+        .env("IRONSHELL_ALLOW_SH", "")
+        .output()
+        .expect("run ish");
+    let text = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    (out.status.code().unwrap_or(-1), text)
+}
+
+fn fresh_workspace(tag: &str) -> std::path::PathBuf {
+    let ws = std::path::Path::new(env!("CARGO_TARGET_TMPDIR"))
+        .join(format!("r18_ws_{tag}_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&ws);
+    std::fs::create_dir_all(&ws).expect("workspace dir");
+    ws
+}
+
+#[test]
+fn item3_a_missing_file_inside_the_workspace_is_not_found() {
+    let ws = fresh_workspace("missing");
+    let (_, text) = agent_workspace_run(&ws, r#"read_text("missing.txt")"#);
+    assert!(text.contains("E_NOT_FOUND"), "{text}");
+    assert!(!text.contains("E_OUTSIDE_WORKSPACE"), "{text}");
+}
+
+#[test]
+fn item3_a_missing_path_through_a_missing_directory_inside_is_not_found() {
+    let ws = fresh_workspace("sub_dotdot");
+    let (_, text) = agent_workspace_run(&ws, r#"read_text("sub/../missing.txt")"#);
+    assert!(text.contains("E_NOT_FOUND"), "{text}");
+    assert!(!text.contains("E_OUTSIDE_WORKSPACE"), "{text}");
+}
+
+#[test]
+fn item3_a_missing_file_one_level_up_is_outside() {
+    let ws = fresh_workspace("up_one");
+    let (code, text) = agent_workspace_run(&ws, r#"read_text("../missing.txt")"#);
+    assert!(text.contains("E_OUTSIDE_WORKSPACE"), "{text}");
+    assert!(!text.contains("E_NOT_FOUND"), "{text}");
+    assert_ne!(code, 0, "{text}");
+}
+
+#[test]
+fn item3_a_missing_path_that_climbs_out_is_outside() {
+    let ws = fresh_workspace("climb");
+    let (_, text) = agent_workspace_run(&ws, r#"read_text("nosuchdir/../../x")"#);
+    assert!(text.contains("E_OUTSIDE_WORKSPACE"), "{text}");
+    assert!(!text.contains("E_NOT_FOUND"), "{text}");
+}
+
+#[test]
+fn item3_the_outside_refusal_names_the_builtin() {
+    let ws = fresh_workspace("names");
+    let (_, text) = agent_workspace_run(&ws, r#"read_text("../missing.txt")"#);
+    assert!(text.contains("read_text: `"), "{text}");
+    assert!(
+        !text.contains(": `"),
+        "a refusal with an empty name: {text}"
+    );
+}
+
+#[test]
+fn item3_a_plain_missing_file_stays_not_found_outside_agent_mode() {
+    let ws = fresh_workspace("plain");
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_ish"))
+        .args(["-c", r#"read_text("missing.txt")"#])
+        .current_dir(&ws)
+        .env("IRONSHELL_SESSION_DIR", ws.join("session"))
+        .env("NO_COLOR", "1")
+        .output()
+        .expect("run ish");
+    let text = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(text.contains("E_NOT_FOUND"), "{text}");
+}
