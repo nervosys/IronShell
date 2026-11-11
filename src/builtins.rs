@@ -23483,6 +23483,15 @@ fn bi_ontology_describe(args: Vec<Value>, _input: Option<Value>) -> Result<Value
             ))
         }
     };
+    // An empty name looked up as a builtin named nothing: "unknown builtin: ".
+    // help("") comes here too.
+    if q.trim().is_empty() {
+        return Err(crate::safety::bad_arg_in(
+            "ontology_describe",
+            "name must not be empty",
+            "help() lists the core builtins; ontology_manifest() lists categories",
+        ));
+    }
     let described = crate::agent_api::ontology_describe_json(&q);
     if described.get("error").is_some() {
         // An unknown name is a failed lookup, as an unknown builtin call is: an

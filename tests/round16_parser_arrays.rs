@@ -4,12 +4,27 @@
 //!
 //! In-process, as tests/curried_closure_builtins.rs runs them.
 
+use iron_shell::safety::SafetyError;
 use iron_shell::value::Value;
 
 fn run(src: &str) -> Value {
     let mut env = iron_shell::modules::env_with_modules();
     let stmts = iron_shell::parser::parse_program(src).expect("parses");
     iron_shell::eval::eval_program(&stmts, &mut env).expect("runs")
+}
+
+/// The structured refusal `src` ends in; panics if it runs or fails without one.
+fn refusal(src: &str) -> SafetyError {
+    let mut env = iron_shell::modules::env_with_modules();
+    let stmts = iron_shell::parser::parse_program(src).expect("parses");
+    match iron_shell::eval::eval_program(&stmts, &mut env) {
+        Err(e) => e
+            .chain()
+            .find_map(|c| c.downcast_ref::<SafetyError>())
+            .cloned()
+            .unwrap_or_else(|| panic!("structured error expected: {e:#}")),
+        Ok(v) => panic!("expected a refusal from {src:?}, got {v:?}"),
+    }
 }
 
 /// The error code of `src`, caught by the language's own `try`.
@@ -126,4 +141,30 @@ fn group_by_still_groups_equal_values_of_one_type() {
         run("g = ([1, 1, \"1\"] | group_by(fn(x) => x))\ng[0].Count"),
         Value::Int(2)
     );
+}
+
+// Item 4: an empty name is refused, not looked up as the builtin "".
+
+#[test]
+fn help_with_an_empty_name_is_refused() {
+    let e = refusal("help(\"\")");
+    assert_eq!(e.code, iron_shell::safety::ErrorCode::BadArg);
+    assert!(
+        e.message.contains("name must not be empty"),
+        "{}",
+        e.message
+    );
+    assert!(e.hint.contains("ontology_manifest()"), "{}", e.hint);
+}
+
+#[test]
+fn ontology_describe_with_an_empty_name_is_refused() {
+    let e = refusal("ontology_describe(\"\")");
+    assert_eq!(e.code, iron_shell::safety::ErrorCode::BadArg);
+    assert!(
+        e.message.contains("name must not be empty"),
+        "{}",
+        e.message
+    );
+    assert!(!e.message.contains("unknown builtin"), "{}", e.message);
 }
