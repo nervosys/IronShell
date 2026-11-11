@@ -714,6 +714,51 @@ fn in_place_append_operand<'a>(
 /// Appends `operand` to the String or Array bound to `name`, in place, so the
 /// binding is not copied out and back. Gives the operand back when the two do
 /// not both fit: a different kind, or a string past the size limit.
+/// Evaluate a lambda body whose parameters are bound in `env` and are not read
+/// again afterwards. A body `acc + e`, where `acc` is a parameter that `e` does
+/// not mention, moves the parameter's String or Array out and appends to it,
+/// so `reduce(fn(acc, x) => acc + x, "")` is linear instead of copying the
+/// accumulator at every step. Any other body is evaluated as usual.
+pub(crate) fn eval_body_consuming_params(
+    body: &Expr,
+    params: &[String],
+    env: &mut Env,
+) -> Result<Value> {
+    if let Expr::Binary {
+        left,
+        op: BinOp::Add,
+        right,
+    } = body
+    {
+        if let Expr::Ident(name) = left.as_ref() {
+            if params.iter().any(|p| p == name) {
+                let mut mentioned = std::collections::BTreeSet::new();
+                free_idents(right, &mut Vec::new(), &mut mentioned);
+                if !mentioned.contains(name.as_str()) {
+                    let rhs = eval_expr(right, env)?;
+                    match (env.get_var_mut(name), rhs) {
+                        (Some(Value::Str(a)), Value::Str(b))
+                            if a.len() + b.len() <= MAX_STRING_BYTES =>
+                        {
+                            let mut out = std::mem::take(a);
+                            out.push_str(&b);
+                            return Ok(Value::Str(out));
+                        }
+                        (Some(Value::Array(a)), Value::Array(b)) => {
+                            let mut out = std::mem::take(a);
+                            out.extend(b);
+                            return Ok(Value::Array(out));
+                        }
+                        (Some(a), rhs) => return binop(&BinOp::Add, a.clone(), rhs),
+                        (None, _) => {}
+                    }
+                }
+            }
+        }
+    }
+    eval_expr(body, env)
+}
+
 fn append_in_place(env: &mut Env, name: &str, operand: Value) -> std::result::Result<(), Value> {
     match (env.get_var_mut(name), operand) {
         (Some(Value::Str(a)), Value::Str(b)) if a.len() + b.len() <= MAX_STRING_BYTES => {

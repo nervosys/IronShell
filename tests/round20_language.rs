@@ -177,3 +177,25 @@ fn string_past_the_size_limit_is_refused_and_leaves_the_binding() {
     assert!(eval_in(&mut env, "s = s + s").is_err());
     assert_eq!(eval_in(&mut env, "len(s)").unwrap(), Value::Int(1 << 23));
 }
+
+// ---------- a lambda body `acc + e` appends to its parameter ----------
+
+#[test]
+fn reduce_appending_to_its_accumulator_keeps_every_value() {
+    let v = eval(r#"range(5) | reduce(fn(acc, i) => acc + [i * 2], [])"#).unwrap();
+    assert_eq!(v, Value::Array((0..5).map(|i| Value::Int(i * 2)).collect()));
+    let n = eval(r#"range(5) | reduce(fn(acc, i) => acc + i, 10)"#).unwrap();
+    assert_eq!(n, Value::Int(20));
+}
+
+#[test]
+fn a_body_that_reads_its_accumulator_twice_still_sees_it_whole() {
+    let v = eval(r#"range(3) | reduce(fn(acc, i) => acc + acc, "a")"#).unwrap();
+    assert_eq!(v, Value::Str("aaaaaaaa".into()));
+}
+
+#[test]
+fn a_reduce_body_that_fails_reports_the_error() {
+    let e = eval(r#"range(3) | reduce(fn(acc, i) => acc + nope, "a")"#).unwrap_err();
+    assert!(e.to_string().contains("nope"), "{e}");
+}

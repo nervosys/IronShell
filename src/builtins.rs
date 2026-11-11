@@ -4881,7 +4881,13 @@ fn bind_eval_unbind(
     for (p, a) in lam.params.iter().zip(args) {
         saved.push(env.replace_param(p, a));
     }
-    let result = eval_expr(&lam.body, env);
+    // A caller that wants the parameters back must see them unchanged; one
+    // that does not lets the body consume them (see eval_body_consuming_params).
+    let result = if give_back {
+        eval_expr(&lam.body, env)
+    } else {
+        crate::eval::eval_body_consuming_params(&lam.body, &lam.params, env)
+    };
     let mut back = Vec::new();
     for (p, prev) in lam.params.iter().zip(saved).rev() {
         let cur = env.restore_param(p, prev);
