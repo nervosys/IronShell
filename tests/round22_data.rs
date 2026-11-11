@@ -76,3 +76,17 @@ fn a_blank_in_a_text_column_stays_an_empty_string_and_in_a_numeric_one_is_null()
         Value::Array(vec![Value::Null, Value::Int(2)])
     );
 }
+
+// ── item 2: to_csv keeps every key ──────────────────────────────────────
+
+#[test]
+fn to_csv_keeps_a_key_that_only_a_later_row_has() {
+    assert_eq!(
+        eval(r#"[{id: 1}, {id: 2, customer: "Ada"}] | to_csv"#).unwrap(),
+        s("customer,id\n,1\nAda,2\n")
+    );
+    assert_eq!(
+        eval(r#"to_csv([{a: 1}, {b: 2}, {a: 3, c: 4}])"#).unwrap(),
+        s("a,b,c\n1,,\n,2,\n3,,4\n")
+    );
+}

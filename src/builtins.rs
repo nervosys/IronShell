@@ -10495,7 +10495,17 @@ fn bi_to_csv(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
             let headers: Vec<String> = match (columns, arr.first()) {
                 (Some(names), _) => names,
                 (None, None) => return Ok(Value::Str(String::new())),
-                (None, Some(Value::Record(first_record))) => first_record.keys().cloned().collect(),
+                (None, Some(Value::Record(_))) => {
+                    // The keys of every record, sorted, so a key that only a later
+                    // row has is a column too and is not dropped.
+                    let mut keys = std::collections::BTreeSet::new();
+                    for item in &arr {
+                        if let Value::Record(record) = item {
+                            keys.extend(record.keys().cloned());
+                        }
+                    }
+                    keys.into_iter().collect()
+                }
                 (None, Some(_)) => {
                     return Err(crate::safety::arg_err(
                         "to-csv: input must be array of records",

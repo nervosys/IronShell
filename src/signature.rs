@@ -1757,12 +1757,13 @@ pub static SIGNATURES: &[Signature] = &[
     Signature {
         name: "to_csv", category: None, subject_required: false, aliases: &["to-csv"],
         subject: Some(Ty::Array), params: &[opt("columns", Ty::Array, "column names, in the order to write them; a record without one writes an empty field")], returns: "String",
-        doc: "Serialize an array of records to CSV. The columns are the first record's keys in sorted order, or the columns Array when one is given, in that order; a key a record lacks writes an empty field, and a null writes an empty field. The rows are piped in or passed as the argument: to_csv(rows), or rows | to_csv(columns).",
+        doc: "Serialize an array of records to CSV. The columns are the keys of every record in sorted order, so a key that only a later row has is kept, or the columns Array when one is given, in that order; a key a record lacks writes an empty field, and a null writes an empty field. The rows are piped in or passed as the argument: to_csv(rows), or rows | to_csv(columns).",
         examples: &[
             (r#"[{n: 7}] | to_csv | from_csv | len"#, "1"),
             (r#"to_csv([{n: 7}]) | from_csv | len"#, "1"),
             (r#"to_csv([{b: 2, a: 1}], ["b", "a"]) | lines | first"#, r#""b,a""#),
             (r#"[{id: 1}, {id: 2, customer: "Ada"}] | to_csv(["id", "customer"]) | lines | last"#, r#""2,Ada""#),
+            (r#"[{id: 1}, {id: 2, customer: "Ada"}] | to_csv | lines | first"#, r#""customer,id""#),
         ],
     },
     Signature {
