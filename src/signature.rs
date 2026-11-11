@@ -8199,11 +8199,12 @@ pub static SIGNATURES: &[Signature] = &[
         subject_required: false,
         aliases: &[],
         subject: None,
-        params: &[],
-        returns: "String",
-        doc: "A short reference of the core builtins.",
+        params: &[opt("name", Ty::Str, "a builtin or category name; omitted, it gives the short reference")],
+        returns: "String | Record",
+        doc: "A short reference of the core builtins. help(\"name\") describes one builtin, with its signature, effect and examples, as ontology_describe(\"name\") does; a category name lists its builtins.",
         examples: &[
             (r#"typeof(help())"#, r#"String"#),
+            (r#"typeof(help("ls"))"#, r#"Record"#),
         ],
     },
     Signature {

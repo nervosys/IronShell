@@ -16,6 +16,9 @@ fn create_env_with_modules() -> Env {
 #[command(about = "IronShell Shell - A typed functional shell with multi-modal AI")]
 #[command(version = env!("CARGO_PKG_VERSION"))]
 #[command(args_conflicts_with_subcommands = true)]
+#[command(
+    after_help = "Builtins: help(\"name\") or ontology_describe(\"name\") gives one builtin's signature, effect and examples; ontology_manifest() lists the categories."
+)]
 struct Cli {
     #[command(subcommand)]
     subcommand: Option<Commands>,

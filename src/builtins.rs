@@ -2405,7 +2405,8 @@ impl FinetuneStatus {
 // Fast dispatch table for builtin functions
 static BUILTIN_DISPATCH: &[fn(Vec<Value>, Option<Value>, &mut Env) -> Result<Value>] = &[
     // 0-9: General and file system functions
-    |_, _, _| bi_help(),
+    // help() is the short reference; help("name") is ontology_describe("name").
+    |args, input, _| bi_help_entry(args, input),
     |args, input, env| bi_call(args, input, env),
     |_, _, _| bi_clear(),
     |args, input, _| bi_echo(&args, input),
@@ -4896,6 +4897,15 @@ fn with_param_slots<T>(
 
 // --------------- General builtins ---------------
 
+/// help() is the short reference; help("name") is ontology_describe("name").
+fn bi_help_entry(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
+    if args.is_empty() {
+        bi_help()
+    } else {
+        bi_ontology_describe(args, input)
+    }
+}
+
 fn bi_help() -> Result<Value> {
     let txt = r#"Æther (æ) built-ins:
 - help                         # this help
@@ -5040,6 +5050,9 @@ AI & MCP Integration:
   model = ai_detect()            # auto-detect AI backend
   server = mcp_detect()          # find MCP server
   agent("task", model, server.tools)  # use both together
+
+One builtin in full (signature, effect, parameters, examples): help("name")
+Every category and its builtins: ontology_manifest(), then ontology_describe("category")
 "#;
     Ok(Value::Str(txt.to_string()))
 }
