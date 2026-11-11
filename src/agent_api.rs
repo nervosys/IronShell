@@ -5604,8 +5604,14 @@ pub mod server {
         }
     }
 
-    async fn handle_execute(Json(request): Json<AgentRequest>) -> impl IntoResponse {
-        run_blocking(request, eval_deadline()).await
+    // The body is read as text and parsed by `parse_request`, as stdin is, so
+    // HTTP refuses what `ish agent execute` refuses (a repeated top-level key)
+    // with the same coded error, instead of serde's last-key-wins.
+    async fn handle_execute(body: String) -> (StatusCode, Json<AgentResponse>) {
+        match crate::agent_api::parse_request(&body) {
+            Ok(request) => run_blocking(request, eval_deadline()).await,
+            Err(refusal) => (StatusCode::BAD_REQUEST, Json(refusal)),
+        }
     }
 
     async fn handle_call(
@@ -5643,7 +5649,11 @@ pub mod server {
     // ========================================================================
 
     /// Stream execution of a generic request
-    async fn handle_stream_execute(Json(request): Json<AgentRequest>) -> Response {
+    async fn handle_stream_execute(body: String) -> Response {
+        let request = match crate::agent_api::parse_request(&body) {
+            Ok(request) => request,
+            Err(refusal) => return (StatusCode::BAD_REQUEST, Json(refusal)).into_response(),
+        };
         let Some(slot) = try_take_stream_slot(&stream_slots()) else {
             return stream_busy_response();
         };
