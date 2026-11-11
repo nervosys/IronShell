@@ -1082,10 +1082,23 @@ pub fn eval_expr(expr: &Expr, env: &mut Env) -> Result<Value> {
             let a = eval_expr(left, env)?;
             // `&&` and `||` short-circuit, as in every shell and C-family
             // language: `x != "" && x >= 1` must not compare "" with 1.
-            match op {
-                BinOp::And if !is_truthy(&a) => return Ok(Value::Bool(false)),
-                BinOp::Or if is_truthy(&a) => return Ok(Value::Bool(true)),
-                _ => {}
+            // Their operands must be Bool, as `if` and `where` require: `1 && 2`
+            // used to be true, and `"false" && true` used to be true too.
+            if matches!(op, BinOp::And | BinOp::Or) {
+                let x = match a {
+                    Value::Bool(x) => x,
+                    other => return Err(logic_operand_error(op, &other)),
+                };
+                match op {
+                    BinOp::And if !x => return Ok(Value::Bool(false)),
+                    BinOp::Or if x => return Ok(Value::Bool(true)),
+                    _ => {}
+                }
+                let b = eval_expr(right, env)?;
+                return match b {
+                    Value::Bool(y) => Ok(Value::Bool(y)),
+                    other => Err(logic_operand_error(op, &other)),
+                };
             }
             let b = eval_expr(right, env)?;
             binop(op, a, b)
@@ -2433,8 +2446,10 @@ fn binop(op: &BinOp, a: Value, b: Value) -> Result<Value> {
         (Gt, Value::Str(x), Value::Str(y)) => Value::Bool(x > y),
         (Gte, Value::Str(x), Value::Str(y)) => Value::Bool(x >= y),
 
-        (And, x, y) => Value::Bool(is_truthy(&x) && is_truthy(&y)),
-        (Or, x, y) => Value::Bool(is_truthy(&x) || is_truthy(&y)),
+        (And, Value::Bool(x), Value::Bool(y)) => Value::Bool(x && y),
+        (Or, Value::Bool(x), Value::Bool(y)) => Value::Bool(x || y),
+        (And | Or, Value::Bool(_), b) => return Err(logic_operand_error(op, &b)),
+        (And | Or, a, _) => return Err(logic_operand_error(op, &a)),
 
         // Power: numeric exponentiation. Promote to float when necessary.
         (Pow, Value::Int(x), Value::Int(y)) => {
@@ -2513,6 +2528,17 @@ fn binop(op: &BinOp, a: Value, b: Value) -> Result<Value> {
             ));
         }
     })
+}
+
+/// The refusal for a non-Bool operand of `&&` or `||`. Truthiness is not used
+/// for these operators, so `1 && 2` is refused rather than read as true.
+fn logic_operand_error(op: &BinOp, got: &Value) -> anyhow::Error {
+    crate::safety::bad_arg_with_hint(
+        &format!("operator {op:?}"),
+        "Bool operands",
+        got.type_name(),
+        "compare explicitly, e.g. x != 0, s != \"\", len(a) > 0",
+    )
 }
 
 /// The Int result of an operation, or the overflow refusal when it does not fit.
