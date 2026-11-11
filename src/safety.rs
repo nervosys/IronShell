@@ -2704,6 +2704,23 @@ pub fn integer_overflow(operator: &str) -> anyhow::Error {
     })
 }
 
+/// A missing folder or other thing that needs its own message and hint, as
+/// `E_NOT_FOUND`. For a case where [`not_found`]'s "no file named" would name
+/// the wrong thing, such as a destination folder that is the one missing.
+pub fn not_found_with(builtin: &str, message: String, hint: &str) -> anyhow::Error {
+    anyhow::Error::new(SafetyError {
+        code: ErrorCode::NotFound,
+        message,
+        builtin: builtin.to_string(),
+        hint: hint.to_string(),
+        approval: None,
+        did_you_mean: Vec::new(),
+        expected: "the destination folder to exist".to_string(),
+        got: "no such folder".to_string(),
+        extra: serde_json::Map::new(),
+    })
+}
+
 /// An edit whose pattern or anchor is not in the file (`E_NOT_FOUND`). Nothing
 /// was written, so the caller can fix the pattern and run the edit again. An
 /// edit that finds nothing is a failure, not a success with a flag in it.

@@ -50657,7 +50657,45 @@ fn bi_file_move(args: Vec<Value>, _input: Option<Value>) -> Result<Value> {
     // Classified `ReadLocal` while the body renamed one path over another —
     // which removes the source and can overwrite the destination. Both ends
     // are caller-supplied, and neither was jailed.
+    let (written_source, written_dest) = (source.clone(), dest.clone());
     let (source, dest) = guard_local_move("file_move", &source, &dest)?;
+    // Refused before the rename, which said "no file named" for a missing
+    // destination folder (it reads as a missing source) and "denied" for an
+    // existing directory. Both are named as what they are, with the fix.
+    if !crate::safety::names_a_remote_share(&written_dest) {
+        if let Some(parent) = std::path::Path::new(&dest).parent() {
+            if !parent.as_os_str().is_empty()
+                && fs::metadata(parent).is_err_and(|e| e.kind() == std::io::ErrorKind::NotFound)
+            {
+                let folder = std::path::Path::new(&written_dest)
+                    .parent()
+                    .filter(|p| !p.as_os_str().is_empty())
+                    .map(|p| p.display().to_string())
+                    .unwrap_or_else(|| parent.display().to_string());
+                return Err(crate::safety::not_found_with(
+                    "file_move",
+                    format!(
+                        "file_move: the destination folder '{folder}' does not exist; create it with mkdir(\"{folder}\")"
+                    ),
+                    "mkdir creates the folder; then mv moves the file into it",
+                ));
+            }
+        }
+        if fs::metadata(&dest).is_ok_and(|m| m.is_dir()) {
+            let base = std::path::Path::new(&written_source)
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_else(|| "name".to_string());
+            return Err(crate::safety::bad_arg_with_hint(
+                "file_move",
+                "a destination file path",
+                "a directory",
+                &format!(
+                    "'{written_dest}' is a directory; mv renames, so give the full target path: mv(\"{written_source}\", \"{written_dest}/{base}\")"
+                ),
+            ));
+        }
+    }
 
     let metadata =
         fs::metadata(&source).map_err(|e| crate::safety::fs_error("file_move", &source, &e))?;

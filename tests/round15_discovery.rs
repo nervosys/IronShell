@@ -129,6 +129,54 @@ fn rm_still_removes_a_file() {
     assert!(out.starts_with("removed:"), "{out}");
 }
 
+// ── mv names the destination, not the source ────────────────────────────
+
+#[test]
+fn mv_into_a_missing_folder_names_the_folder_not_the_source() {
+    let out = text(run(
+        "let d = fs_tempdir(\"ae_r15_mv_nodir\"); \
+         file_write(d + \"/a.txt\", \"x\"); \
+         let r = try { mv(d + \"/a.txt\", d + \"/nodir/b.txt\") } catch e { e.error.code + \"|\" + e.error.message }; \
+         rmdir(d, true); r",
+    ));
+    assert!(out.starts_with("E_NOT_FOUND|"), "{out}");
+    assert!(out.contains("the destination folder '"), "{out}");
+    assert!(
+        out.contains("nodir' does not exist; create it with mkdir("),
+        "{out}"
+    );
+    assert!(!out.contains("no file named"), "{out}");
+}
+
+#[test]
+fn mv_onto_an_existing_directory_is_refused_with_the_full_target_path() {
+    let out = text(run(
+        "let d = fs_tempdir(\"ae_r15_mv_dir\"); \
+         file_write(d + \"/a.txt\", \"x\"); \
+         mkdir(d + \"/existingdir\"); \
+         let r = try { mv(d + \"/a.txt\", d + \"/existingdir\") } catch e { e.error.code + \"|\" + e.error.hint }; \
+         rmdir(d, true); r",
+    ));
+    assert!(out.starts_with("E_BAD_ARG|"), "{out}");
+    assert!(!out.contains("E_OS_DENIED"), "{out}");
+    assert!(
+        out.contains("is a directory; mv renames, so give the full target path: mv("),
+        "{out}"
+    );
+    assert!(out.contains("/existingdir/a.txt"), "{out}");
+}
+
+#[test]
+fn mv_of_a_file_to_a_new_name_still_moves_it() {
+    assert_eq!(
+        run("let d = fs_tempdir(\"ae_r15_mv_ok\"); \
+             file_write(d + \"/a.txt\", \"x\"); \
+             let r = mv(d + \"/a.txt\", d + \"/b.txt\"); \
+             rmdir(d, true); r.success",),
+        Value::Bool(true)
+    );
+}
+
 #[test]
 fn crypto_hash_file_of_a_directory_says_so_and_names_the_glob() {
     let out = text(run("let d = fs_tempdir(\"ae_r15_hash_dir\"); \
