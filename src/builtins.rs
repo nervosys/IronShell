@@ -49522,6 +49522,7 @@ fn bi_file_write(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
 
     crate::tx::snapshot(&path); // record pre-write state if a transaction is active
 
+    let shared = shared_link_count(&path);
     write_file_atomically("file_write", &path, content.as_bytes())?;
 
     let mut result = BTreeMap::new();
@@ -49532,8 +49533,21 @@ fn bi_file_write(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
         Value::Int(content.lines().count() as i64),
     );
     result.insert("success".to_string(), Value::Bool(true));
+    if shared.is_some() {
+        result.insert("note".to_string(), Value::Str(SHARED_LINK_NOTE.to_string()));
+    }
 
     Ok(Value::Record(result))
+}
+
+/// The note on a result whose atomic replace broke a hard link: the rename
+/// gives the target a new file, so its other names keep the old content.
+const SHARED_LINK_NOTE: &str = "replaced a hard-linked file; its other links keep the old content";
+
+/// The link count of `path` when it has more than one hard link, read before an
+/// atomic replace of it. `None` for a file with one name or none.
+fn shared_link_count(path: &str) -> Option<u64> {
+    crate::safety::hard_link_count(std::path::Path::new(path)).filter(|n| *n > 1)
 }
 
 /// file_append(path, content) - Append content to a file
@@ -49864,9 +49878,11 @@ fn bi_file_patch(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
         ));
     }
     let written = !applied.is_empty();
+    let mut shared = None;
     if written {
         // Write back atomically
         crate::tx::snapshot(&path); // record pre-patch state if a transaction is active
+        shared = shared_link_count(&path);
         write_file_atomically(builtin, &path, content.as_bytes())?;
     } else {
         crate::journal::report_no_change();
@@ -49896,6 +49912,9 @@ fn bi_file_patch(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
         "patches_failed".to_string(),
         Value::Int(failed.len() as i64),
     );
+    if shared.is_some() {
+        result.insert("note".to_string(), Value::Str(SHARED_LINK_NOTE.to_string()));
+    }
 
     Ok(Value::Record(result))
 }

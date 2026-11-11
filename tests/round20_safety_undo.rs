@@ -101,3 +101,46 @@ fn a_redirection_to_a_plain_file_still_truncates_then_appends() {
     assert!(out.status.success(), "{out:?}");
     assert_eq!(read(&target), "first\nsecond\n", "{out:?}");
 }
+
+#[test]
+fn an_atomic_replace_of_a_hard_linked_file_says_its_other_links_keep_the_old_content() {
+    let d = Dirs::new("replace");
+    let (inside, outside) = linked_pair(&d, "old\n");
+    let out = d.ish(&["-c", r#"file_write("linked.txt", "new\n")"#]);
+    assert!(out.status.success(), "{out:?}");
+    assert_eq!(read(&inside), "new\n", "{out:?}");
+    assert_eq!(read(&outside), "old\n", "{out:?}");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("replaced a hard-linked file; its other links keep the old content"),
+        "{stdout}"
+    );
+}
+
+#[test]
+fn file_replace_of_a_hard_linked_file_carries_the_same_note() {
+    let d = Dirs::new("freplace");
+    let (inside, outside) = linked_pair(&d, "old text\n");
+    let out = d.ish(&["-c", r#"file_replace("linked.txt", "old", "new")"#]);
+    assert!(out.status.success(), "{out:?}");
+    assert_eq!(read(&inside), "new text\n", "{out:?}");
+    assert_eq!(read(&outside), "old text\n", "{out:?}");
+    assert!(
+        String::from_utf8_lossy(&out.stdout).contains("replaced a hard-linked file"),
+        "{out:?}"
+    );
+}
+
+#[test]
+fn a_replace_of_a_plain_file_has_no_link_note() {
+    let d = Dirs::new("nonote");
+    let target = d.workspace.join("solo.txt");
+    std::fs::write(&target, "old\n").unwrap();
+    let out = d.ish(&["-c", r#"file_write("solo.txt", "new\n")"#]);
+    assert!(out.status.success(), "{out:?}");
+    assert_eq!(read(&target), "new\n", "{out:?}");
+    assert!(
+        !String::from_utf8_lossy(&out.stdout).contains("hard-linked"),
+        "{out:?}"
+    );
+}
