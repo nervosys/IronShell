@@ -103,7 +103,7 @@ pub struct PipelineStep {
 }
 
 /// Schema output format
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum SchemaFormat {
     /// JSON Schema format
@@ -167,16 +167,35 @@ pub enum SchemaFormat {
     SHACL,
 }
 
+/// A schema format is read from the name `ish agent schema -f` takes (`openai`,
+/// `claude`, ...). The serde names of the variants (`open_a_i`, `json_schema`)
+/// are accepted too, as `parse_schema_format` accepts them.
+impl<'de> Deserialize<'de> for SchemaFormat {
+    fn deserialize<D: serde::Deserializer<'de>>(
+        deserializer: D,
+    ) -> std::result::Result<Self, D::Error> {
+        let name = String::deserialize(deserializer)?;
+        parse_schema_format(&name).ok_or_else(|| {
+            serde::de::Error::custom(format!(
+                "unknown format '{name}'; expected one of: {SCHEMA_FORMATS_HINT}"
+            ))
+        })
+    }
+}
+
 /// Agent API response
+///
+/// On the wire a failure's `error` is an object (`code`, `message`, `hint`,
+/// `retryable`, and the fields of a structured error), built from the fields
+/// below by `AgentResponseWire`. Rust callers read the message as a string.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(into = "AgentResponseWire", from = "AgentResponseWire")]
 pub struct AgentResponse {
     /// Whether the operation succeeded
     pub success: bool,
     /// The result value (if success)
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub result: Option<JsonValue>,
     /// Error message (if failure)
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
     /// Machine-readable error code such as `E_BAD_ARG` (if failure with a known code)
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -190,6 +209,164 @@ pub struct AgentResponse {
     /// Metadata about the operation
     #[serde(skip_serializing_if = "Option::is_none")]
     pub metadata: Option<JsonValue>,
+}
+
+/// The wire form of `AgentResponse`. The field order is the order the response
+/// has always been written in.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct AgentResponseWire {
+    success: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    result: Option<JsonValue>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    error: Option<JsonValue>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    code: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    hint: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    result_type: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    metadata: Option<JsonValue>,
+}
+
+impl From<AgentResponse> for AgentResponseWire {
+    fn from(r: AgentResponse) -> Self {
+        // A failure always has an error object, even one whose message is missing.
+        let error = if r.success && r.error.is_none() {
+            None
+        } else {
+            let text = r.error.as_deref().unwrap_or("the request failed");
+            Some(error_object(text, r.code.as_deref(), r.hint.as_deref()))
+        };
+        AgentResponseWire {
+            success: r.success,
+            result: r.result,
+            error,
+            code: r.code,
+            hint: r.hint,
+            result_type: r.result_type,
+            metadata: r.metadata,
+        }
+    }
+}
+
+impl From<AgentResponseWire> for AgentResponse {
+    fn from(w: AgentResponseWire) -> Self {
+        let (error, code, hint) = match &w.error {
+            None => (None, w.code.clone(), w.hint.clone()),
+            Some(JsonValue::String(text)) => (Some(text.clone()), w.code.clone(), w.hint.clone()),
+            Some(object) => {
+                let text = object
+                    .get("message")
+                    .and_then(JsonValue::as_str)
+                    .map(str::to_string);
+                let code = object
+                    .get("code")
+                    .and_then(JsonValue::as_str)
+                    .map(str::to_string)
+                    .or_else(|| w.code.clone());
+                let hint = object
+                    .get("hint")
+                    .and_then(JsonValue::as_str)
+                    .map(str::to_string)
+                    .or_else(|| w.hint.clone());
+                (text, code, hint)
+            }
+        };
+        AgentResponse {
+            success: w.success,
+            result: w.result,
+            error,
+            code,
+            hint,
+            result_type: w.result_type,
+            metadata: w.metadata,
+        }
+    }
+}
+
+/// The hint for a failure that has none of its own.
+const DEFAULT_ERROR_HINT: &str = "read error.message; error.code names the class of failure, and error.retryable says whether a corrected call can succeed";
+
+/// Whether a failure with this code can succeed once the call is corrected.
+/// The same classes `ErrorCode::retryable` gives, by wire code.
+fn code_retryable(code: &str) -> bool {
+    matches!(
+        code,
+        "E_PARSE"
+            | "E_BAD_ARG"
+            | "E_UNKNOWN_BUILTIN"
+            | "E_UNKNOWN_FIELD"
+            | "E_UNKNOWN_NAME"
+            | "E_NOT_FOUND"
+            | "E_BAD_STATE"
+            | "E_NEEDS_APPROVAL"
+            | "E_NETWORK"
+    )
+}
+
+/// The `error` object of a failed response: `code`, `message`, `hint` and
+/// `retryable`. A structured error (`{"error":{...}}`, as the evaluator writes
+/// it) contributes its own fields, and any text before it, such as the name of
+/// the pipeline step that failed, stays in front of its message.
+fn error_object(text: &str, code: Option<&str>, hint: Option<&str>) -> JsonValue {
+    let mut fields = match structured_error_body(text) {
+        Some((prefix, mut body)) => {
+            if !prefix.is_empty() {
+                let inner = body
+                    .get("message")
+                    .and_then(JsonValue::as_str)
+                    .unwrap_or_default()
+                    .to_string();
+                body.insert("message".to_string(), json!(format!("{prefix}: {inner}")));
+            }
+            body
+        }
+        None => serde_json::Map::new(),
+    };
+    if !fields.contains_key("message") {
+        fields.insert("message".to_string(), json!(text));
+    }
+    let code = fields
+        .get("code")
+        .and_then(JsonValue::as_str)
+        .map(str::to_string)
+        .or_else(|| code.map(str::to_string))
+        .unwrap_or_else(|| "E_UNKNOWN".to_string());
+    let hint = fields
+        .get("hint")
+        .and_then(JsonValue::as_str)
+        .map(str::to_string)
+        .or_else(|| hint.map(str::to_string))
+        .unwrap_or_else(|| DEFAULT_ERROR_HINT.to_string());
+    let retryable = fields
+        .get("retryable")
+        .and_then(JsonValue::as_bool)
+        .unwrap_or_else(|| code_retryable(&code));
+    fields.insert("code".to_string(), json!(code));
+    fields.insert("hint".to_string(), json!(hint));
+    fields.insert("retryable".to_string(), json!(retryable));
+    JsonValue::Object(fields)
+}
+
+/// The structured error inside `text`, whole or after a prefix, as its
+/// `error` object and the prefix text before it.
+fn structured_error_body(text: &str) -> Option<(String, serde_json::Map<String, JsonValue>)> {
+    text.match_indices('{').find_map(|(start, _)| {
+        let value = serde_json::Deserializer::from_str(&text[start..])
+            .into_iter::<JsonValue>()
+            .next()?
+            .ok()?;
+        let body = value.get("error")?.as_object()?;
+        body.get("code").and_then(JsonValue::as_str)?;
+        let prefix = text[..start]
+            .trim()
+            .trim_end_matches(':')
+            .trim()
+            .to_string();
+        Some((prefix, body.clone()))
+    })
 }
 
 // ============================================================================
@@ -501,7 +678,10 @@ fn execute_call(builtin: &str, args: &JsonValue) -> AgentResponse {
             );
             return AgentResponse {
                 code: Some("E_BAD_ARG".to_string()),
-                hint: None,
+                hint: Some(
+                    "pass the arguments as a JSON array in parameter order, or as an object keyed by the parameter names describe lists"
+                        .to_string(),
+                ),
                 success: false,
                 result: None,
                 error: Some(format!("Failed to convert arguments: {}", e)),
@@ -527,7 +707,7 @@ fn execute_pipeline(steps: &[PipelineStep], input: Option<&JsonValue>) -> AgentR
             result_type: None,
             metadata: failure
                 .code_attempted
-                .map(|code| json!({ "code_attempted": code })),
+                .map(|code| json!({ "code_attempted": echo_code(&code) })),
         },
     }
 }
@@ -705,8 +885,6 @@ fn run_pipeline_steps_unrecorded(
     Ok((output, joined))
 }
 
-/// The response for an evaluated value. Agent mode renders tabular results as
-/// AECON text; everything else is native JSON.
 /// `value` as an agent may see it: secrets scrubbed in agent mode unless
 /// `IRONSHELL_REDACT=off`, as `ish --agent` scrubs them. The Agent API and
 /// MCP returned records and scalars as they were, so a password that
@@ -721,46 +899,144 @@ pub fn redact_for_agent(value: Value) -> Value {
     }
 }
 
+/// The response for an evaluated value. The result is always JSON, so an Array,
+/// a Record or a Table is an array or an object to the caller, never a string.
+/// In agent mode a tabular result is paged to `IRONSHELL_TOKEN_BUDGET` when
+/// that is set, or kept as a handle when it is too large to send whole.
 fn response_from_value(value: Value, code: &str) -> AgentResponse {
     let value = redact_for_agent(value);
     let result_type = value_type_name(&value);
-    // Agent mode mirrors the CLI default: tabular results (Array/Table,
-    // where keys would otherwise repeat per row) are returned as compact
-    // AECON text instead of verbose JSON, paged to IRONSHELL_TOKEN_BUDGET when
-    // set. Scalars/records/strings stay native JSON (a bare number must
-    // not become a quoted string). Non-agent consumers are unchanged.
-    // Deterministic mode wins over the AECON renderer, as it does in `ish -c`,
-    // so the result is the canonical JSON the response carries instead.
-    if !deterministic_mode()
+    // Deterministic output is the whole value in canonical form, so the
+    // paging and handles of agent mode apply only when it is off.
+    let paged = !deterministic_mode()
         && crate::safety::current_mode() == crate::safety::Mode::Agent
-        && matches!(value, Value::Array(_) | Value::Table(_))
-    {
-        let budget = std::env::var("IRONSHELL_TOKEN_BUDGET")
-            .ok()
-            .and_then(|s| s.parse::<usize>().ok())
-            .filter(|m| *m > 0);
-        if let Some(text) = crate::builtins::render_agent(&value, budget) {
-            return AgentResponse {
-                code: None,
-                hint: None,
-                success: true,
-                result: Some(JsonValue::String(text)),
-                error: None,
-                result_type: Some("aecon".to_string()),
-                metadata: Some(json!({ "code_executed": code, "render": "aecon" })),
-            };
+        && matches!(value, Value::Array(_) | Value::Table(_));
+    let mut metadata = serde_json::Map::new();
+    metadata.insert("code_executed".to_string(), json!(echo_code(code)));
+    let result = if paged {
+        match tabular_result(&value, &mut metadata) {
+            Ok(result) => result,
+            Err(e) => {
+                return AgentResponse {
+                    code: None,
+                    hint: None,
+                    success: false,
+                    result: None,
+                    error: Some(e.to_string()),
+                    result_type: None,
+                    metadata: Some(JsonValue::Object(metadata)),
+                }
+            }
         }
-    }
+    } else {
+        value_to_json(&value)
+    };
     AgentResponse {
         code: None,
         hint: None,
         success: true,
-        result: Some(value_to_json(&value)),
+        result: Some(result),
         error: None,
         result_type: Some(result_type),
-        metadata: Some(json!({
-            "code_executed": code
-        })),
+        metadata: Some(JsonValue::Object(metadata)),
+    }
+}
+
+/// Source code as metadata echoes it: whole when it is short, otherwise its
+/// first 200 characters and its length. A caller that sent a large program
+/// does not get it back in full.
+fn echo_code(code: &str) -> String {
+    let chars = code.chars().count();
+    if chars < 1000 {
+        code.to_string()
+    } else {
+        let head: String = code.chars().take(200).collect();
+        format!("{head}... ({chars} chars)")
+    }
+}
+
+/// Rows a handled result shows in its preview.
+const HANDLE_PREVIEW_ROWS: usize = 3;
+
+/// The JSON `result` for an Array or Table in agent mode. With
+/// `IRONSHELL_TOKEN_BUDGET` set, the rows that fit the budget are returned and
+/// the count left out is stated in `metadata`. Without a budget, a result too
+/// large to send whole is stored as a handle (`metadata.handle`), and its first
+/// rows are returned; `handle("<id>")` gives the whole value back.
+fn tabular_result(
+    value: &Value,
+    metadata: &mut serde_json::Map<String, JsonValue>,
+) -> Result<JsonValue> {
+    let full = value_to_json(value);
+    let total = table_rows(&full).len();
+    let budget = std::env::var("IRONSHELL_TOKEN_BUDGET")
+        .ok()
+        .and_then(|s| s.parse::<usize>().ok())
+        .filter(|m| *m > 0);
+    if let Some(max) = budget {
+        let shown = rows_within_budget(&full, max);
+        if shown < total {
+            metadata.insert("total".to_string(), json!(total));
+            metadata.insert("shown".to_string(), json!(shown));
+            metadata.insert("omitted".to_string(), json!(total - shown));
+        }
+        return Ok(first_rows(&full, shown));
+    }
+    let full_bytes = full.to_string().len();
+    if crate::handles::worth_handling(value, full_bytes) {
+        let shown = total.min(HANDLE_PREVIEW_ROWS);
+        let handle = crate::handles::put(value.clone(), full_bytes)?;
+        metadata.insert("handle".to_string(), json!(handle.id));
+        metadata.insert("shape".to_string(), json!(handle.shape));
+        metadata.insert("items".to_string(), json!(handle.items));
+        metadata.insert("bytes".to_string(), json!(handle.bytes));
+        metadata.insert("total".to_string(), json!(total));
+        metadata.insert("shown".to_string(), json!(shown));
+        metadata.insert("omitted".to_string(), json!(total - shown));
+        return Ok(first_rows(&full, shown));
+    }
+    Ok(full)
+}
+
+/// The rows of an Array, or of a Table's JSON form.
+fn table_rows(full: &JsonValue) -> &[JsonValue] {
+    match full {
+        JsonValue::Array(rows) => rows.as_slice(),
+        JsonValue::Object(obj) => match obj.get("rows") {
+            Some(JsonValue::Array(rows)) => rows.as_slice(),
+            _ => &[],
+        },
+        _ => &[],
+    }
+}
+
+/// How many leading rows fit in `max` estimated tokens. One row is always
+/// shown, so a single large row still makes progress.
+fn rows_within_budget(full: &JsonValue, max: usize) -> usize {
+    let mut used = 0usize;
+    let mut shown = 0usize;
+    for row in table_rows(full) {
+        let tokens = crate::builtins::est_token_count(&row.to_string());
+        if shown > 0 && used.saturating_add(tokens) > max {
+            break;
+        }
+        used = used.saturating_add(tokens);
+        shown += 1;
+    }
+    shown
+}
+
+/// `full` with only its first `n` rows.
+fn first_rows(full: &JsonValue, n: usize) -> JsonValue {
+    match full {
+        JsonValue::Array(rows) => JsonValue::Array(rows.iter().take(n).cloned().collect()),
+        JsonValue::Object(obj) => {
+            let mut obj = obj.clone();
+            let page: Vec<JsonValue> = table_rows(full).iter().take(n).cloned().collect();
+            obj.insert("rows".to_string(), JsonValue::Array(page));
+            JsonValue::Object(obj)
+        }
+        other => other.clone(),
     }
 }
 
@@ -789,7 +1065,7 @@ fn execute_eval(code: &str) -> AgentResponse {
             error: Some(e.to_string()),
             result_type: None,
             metadata: Some(json!({
-                "code_attempted": code
+                "code_attempted": echo_code(code)
             })),
         },
     }
@@ -870,8 +1146,8 @@ fn describe_builtin(name: &str) -> AgentResponse {
                 format!("did you mean {}?", did_you_mean.join(", "))
             };
             AgentResponse {
-                code: None,
-                hint: None,
+                code: Some("E_UNKNOWN_BUILTIN".to_string()),
+                hint: Some(hint.clone()),
                 success: false,
                 result: None,
                 error: Some(format!("Builtin '{}' not found; {}", name, hint)),
@@ -1141,8 +1417,10 @@ fn get_type_info(type_name: Option<&str>) -> AgentResponse {
             }
         } else {
             AgentResponse {
-                code: None,
-                hint: None,
+                code: Some("E_NOT_FOUND".to_string()),
+                hint: Some(
+                    "send a type_info request without type_name to list the types".to_string(),
+                ),
                 success: false,
                 result: None,
                 error: Some(format!("Type '{}' not found", name)),
@@ -1201,9 +1479,11 @@ fn args_to_code(builtin: &str, args: &JsonValue) -> Result<String> {
 /// A name that is not a parameter is refused, and the error lists the valid
 /// names. A parameter that is left out must be optional, and no later one may
 /// be given, since an omitted middle argument has no literal. A variadic last
-/// parameter given an array is spread over the positions. A builtin whose first
-/// argument is its piped subject has no name for that subject, so it takes its
-/// arguments as an array only.
+/// parameter given an array is spread over the positions.
+///
+/// A builtin with a piped subject takes that subject as its first argument, so
+/// in this form the subject is the first position. It is named `subject` (or
+/// `input`) and its declared parameters follow it.
 fn named_args_to_positional(
     builtin: &str,
     obj: &serde_json::Map<String, JsonValue>,
@@ -1222,48 +1502,61 @@ fn named_args_to_positional(
         None => (builtin.to_string(), Vec::new()),
     };
     let signature = crate::signature::signature_of(&canonical);
+    let has_subject = signature.is_some_and(|s| s.subject.is_some());
 
-    if signature.is_some_and(|s| s.subject.is_some()) {
-        return Err(anyhow!(
-            "'{}' takes its first argument from the pipeline, which has no name; \
-             pass its arguments as an array",
-            builtin
-        ));
+    // The positions, in order: the subject first when there is one, then the
+    // declared parameters. Each is a name and whether it must be given.
+    let mut positions: Vec<(String, bool)> = Vec::new();
+    if has_subject {
+        let required = signature.is_some_and(|s| s.subject_required);
+        positions.push(("subject".to_string(), required));
     }
+    positions.extend(params.iter().map(|p| (p.name.clone(), p.required)));
 
-    let valid = if params.is_empty() {
+    let valid = if positions.is_empty() {
         "none (pass its arguments as an array)".to_string()
     } else {
-        params
+        positions
             .iter()
-            .map(|p| p.name.as_str())
+            .map(|(name, _)| name.as_str())
             .collect::<Vec<_>>()
             .join(", ")
     };
-    let mut slots: Vec<Option<JsonValue>> = vec![None; params.len()];
+    let mut slots: Vec<Option<JsonValue>> = vec![None; positions.len()];
     for (key, value) in obj {
-        match params.iter().position(|p| p.name == *key) {
-            Some(i) => slots[i] = Some(value.clone()),
-            None => {
-                return Err(anyhow!(
-                    "unknown argument '{}' for '{}'; valid parameters: {}",
-                    key,
-                    builtin,
-                    valid
-                ))
-            }
+        // `input` names the subject too, when the builtin has one and no
+        // parameter of its own is called that.
+        let index = positions
+            .iter()
+            .position(|(name, _)| name == key)
+            .or_else(|| (has_subject && key == "input").then_some(0));
+        let Some(i) = index else {
+            return Err(anyhow!(
+                "unknown argument '{}' for '{}'; valid parameters: {}",
+                key,
+                builtin,
+                valid
+            ));
+        };
+        if slots[i].is_some() {
+            return Err(anyhow!(
+                "argument '{}' of '{}' is given twice",
+                positions[i].0,
+                builtin
+            ));
         }
+        slots[i] = Some(value.clone());
     }
 
-    if let Some(p) = params
+    if let Some((name, _)) = positions
         .iter()
         .zip(&slots)
-        .find(|(p, slot)| p.required && slot.is_none())
-        .map(|(p, _)| p)
+        .find(|((_, required), slot)| *required && slot.is_none())
+        .map(|(position, _)| position)
     {
         return Err(anyhow!(
             "missing required argument '{}' for '{}'",
-            p.name,
+            name,
             builtin
         ));
     }
@@ -1273,12 +1566,12 @@ fn named_args_to_positional(
     };
     let variadic_last = signature.is_some_and(|s| s.params.last().is_some_and(|p| p.variadic));
     let mut out = Vec::with_capacity(last + 1);
-    for (i, (param, slot)) in params.iter().zip(slots).enumerate() {
+    for (i, (slot, (name, _))) in slots.into_iter().zip(&positions).enumerate() {
         if i > last {
             break;
         }
         match slot {
-            Some(JsonValue::Array(items)) if variadic_last && i + 1 == params.len() => {
+            Some(JsonValue::Array(items)) if variadic_last && i + 1 == positions.len() => {
                 out.extend(items)
             }
             Some(value) => out.push(value),
@@ -1286,9 +1579,9 @@ fn named_args_to_positional(
                 return Err(anyhow!(
                     "argument '{}' of '{}' is optional, but a later argument is given; \
                      give '{}' a value too",
-                    param.name,
+                    name,
                     builtin,
-                    param.name
+                    name
                 ))
             }
         }
@@ -1367,7 +1660,7 @@ fn predicate_to_lambda(predicate: &str) -> String {
 /// is refused rather than written into the code.
 fn json_to_ae_literal(val: &JsonValue) -> Result<String> {
     Ok(match val {
-        JsonValue::Null => "None".to_string(),
+        JsonValue::Null => "null".to_string(),
         JsonValue::Bool(b) => if *b { "true" } else { "false" }.to_string(),
         JsonValue::Number(n) => n.to_string(),
         JsonValue::String(s) => ae_string_literal(s),
@@ -6780,14 +7073,54 @@ pub fn process_json_request(json_str: &str) -> Result<String> {
     Ok(serde_json::to_string_pretty(&response)?)
 }
 
+/// The hint for input that is not an agent request.
+const REQUEST_HINT: &str = "a request is {\"action\":\"call\",\"builtin\":NAME,\"args\":[...]}; actions: call, pipeline, eval, describe, list_builtins, schema, type_info";
+
+/// Parse one request from its JSON text. A leading byte-order mark is ignored.
+/// Text that is not JSON is `E_PARSE`, and JSON that is not a request is
+/// `E_BAD_ARG`. Either is returned as the failure response itself, so a caller
+/// always has exactly one response to print.
+pub fn parse_request(text: &str) -> Result<AgentRequest, AgentResponse> {
+    let text = text.strip_prefix('\u{feff}').unwrap_or(text);
+    let value: JsonValue = serde_json::from_str(text)
+        .map_err(|e| bad_request("E_PARSE", format!("Invalid JSON request: {e}")))?;
+    serde_json::from_value(value)
+        .map_err(|e| bad_request("E_BAD_ARG", format!("Invalid request: {e}")))
+}
+
+/// The failure response for input that is not a request.
+fn bad_request(code: &str, message: String) -> AgentResponse {
+    AgentResponse {
+        success: false,
+        result: None,
+        error: Some(message),
+        code: Some(code.to_string()),
+        hint: Some(REQUEST_HINT.to_string()),
+        result_type: None,
+        metadata: None,
+    }
+}
+
+/// The one response to a request's JSON text: the result of the request, or the
+/// failure for input that is not one. For a caller that prints a response per
+/// request, as `ish agent execute` and `ish agent interactive` do.
+pub fn process_json_response(text: &str) -> AgentResponse {
+    match parse_request(text) {
+        Ok(request) => process_request(&request),
+        Err(response) => response,
+    }
+}
+
 /// The names `ish agent schema <format>` and `GET /api/v1/schema/:format`
 /// accept, matched case-insensitively. None for a name neither knows, so
 /// that a typo is reported rather than answered with some other format.
 pub fn parse_schema_format(format: &str) -> Option<SchemaFormat> {
     match format.to_lowercase().as_str() {
         // OpenAI family
-        "openai" | "gpt" | "chatgpt" => Some(SchemaFormat::OpenAI),
-        "azure" | "azure_openai" | "azureopenai" => Some(SchemaFormat::AzureOpenAI),
+        "openai" | "gpt" | "chatgpt" | "open_a_i" => Some(SchemaFormat::OpenAI),
+        "azure" | "azure_openai" | "azureopenai" | "azure_open_a_i" => {
+            Some(SchemaFormat::AzureOpenAI)
+        }
 
         // Anthropic
         "claude" | "anthropic" => Some(SchemaFormat::Claude),
@@ -6808,7 +7141,7 @@ pub fn parse_schema_format(format: &str) -> Option<SchemaFormat> {
         "grok" | "xai" => Some(SchemaFormat::Grok),
 
         // DeepSeek
-        "deepseek" | "deepseek-r1" => Some(SchemaFormat::DeepSeek),
+        "deepseek" | "deepseek-r1" | "deep_seek" => Some(SchemaFormat::DeepSeek),
 
         // AWS
         "bedrock" | "aws" | "amazon" => Some(SchemaFormat::Bedrock),
@@ -6820,31 +7153,31 @@ pub fn parse_schema_format(format: &str) -> Option<SchemaFormat> {
         "ollama" => Some(SchemaFormat::Ollama),
         // LM Studio serves the OpenAI chat-completions API.
         "lmstudio" | "lm-studio" | "lm_studio" => Some(SchemaFormat::OpenAI),
-        "vllm" => Some(SchemaFormat::VLLM),
+        "vllm" | "v_llm" => Some(SchemaFormat::VLLM),
 
         // Platforms
-        "huggingface" | "hf" | "tgi" => Some(SchemaFormat::HuggingFace),
-        "openrouter" => Some(SchemaFormat::OpenRouter),
+        "huggingface" | "hugging_face" | "hf" | "tgi" => Some(SchemaFormat::HuggingFace),
+        "openrouter" | "open_router" => Some(SchemaFormat::OpenRouter),
 
         // Chinese AI providers
         "kimi" | "moonshot" => Some(SchemaFormat::Kimi),
         "yi" | "01ai" | "lingyiwanwu" => Some(SchemaFormat::Yi),
-        "glm" | "chatglm" | "zhipu" => Some(SchemaFormat::GLM),
+        "glm" | "g_l_m" | "chatglm" | "zhipu" => Some(SchemaFormat::GLM),
 
         // Additional SOTA providers
         "reka" => Some(SchemaFormat::Reka),
-        "ai21" | "jamba" | "jurassic" => Some(SchemaFormat::AI21),
+        "ai21" | "a_i21" | "jamba" | "jurassic" => Some(SchemaFormat::AI21),
         "perplexity" | "sonar" => Some(SchemaFormat::Perplexity),
         "together" | "together-ai" => Some(SchemaFormat::Together),
         "groq" => Some(SchemaFormat::Groq),
         "fireworks" | "fireworks-ai" => Some(SchemaFormat::Fireworks),
 
         // Standard formats
-        "json" | "jsonschema" | "full" => Some(SchemaFormat::JsonSchema),
+        "json" | "jsonschema" | "json_schema" | "full" => Some(SchemaFormat::JsonSchema),
         "compact" | "ontology" => Some(SchemaFormat::Ontology),
-        "jsonld" | "json-ld" | "linked_data" => Some(SchemaFormat::JsonLD),
+        "jsonld" | "json-ld" | "json_ld" | "linked_data" => Some(SchemaFormat::JsonLD),
         "owl" | "rdf" | "turtle" | "owl_turtle" => Some(SchemaFormat::OwlTurtle),
-        "shacl" | "shapes" => Some(SchemaFormat::SHACL),
+        "shacl" | "shapes" | "s_h_a_c_l" => Some(SchemaFormat::SHACL),
 
         _ => None,
     }
