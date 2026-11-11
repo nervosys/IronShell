@@ -543,7 +543,7 @@ fn execute_pipeline(steps: &[PipelineStep], input: Option<&JsonValue>) -> AgentR
             result_type: None,
             metadata: failure
                 .code_attempted
-                .map(|code| json!({ "code_attempted": code })),
+                .map(|code| json!({ "code_attempted": echo_code(&code) })),
         },
     }
 }
@@ -748,7 +748,7 @@ fn response_from_value(value: Value, code: &str) -> AgentResponse {
         && crate::safety::current_mode() == crate::safety::Mode::Agent
         && matches!(value, Value::Array(_) | Value::Table(_));
     let mut metadata = serde_json::Map::new();
-    metadata.insert("code_executed".to_string(), json!(code));
+    metadata.insert("code_executed".to_string(), json!(echo_code(code)));
     let result = if paged {
         match tabular_result(&value, &mut metadata) {
             Ok(result) => result,
@@ -775,6 +775,19 @@ fn response_from_value(value: Value, code: &str) -> AgentResponse {
         error: None,
         result_type: Some(result_type),
         metadata: Some(JsonValue::Object(metadata)),
+    }
+}
+
+/// Source code as metadata echoes it: whole when it is short, otherwise its
+/// first 200 characters and its length. A caller that sent a large program
+/// does not get it back in full.
+fn echo_code(code: &str) -> String {
+    let chars = code.chars().count();
+    if chars < 1000 {
+        code.to_string()
+    } else {
+        let head: String = code.chars().take(200).collect();
+        format!("{head}... ({chars} chars)")
     }
 }
 
@@ -888,7 +901,7 @@ fn execute_eval(code: &str) -> AgentResponse {
             error: Some(e.to_string()),
             result_type: None,
             metadata: Some(json!({
-                "code_attempted": code
+                "code_attempted": echo_code(code)
             })),
         },
     }

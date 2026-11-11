@@ -82,6 +82,29 @@ fn schema_takes_the_cli_format_names_and_the_serde_names() {
 }
 
 #[test]
+fn code_executed_echoes_short_code_whole_and_a_long_program_only_in_part() {
+    let short = execute(r#"{"action":"eval","code":"1 + 2"}"#);
+    assert_eq!(
+        short["metadata"]["code_executed"],
+        json!("1 + 2"),
+        "{short}"
+    );
+
+    let long_code = format!("\"{}\"", "x".repeat(8000));
+    let request = json!({"action": "eval", "code": long_code}).to_string();
+    let v = execute(&request);
+    assert_eq!(v["result"].as_str().map(str::len), Some(8000), "{v}");
+    let echoed = v["metadata"]["code_executed"].as_str().expect("echo");
+    assert!(echoed.starts_with("\"xxx"), "{echoed}");
+    assert!(echoed.ends_with("... (8002 chars)"), "{echoed}");
+    assert_eq!(
+        echoed.chars().count(),
+        200 + "... (8002 chars)".len(),
+        "{echoed}"
+    );
+}
+
+#[test]
 fn a_record_result_is_a_json_object_and_scalars_keep_their_types() {
     let v = execute(r#"{"action":"eval","code":"{x: 1, y: \"two\"}"}"#);
     assert_eq!(v["result"], json!({"x": 1, "y": "two"}), "{v}");
