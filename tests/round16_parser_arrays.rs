@@ -157,6 +157,36 @@ fn help_with_an_empty_name_is_refused() {
     assert!(e.hint.contains("ontology_manifest()"), "{}", e.hint);
 }
 
+// Item 5: format_number says which decimals it wants, and what it got.
+
+#[test]
+fn format_number_names_the_decimals_range_it_refused() {
+    for (src, got) in [
+        ("format_number(1.5, 16)", "16"),
+        ("format_number(1.5, 100)", "100"),
+        ("format_number(1.5, -1)", "-1"),
+    ] {
+        let e = refusal(src);
+        assert_eq!(e.code, iron_shell::safety::ErrorCode::BadArg, "{src}");
+        assert!(
+            e.message
+                .contains(&format!("decimals must be from 0 to 15, got {got}")),
+            "{src}: {}",
+            e.message
+        );
+    }
+}
+
+#[test]
+fn format_number_still_formats_with_decimals_at_the_edges() {
+    assert_eq!(run("format_number(1.5, 0)"), Value::Str("2".into()));
+    // Fifteen digits after the point: the 5, then fourteen zeros.
+    assert_eq!(
+        run("format_number(1.5, 15)"),
+        Value::Str(format!("1.5{}", "0".repeat(14)))
+    );
+}
+
 #[test]
 fn ontology_describe_with_an_empty_name_is_refused() {
     let e = refusal("ontology_describe(\"\")");

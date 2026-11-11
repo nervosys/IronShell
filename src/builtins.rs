@@ -15476,11 +15476,18 @@ fn bi_format_number(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
     };
     let decimals = match decimals {
         Value::Int(d) if (0..=FORMAT_NUMBER_MAX_DECIMALS).contains(d) => *d as u32,
+        Value::Int(d) => {
+            return Err(crate::safety::bad_arg_in(
+                B,
+                format!("{B}: decimals must be from 0 to {FORMAT_NUMBER_MAX_DECIMALS}, got {d}"),
+                "pass the number of digits after the point, such as 2",
+            ))
+        }
         other => {
             return Err(crate::safety::bad_arg_in(
                 B,
                 format!(
-                    "{B}: decimals is {}, not an Int from 0 to {FORMAT_NUMBER_MAX_DECIMALS}",
+                    "{B}: decimals must be an Int from 0 to {FORMAT_NUMBER_MAX_DECIMALS}, got {}",
                     other.type_name()
                 ),
                 "pass the number of digits after the point, such as 2",
