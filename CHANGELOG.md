@@ -23,6 +23,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - A repeated key is refused at any depth of an agent request, naming its path (`args.path`), and on the MCP stdio transport (-32600).
 - `ish --explain` judges the POSIX subset's file operands (`rm`, `tee`, `mkdir`, `touch`, `cp`, `mv`) against the workspace jail, so a plan that would be refused is reported as denied rather than allowed.
 - An audit chain key that is set but too short is named once on stderr and in `audit_verify`'s note, instead of being dropped silently. A hash mismatch in an unkeyed chain says it was edited or corrupted, not tampered with: an unkeyed chain cannot tell which.
+- rusqlite 0.41 (bundled SQLite via libsqlite3-sys 0.39) for RUSTSEC-2026-0459, and openssl 0.10.82 for RUSTSEC-2026-0473 to -0479. The minimum supported Rust version is now 1.89, which rusqlite 0.41 requires.
 
 ### Changed
 
