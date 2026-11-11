@@ -8753,6 +8753,17 @@ fn bi_cat(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
     Ok(Value::Str(read_named_files("cat", path_str)?))
 }
 
+/// The text with a leading UTF-8 byte-order mark removed. Windows PowerShell
+/// writes one by default; it is not part of the text, so it is not read as
+/// the first character. Only text readers call this, never a byte reader or
+/// a writer, which keep the bytes they were given.
+fn without_bom(text: String) -> String {
+    match text.strip_prefix('\u{FEFF}') {
+        Some(rest) => rest.to_string(),
+        None => text,
+    }
+}
+
 /// The text of the path a builtin was given. A glob reads every match, in
 /// order, as `cat src/*.rs` does -- unless a file with that literal name
 /// exists. Every path read goes through `validate_read_path`, so the workspace
@@ -8800,6 +8811,7 @@ fn read_named_file(builtin: &str, path_str: &str) -> Result<String> {
     check_file_size_limit(metadata.len()).context(format!("{builtin}: file too large"))?;
 
     fs::read_to_string(&validated_path)
+        .map(without_bom)
         .map_err(|e| crate::safety::fs_error(builtin, &validated_path, &e))
 }
 
@@ -8828,6 +8840,7 @@ fn bi_read_text(args: Vec<Value>, _input: Option<Value>) -> Result<Value> {
     check_file_size_limit(metadata.len()).context("read_text: file too large")?;
 
     let content = fs::read_to_string(&validated_path)
+        .map(without_bom)
         .map_err(|e| crate::safety::fs_error("read_text", &validated_path, &e))?;
 
     Ok(Value::Str(content))
@@ -10147,6 +10160,7 @@ fn bi_from_json(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
     } else {
         return Err(crate::safety::arg_err("from-json: no JSON input provided"));
     };
+    let json_str = without_bom(json_str);
 
     // A bare `?` here surfaced serde's message as E_UNKNOWN with exit 1, the
     // one uncoded failure left in benches/agentic/errors.mjs (malformed-json).
@@ -15806,6 +15820,7 @@ fn bi_json_parse(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
     } else {
         expect_string("json_parse", &args[0])?.to_string()
     };
+    let json_str = without_bom(json_str);
 
     let json_val: serde_json::Value = serde_json::from_str(&json_str).map_err(|e| {
         crate::safety::value_not_representable(
@@ -29676,6 +29691,7 @@ fn bi_open(args: Vec<Value>, _input: Option<Value>) -> Result<Value> {
         fs::metadata(&validated).map_err(|e| crate::safety::fs_error("open", &validated, &e))?;
     check_file_size_limit(md.len()).context("open: file too large")?;
     let text = fs::read_to_string(&validated)
+        .map(without_bom)
         .map_err(|e| crate::safety::fs_error("open", &validated, &e))?;
     let ext = std::path::Path::new(&path)
         .extension()
