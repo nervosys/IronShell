@@ -82,6 +82,39 @@ fn a_piped_subject_can_be_named_subject_or_input_in_object_args() {
     assert_eq!(positional["result"], json!("ABC"), "{positional}");
 }
 
+/// A failure's `error` is an object with `code`, `message`, `hint` and
+/// `retryable`, whichever path produced it.
+fn assert_error_object(v: &Value, code: &str) {
+    assert_eq!(v["success"], json!(false), "{v}");
+    assert!(v["error"].is_object(), "error is not an object: {v}");
+    assert_eq!(v["error"]["code"], json!(code), "{v}");
+    assert!(v["error"]["message"].is_string(), "{v}");
+    assert!(
+        v["error"]["hint"].as_str().is_some_and(|h| !h.is_empty()),
+        "{v}"
+    );
+    assert!(v["error"]["retryable"].is_boolean(), "{v}");
+}
+
+#[test]
+fn every_failure_has_an_error_object_with_code_message_hint_and_retryable() {
+    let describe = execute(r#"{"action":"describe","builtin":"no_such_builtin_zz"}"#);
+    assert_error_object(&describe, "E_UNKNOWN_BUILTIN");
+    assert_eq!(describe["code"], json!("E_UNKNOWN_BUILTIN"), "{describe}");
+
+    let convert = execute(r#"{"action":"call","builtin":"upper","args":{"bogus":1}}"#);
+    assert_error_object(&convert, "E_BAD_ARG");
+    assert!(
+        convert["error"]["message"]
+            .as_str()
+            .is_some_and(|m| m.contains("Failed to convert arguments")),
+        "{convert}"
+    );
+
+    let parse = execute(r#"{"action":"eval","code":"((("}"#);
+    assert_error_object(&parse, "E_PARSE");
+}
+
 #[test]
 fn a_json_null_argument_is_the_null_value() {
     let v = execute(r#"{"action":"call","builtin":"type_of","args":[null]}"#);

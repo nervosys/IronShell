@@ -274,7 +274,9 @@ fn code_and_hint_come_from_the_structured_error_only_when_there_is_one() {
     let wire = serde_json::to_value(&parse).expect("serialise");
     assert_eq!(wire["code"], json!("E_PARSE"));
     assert!(wire["hint"].is_string(), "{wire}");
-    assert!(wire["error"].is_string(), "{wire}");
+    assert_eq!(wire["error"]["code"], json!("E_PARSE"), "{wire}");
+    assert!(wire["error"]["message"].is_string(), "{wire}");
+    assert!(wire["error"]["retryable"].is_boolean(), "{wire}");
 
     // A refused select is structured too, and its hint says what was wanted.
     let select = pipeline(

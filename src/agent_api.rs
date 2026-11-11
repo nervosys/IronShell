@@ -184,15 +184,18 @@ impl<'de> Deserialize<'de> for SchemaFormat {
 }
 
 /// Agent API response
+///
+/// On the wire a failure's `error` is an object (`code`, `message`, `hint`,
+/// `retryable`, and the fields of a structured error), built from the fields
+/// below by `AgentResponseWire`. Rust callers read the message as a string.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(into = "AgentResponseWire", from = "AgentResponseWire")]
 pub struct AgentResponse {
     /// Whether the operation succeeded
     pub success: bool,
     /// The result value (if success)
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub result: Option<JsonValue>,
     /// Error message (if failure)
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
     /// Machine-readable error code such as `E_BAD_ARG` (if failure with a known code)
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -206,6 +209,166 @@ pub struct AgentResponse {
     /// Metadata about the operation
     #[serde(skip_serializing_if = "Option::is_none")]
     pub metadata: Option<JsonValue>,
+}
+
+/// The wire form of `AgentResponse`. The field order is the order the response
+/// has always been written in.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct AgentResponseWire {
+    success: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    result: Option<JsonValue>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    error: Option<JsonValue>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    code: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    hint: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    result_type: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    metadata: Option<JsonValue>,
+}
+
+impl From<AgentResponse> for AgentResponseWire {
+    fn from(r: AgentResponse) -> Self {
+        // A failure always has an error object, even one whose message is missing.
+        let error = if r.success && r.error.is_none() {
+            None
+        } else {
+            let text = r.error.as_deref().unwrap_or("the request failed");
+            Some(error_object(text, r.code.as_deref(), r.hint.as_deref()))
+        };
+        AgentResponseWire {
+            success: r.success,
+            result: r.result,
+            error,
+            code: r.code,
+            hint: r.hint,
+            result_type: r.result_type,
+            metadata: r.metadata,
+        }
+    }
+}
+
+impl From<AgentResponseWire> for AgentResponse {
+    fn from(w: AgentResponseWire) -> Self {
+        let (error, code, hint) = match &w.error {
+            None => (None, w.code.clone(), w.hint.clone()),
+            Some(JsonValue::String(text)) => (Some(text.clone()), w.code.clone(), w.hint.clone()),
+            Some(object) => {
+                let text = object
+                    .get("message")
+                    .and_then(JsonValue::as_str)
+                    .map(str::to_string);
+                let code = object
+                    .get("code")
+                    .and_then(JsonValue::as_str)
+                    .map(str::to_string)
+                    .or_else(|| w.code.clone());
+                let hint = object
+                    .get("hint")
+                    .and_then(JsonValue::as_str)
+                    .map(str::to_string)
+                    .or_else(|| w.hint.clone());
+                (text, code, hint)
+            }
+        };
+        AgentResponse {
+            success: w.success,
+            result: w.result,
+            error,
+            code,
+            hint,
+            result_type: w.result_type,
+            metadata: w.metadata,
+        }
+    }
+}
+
+/// The hint for a failure that has none of its own.
+const DEFAULT_ERROR_HINT: &str = "read error.message; error.code names the class of failure, and error.retryable says whether a corrected call can succeed";
+
+/// Whether a failure with this code can succeed once the call is corrected.
+/// The same classes `ErrorCode::retryable` gives, by wire code.
+fn code_retryable(code: &str) -> bool {
+    matches!(
+        code,
+        "E_PARSE"
+            | "E_BAD_ARG"
+            | "E_UNKNOWN_BUILTIN"
+            | "E_UNKNOWN_FIELD"
+            | "E_UNKNOWN_NAME"
+            | "E_NOT_FOUND"
+            | "E_BAD_STATE"
+            | "E_NEEDS_APPROVAL"
+            | "E_NETWORK"
+    )
+}
+
+/// The `error` object of a failed response: `code`, `message`, `hint` and
+/// `retryable`. A structured error (`{"error":{...}}`, as the evaluator writes
+/// it) contributes its own fields, and any text before it, such as the name of
+/// the pipeline step that failed, stays in front of its message.
+fn error_object(text: &str, code: Option<&str>, hint: Option<&str>) -> JsonValue {
+    let mut fields = match structured_error_body(text) {
+        Some((prefix, mut body)) => {
+            if !prefix.is_empty() {
+                let inner = body
+                    .get("message")
+                    .and_then(JsonValue::as_str)
+                    .unwrap_or_default()
+                    .to_string();
+                body.insert("message".to_string(), json!(format!("{prefix}: {inner}")));
+            }
+            body
+        }
+        None => serde_json::Map::new(),
+    };
+    if !fields.contains_key("message") {
+        fields.insert("message".to_string(), json!(text));
+    }
+    let code = fields
+        .get("code")
+        .and_then(JsonValue::as_str)
+        .map(str::to_string)
+        .or_else(|| code.map(str::to_string))
+        .unwrap_or_else(|| "E_UNKNOWN".to_string());
+    let hint = fields
+        .get("hint")
+        .and_then(JsonValue::as_str)
+        .map(str::to_string)
+        .or_else(|| hint.map(str::to_string))
+        .unwrap_or_else(|| DEFAULT_ERROR_HINT.to_string());
+    let retryable = fields
+        .get("retryable")
+        .and_then(JsonValue::as_bool)
+        .unwrap_or_else(|| code_retryable(&code));
+    fields.insert("code".to_string(), json!(code));
+    fields.insert("hint".to_string(), json!(hint));
+    fields.insert("retryable".to_string(), json!(retryable));
+    JsonValue::Object(fields)
+}
+
+/// The structured error inside `text`, whole or after a prefix, as its
+/// `error` object and the prefix text before it.
+fn structured_error_body(text: &str) -> Option<(String, serde_json::Map<String, JsonValue>)> {
+    text.match_indices('{').find_map(|(start, _)| {
+        let value = serde_json::Deserializer::from_str(&text[start..])
+            .into_iter::<JsonValue>()
+            .next()?
+            .ok()?;
+        let body = value.get("error")?.as_object()?;
+        if body.get("code").and_then(JsonValue::as_str).is_none() {
+            return None;
+        }
+        let prefix = text[..start]
+            .trim()
+            .trim_end_matches(':')
+            .trim()
+            .to_string();
+        Some((prefix, body.clone()))
+    })
 }
 
 // ============================================================================
@@ -517,7 +680,10 @@ fn execute_call(builtin: &str, args: &JsonValue) -> AgentResponse {
             );
             return AgentResponse {
                 code: Some("E_BAD_ARG".to_string()),
-                hint: None,
+                hint: Some(
+                    "pass the arguments as a JSON array in parameter order, or as an object keyed by the parameter names describe lists"
+                        .to_string(),
+                ),
                 success: false,
                 result: None,
                 error: Some(format!("Failed to convert arguments: {}", e)),
@@ -982,8 +1148,8 @@ fn describe_builtin(name: &str) -> AgentResponse {
                 format!("did you mean {}?", did_you_mean.join(", "))
             };
             AgentResponse {
-                code: None,
-                hint: None,
+                code: Some("E_UNKNOWN_BUILTIN".to_string()),
+                hint: Some(hint.clone()),
                 success: false,
                 result: None,
                 error: Some(format!("Builtin '{}' not found; {}", name, hint)),
@@ -1253,8 +1419,10 @@ fn get_type_info(type_name: Option<&str>) -> AgentResponse {
             }
         } else {
             AgentResponse {
-                code: None,
-                hint: None,
+                code: Some("E_NOT_FOUND".to_string()),
+                hint: Some(
+                    "send a type_info request without type_name to list the types".to_string(),
+                ),
                 success: false,
                 result: None,
                 error: Some(format!("Type '{}' not found", name)),
