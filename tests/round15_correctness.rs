@@ -77,7 +77,7 @@ fn ish_in(dir: &Path, code: &str) -> Output {
 fn run(src: &str) -> Result<Value, String> {
     let mut env = iron_shell::modules::env_with_modules();
     let stmts = iron_shell::parser::parse_program(src).expect("parses");
-    iron_shell::eval::eval_program(&stmts, &mut env).map_err(|e| e.to_string())
+    iron_shell::eval::eval_program(&stmts, &mut env).map_err(|e| format!("{e:#}"))
 }
 
 // ── Item 1: a non-Bool `if` condition is an error, not a silent else ──
