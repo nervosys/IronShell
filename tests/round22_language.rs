@@ -114,3 +114,13 @@ fn where_names_the_value_it_got_and_how_to_fix_the_predicate() {
     );
     assert!(!text.contains("Int(0)"), "Debug form leaked: {text}");
 }
+
+// ---- 3. a comparison on a function names the pipe precedence ----
+
+#[test]
+fn a_comparison_on_a_function_says_the_pipe_binds_loosest() {
+    let text = run_refusal("[\"ab\"] | where(fn(f) => f | len > 0)");
+    assert!(text.contains("`|` binds loosest"), "{text}");
+    assert!(text.contains("(a | f) > 0"), "{text}");
+    assert!(!text.contains("convert with int(x)"), "{text}");
+}

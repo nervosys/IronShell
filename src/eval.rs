@@ -2512,6 +2512,10 @@ fn binop(op: &BinOp, a: Value, b: Value) -> Result<Value> {
         (op, a, b) => {
             let hint = if is_empty_string_number_mix(&a, &b) {
                 EMPTY_STRING_HINT
+            } else if is_lambda(&a) || is_lambda(&b) {
+                // `len > 0` after a pipe: the pipe binds loosest, so the
+                // comparison ran on the function, not on the piped value.
+                PIPE_PRECEDENCE_HINT
             } else {
                 match op {
                     Lt | Lte | Gt | Gte => {
@@ -2584,6 +2588,16 @@ fn number_string_error(op: &BinOp, a: &Value, b: &Value) -> anyhow::Error {
 /// field. Arithmetic and comparison refusals both name it.
 const EMPTY_STRING_HINT: &str =
     "the String is empty, often a blank CSV field; filter it out (where(.x != \"\")) or default it";
+
+/// For a comparison or arithmetic operator given a function: `|` binds loosest,
+/// so `a | f > 0` runs `f > 0` on the function, not on the piped value.
+const PIPE_PRECEDENCE_HINT: &str =
+    "`|` binds loosest: `a | f > 0` is `a | (f > 0)`; parenthesize the pipe: `(a | f) > 0`";
+
+/// Whether an operand is a function value (a lambda, sync or async).
+fn is_lambda(v: &Value) -> bool {
+    matches!(v, Value::Lambda(_) | Value::AsyncLambda(_))
+}
 
 /// Whether a number meets an empty String, in either order.
 fn is_empty_string_number_mix(a: &Value, b: &Value) -> bool {
