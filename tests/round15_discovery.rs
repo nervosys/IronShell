@@ -96,6 +96,8 @@ fn subtraction_negative_numbers_and_mid_statement_words_are_not_flags() {
         "n -1",
         "[1, -1]",
         "ls -1",
+        // A variable bound earlier is subtracted from, not flagged.
+        "total = 10\ndiscount = 3\ntotal -discount",
     ] {
         assert!(
             iron_shell::parser::parse_program(src).is_ok(),

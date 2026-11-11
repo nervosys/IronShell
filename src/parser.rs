@@ -3002,6 +3002,14 @@ impl Parser {
             return Ok(());
         }
         let name = word.text.as_str();
+        // `total -discount` is a subtraction when `total` is a variable: a name
+        // bound earlier in the source (`total = ...`) is left to the parser.
+        let bound_earlier = self.toks[..self.i]
+            .windows(2)
+            .any(|w| w[0].kind == Tok::Ident && w[0].text == name && w[1].kind == Tok::Equal);
+        if bound_earlier {
+            return Ok(());
+        }
         Err(anyhow::Error::new(HintedSyntax {
             msg: format!(
                 "unexpected '-' after `{name}` at line {}, column {}",
