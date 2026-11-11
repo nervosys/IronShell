@@ -106,3 +106,27 @@ fn item3_ontology_describe_carries_the_json_schema_the_describe_action_gives() {
         assert_eq!(described["json_schema"], result["json_schema"], "{name}");
     }
 }
+
+#[test]
+fn item4_a_request_that_repeats_a_top_level_key_is_refused() {
+    // Last-wins would run `eval`; the request is refused and names the key.
+    let text = r#"{"action":"call","builtin":"upper","args":[],"action":"eval"}"#;
+    let err = parse_request(text).expect_err("a repeated key is refused");
+    assert_eq!(err.code.as_deref(), Some("E_PARSE"), "{err:?}");
+    let message = err.error.unwrap_or_default();
+    assert!(message.contains("duplicate key \"action\""), "{message}");
+
+    let response = iron_shell::agent_api::process_json_response(text);
+    assert!(!response.success, "{response:?}");
+    assert_eq!(response.code.as_deref(), Some("E_PARSE"), "{response:?}");
+}
+
+#[test]
+fn item4_a_repeated_key_nested_below_the_top_level_is_not_refused() {
+    // The check is for the request object only.
+    let text = r#"{"action":"eval","code":"1 + 1","meta":{"x":1,"x":2}}"#;
+    assert!(
+        parse_request(text).is_ok(),
+        "nested repeats are not refused"
+    );
+}

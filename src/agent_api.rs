@@ -7181,8 +7181,14 @@ pub mod server {
 
 /// Process a JSON request from stdin (for CLI usage)
 pub fn process_json_request(json_str: &str) -> Result<String> {
-    let request: AgentRequest =
-        serde_json::from_str(json_str).map_err(|e| anyhow!("Invalid JSON request: {}", e))?;
+    // The same parse as `parse_request`, so a repeated key is refused here too.
+    let request = parse_request(json_str).map_err(|r| {
+        anyhow!(
+            "{}",
+            r.error
+                .unwrap_or_else(|| "Invalid JSON request".to_string())
+        )
+    })?;
 
     let response = process_request(&request);
     Ok(serde_json::to_string_pretty(&response)?)
@@ -7190,6 +7196,39 @@ pub fn process_json_request(json_str: &str) -> Result<String> {
 
 /// The hint for input that is not an agent request.
 const REQUEST_HINT: &str = "a request is {\"action\":\"call\",\"builtin\":NAME,\"args\":[...]}; actions: call, pipeline, eval, describe, list_builtins, schema, type_info";
+
+/// The top-level keys of a JSON object in the order the text gives them, with a
+/// repeated key kept each time. `serde_json::Value` keeps only the last of a
+/// repeated key, so a `Value` cannot show that a request repeated one.
+struct TopLevelKeys(Vec<String>);
+
+impl<'de> serde::Deserialize<'de> for TopLevelKeys {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct KeyVisitor;
+
+        impl<'de> serde::de::Visitor<'de> for KeyVisitor {
+            type Value = Vec<String>;
+
+            fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+                f.write_str("a JSON object")
+            }
+
+            fn visit_map<A: serde::de::MapAccess<'de>>(
+                self,
+                mut map: A,
+            ) -> Result<Vec<String>, A::Error> {
+                let mut keys = Vec::new();
+                while let Some(key) = map.next_key::<String>()? {
+                    map.next_value::<serde::de::IgnoredAny>()?;
+                    keys.push(key);
+                }
+                Ok(keys)
+            }
+        }
+
+        deserializer.deserialize_map(KeyVisitor).map(TopLevelKeys)
+    }
+}
 
 /// Parse one request from its JSON text. A leading byte-order mark is ignored.
 /// Text that is not JSON is `E_PARSE`, and JSON that is not a request is
@@ -7207,6 +7246,20 @@ pub fn parse_request(text: &str) -> Result<AgentRequest, AgentResponse> {
         };
         bad_request("E_PARSE", format!("Invalid JSON request: {e}"), hint)
     })?;
+    // A key the request repeats is refused, not resolved to its last value: a
+    // reader of the text and the parser could disagree about which one counts.
+    if value.is_object() {
+        if let Ok(TopLevelKeys(keys)) = serde_json::from_str::<TopLevelKeys>(text) {
+            let mut seen = std::collections::HashSet::new();
+            if let Some(repeated) = keys.iter().find(|k| !seen.insert(k.as_str())) {
+                return Err(bad_request(
+                    "E_PARSE",
+                    format!("Invalid JSON request: duplicate key \"{repeated}\""),
+                    REQUEST_HINT.to_string(),
+                ));
+            }
+        }
+    }
     // A pipeline that does not parse is most often written with `stages` for
     // `steps`, so its hint shows the shape.
     let hint = if value.get("action").and_then(JsonValue::as_str) == Some("pipeline") {
