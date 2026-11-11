@@ -156,6 +156,7 @@ fn a_last_line_without_a_newline_is_read_but_fails() {
 }
 
 #[test]
+#[cfg(windows)]
 fn a_script_with_a_sh_shebang_runs_in_a_child_and_gives_its_status() {
     let dir = scratch("shebang_child");
     std::fs::write(
@@ -170,6 +171,7 @@ fn a_script_with_a_sh_shebang_runs_in_a_child_and_gives_its_status() {
 }
 
 #[test]
+#[cfg(windows)]
 fn a_script_in_a_folder_with_an_env_bash_shebang_runs_in_a_child() {
     let dir = scratch("shebang_folder");
     std::fs::create_dir_all(dir.join("scripts")).expect("scripts dir");
@@ -185,6 +187,7 @@ fn a_script_in_a_folder_with_an_env_bash_shebang_runs_in_a_child() {
 }
 
 #[test]
+#[cfg(windows)]
 fn sh_and_bash_run_a_script_file_without_a_shebang_in_a_child() {
     let dir = scratch("sh_file");
     std::fs::write(dir.join("plain.sh"), "echo \"[$1]\"\n").expect("write plain");
@@ -195,6 +198,7 @@ fn sh_and_bash_run_a_script_file_without_a_shebang_in_a_child() {
 }
 
 #[test]
+#[cfg(windows)]
 fn a_child_refusal_is_the_command_status() {
     let dir = scratch("shebang_refused");
     std::fs::write(dir.join("f.sh"), "#!/bin/sh\nf() { echo x; }\n").expect("write f");
@@ -206,6 +210,7 @@ fn a_child_refusal_is_the_command_status() {
 }
 
 #[test]
+#[cfg(windows)]
 fn a_child_script_in_agent_mode_stays_inside_the_workspace() {
     let dir = scratch("shebang_agent");
     let escape = dir.parent().unwrap().join("r17_escape.txt");

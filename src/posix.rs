@@ -2739,6 +2739,11 @@ impl Shell {
 /// shell script, or `sh FILE args...` / `bash FILE args...` where FILE is an
 /// existing file. An option before FILE (`sh -c ...`) is not this form.
 fn shell_script_command(argv: &[String]) -> Option<(&str, &[String])> {
+    // Elsewhere a script runs as the real shell, as it always has; Windows
+    // has no `sh` to run it, and `./x.sh` failed with a Win32 error.
+    if !cfg!(windows) {
+        return None;
+    }
     let head = argv.first()?.as_str();
     if head.contains(['/', '\\']) {
         return has_shell_shebang(head).then_some((head, &argv[1..]));

@@ -92,7 +92,7 @@ background jobs) is refused before any of it runs, naming the construct and its 
 `IRONSHELL_ALLOW_SH` is set. With it, the unsupported parts fall back to the transpiler, which may
 delegate them to `bash -lc`; that fallback is not contained.
 Zsh and PowerShell input still goes through the transpilers only.
-A script run as a command (`./x.sh` whose first line is a `#!/bin/sh` or `#!/bin/bash` shebang, or `sh FILE` / `bash FILE`) runs in a child `ish -b` with the same mode and workspace, and its status becomes the command's status; the child gates its own commands, so the script itself has no Exec gate.
+On Windows, a script run as a command (`./x.sh` whose first line is a `#!/bin/sh` or `#!/bin/bash` shebang, or `sh FILE` / `bash FILE`) runs in a child `ish -b` with the same mode and workspace, and its status becomes the command's status; the child gates its own commands, so the script itself has no Exec gate.
 
 ```bash
 # Auto-detected by file extension
