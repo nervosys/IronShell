@@ -111,3 +111,41 @@ fn date_diff_answers_b_minus_a_so_a_reversed_pair_is_negative() {
         Value::Int(-984)
     );
 }
+
+// --- a number and an empty String ---------------------------------------------
+
+fn refused(src: &str) -> iron_shell::safety::SafetyError {
+    let err = eval(src).expect_err("a number and a String must not combine");
+    err.downcast_ref::<iron_shell::safety::SafetyError>()
+        .expect("a structured refusal")
+        .clone()
+}
+
+#[test]
+fn an_empty_string_in_arithmetic_is_named_with_a_filter_hint() {
+    let se = refused("1.5 + \"\"");
+    assert_eq!(se.message, "operator Add: cannot combine Float and String");
+    assert!(se.hint.contains("the String is empty"), "hint: {}", se.hint);
+    assert!(se.hint.contains("where(.x != \"\")"), "hint: {}", se.hint);
+    let se = refused("\"\" + 2");
+    assert!(se.hint.contains("the String is empty"), "hint: {}", se.hint);
+}
+
+#[test]
+fn an_empty_string_in_a_comparison_is_named_with_a_filter_hint() {
+    let se = refused("1.5 >= \"\"");
+    assert!(se.hint.contains("the String is empty"), "hint: {}", se.hint);
+    let se = refused("3 < \"\"");
+    assert!(se.hint.contains("the String is empty"), "hint: {}", se.hint);
+    let se = refused("\"\" > 2.5");
+    assert!(se.hint.contains("the String is empty"), "hint: {}", se.hint);
+}
+
+#[test]
+fn a_non_empty_string_keeps_the_conversion_hint() {
+    let se = refused("1 < \"a\"");
+    assert!(!se.hint.contains("empty"), "hint: {}", se.hint);
+    assert!(se.hint.contains("int(x)"), "hint: {}", se.hint);
+    let se = refused("1 + \"a\"");
+    assert!(!se.hint.contains("empty"), "hint: {}", se.hint);
+}

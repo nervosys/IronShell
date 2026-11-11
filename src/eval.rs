@@ -2297,11 +2297,15 @@ fn binop(op: &BinOp, a: Value, b: Value) -> Result<Value> {
         // Uncoded (E_UNKNOWN), and printed whole values: `null - null` said
         // "unsupported op Sub on Null and Null", a record dumped its contents.
         (op, a, b) => {
-            let hint = match op {
-                Lt | Lte | Gt | Gte => {
-                    "compare two numbers or two strings; convert with int(x) or float(x)"
+            let hint = if is_empty_string_number_mix(&a, &b) {
+                EMPTY_STRING_HINT
+            } else {
+                match op {
+                    Lt | Lte | Gt | Gte => {
+                        "compare two numbers or two strings; convert with int(x) or float(x)"
+                    }
+                    _ => "use numbers for arithmetic, or strings for + (concatenation); convert with int(x) or float(x)",
                 }
-                _ => "use numbers for arithmetic, or strings for + (concatenation); convert with int(x) or float(x)",
             };
             return Err(crate::safety::bad_arg_with_hint(
                 &format!("operator {op:?}"),
@@ -2336,6 +2340,11 @@ fn is_number_string_mix(op: &BinOp, a: &Value, b: &Value) -> bool {
 /// `to_string()`), which turns a number into text.
 fn number_string_error(op: &BinOp, a: &Value, b: &Value) -> anyhow::Error {
     let operator = format!("operator {op:?}");
+    let hint = if is_empty_string_number_mix(a, b) {
+        EMPTY_STRING_HINT
+    } else {
+        "use interpolation \"${x}\", or str(x) / to_string(x) to convert a number to text, or int(x) / float(x) to convert text to a number"
+    };
     crate::safety::bad_arg_in(
         &operator,
         format!(
@@ -2343,8 +2352,22 @@ fn number_string_error(op: &BinOp, a: &Value, b: &Value) -> anyhow::Error {
             a.type_name(),
             b.type_name()
         ),
-        "use interpolation \"${x}\", or str(x) / to_string(x) to convert a number to text, or int(x) / float(x) to convert text to a number",
+        hint,
     )
+}
+
+/// The hint when a number meets an empty String, which is usually a blank CSV
+/// field. Arithmetic and comparison refusals both name it.
+const EMPTY_STRING_HINT: &str =
+    "the String is empty, often a blank CSV field; filter it out (where(.x != \"\")) or default it";
+
+/// Whether a number meets an empty String, in either order.
+fn is_empty_string_number_mix(a: &Value, b: &Value) -> bool {
+    match (a, b) {
+        (Value::Str(s), Value::Int(_) | Value::Float(_))
+        | (Value::Int(_) | Value::Float(_), Value::Str(s)) => s.is_empty(),
+        _ => false,
+    }
 }
 
 /// The record a caught error is bound to. Its fields sit at the top level, so
