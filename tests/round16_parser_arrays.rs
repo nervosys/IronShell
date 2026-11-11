@@ -109,3 +109,21 @@ fn tail_takes_an_array_as_its_first_argument() {
 fn head_with_a_negative_count_is_refused() {
     assert_eq!(error_code("[1, 2, 3] | head(-1)"), "E_BAD_ARG");
 }
+
+// Item 3: group_by keys on the type as well as the text.
+
+#[test]
+fn group_by_keeps_int_one_and_string_one_apart() {
+    assert_eq!(
+        run("[1, \"1\"] | group_by(fn(x) => x) | len"),
+        Value::Int(2)
+    );
+}
+
+#[test]
+fn group_by_still_groups_equal_values_of_one_type() {
+    assert_eq!(
+        run("g = ([1, 1, \"1\"] | group_by(fn(x) => x))\ng[0].Count"),
+        Value::Int(2)
+    );
+}

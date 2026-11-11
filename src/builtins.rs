@@ -10007,14 +10007,15 @@ fn bi_group_object(args: Vec<Value>, input: Option<Value>, env: &mut Env) -> Res
 
     match input {
         Value::Array(arr) => {
-            // Each row with the text of its key. Rows whose keys have the same
-            // text share a group, whichever form gave the key.
-            let mut keyed: Vec<(String, Value)> = Vec::with_capacity(arr.len());
+            // Each row with its key's text and type name. Rows share a group
+            // only when both match, so Int 1 and String "1" stay apart, while
+            // the group is still named by the text, as it always was.
+            let mut keyed: Vec<((String, &'static str), Value)> = Vec::with_capacity(arr.len());
             match property {
                 Some(property) => {
                     for item in arr {
                         let key = get_property_value(&item, property);
-                        keyed.push((value_to_string(&key), item));
+                        keyed.push(((value_to_string(&key), key.type_name()), item));
                     }
                 }
                 None => {
@@ -10022,20 +10023,22 @@ fn bi_group_object(args: Vec<Value>, input: Option<Value>, env: &mut Env) -> Res
                     with_param_slots(lam, env, |env| {
                         for item in arr {
                             let key = call_lambda_one(lam, item.clone(), env, false)?.0;
-                            keyed.push((value_to_string(&key), item));
+                            keyed.push(((value_to_string(&key), key.type_name()), item));
                         }
                         Ok(())
                     })?;
                 }
             }
 
-            let mut groups = BTreeMap::new();
-            for (key_str, item) in keyed {
-                groups.entry(key_str).or_insert_with(Vec::new).push(item);
+            // Ordered by the key's text, then its type, so the groups come out
+            // in the same order as before.
+            let mut groups: BTreeMap<(String, &'static str), Vec<Value>> = BTreeMap::new();
+            for (key, item) in keyed {
+                groups.entry(key).or_insert_with(Vec::new).push(item);
             }
 
             let mut result = Vec::new();
-            for (key, items) in groups {
+            for ((key, _type), items) in groups {
                 let mut group = BTreeMap::new();
                 group.insert("Name".to_string(), Value::Str(key));
                 group.insert("Count".to_string(), Value::Int(items.len() as i64));
