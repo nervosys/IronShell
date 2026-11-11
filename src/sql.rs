@@ -484,7 +484,7 @@ fn run(
         .enumerate()
         .map(|(i, v)| bind_value(builtin, i, v))
         .collect::<Result<Vec<_>>>()?;
-    let columns: Vec<String> = stmt.column_names().iter().map(|c| c.to_string()).collect();
+    let columns: Vec<String> = stmt.column_names().map(|c| c.to_string()).collect();
     let mut rows_out = Vec::new();
     let mut rows = stmt
         .query(rusqlite::params_from_iter(bound))
