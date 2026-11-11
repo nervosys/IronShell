@@ -6,6 +6,33 @@
 //! truthiness.
 
 use iron_shell::value::Value;
+use std::path::{Path, PathBuf};
+use std::process::{Command, Output};
+
+/// A fresh scratch directory for the CLI tests, with its own session directory.
+fn scratch(name: &str) -> PathBuf {
+    let dir = Path::new(env!("CARGO_TARGET_TMPDIR"))
+        .join("round15_correctness")
+        .join(name);
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("session")).expect("session dir");
+    dir
+}
+
+/// Run `code` by `ish -c` with `dir` as the working directory.
+fn ish_in(dir: &Path, code: &str) -> Output {
+    Command::new(env!("CARGO_BIN_EXE_ish"))
+        .args(["-c", code])
+        .current_dir(dir)
+        .env("IRONSHELL_SESSION_DIR", dir.join("session"))
+        .env("NO_COLOR", "1")
+        .env_remove("IRONSHELL_MODE")
+        .env_remove("IRONSHELL_AGENT")
+        .env_remove("IRONSHELL_WORKSPACE")
+        .env_remove("IRONSHELL_APPROVE")
+        .output()
+        .expect("run ish")
+}
 
 fn run(src: &str) -> Result<Value, String> {
     let mut env = iron_shell::modules::env_with_modules();
@@ -74,6 +101,67 @@ fn an_if_comparing_a_record_field_works() {
         run(r#"r = {exists: true}; if r.exists { "yes" } else { "no" }"#),
         Ok(Value::Str("yes".into()))
     );
+}
+
+// ── Item 2: a .tar.gz or .tgz archive is gzipped, and reads back ──
+
+fn write_member(dir: &Path) {
+    std::fs::create_dir_all(dir.join("proj").join("src")).unwrap();
+    std::fs::write(dir.join("proj").join("src").join("a.txt"), "alpha\n").unwrap();
+}
+
+#[test]
+fn tar_create_gzips_a_tar_gz_archive_and_round_trips() {
+    let dir = scratch("tar_gz_round_trip");
+    write_member(&dir);
+    let proj = dir.join("proj");
+    let created = ish_in(&proj, r#"tar_create("pack.tar.gz", "src")"#);
+    assert!(
+        created.status.success(),
+        "{}",
+        String::from_utf8_lossy(&created.stderr)
+    );
+    let bytes = std::fs::read(proj.join("pack.tar.gz")).unwrap();
+    assert_eq!(&bytes[..2], &[0x1f, 0x8b], "the archive is gzip");
+
+    let listed = ish_in(&proj, r#"tar_list("pack.tar.gz")"#);
+    assert!(
+        listed.status.success(),
+        "tar_list must read it back: {}",
+        String::from_utf8_lossy(&listed.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&listed.stdout).contains("a.txt"),
+        "{}",
+        String::from_utf8_lossy(&listed.stdout)
+    );
+
+    let extracted = ish_in(&proj, r#"tar_extract("pack.tar.gz", "out")"#);
+    assert!(
+        extracted.status.success(),
+        "{}",
+        String::from_utf8_lossy(&extracted.stderr)
+    );
+    assert_eq!(
+        std::fs::read_to_string(proj.join("out").join("src").join("a.txt")).unwrap(),
+        "alpha\n"
+    );
+}
+
+#[test]
+fn tar_create_writes_plain_tar_for_a_tar_name() {
+    let dir = scratch("tar_plain");
+    write_member(&dir);
+    let proj = dir.join("proj");
+    let created = ish_in(&proj, r#"tar_create("pack.tar", "src")"#);
+    assert!(
+        created.status.success(),
+        "{}",
+        String::from_utf8_lossy(&created.stderr)
+    );
+    let bytes = std::fs::read(proj.join("pack.tar")).unwrap();
+    assert_ne!(&bytes[..2], &[0x1f, 0x8b], "a .tar name is not gzipped");
+    assert_eq!(&bytes[257..262], b"ustar", "a plain tar header");
 }
 
 #[test]

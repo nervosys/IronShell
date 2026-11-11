@@ -35663,7 +35663,13 @@ fn bi_tar_create(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
     let out = guard_local_write("tar_create", &archive)?;
     let mut argv: Vec<&str> = vec!["-c", "-f", "-", "--"];
     argv.extend(members.iter().map(String::as_str));
-    tool_to_new_file("tar_create", "tar", &argv, &out)?;
+    // A .tar.gz or .tgz name gets a gzipped stream, which tar_list and
+    // tar_extract read back. The plain tar stream was written under that name.
+    if archive_kind(&archive) == Some("tar.gz") {
+        tool_to_new_gzip_file("tar_create", "tar", &argv, &out)?;
+    } else {
+        tool_to_new_file("tar_create", "tar", &argv, &out)?;
+    }
     Ok(Value::Bool(true))
 }
 
@@ -64824,6 +64830,41 @@ fn tool_to_new_file(builtin: &str, tool: &str, argv: &[&str], out_path: &str) ->
         FILE_OUTPUT_CAP,
     )
     .and_then(|(status, stderr)| tool_ok(builtin, tool, status, &stderr));
+    if result.is_err() {
+        remove_partial(out_path);
+    }
+    result
+}
+
+/// Runs a tool whose stdout is a stream, and writes that stream gzipped to the
+/// new file `out_path` (in-process, flate2: no gzip program is needed). Like
+/// [`tool_to_new_file`], an existing file is refused and a failed run removes it.
+fn tool_to_new_gzip_file(builtin: &str, tool: &str, argv: &[&str], out_path: &str) -> Result<()> {
+    let file = create_new_output(builtin, out_path)?;
+    let sink = std::sync::Arc::new(std::sync::Mutex::new(Vec::<u8>::new()));
+    let mut cmd = crate::safety::child_command(tool);
+    cmd.args(argv);
+    let result = run_tool(
+        builtin,
+        tool,
+        cmd,
+        None,
+        sink.clone(),
+        LOCAL_DEADLINE_SECS,
+        FILE_OUTPUT_CAP,
+    )
+    .and_then(|(status, stderr)| tool_ok(builtin, tool, status, &stderr))
+    .and_then(|()| {
+        let bytes = std::mem::take(
+            &mut *sink
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+        );
+        let mut enc = flate2::write::GzEncoder::new(file, flate2::Compression::default());
+        std::io::Write::write_all(&mut enc, &bytes)
+            .and_then(|()| enc.finish().map(|_| ()))
+            .map_err(|e| crate::safety::fs_error(builtin, out_path, &e))
+    });
     if result.is_err() {
         remove_partial(out_path);
     }
