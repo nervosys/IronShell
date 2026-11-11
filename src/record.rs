@@ -282,7 +282,7 @@ pub fn heads_of(source: &str) -> Vec<String> {
 fn walk_stmt(stmt: &Stmt, out: &mut Vec<String>) {
     match stmt {
         Stmt::Expr(e) => walk_expr(e, out),
-        Stmt::Let { value, .. } => walk_expr(value, out),
+        Stmt::Let { value, .. } | Stmt::SetField { value, .. } => walk_expr(value, out),
         Stmt::Cfg { body, .. } => walk_stmt(body, out),
         _ => {}
     }

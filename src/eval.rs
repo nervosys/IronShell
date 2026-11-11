@@ -583,6 +583,21 @@ pub fn eval_stmt(stmt: &Stmt, env: &mut Env) -> Result<Value> {
             Ok(v)
         }
         Stmt::Expr(e) => eval_expr(e, env),
+        Stmt::SetField { name, path, value } => {
+            // The new value is evaluated while `name` is still bound, so
+            // `r.a = r.a + 1` reads the old `a`. The Record is copied, changed
+            // and stored back, so a refusal anywhere leaves `name` as it was.
+            let v = eval_expr(value, env)?;
+            let mut updated = match env.get_var(name) {
+                Some(root) => root.clone(),
+                None => return Err(unknown_name_error(name, env)),
+            };
+            set_field_path(&mut updated, name, path, v.clone())?;
+            env.set_var(name, updated).map_err(|e| {
+                crate::safety::bad_state_with_hint("assign", &e, &env.rebind_hint(name))
+            })?;
+            Ok(v)
+        }
         Stmt::Import {
             items,
             source,
@@ -1108,6 +1123,29 @@ fn unknown_name_error(name: &str, env: &Env) -> anyhow::Error {
     // with the bound variables added to the candidates.
     let candidates = builtins::did_you_mean_among(name, env.vars().keys().map(|k| k.as_str()));
     crate::safety::unknown_name(name, candidates)
+}
+
+/// Sets the field at `path` inside `target`, which is the Record `label` names.
+/// Every field but the last must already hold a Record; the last is created
+/// when missing. A refusal names the path up to the field that failed.
+fn set_field_path(target: &mut Value, label: &str, path: &[String], new: Value) -> Result<()> {
+    let Some((field, rest)) = path.split_first() else {
+        *target = new;
+        return Ok(());
+    };
+    let kind = target.type_name();
+    let Value::Record(map) = target else {
+        return Err(crate::safety::bad_arg(label, "a Record", kind));
+    };
+    if rest.is_empty() {
+        map.insert(field.clone(), new);
+        return Ok(());
+    }
+    let child_label = format!("{label}.{field}");
+    match map.get_mut(field) {
+        Some(child) => set_field_path(child, &child_label, rest, new),
+        None => Err(crate::safety::bad_arg(&child_label, "a Record", "nothing")),
+    }
 }
 
 /// Resolve only identifiers and field chains, which cannot mutate the env.

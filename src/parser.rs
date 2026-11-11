@@ -1516,6 +1516,20 @@ impl Parser {
             }
         }
 
+        // `name.field(.field)* = value`: sets a field of the Record bound to `name`.
+        if visibility == Visibility::Private && self.at_field_assignment() {
+            let name = self.need_ident("expected identifier")?;
+            let mut path = Vec::new();
+            while self.match_tok(Tok::Dot) {
+                path.push(self.need_field("expected field name after '.'")?);
+            }
+            if !self.match_tok(Tok::Equal) {
+                self.need(Tok::ColonEqual, "expected '=' or ':=' after field")?;
+            }
+            let value = self.parse_expr()?;
+            return Ok(Stmt::SetField { name, path, value });
+        }
+
         if self.match_tok(Tok::Let) {
             // Keep let/let mut for explicit declarations
             let is_mut = self.match_tok(Tok::Mut);
@@ -2964,6 +2978,19 @@ impl Parser {
         } else {
             None
         }
+    }
+    /// Whether the tokens ahead are `ident (. ident)+ =` (or `:=`): a field
+    /// assignment. A plain `name = value` or a `==` comparison is not one.
+    fn at_field_assignment(&self) -> bool {
+        let kind = |k: usize| self.peek_ahead(k);
+        if kind(0) != Some(Tok::Ident) || kind(1) != Some(Tok::Dot) {
+            return false;
+        }
+        let mut k = 1;
+        while kind(k) == Some(Tok::Dot) && kind(k + 1) == Some(Tok::Ident) {
+            k += 2;
+        }
+        matches!(kind(k), Some(Tok::Equal) | Some(Tok::ColonEqual))
     }
     fn match_tok(&mut self, k: Tok) -> bool {
         if self.check(k) {

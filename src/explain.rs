@@ -75,6 +75,7 @@ impl Walk<'_> {
                 self.locals.insert(name.clone());
             }
             Stmt::Expr(e) => self.expr(e),
+            Stmt::SetField { value, .. } => self.expr(value),
             Stmt::Cfg { body, .. } => self.stmt(body),
             Stmt::Import { .. } | Stmt::Export { .. } => {}
         }

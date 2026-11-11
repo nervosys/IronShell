@@ -42,6 +42,14 @@ pub enum Stmt {
         ty: Option<String>,
     },
     Expr(Expr),
+    /// Field assignment: `r.a.b = value`. `r` is rebound to a copy of its
+    /// Record with the field set (created when missing). Records are values, so
+    /// other bindings of the old Record do not see the change.
+    SetField {
+        name: String,
+        path: Vec<String>,
+        value: Expr,
+    },
     /// Import statement: `import "path"` or `import { a, b } from "path"`
     Import {
         /// Items to import (empty means import all as module)
