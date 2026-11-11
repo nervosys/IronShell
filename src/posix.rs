@@ -543,7 +543,17 @@ impl<'a> Lexer<'a> {
                 }
                 let name = match self.peek() {
                     Some(c) if is_name_start(c) => self.name(),
-                    Some(c @ ('?' | '$' | '#' | '0'..='9')) => {
+                    // `${10}` is one parameter: every digit up to the brace.
+                    // Without braces `$10` is `$1` followed by `0`.
+                    Some(c) if c.is_ascii_digit() => {
+                        let mut digits = String::new();
+                        while let Some(d) = self.peek().filter(|d| d.is_ascii_digit()) {
+                            digits.push(d);
+                            self.i += 1;
+                        }
+                        digits
+                    }
+                    Some(c @ ('?' | '$' | '#')) => {
                         self.i += 1;
                         c.to_string()
                     }
