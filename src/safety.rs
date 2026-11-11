@@ -3958,6 +3958,37 @@ pub(crate) fn jail_enforced(mode: Mode) -> bool {
     mode == Mode::Agent || std::env::var("IRONSHELL_WORKSPACE").is_ok()
 }
 
+/// Why the workspace jail would refuse a guarded write to `path`, judged as
+/// [`guard`] judges a filesystem target: the same checks, in the same order, but
+/// nothing is audited and nothing is written. `None` when the jail lets it
+/// through. `path` is the path the write would go to, as
+/// [`resolve_path_str`] gives it.
+pub fn write_jail_refusal(path: &str) -> Option<String> {
+    let mode = current_mode();
+    if !jail_enforced(mode) {
+        return None;
+    }
+    if !within_workspace(path) {
+        return Some(format!("'{path}' is outside the workspace root"));
+    }
+    if is_audit_artifact(path) {
+        return Some(format!(
+            "'{path}' is the audit log or its directory, which is protected and cannot be written by a guarded builtin"
+        ));
+    }
+    if is_governance_file(path) {
+        return Some(format!(
+            "'{path}' configures this shell's access control or audit key and cannot be written by a guarded builtin"
+        ));
+    }
+    if mode == Mode::Agent && is_git_control_path(path) {
+        return Some(format!(
+            "'{path}' is inside a .git directory and cannot be written by an agent"
+        ));
+    }
+    None
+}
+
 /// Resolve a user-supplied path the way an effecting builtin should operate on it.
 ///
 /// Absolute paths are returned unchanged. In a **jailed** context (agent mode, or

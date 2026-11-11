@@ -153,3 +153,99 @@ fn a_stray_close_paren_is_a_parse_error() {
         "{err}"
     );
 }
+
+#[test]
+fn explain_judges_write_and_read_operands_against_the_jail_as_the_run_does() {
+    // `--explain -b` in agent mode with a workspace predicts what the run does:
+    // a write or a read outside the workspace is deny, with the reason, and the
+    // run refuses it with E_OUTSIDE_WORKSPACE before the file is touched.
+    let sb = Sandbox::new("explain-jail");
+    let ws = sb.0.join("ws");
+    std::fs::create_dir_all(&ws).unwrap();
+    std::fs::write(sb.0.join("secret"), "x\n").unwrap();
+    for script in [
+        "touch ../z",
+        "mkdir ../d",
+        "echo x | tee ../f",
+        "echo x > ../x",
+        "cat ../secret",
+        "cat inside.txt ../secret",
+    ] {
+        let out = Command::new(env!("CARGO_BIN_EXE_ish"))
+            .args([
+                "--agent",
+                "--workspace",
+                ".",
+                "--explain",
+                "-b",
+                "-c",
+                script,
+            ])
+            .current_dir(&ws)
+            .env("NO_COLOR", "1")
+            .env("IRONSHELL_SESSION_DIR", sb.0.join("session"))
+            .output()
+            .expect("run ish");
+        let report: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap_or_else(|e| {
+            panic!(
+                "{script}: not JSON ({e}): {}",
+                String::from_utf8_lossy(&out.stderr)
+            )
+        });
+        assert_eq!(report["decision"], "deny", "{script}: {report}");
+        let reasons: Vec<&str> = report["calls"]
+            .as_array()
+            .expect("calls")
+            .iter()
+            .filter(|c| c["decision"] == "deny")
+            .filter_map(|c| c["reason"].as_str())
+            .collect();
+        assert!(
+            reasons
+                .iter()
+                .any(|r| r.contains("outside the workspace root")),
+            "{script}: {report}"
+        );
+
+        let run = Command::new(env!("CARGO_BIN_EXE_ish"))
+            .args(["--agent", "--workspace", ".", "-b", "-c", script])
+            .current_dir(&ws)
+            .env("NO_COLOR", "1")
+            .env("IRONSHELL_SESSION_DIR", sb.0.join("session"))
+            .output()
+            .expect("run ish");
+        let text = format!(
+            "{}{}",
+            String::from_utf8_lossy(&run.stdout),
+            String::from_utf8_lossy(&run.stderr)
+        );
+        assert!(text.contains("E_OUTSIDE_WORKSPACE"), "{script}: {text}");
+    }
+    assert!(!sb.0.join("z").exists() && !sb.0.join("d").exists() && !sb.0.join("f").exists());
+    assert!(!sb.0.join("x").exists());
+}
+
+#[test]
+fn explain_predicts_allow_for_an_operand_inside_the_workspace() {
+    let sb = Sandbox::new("explain-inside");
+    let ws = sb.0.join("ws");
+    std::fs::create_dir_all(&ws).unwrap();
+    std::fs::write(ws.join("in.txt"), "a\n").unwrap();
+    let out = Command::new(env!("CARGO_BIN_EXE_ish"))
+        .args([
+            "--agent",
+            "--workspace",
+            ".",
+            "--explain",
+            "-b",
+            "-c",
+            "cat in.txt > out.txt",
+        ])
+        .current_dir(&ws)
+        .env("NO_COLOR", "1")
+        .env("IRONSHELL_SESSION_DIR", sb.0.join("session"))
+        .output()
+        .expect("run ish");
+    let report: serde_json::Value = serde_json::from_slice(&out.stdout).expect("JSON");
+    assert_eq!(report["decision"], "allow", "{report}");
+}

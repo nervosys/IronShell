@@ -6354,6 +6354,65 @@ pub fn write_operands(head: &str, args: &[String]) -> Option<Vec<String>> {
     }
 }
 
+/// The file operands an in-process utility reads, for `--explain`: each one is
+/// judged by the workspace jail as the run judges it when it opens the file. `-`
+/// (standard input) is among them as given. `None` when the utility's operand
+/// grammar is not modelled here (a flag takes a value, or a pattern comes before
+/// the files), or when it declines its options and runs as a program.
+pub fn read_operands(head: &str, args: &[String]) -> Option<Vec<String>> {
+    match head {
+        "cat" => short_flags(args, "n").map(|(_, ops)| ops),
+        "wc" => short_flags(args, "lwcm").map(|(_, ops)| ops),
+        "ls" => {
+            // `ls -l` declines on Windows and runs as a program.
+            let (flags, ops) = short_flags(args, "aAl1d")?;
+            (!flags.contains(&'l') || cfg!(unix)).then_some(ops)
+        }
+        "sed" => sed_operands(args),
+        _ => None,
+    }
+}
+
+/// The files `sed` reads: the operands after its script, as `sed()` splits its
+/// arguments. `None` where `sed()` declines.
+fn sed_operands(args: &[String]) -> Option<Vec<String>> {
+    let mut have_script = false;
+    let mut files = Vec::new();
+    let mut i = 0;
+    while i < args.len() {
+        let a = args[i].as_str();
+        match a {
+            "-n" | "-E" | "-r" => {}
+            "-e" => {
+                i += 1;
+                if i >= args.len() {
+                    return None;
+                }
+                have_script = true;
+            }
+            "-ne" | "-nE" | "-En" => {
+                if a == "-ne" {
+                    i += 1;
+                    if i >= args.len() {
+                        return None;
+                    }
+                }
+                have_script = true;
+            }
+            s if s.starts_with('-') && s != "-" => return None,
+            _ => {
+                if have_script {
+                    files.push(args[i].clone());
+                } else {
+                    have_script = true;
+                }
+            }
+        }
+        i += 1;
+    }
+    Some(files)
+}
+
 fn walk_list(list: &List, out: &mut Vec<ExplainCommand>) {
     for ao in list {
         walk_pipeline(&ao.first, out);

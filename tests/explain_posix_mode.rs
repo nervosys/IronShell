@@ -134,8 +134,12 @@ fn an_output_redirection_is_write_local_with_its_target() {
         assert_eq!(write["target"], "../x", "{report}");
         assert_eq!(report["effects"].as_array().unwrap().len(), 2, "{report}");
     }
-    let report = d.explain("echo x > ../x");
+    // Inside the workspace the write is allowed; `../x` is outside it, and the
+    // run refuses it (E_OUTSIDE_WORKSPACE), so the prediction is deny.
+    let report = d.explain("echo x > inside-out.txt");
     assert_eq!(report["decision"], "allow", "{report}");
+    let report = d.explain("echo x > ../x");
+    assert_eq!(report["decision"], "deny", "{report}");
 }
 
 #[test]

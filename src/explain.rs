@@ -325,7 +325,15 @@ pub fn explain_posix(src: &str) -> Result<Value> {
                 r.insert("decision".to_string(), Value::Str("unknown".to_string()));
             } else {
                 let effect = Effect::WriteLocal;
-                let decision = agent_decision(effect);
+                // The jail judges the path the write goes to, as the run's
+                // guard does for a `>` target or a `tee`, `mkdir` or `touch` file.
+                let resolved = crate::safety::resolve_path_str(&target);
+                let refusal = crate::safety::write_jail_refusal(&resolved);
+                let decision = if refusal.is_some() {
+                    "deny"
+                } else {
+                    agent_decision(effect)
+                };
                 effects.insert(effect as u8, effect.as_str());
                 if rank(decision) > rank(verdict) {
                     verdict = decision;
@@ -336,6 +344,9 @@ pub fn explain_posix(src: &str) -> Result<Value> {
                 );
                 r.insert("target".to_string(), Value::Str(target.clone()));
                 r.insert("decision".to_string(), Value::Str(decision.to_string()));
+                if let Some(reason) = refusal {
+                    r.insert("reason".to_string(), Value::Str(reason));
+                }
             }
             calls.push(Value::Record(r));
         }
@@ -361,7 +372,49 @@ pub fn explain_posix(src: &str) -> Result<Value> {
                     None => Effect::Exec,
                 }
             };
-            let decision = agent_decision(effect);
+            let mut decision = agent_decision(effect);
+            // A utility that reads files: each file operand is judged by the
+            // read jail, as the run judges it when it opens the file. An operand
+            // list the subset does not model is not predicted: `unknown`.
+            if matches!(effect, Effect::ReadLocal) {
+                match crate::posix::read_operands(&head, &cmd.args) {
+                    Some(files) => {
+                        for f in files.iter().filter(|f| f.as_str() != "-") {
+                            if f.is_empty() {
+                                // A file named at run time (`cat "$f"`): not known here.
+                                if rank("unknown") > rank(verdict) {
+                                    verdict = "unknown";
+                                }
+                                decision = "unknown";
+                                continue;
+                            }
+                            if crate::security::outside_read_jail(f) {
+                                let mut fr = BTreeMap::new();
+                                fr.insert("call".to_string(), Value::Str(format!("{head} {f}")));
+                                fr.insert(
+                                    "effect".to_string(),
+                                    Value::Str(Effect::ReadLocal.as_str().to_string()),
+                                );
+                                fr.insert("target".to_string(), Value::Str(f.clone()));
+                                fr.insert("decision".to_string(), Value::Str("deny".to_string()));
+                                fr.insert(
+                                    "reason".to_string(),
+                                    Value::Str(format!("'{f}' is outside the workspace root")),
+                                );
+                                effects.insert(Effect::ReadLocal as u8, Effect::ReadLocal.as_str());
+                                if rank("deny") > rank(verdict) {
+                                    verdict = "deny";
+                                }
+                                calls.push(Value::Record(fr));
+                            }
+                        }
+                    }
+                    None if cmd.args.iter().any(|a| !a.starts_with('-')) => {
+                        decision = "unknown";
+                    }
+                    None => {}
+                }
+            }
             effects.insert(effect as u8, effect.as_str());
             if rank(decision) > rank(verdict) {
                 verdict = decision;
@@ -395,9 +448,10 @@ pub fn explain_posix(src: &str) -> Result<Value> {
         "note".to_string(),
         Value::Str(
             "static, POSIX subset: a program named here runs through the effect gate as exec; \
-             a utility the subset runs itself is judged by its read effect; an output file is \
-             write_local and is judged by the jail when the run opens it; a utility that \
-             declines its flags runs as a program and is not predicted"
+             a utility the subset runs itself is judged by its read effect, and a file it reads \
+             outside the read jail is deny; an output file is write_local and is judged by the \
+             write jail, as the run judges it; a utility that declines its flags runs as a \
+             program and is not predicted"
                 .to_string(),
         ),
     );
