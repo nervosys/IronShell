@@ -7154,20 +7154,46 @@ const REQUEST_HINT: &str = "a request is {\"action\":\"call\",\"builtin\":NAME,\
 /// always has exactly one response to print.
 pub fn parse_request(text: &str) -> Result<AgentRequest, AgentResponse> {
     let text = text.strip_prefix('\u{feff}').unwrap_or(text);
-    let value: JsonValue = serde_json::from_str(text)
-        .map_err(|e| bad_request("E_PARSE", format!("Invalid JSON request: {e}")))?;
+    let value: JsonValue = serde_json::from_str(text).map_err(|e| {
+        // Text after the first request is what a second request on the same
+        // input looks like, so the hint says how requests are given.
+        let hint = if e.to_string().starts_with("trailing characters") {
+            several_requests_hint()
+        } else {
+            REQUEST_HINT.to_string()
+        };
+        bad_request("E_PARSE", format!("Invalid JSON request: {e}"), hint)
+    })?;
+    // A pipeline that does not parse is most often written with `stages` for
+    // `steps`, so its hint shows the shape.
+    let hint = if value.get("action").and_then(JsonValue::as_str) == Some("pipeline") {
+        PIPELINE_HINT.to_string()
+    } else {
+        REQUEST_HINT.to_string()
+    };
     serde_json::from_value(value)
-        .map_err(|e| bad_request("E_BAD_ARG", format!("Invalid request: {e}")))
+        .map_err(|e| bad_request("E_BAD_ARG", format!("Invalid request: {e}"), hint))
+}
+
+/// The hint for a pipeline request that does not parse: its shape, whose list
+/// is named `steps`.
+const PIPELINE_HINT: &str = "a pipeline is {\"action\":\"pipeline\",\"steps\":[{\"builtin\":NAME,\"args\":[...]}]}, with an optional \"input\"; the list is named steps, not stages";
+
+/// The hint for input that holds more than one request.
+fn several_requests_hint() -> String {
+    format!(
+        "execute takes one request; `ish agent interactive` takes one request per line. {REQUEST_HINT}"
+    )
 }
 
 /// The failure response for input that is not a request.
-fn bad_request(code: &str, message: String) -> AgentResponse {
+fn bad_request(code: &str, message: String, hint: String) -> AgentResponse {
     AgentResponse {
         success: false,
         result: None,
         error: Some(message),
         code: Some(code.to_string()),
-        hint: Some(REQUEST_HINT.to_string()),
+        hint: Some(hint),
         result_type: None,
         metadata: None,
     }

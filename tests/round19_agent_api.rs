@@ -134,6 +134,35 @@ fn item3_an_unknown_module_member_says_to_drop_the_prefix() {
     assert!(hint.contains("nosuch_zz"), "{hint}");
 }
 
+// ── Item 5: request hints for a pipeline and for several requests ───────────
+
+#[test]
+fn item5_a_pipeline_written_with_stages_gets_the_pipeline_shape_as_its_hint() {
+    let (code, v) =
+        execute_once(r#"{"action":"pipeline","stages":[{"builtin":"upper","args":["a"]}]}"#);
+    assert_eq!(code, Some(1), "{v}");
+    assert_eq!(v["error"]["code"], json!("E_BAD_ARG"), "{v}");
+    let hint = v["error"]["hint"].as_str().unwrap_or_default();
+    assert!(hint.contains(r#""steps":[{"builtin""#), "{hint}");
+    assert!(hint.contains("not stages"), "{hint}");
+}
+
+#[test]
+fn item5_several_requests_on_stdin_say_one_request_per_line_is_interactive() {
+    let input = concat!(
+        "{\"action\":\"eval\",\"code\":\"1\"}\n",
+        "{\"action\":\"eval\",\"code\":\"2\"}\n",
+    );
+    let (code, out, err) = run_agent(&["execute"], input.as_bytes());
+    assert_eq!(code, Some(1), "stdout: {out}; stderr: {err}");
+    let v: Value = serde_json::from_str(&out).unwrap_or_else(|e| panic!("{e}: {out}"));
+    assert_eq!(v["error"]["code"], json!("E_PARSE"), "{v}");
+    let hint = v["error"]["hint"].as_str().unwrap_or_default();
+    assert!(hint.contains("execute takes one request"), "{hint}");
+    assert!(hint.contains("ish agent interactive"), "{hint}");
+    assert!(hint.contains("actions: call"), "{hint}");
+}
+
 // ── Item 4: the MCP `ironshell` meta-tool's arguments ───────────────────────
 
 /// One `tools/call` through the stdio dispatcher, as a JSON-RPC response.
