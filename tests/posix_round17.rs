@@ -156,6 +156,73 @@ fn a_last_line_without_a_newline_is_read_but_fails() {
 }
 
 #[test]
+fn a_script_with_a_sh_shebang_runs_in_a_child_and_gives_its_status() {
+    let dir = scratch("shebang_child");
+    std::fs::write(
+        dir.join("child.sh"),
+        "#!/bin/sh\necho \"[$1] [$2]\"\nexit 3\n",
+    )
+    .expect("write child");
+    let s = script(&dir, "parent.sh", "./child.sh a b\necho \"status=$?\"\n");
+    let (code, out, err) = ish(&dir, &["-b", &s]);
+    assert_eq!(code, 0, "{err}");
+    assert_eq!(out, "[a] [b]\nstatus=3");
+}
+
+#[test]
+fn a_script_in_a_folder_with_an_env_bash_shebang_runs_in_a_child() {
+    let dir = scratch("shebang_folder");
+    std::fs::create_dir_all(dir.join("scripts")).expect("scripts dir");
+    std::fs::write(
+        dir.join("scripts").join("x.sh"),
+        "#!/usr/bin/env bash\necho \"ran $1\"\n",
+    )
+    .expect("write x");
+    let s = script(&dir, "parent.sh", "scripts/x.sh one\necho \"status=$?\"\n");
+    let (code, out, err) = ish(&dir, &["-b", &s]);
+    assert_eq!(code, 0, "{err}");
+    assert_eq!(out, "ran one\nstatus=0");
+}
+
+#[test]
+fn sh_and_bash_run_a_script_file_without_a_shebang_in_a_child() {
+    let dir = scratch("sh_file");
+    std::fs::write(dir.join("plain.sh"), "echo \"[$1]\"\n").expect("write plain");
+    let s = script(&dir, "parent.sh", "sh plain.sh x\nbash plain.sh y\n");
+    let (code, out, err) = ish(&dir, &["-b", &s]);
+    assert_eq!(code, 0, "{err}");
+    assert_eq!(out, "[x]\n[y]");
+}
+
+#[test]
+fn a_child_refusal_is_the_command_status() {
+    let dir = scratch("shebang_refused");
+    std::fs::write(dir.join("f.sh"), "#!/bin/sh\nf() { echo x; }\n").expect("write f");
+    let s = script(&dir, "parent.sh", "./f.sh\necho \"status=$?\"\n");
+    let (code, out, err) = ish(&dir, &["-b", &s]);
+    assert_eq!(code, 0, "{err}");
+    assert_eq!(out, "status=77");
+    assert!(err.contains("function definition"), "{err}");
+}
+
+#[test]
+fn a_child_script_in_agent_mode_stays_inside_the_workspace() {
+    let dir = scratch("shebang_agent");
+    let escape = dir.parent().unwrap().join("r17_escape.txt");
+    let _ = std::fs::remove_file(&escape);
+    std::fs::write(
+        dir.join("child.sh"),
+        "#!/bin/sh\necho hi > ../r17_escape.txt\necho \"write=$?\"\n",
+    )
+    .expect("write child");
+    let s = script(&dir, "parent.sh", "./child.sh\n");
+    let (_code, out, _err) = ish(&dir, &["--agent", "-b", &s]);
+    assert!(!escape.exists(), "the child wrote outside the workspace");
+    assert!(out.contains("write="), "{out:?}");
+    assert!(!out.contains("write=0"), "{out:?}");
+}
+
+#[test]
 fn a_here_string_is_named_and_refused_before_anything_runs() {
     let dir = scratch("here_string");
     let s = script(&dir, "h.sh", "echo before\ngrep -c b <<< \"abc\"\n");

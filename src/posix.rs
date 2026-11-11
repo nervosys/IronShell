@@ -2454,6 +2454,11 @@ impl Shell {
                 Util::Decline => {}
             }
         }
+        // A script file run as a command, or `sh FILE` / `bash FILE`, runs in a
+        // child of this engine rather than through the platform's shell.
+        if let Some((script, script_args)) = shell_script_command(argv) {
+            return Flow::Next(self.run_script_child(script, script_args, env, stdin, sink));
+        }
         Flow::Next(self.external(argv, env, stdin, sink))
     }
 
@@ -2561,28 +2566,9 @@ impl Shell {
             sink.eline(&e.to_string());
             return e.code.exit_code();
         }
-        // The approval above describes argv only. A child that inherits an
-        // `IRONSHELL_*` variable from an assignment prefix or an export runs with
-        // whatever gate that variable sets (`IRONSHELL_MODE=human ish -c 'apply(..)'`
-        // is ungated), so in agent mode no such variable reaches a child.
-        if crate::safety::current_mode() == crate::safety::Mode::Agent {
-            let gate_var = self
-                .exported
-                .iter()
-                .map(String::as_str)
-                .chain(env.iter().map(|(n, _)| n.as_str()))
-                .find(|n| crate::safety::env_name_steers_children(n));
-            if let Some(name) = gate_var {
-                let refusal = crate::safety::policy_deny(
-                    "posix",
-                    format!(
-                        "{name}: an agent may not pass this variable to a child process: it steers the programs, libraries or network destinations the child uses"
-                    ),
-                    "variables that steer child programs are set by whoever launches the agent, not by the agent",
-                );
-                sink.eline(&refusal.to_string());
-                return 126;
-            }
+        if let Some(refusal) = self.steering_refusal(env) {
+            sink.eline(&refusal);
+            return 126;
         }
         let program = match resolve_program(argv, env) {
             Ok(p) => p,
@@ -2602,6 +2588,98 @@ impl Shell {
             cmd.env(n, v);
         }
         crate::safety::strip_ironshell_env(&mut cmd);
+        self.run_piped(cmd, &argv[0], stdin, sink)
+    }
+
+    /// The refusal, if any, for a steering variable in this command's
+    /// environment: in agent mode no such variable reaches a child (see
+    /// `external`). `None` when there is nothing to refuse.
+    fn steering_refusal(&self, env: &[(String, String)]) -> Option<String> {
+        if crate::safety::current_mode() != crate::safety::Mode::Agent {
+            return None;
+        }
+        // The approval of argv does not cover what a child inherits from an
+        // `IRONSHELL_*` variable set by an assignment prefix or an export, which
+        // can set the gate of the child (`IRONSHELL_MODE=human ish -c 'apply(..)'`
+        // is ungated), so no such variable reaches a child in agent mode.
+        let name = self
+            .exported
+            .iter()
+            .map(String::as_str)
+            .chain(env.iter().map(|(n, _)| n.as_str()))
+            .find(|n| crate::safety::env_name_steers_children(n))?;
+        let refusal = crate::safety::policy_deny(
+            "posix",
+            format!(
+                "{name}: an agent may not pass this variable to a child process: it steers the programs, libraries or network destinations the child uses"
+            ),
+            "variables that steer child programs are set by whoever launches the agent, not by the agent",
+        );
+        Some(refusal.to_string())
+    }
+
+    /// Run a shell script (see [`shell_script_command`]) in a child `ish -b`,
+    /// and return its status.
+    ///
+    /// Windows cannot start a `#!/bin/sh` script, and `sh` or `bash` may not be
+    /// installed, so the script runs in this same in-process engine. The child
+    /// is this binary, so it is held as this shell is: `child_command` keeps
+    /// `IRONSHELL_MODE`, `IRONSHELL_WORKSPACE` and the pinned workspace root (all
+    /// in `CONFINING_ENV`), and in agent mode it sets `IRONSHELL_MODE=agent`. The
+    /// script's commands are gated one by one in the child, exactly as they are
+    /// here, so the script itself gets no Exec gate of its own: the workspace
+    /// jail and every write check apply inside the child. The steering-variable
+    /// refusal above still applies, as it does to any other command.
+    fn run_script_child(
+        &mut self,
+        script: &str,
+        args: &[String],
+        env: &[(String, String)],
+        stdin: &mut Input,
+        sink: &mut Sink,
+    ) -> i32 {
+        if let Some(refusal) = self.steering_refusal(env) {
+            sink.eline(&refusal);
+            return 126;
+        }
+        let exe = match std::env::current_exe() {
+            Ok(exe) => exe,
+            Err(e) => {
+                sink.eline(&format!(
+                    "{SHELL_NAME}: {script}: cannot find this shell to run the script: {e}"
+                ));
+                return 126;
+            }
+        };
+        let mut cmd = crate::safety::child_command(&exe);
+        cmd.arg("-b").arg(script).args(args);
+        // Where this shell keeps its session (history, undo journal) is not
+        // a confining setting, but the child would otherwise use the default,
+        // so the same directory goes on to it.
+        if let Some(session) = std::env::var_os("IRONSHELL_SESSION_DIR") {
+            cmd.env("IRONSHELL_SESSION_DIR", session);
+        }
+        for n in &self.exported {
+            if let Some(v) = self.vars.get(n) {
+                cmd.env(n, v);
+            }
+        }
+        for (n, v) in env {
+            cmd.env(n, v);
+        }
+        crate::safety::strip_ironshell_env(&mut cmd);
+        self.run_piped(cmd, script, stdin, sink)
+    }
+
+    /// Run `cmd` with this shell's standard input, and gather its output into
+    /// `sink` as a pipeline stage does. `name` labels its errors.
+    fn run_piped(
+        &mut self,
+        mut cmd: std::process::Command,
+        name: &str,
+        stdin: &mut Input,
+        sink: &mut Sink,
+    ) -> i32 {
         cmd.stdout(std::process::Stdio::piped());
         cmd.stderr(match sink.err_mode {
             ErrMode::Real => std::process::Stdio::inherit(),
@@ -2617,14 +2695,14 @@ impl Shell {
         let mut child = match cmd.spawn() {
             Ok(c) => c,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                sink.eline(&format!("{SHELL_NAME}: {}: command not found", argv[0]));
+                sink.eline(&format!("{SHELL_NAME}: {name}: command not found"));
                 if let Some(hint) = windows_tools_hint() {
                     sink.eline(&hint);
                 }
                 return 127;
             }
             Err(e) => {
-                sink.eline(&format!("{SHELL_NAME}: {}: {}", argv[0], io_reason(&e)));
+                sink.eline(&format!("{SHELL_NAME}: {name}: {}", io_reason(&e)));
                 return 126;
             }
         };
@@ -2641,7 +2719,7 @@ impl Shell {
         let out = match child.wait_with_output() {
             Ok(o) => o,
             Err(e) => {
-                sink.eline(&format!("{SHELL_NAME}: {}: {}", argv[0], io_reason(&e)));
+                sink.eline(&format!("{SHELL_NAME}: {name}: {}", io_reason(&e)));
                 return 1;
             }
         };
@@ -2654,6 +2732,58 @@ impl Shell {
         }
         out.status.code().unwrap_or(128)
     }
+}
+
+/// The script a command runs in a child shell (see `Shell::run_script_child`):
+/// `FILE args...` where FILE is a path (it has a slash or a backslash) to a
+/// shell script, or `sh FILE args...` / `bash FILE args...` where FILE is an
+/// existing file. An option before FILE (`sh -c ...`) is not this form.
+fn shell_script_command(argv: &[String]) -> Option<(&str, &[String])> {
+    let head = argv.first()?.as_str();
+    if head.contains(['/', '\\']) {
+        return has_shell_shebang(head).then_some((head, &argv[1..]));
+    }
+    if matches!(head, "sh" | "bash") {
+        let file = argv.get(1)?.as_str();
+        if !file.starts_with('-') && has_file(file) {
+            return Some((file, &argv[2..]));
+        }
+    }
+    None
+}
+
+/// Whether `path` names an existing file, never probing a remote share.
+fn has_file(path: &str) -> bool {
+    !crate::safety::names_a_remote_share(path) && std::path::Path::new(path).is_file()
+}
+
+/// Whether `path` is a file whose first line is a shebang for `sh` or `bash`:
+/// `#!/bin/sh`, `#!/bin/bash`, or `#!/usr/bin/env` with `sh` or `bash`, in any
+/// directory, and with no further option on the line.
+fn has_shell_shebang(path: &str) -> bool {
+    use std::io::Read;
+    if !has_file(path) {
+        return false;
+    }
+    let mut head = [0u8; 256];
+    let n = std::fs::File::open(path)
+        .and_then(|mut f| f.read(&mut head))
+        .unwrap_or(0);
+    let head = &head[..n];
+    let end = head.iter().position(|&b| b == b'\n').unwrap_or(head.len());
+    let Ok(line) = std::str::from_utf8(&head[..end]) else {
+        return false;
+    };
+    let Some(spec) = line.trim_end_matches('\r').strip_prefix("#!") else {
+        return false;
+    };
+    let words: Vec<&str> = spec.split_whitespace().collect();
+    let interpreter = match words.as_slice() {
+        [program] => *program,
+        [env, name] if env.rsplit('/').next() == Some("env") => *name,
+        _ => return false,
+    };
+    matches!(interpreter.rsplit('/').next(), Some("sh" | "bash"))
 }
 
 /// The commands the subset implements. On Windows, a bare name from this list
