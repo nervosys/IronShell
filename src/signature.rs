@@ -3001,7 +3001,7 @@ pub static SIGNATURES: &[Signature] = &[
             opt(
                 "params",
                 Ty::Array,
-                "bind values for the ? placeholders, in order: Int, Float, String, Bool or null",
+                "bind values for the placeholders, in order: Int, Float, String, Bool or null; SQLite's ?, ?N, :name, @name and $name forms all bind by position from this Array, and a String binds as text, so pass 1, not \"1\", to compare with a number",
             ),
         ],
         returns: "Array",
@@ -3101,7 +3101,7 @@ pub static SIGNATURES: &[Signature] = &[
             opt(
                 "params",
                 Ty::Array,
-                "bind values for the ? placeholders, in order: Int, Float, String, Bool or null",
+                "bind values for the placeholders, in order: Int, Float, String, Bool or null; SQLite's ?, ?N, :name, @name and $name forms all bind by position from this Array, and a String binds as text, so pass 1, not \"1\", to compare with a number",
             ),
         ],
         returns: "Any",
