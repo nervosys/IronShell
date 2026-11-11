@@ -29,7 +29,7 @@ fn test_mcp_stdio_jsonrpc_dispatch() {
         .handle_rpc(&json!({"jsonrpc":"2.0","id":1,"method":"initialize"}))
         .expect("initialize has a response");
     assert_eq!(init["id"], 1);
-    assert_eq!(init["result"]["protocolVersion"], "2024-11-05");
+    assert_eq!(init["result"]["protocolVersion"], "2025-06-18");
     assert_eq!(init["result"]["serverInfo"]["name"], "ironshell");
     assert!(init["result"]["capabilities"]["tools"].is_object());
 
@@ -80,7 +80,7 @@ fn test_mcp_server_default_creation() {
     let info = server.initialize();
 
     assert_eq!(info.server_info.name, "ironshell-mcp");
-    assert_eq!(info.protocol_version, "2024-11-05");
+    assert_eq!(info.protocol_version, "2025-06-18");
     assert!(server.tool_count() > 0, "Server should have tools");
 }
 
@@ -634,7 +634,7 @@ fn test_initialize_returns_correct_info() {
     let server = McpServer::new();
     let info = server.initialize();
 
-    assert_eq!(info.protocol_version, "2024-11-05");
+    assert_eq!(info.protocol_version, "2025-06-18");
     assert!(info.capabilities.tools.is_some());
     assert!(info.capabilities.resources.is_some());
     assert!(info.capabilities.prompts.is_some());

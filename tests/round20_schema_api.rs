@@ -5,6 +5,7 @@
 //! `initialize` negotiates the protocol version.
 
 use iron_shell::agent_api::{ontology_describe_json, parse_request, process_request};
+use iron_shell::mcp::{negotiate_protocol_version, McpServer};
 use serde_json::Value as JsonValue;
 
 /// The OpenAI function parameters the tool `name` is given.
@@ -129,4 +130,38 @@ fn item4_a_repeated_key_nested_below_the_top_level_is_not_refused() {
         parse_request(text).is_ok(),
         "nested repeats are not refused"
     );
+}
+
+/// The protocol version the server answers an `initialize` with `params`.
+fn answered_version(params: Option<serde_json::Value>) -> String {
+    let mut req = serde_json::json!({"jsonrpc": "2.0", "id": 7, "method": "initialize"});
+    if let Some(p) = params {
+        req["params"] = p;
+    }
+    let res = McpServer::new().handle_rpc(&req).expect("response");
+    res["result"]["protocolVersion"]
+        .as_str()
+        .expect("protocolVersion")
+        .to_string()
+}
+
+#[test]
+fn item5_a_supported_requested_version_is_echoed() {
+    for version in ["2025-06-18", "2025-03-26", "2024-11-05"] {
+        let got = answered_version(Some(
+            serde_json::json!({"protocolVersion": version, "capabilities": {}}),
+        ));
+        assert_eq!(got, version);
+    }
+}
+
+#[test]
+fn item5_an_unknown_or_missing_requested_version_gets_the_newest_supported() {
+    let unknown = answered_version(Some(serde_json::json!({"protocolVersion": "1999-01-01"})));
+    assert_eq!(unknown, "2025-06-18");
+    let absent = answered_version(Some(serde_json::json!({"capabilities": {}})));
+    assert_eq!(absent, "2025-06-18");
+    assert_eq!(answered_version(None), "2025-06-18");
+    assert_eq!(negotiate_protocol_version(Some("2024-11-05")), "2024-11-05");
+    assert_eq!(negotiate_protocol_version(Some("bogus")), "2025-06-18");
 }

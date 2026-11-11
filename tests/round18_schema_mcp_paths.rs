@@ -253,11 +253,13 @@ fn item2_a_missing_tool_name_is_invalid_params() {
 }
 
 #[test]
-fn item2_the_server_keeps_its_announced_protocol_version() {
+fn item2_the_server_answers_its_newest_version_when_none_is_requested() {
+    // No protocolVersion in the request: the newest supported version (round 20
+    // negotiates; the request's own version is covered in round20_schema_api).
     let res = McpServer::new()
         .handle_rpc(&serde_json::json!({"jsonrpc":"2.0","id":3,"method":"initialize"}))
         .expect("response");
-    assert_eq!(res["result"]["protocolVersion"], "2024-11-05");
+    assert_eq!(res["result"]["protocolVersion"], "2025-06-18");
 }
 
 // ── Item 3: a missing path is judged by where it would land ─────────────────
