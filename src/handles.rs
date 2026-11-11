@@ -248,6 +248,24 @@ fn forget_tally() {
 }
 
 /// The byte threshold in force. `0` means handles are disabled.
+thread_local! {
+    /// Set by a builtin whose whole result is what the caller asked to read:
+    /// `help`, `ontology_describe`, and `handle(id)` itself. Taking the next
+    /// rendered result as a handle would answer "show me this" with another
+    /// reference to it, and `handle(id)` would mint handle after handle.
+    static SHOW_WHOLE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Mark the result being produced as one to show whole, not as a handle.
+pub fn show_next_whole() {
+    SHOW_WHOLE.with(|c| c.set(true));
+}
+
+/// Whether the result being rendered was marked to show whole; clears the mark.
+pub fn take_show_whole() -> bool {
+    SHOW_WHOLE.with(|c| c.replace(false))
+}
+
 pub fn threshold_bytes() -> usize {
     match std::env::var("IRONSHELL_HANDLE_BYTES") {
         Ok(v) => v.trim().parse().unwrap_or(DEFAULT_THRESHOLD_BYTES),

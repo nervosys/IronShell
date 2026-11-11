@@ -4923,6 +4923,8 @@ fn with_param_slots<T>(
 
 /// help() is the short reference; help("name") is ontology_describe("name").
 fn bi_help_entry(args: Vec<Value>) -> Result<Value> {
+    // Documentation is read whole; a handle to it is a round trip for nothing.
+    crate::handles::show_next_whole();
     if args.is_empty() {
         bi_help()
     } else {
@@ -22291,7 +22293,8 @@ pub fn render_agent(v: &Value, budget: Option<usize>) -> Option<String> {
             // and referenced instead. The agent narrows it down with a pipeline
             // and only the small answer crosses back — the saving no encoder can
             // reach, because it is the bytes never sent.
-            if crate::handles::worth_handling(v.as_ref(), full.len()) {
+            let whole = crate::handles::take_show_whole();
+            if !whole && crate::handles::worth_handling(v.as_ref(), full.len()) {
                 match render_handle(v.into_owned(), full.len()) {
                     Ok(handle) => Some(handle),
                     // At the handle cap the result is not sent: it is over the
@@ -22630,7 +22633,12 @@ fn bi_handle(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
         .map(|s| s.to_string())
         .ok_or_else(|| crate::safety::arg_err("handle(id): a handle id is required"))?;
     match crate::handles::get(&id) {
-        Some(v) => Ok(v),
+        Some(v) => {
+            // Reading a handle whole is asking for its value, not for a new
+            // handle to it.
+            crate::handles::show_next_whole();
+            Ok(v)
+        }
         None => {
             let live: Vec<String> = crate::handles::list().into_iter().map(|h| h.id).collect();
             let got = if live.is_empty() {
@@ -23800,6 +23808,7 @@ fn bi_ontology_manifest(_args: Vec<Value>, _input: Option<Value>) -> Result<Valu
 /// builtins (name, signature, effect), or a builtin name → its full definition
 /// (effect, params, examples).
 fn bi_ontology_describe(args: Vec<Value>, _input: Option<Value>) -> Result<Value> {
+    crate::handles::show_next_whole();
     let q = match args.first() {
         Some(Value::Str(s)) => s.clone(),
         other => {
