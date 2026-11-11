@@ -2982,16 +2982,15 @@ pub static SIGNATURES: &[Signature] = &[
         subject_required: false,
         aliases: &["sqlite_query", "db_sqlite_query"],
         subject: Some(Ty::Any),
-        // `query` is variadic so that a trailing `params` Array is matched by
-        // its own type: the validator gives the last argument to the parameter
-        // after a variadic when that type accepts it, and to `query` otherwise.
+        // A trailing `params` Array is matched by its own type: the validator
+        // lets the last argument skip `query` when it is not a String.
         params: &[
             req(
                 "source_or_query",
                 Ty::Str,
                 "with rows piped in, the query (they are table `t`); otherwise a source: a .json/.jsonl/.csv file (a table named after the file, also `t`), a SQLite file, or \":memory:\"",
             ),
-            opt_rest(
+            opt(
                 "query",
                 Ty::Str,
                 "the read-only SQL to run against the source; each ? in it takes the next value of params",
@@ -3084,15 +3083,14 @@ pub static SIGNATURES: &[Signature] = &[
         subject_required: false,
         aliases: &[],
         subject: Some(Ty::Any),
-        // `query` is variadic for the same reason as in `sql`: it lets a
-        // trailing params Array match its own type.
+        // A trailing params Array skips `query` by its type, as in `sql`.
         params: &[
             req(
                 "source_or_query",
                 Ty::Str,
                 "with rows piped in, the query (they are table `t`); otherwise a source, as for sql",
             ),
-            opt_rest("query", Ty::Str, "the read-only SQL to run against the source; each ? in it takes the next value of params"),
+            opt("query", Ty::Str, "the read-only SQL to run against the source; each ? in it takes the next value of params"),
             opt(
                 "params",
                 Ty::Array,
@@ -15009,11 +15007,25 @@ pub fn validate(name: &str, args: &[Value], input: Option<&Value>) -> anyhow::Re
     // argument from the variadic one on against it. One optional parameter may
     // follow the variadic (proc_spawn's options Record): the last argument is
     // that parameter when its type accepts it, and a variadic one otherwise.
+    // Without a variadic, the last argument may likewise skip one optional
+    // parameter whose type it does not match for the optional one after it:
+    // `sql("select ?", [7])` gives the Array to `params`, past `query`.
     let supplied_args = &args[params_start..];
     let last = supplied_args.len().saturating_sub(1);
     let rest = supplied_args.iter().enumerate().map(|(i, a)| {
         let p = match variadic {
-            None => sig.params.get(i),
+            None => match (sig.params.get(i), sig.params.get(i + 1)) {
+                (Some(here), Some(next))
+                    if i == last
+                        && !here.required
+                        && !next.required
+                        && !here.ty.accepts(a)
+                        && next.ty.accepts(a) =>
+                {
+                    Some(next)
+                }
+                (here, _) => here,
+            },
             Some(v) if i < v => sig.params.get(i),
             Some(v) => match sig.params.get(v + 1) {
                 Some(tail) if i == last && tail.ty.accepts(a) => Some(tail),
