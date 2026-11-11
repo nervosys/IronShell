@@ -870,8 +870,7 @@ pub fn undo(n: usize, force: bool) -> Result<Vec<Outcome>, (String, bool)> {
     // of one group are one step, however many there are.
     let mut steps = 0;
     let mut group: Option<usize> = None;
-    loop {
-        let Some(top) = s.journal.last() else { break };
+    while let Some(top) = s.journal.last() {
         if group.is_none() || top.group != group {
             if steps == n {
                 break;
@@ -1043,8 +1042,7 @@ pub fn redo(n: usize) -> Vec<Outcome> {
     // As in undo: the entries of one group are one step.
     let mut steps = 0;
     let mut group: Option<usize> = None;
-    loop {
-        let Some(top) = s.redo.last() else { break };
+    while let Some(top) = s.redo.last() {
         if group.is_none() || top.group != group {
             if steps == n {
                 break;

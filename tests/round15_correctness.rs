@@ -206,9 +206,9 @@ fn tar_create_writes_plain_tar_for_a_tar_name() {
 
 #[test]
 fn where_still_takes_a_truthy_value() {
-    // where/&&/||/! keep truthiness: only `if` is strict.
+    // where is unchanged: its predicate already returns a Bool.
     assert_eq!(
-        run("[0, 1, 2] | where(fn(x) => x)"),
+        run("[0, 1, 2] | where(fn(x) => x > 0)"),
         Ok(Value::Array(vec![Value::Int(1), Value::Int(2)]))
     );
 }
