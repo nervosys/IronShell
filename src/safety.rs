@@ -342,6 +342,8 @@ fn classified_effect(name: &str) -> Option<Effect> {
     match name {
         // Native regex substitution only: no process or file access.
         "sd_replace" => Some(Effect::Pure),
+        // Pairs each element with its position: no input but its argument.
+        "enumerate" => Some(Effect::Pure),
         // Stated Pure until pure-audit-3, which read each body. ReadLocal: reads
         // mutable in-process state (a lock, an atomic, a registry), walks a
         // directory tree, reads the cwd or an environment variable, or stats a
@@ -1196,7 +1198,7 @@ fn classified_effect(name: &str) -> Option<Effect> {
         // `file_mkdir` is the same dispatch index as `mkdir`; without it the
         // `file_*` prefix rule below claimed the directory-creating spelling only
         // read. `tests/effect_alias_agreement.rs` is what noticed.
-        "file_write" | "file_append" | "file_copy" | "mkdir" | "mkdirp" | "file_mkdir" | "touch"
+        "file_write" | "json_set" | "file_append" | "file_copy" | "mkdir" | "mkdirp" | "file_mkdir" | "touch"
         // `file_edit`, `file_insert` and `file_patch` read a file, change it and
         // write it back — the `file_*` prefix rule below saw only the read. The
         // jail keys on `WriteLocal`, so all three modified files anywhere on disk
@@ -2132,6 +2134,22 @@ pub fn not_found(builtin: &str, kind: &str, name: &str) -> anyhow::Error {
         did_you_mean: Vec::new(),
         expected: format!("an existing {kind}"),
         got: name.to_string(),
+        extra: serde_json::Map::new(),
+    })
+}
+
+/// `E_NOT_FOUND` for a journal step id that no step has. The journal's own
+/// word is "step": an id names a step, and "entry" is the file-edit term.
+pub fn journal_step_not_found(builtin: &str, id: usize) -> anyhow::Error {
+    anyhow::Error::new(SafetyError {
+        code: ErrorCode::NotFound,
+        message: format!("{builtin}: no journal step with id {id}"),
+        builtin: builtin.to_string(),
+        hint: "list the available journal steps with journal() and use an id from them".to_string(),
+        approval: None,
+        did_you_mean: Vec::new(),
+        expected: "an existing journal step".to_string(),
+        got: id.to_string(),
         extra: serde_json::Map::new(),
     })
 }
@@ -4003,17 +4021,34 @@ pub fn resolve_path_str(path: &str) -> String {
     if p.is_absolute() || !jail_enforced(current_mode()) {
         path.to_string()
     } else if std::env::var_os("IRONSHELL_WORKSPACE").is_some() {
-        workspace_root().join(p).to_string_lossy().to_string()
+        join_native(workspace_root(), path)
     } else {
         // No workspace was named, so a relative path means what it means to any
         // program: the working directory. The jail still judges the result
         // against the pinned root.
-        std::env::current_dir()
-            .unwrap_or_else(|_| workspace_root())
-            .join(p)
-            .to_string_lossy()
-            .to_string()
+        join_native(
+            std::env::current_dir().unwrap_or_else(|_| workspace_root()),
+            path,
+        )
     }
+}
+
+/// `base` joined with the relative `path` one component at a time, so the
+/// result uses the platform's separator throughout (`proj\src\a.py` on
+/// Windows, not `proj\src/a.py`) for the journal, the audit log and messages.
+/// `.` components are dropped; `..` is kept for the jail to judge. A trailing
+/// separator is kept, since it can say the path names a directory.
+fn join_native(mut base: std::path::PathBuf, path: &str) -> String {
+    for part in std::path::Path::new(path).components() {
+        if part != std::path::Component::CurDir {
+            base.push(part.as_os_str());
+        }
+    }
+    let mut text = base.to_string_lossy().into_owned();
+    if (path.ends_with('/') || path.ends_with('\\')) && !text.ends_with(std::path::MAIN_SEPARATOR) {
+        text.push(std::path::MAIN_SEPARATOR);
+    }
+    text
 }
 
 /// Test whether a (possibly non-existent) path is contained in the workspace
@@ -4514,21 +4549,31 @@ lazy_static! {
     static ref AUDIT_KEY: Option<Vec<u8>> = load_audit_key();
 }
 
+/// The variable that supplied a chain key which was set but too short to use
+/// (`IRONSHELL_AUDIT_KEY` or `IRONSHELL_AUDIT_KEY_FILE`), so `audit_verify` can
+/// say the key was set and rejected rather than report a plain unkeyed chain.
+static AUDIT_KEY_REJECTED: Mutex<Option<&'static str>> = Mutex::new(None);
+
+/// The variable name of a rejected (set, but too short) chain key, if any.
+pub fn audit_key_rejected() -> Option<&'static str> {
+    AUDIT_KEY_REJECTED.lock().ok().and_then(|g| *g)
+}
+
 /// Read the chain key from `IRONSHELL_AUDIT_KEY` (hex or raw bytes) or from the
-/// file named by `IRONSHELL_AUDIT_KEY_FILE`. A malformed or too-short key is a
-/// hard error rather than a silent downgrade to an unkeyed chain -- a security
-/// control that quietly turns itself off is worse than one that is off.
+/// file named by `IRONSHELL_AUDIT_KEY_FILE`. A key that is set but too short
+/// (fewer than 32 bytes) is not used: the chain is written unkeyed, one warning
+/// goes to stderr, and `audit_verify` reports the rejected key.
 fn load_audit_key() -> Option<Vec<u8>> {
     let from_env = std::env::var("IRONSHELL_AUDIT_KEY").ok();
     if from_env.is_some() {
         // Before anything else can spawn a child that would inherit it.
         std::env::remove_var("IRONSHELL_AUDIT_KEY");
     }
-    let raw = match from_env {
-        Some(v) => v,
+    let (raw, var) = match from_env {
+        Some(v) => (v, "IRONSHELL_AUDIT_KEY"),
         None => match std::env::var("IRONSHELL_AUDIT_KEY_FILE") {
             Ok(path) => match std::fs::read_to_string(&path) {
-                Ok(c) => c.trim().to_string(),
+                Ok(c) => (c.trim().to_string(), "IRONSHELL_AUDIT_KEY_FILE"),
                 Err(e) => {
                     tracing::error!(
                         target: "security_audit",
@@ -4550,10 +4595,22 @@ fn load_audit_key() -> Option<Vec<u8>> {
         _ => raw.trim().as_bytes().to_vec(),
     };
     if bytes.len() < AUDIT_KEY_MIN_BYTES {
+        if let Ok(mut g) = AUDIT_KEY_REJECTED.lock() {
+            *g = Some(var);
+        }
         tracing::error!(
             target: "security_audit",
             "audit chain key is {} bytes, below the {}-byte minimum; the chain is UNKEYED",
             bytes.len(), AUDIT_KEY_MIN_BYTES
+        );
+        let subject = if var == "IRONSHELL_AUDIT_KEY" {
+            "IRONSHELL_AUDIT_KEY is set but"
+        } else {
+            "IRONSHELL_AUDIT_KEY_FILE contents are"
+        };
+        eprintln!(
+            "{} shorter than {} characters, so the audit chain is not keyed",
+            subject, AUDIT_KEY_MIN_BYTES
         );
         return None;
     }
@@ -5092,7 +5149,7 @@ pub fn verify_audit_with(path: &PathBuf, key: Option<&[u8]>) -> Result<u64, Stri
             }
             (None, Some(_)) => {
                 return Err(format!(
-                    "line {}: entry is keyed but no chain key is configured; set                      IRONSHELL_AUDIT_KEY or IRONSHELL_AUDIT_KEY_FILE to verify it",
+                    "line {}: entry is keyed but no chain key is configured; set IRONSHELL_AUDIT_KEY or IRONSHELL_AUDIT_KEY_FILE to verify it",
                     lineno + 1
                 ))
             }
@@ -5102,10 +5159,16 @@ pub fn verify_audit_with(path: &PathBuf, key: Option<&[u8]>) -> Result<u64, Stri
         let recomputed = chain_tag(key, &obj.to_string())
             .map_err(|e| format!("line {}: chain tag refused: {e}", lineno + 1))?;
         if !ironcrypto::core_types::ct::verify(stored.as_bytes(), recomputed.as_bytes()) {
-            return Err(format!(
-                "line {}: entry_hash mismatch (tampered)",
-                lineno + 1
-            ));
+            // An unkeyed chain is plain SHA-256 that anyone can recompute, so
+            // a mismatch there cannot be attributed to tampering.
+            return Err(if key.is_some() {
+                format!("line {}: entry_hash mismatch (tampered)", lineno + 1)
+            } else {
+                format!(
+                    "line {}: entry_hash mismatch (the log was edited or corrupted; an unkeyed chain cannot tell which)",
+                    lineno + 1
+                )
+            });
         }
 
         let prev_hash = obj.get("prev_hash").and_then(|v| v.as_str()).unwrap_or("");

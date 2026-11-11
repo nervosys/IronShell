@@ -113,6 +113,11 @@ const BLOCK_HINT: &str = "a braced `{ ... }` holds one expression, not statement
 const ONE_EXPR_HINT: &str =
     "a block holds one expression; bind values before it (x = 1, then if c { x + 1 })";
 
+/// The hint for `=` after an indexed element, `rows[0].n = 99`: elements are
+/// values, so the array is rebuilt rather than assigned in place.
+const INDEX_ASSIGN_HINT: &str =
+    "an indexed element cannot be assigned; rebuild the array, e.g. rows = rows | map(fn(r) => ...)";
+
 /// The hint for `c ? a : b`, which IronShell does not have.
 const TERNARY_HINT: &str = "IronShell has no ?: operator; write if cond { a } else { b }";
 
@@ -1110,6 +1115,8 @@ fn lex_marked(src: &str) -> Result<(Vec<Spanned>, std::collections::HashSet<usiz
                                 't' => s.push('\t'),
                                 '\\' => s.push('\\'),
                                 '"' => s.push('"'),
+                                '\'' => s.push('\''),
+                                '0' => s.push('\0'),
                                 '$' => s.push(ESCAPED_DOLLAR),
                                 'x' | 'u' => match hex_escape(&chars, pos, esc) {
                                     Some((scalar, width)) => {
@@ -1425,7 +1432,11 @@ fn hex_escape(chars: &[char], at: usize, kind: char) -> Option<(char, usize)> {
         if !hex.chars().all(|c| c.is_ascii_hexdigit()) {
             return None;
         }
+        // `\xHH` is ASCII only: above 0x7F it is refused, and keeps its backslash.
         let value = u32::from_str_radix(&hex, 16).ok()?;
+        if value > 0x7F {
+            return None;
+        }
         return Some((char::from_u32(value)?, 2));
     }
     if chars.get(at) != Some(&'{') {
@@ -2992,6 +3003,53 @@ impl Parser {
         }
         matches!(kind(k), Some(Tok::Equal) | Some(Tok::ColonEqual))
     }
+    /// The chain of names, fields and indexes that ends just before the current
+    /// token, as in `r.a[0].b`: whether it has a field step, whether it has an
+    /// index step, and the index of its first token. None when the token before
+    /// the current one does not end such a chain.
+    fn assignable_chain_before(&self) -> Option<(bool, bool, usize)> {
+        let mut end = self.i;
+        let mut has_dot = false;
+        let mut has_index = false;
+        loop {
+            let last = self.toks.get(end.checked_sub(1)?)?;
+            match last.kind {
+                Tok::RBracket => {
+                    // Walk back to the `[` that opens this index step.
+                    let mut depth = 0usize;
+                    let mut k = end;
+                    loop {
+                        k = k.checked_sub(1)?;
+                        match self.toks.get(k)?.kind {
+                            Tok::RBracket => depth += 1,
+                            Tok::LBracket => {
+                                depth -= 1;
+                                if depth == 0 {
+                                    break;
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+                    has_index = true;
+                    end = k;
+                }
+                Tok::Ident => {
+                    end -= 1;
+                    // A field step: the name is preceded by `.`, so the chain
+                    // goes on before it. Otherwise the name is the chain's root.
+                    match end.checked_sub(1).and_then(|j| self.toks.get(j)) {
+                        Some(t) if t.kind == Tok::Dot => {
+                            has_dot = true;
+                            end -= 1;
+                        }
+                        _ => return Some((has_dot, has_index, end)),
+                    }
+                }
+                _ => return None,
+            }
+        }
+    }
     fn match_tok(&mut self, k: Tok) -> bool {
         if self.check(k) {
             self.i += 1;
@@ -3150,6 +3208,23 @@ impl Parser {
             && prev.is_some_and(|p| p.kind == Tok::Ident)
         {
             return Some(ONE_EXPR_HINT);
+        }
+        // `=` after an assignable chain: `rows[0].n = 99` cannot assign an
+        // element, and `{ r.a = 7 }` / `(r.a = v)` is a field assignment where
+        // the block or the parentheses hold one expression.
+        if matches!(cur, Tok::Equal) {
+            if let Some((has_dot, has_index, start)) = self.assignable_chain_before() {
+                if has_index {
+                    return Some(INDEX_ASSIGN_HINT);
+                }
+                let opener = start
+                    .checked_sub(1)
+                    .and_then(|j| self.toks.get(j))
+                    .map(|t| t.kind);
+                if has_dot && matches!(opener, Some(Tok::LBrace | Tok::LParen)) {
+                    return Some(ONE_EXPR_HINT);
+                }
+            }
         }
         // `=` is a comparison's spelling only directly after an operand, as in
         // `r.state = "open"`. After an operator or an opening bracket it is

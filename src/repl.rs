@@ -520,7 +520,9 @@ fn eval_line_noting_print(env: &mut Env, code: &str) -> LineOutcome {
                 .map(|&line| crate::eval::Site { line, file: None }),
         );
         let (before, _) = crate::builtins::print_mark();
-        match eval_program(std::slice::from_ref(stmt), env) {
+        // Not the last statement: its value is not the line's, so a binding
+        // does not copy its value out (see `eval_program_statement`).
+        match crate::eval::eval_program_statement(stmt, index + 1 < stmts.len(), env) {
             Ok(value) => {
                 if index + 1 == stmts.len() {
                     let (after, printed) = crate::builtins::print_mark();

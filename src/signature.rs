@@ -1745,23 +1745,25 @@ pub static SIGNATURES: &[Signature] = &[
     Signature {
         name: "from_csv", category: None, subject_required: false, aliases: &["from-csv"],
         subject: Some(Ty::Str), params: &[], returns: "Array",
-        doc: "Parse a CSV string with headers, inferring numeric and boolean cells. In a column whose non-empty cells are all numbers, an empty cell is null; in any other column it is an empty String. The text is piped in or passed as the argument: from_csv(text).",
+        doc: "Parse a CSV string with headers. Each column is typed as a whole: it is numeric only when every non-empty cell is a number, with no leading \"+\" and no leading zero before another digit (\"007\" is text, \"0.5\" is a number). A numeric column holds Ints when every non-empty cell is an integer, else Floats, and its empty cells are null. A column whose non-empty cells are all true or false holds Bools, its empty cells null. Any other column holds only Strings, and its empty cells are \"\". The text is piped in or passed as the argument: from_csv(text).",
         examples: &[
             (r#"("n\n7\n" | from_csv | first).n"#, "7"),
             (r#"from_csv("n\n7\n") | len"#, "1"),
             (r#"from_csv("n,m\n7,\n8,2\n") | first | fn(r) => r.m"#, "null"),
             (r#"from_csv("n,s\n7,\n8,x\n") | first | fn(r) => r.s"#, r#""""#),
+            (r#"from_csv("n\n007\nNA\n12\n") | first | fn(r) => r.n"#, r#""007""#),
         ],
     },
     Signature {
         name: "to_csv", category: None, subject_required: false, aliases: &["to-csv"],
         subject: Some(Ty::Array), params: &[opt("columns", Ty::Array, "column names, in the order to write them; a record without one writes an empty field")], returns: "String",
-        doc: "Serialize an array of records to CSV. The columns are the first record's keys in sorted order, or the columns Array when one is given, in that order; a key a record lacks writes an empty field, and a null writes an empty field. The rows are piped in or passed as the argument: to_csv(rows), or rows | to_csv(columns).",
+        doc: "Serialize an array of records to CSV. The columns are the keys of every record in sorted order, so a key that only a later row has is kept, or the columns Array when one is given, in that order; a key a record lacks writes an empty field, and a null writes an empty field. The rows are piped in or passed as the argument: to_csv(rows), or rows | to_csv(columns).",
         examples: &[
             (r#"[{n: 7}] | to_csv | from_csv | len"#, "1"),
             (r#"to_csv([{n: 7}]) | from_csv | len"#, "1"),
             (r#"to_csv([{b: 2, a: 1}], ["b", "a"]) | lines | first"#, r#""b,a""#),
             (r#"[{id: 1}, {id: 2, customer: "Ada"}] | to_csv(["id", "customer"]) | lines | last"#, r#""2,Ada""#),
+            (r#"[{id: 1}, {id: 2, customer: "Ada"}] | to_csv | lines | first"#, r#""customer,id""#),
         ],
     },
     Signature {
@@ -1770,9 +1772,10 @@ pub static SIGNATURES: &[Signature] = &[
         // sorted maps, so `open` alone cannot say it.
         name: "csv_columns", category: None, subject_required: false, aliases: &[],
         subject: Some(Ty::Str), params: &[], returns: "Array",
-        doc: "The header row of a CSV file or of CSV text, as an Array of Strings in file order, with quoting read as from_csv reads it. A String that names an existing file is read as that file; any other String is CSV text. The path or text is piped in or passed as the argument: csv_columns(path_or_text).",
+        doc: "The header row of a CSV file or of CSV text, as an Array of Strings in file order, with quoting read as from_csv reads it. A String that names an existing file is read as that file; a single line that ends in .csv, .tsv or .txt and names no file is E_NOT_FOUND; any other String is CSV text. The path or text is piped in or passed as the argument: csv_columns(path_or_text).",
         examples: &[
             (r#"csv_columns("id,customer\n1,Ada\n") | len"#, "2"),
+            (r#"(try { csv_columns("nofile.csv") } catch e { e.error.code })"#, "E_NOT_FOUND"),
             (r#""id,customer\n1,Ada\n" | csv_columns | last"#, r#""customer""#),
             (r#"let d = fs_tempdir("ae_csvcols"); let f = d + "/rows.csv"; file_write(f, "id,customer\n1,Ada\n"); let cols = csv_columns(f); rmdir(d, true); cols | first"#, r#""id""#),
         ],
@@ -2754,10 +2757,10 @@ pub static SIGNATURES: &[Signature] = &[
         subject_required: false,
         aliases: &["to-json"],
         subject: Some(Ty::Any),
-        params: &[],
+        params: &[opt_range("indent", Ty::Int, 0, 8, "spaces per nesting level, 0 to 8; 0 is compact")],
         returns: "String",
-        doc: "Render a value as JSON text. The value is piped in or passed as the argument: to_json(v).",
-        examples: &[(r#"[1, 2] | to_json"#, r#""[1,2]""#), (r#"to_json([1, 2])"#, r#""[1,2]""#)],
+        doc: "Render a value as JSON text, compact, or indented by 1 to 8 spaces per level with an indent argument (0 is compact). The value is piped in or passed as the argument: to_json(v) or to_json(v, indent).",
+        examples: &[(r#"[1, 2] | to_json"#, r#""[1,2]""#), (r#"to_json([1, 2])"#, r#""[1,2]""#), (r#"to_json([1, 2], 2) | lines | len"#, "4"), (r#"to_json([1, 2], 0)"#, r#""[1,2]""#)],
     },
     Signature {
         name: "ls",
@@ -2940,10 +2943,10 @@ pub static SIGNATURES: &[Signature] = &[
         subject_required: false,
         aliases: &[],
         subject: None,
-        params: &[req("pattern", Ty::Str, "a basic regular expression, as grep takes it: ^ and $ anchor, . is any character"), opt("path", Ty::Str, "file to search; omit to search the piped text")],
+        params: &[req("pattern", Ty::Str, "a basic regular expression, as grep takes it: ^ and $ anchor, . is any character"), opt("path", Ty::Str, "file to search; omit to search the piped text"), opt("options", Ty::Record, "{line_numbers: true} returns {file, line, text} records instead of lines; line counts from 1 in each file, and file is null for piped text")],
         returns: "Array",
-        doc: "Lines matching a basic regular expression.",
-        examples: &[(r#"grep("fn main", "src/main.rs") | len"#, "1"), (r#"(grep("fn", "src/main.rs") | len) > 0"#, "true"), (r#"grep("^version", "Cargo.toml") | len"#, "1")],
+        doc: "Lines matching a basic regular expression. With {line_numbers: true} each match is a record {file, line, text} instead, the line numbered from 1 within its file (null for piped text).",
+        examples: &[(r#"grep("fn main", "src/main.rs") | len"#, "1"), (r#"(grep("fn", "src/main.rs") | len) > 0"#, "true"), (r#"grep("^version", "Cargo.toml") | len"#, "1"), (r#"grep("^version", "Cargo.toml", {line_numbers: true}) | first | fn(r) => r.file"#, r#""Cargo.toml""#), (r#""a\nb\na" | grep("a", {line_numbers: true}) | last | fn(r) => r.line"#, "3")],
     },
     Signature {
         name: "find",
@@ -3002,10 +3005,14 @@ pub static SIGNATURES: &[Signature] = &[
             ),
         ],
         returns: "Array",
-        doc: "Run a read-only SQL query over piped rows, a JSON/CSV file or a SQLite database, returning rows as records. A trailing params Array binds its values to the query's ? placeholders in order, so a value is never spliced into the query text.",
+        doc: "Run a read-only SQL query over piped rows, rows given as the first argument, a JSON/CSV file or a SQLite database, returning rows as records. A trailing params Array binds its values to the query's ? placeholders in order, so a value is never spliced into the query text. Without piped rows, name a source first: sql(source, query, params).",
         examples: &[
             (
                 r#"[{n: 1}, {n: 2}, {n: 3}] | sql("select sum(n) as total from t") | first | fn(r) => r.total"#,
+                "6",
+            ),
+            (
+                r#"sql([{n: 1}, {n: 2}, {n: 3}], "select sum(n) as total from t") | first | fn(r) => r.total"#,
                 "6",
             ),
             (
@@ -3098,9 +3105,10 @@ pub static SIGNATURES: &[Signature] = &[
             ),
         ],
         returns: "Any",
-        doc: "Run a read-only SQL query that yields exactly one row of one column, returning that value. A trailing params Array binds its values to the query's ? placeholders in order, as for sql.",
+        doc: "Run a read-only SQL query that yields exactly one row of one column, returning that value. Rows may be piped in or given as the first argument, as for sql. A trailing params Array binds its values to the query's ? placeholders in order, as for sql.",
         examples: &[
             (r#"[{n: 1}, {n: 2}, {n: 3}] | sql_value("select max(n) from t")"#, "3"),
+            (r#"sql_value([{n: 1}, {n: 2}, {n: 3}], "select count(*) from t where n > ?", [1])"#, "2"),
             (r#"sql_value(":memory:", "select 6 * 7")"#, "42"),
             (r#"sql_value(":memory:", "select ? * 6", [7])"#, "42"),
             (r#"[{n: 1}, {n: 2}, {n: 3}] | sql_value("select count(*) from t where n > ?", [1])"#, "2"),
@@ -7010,11 +7018,49 @@ pub static SIGNATURES: &[Signature] = &[
         subject_required: false,
         aliases: &[],
         subject: Some(Ty::Any),
-        params: &[],
+        params: &[opt_range("indent", Ty::Int, 0, 8, "spaces per nesting level, 0 to 8; 0 is compact")],
         returns: "String",
-        doc: "A value as compact JSON.",
+        doc: "A value as JSON: compact, or indented by 1 to 8 spaces per level with an indent argument (0 is compact). The value is piped in or passed as the argument: json_stringify(v, indent).",
         examples: &[
             (r#"json_stringify({a: 1})"#, r#"{"a":1}"#),
+            (r#"json_stringify({a: 1}, 2) | lines | len"#, "3"),
+            (r#"json_stringify({a: 1}, 0)"#, r#"{"a":1}"#),
+        ],
+    },
+    Signature {
+        // Edits one key of a JSON file in place. Its effect is file_write's: the
+        // path is guarded and the write is atomic, and the key order and
+        // indentation of the file are kept.
+        name: "json_set",
+        category: None,
+        subject_required: false,
+        aliases: &[],
+        subject: None,
+        params: &[
+            req("path", Ty::Str, "the JSON file to edit; it must exist"),
+            req("key_path", Ty::Str, "dot-separated keys, such as version or a.b.c or items.0.name; a missing object key is created, an array index must exist"),
+            req("value", Ty::Any, "the value to set at key_path, as JSON"),
+        ],
+        returns: "Record",
+        doc: "Set one key of a JSON file and write it back in place. The file keeps its key order and its indentation (a tab, two or four spaces, or compact). A path that would create a key inside a value that is not an object is E_BAD_ARG, naming the path.",
+        examples: &[
+            (r#"let d = fs_tempdir("ae_jsonset"); let f = d + "/c.json"; file_write(f, "{\n  \"version\": \"1\"\n}\n"); json_set(f, "version", "2"); let v = open(f).version; rmdir(d, true); v"#, r#""2""#),
+            (r#"let d = fs_tempdir("ae_jsonset"); let f = d + "/c.json"; file_write(f, "{\"a\": {}}"); json_set(f, "a.b", 2); let v = open(f).a.b; rmdir(d, true); v"#, "2"),
+        ],
+    },
+    Signature {
+        // The position of each element, for the loops that IronShell does not have.
+        name: "enumerate",
+        category: None,
+        subject_required: false,
+        aliases: &[],
+        subject: Some(Ty::Array),
+        params: &[],
+        returns: "Array",
+        doc: "Each element of an Array with its position: an Array of {index, value} records, counted from 0. The Array is piped in or passed as the argument: enumerate(items).",
+        examples: &[
+            (r#"["a", "b"] | enumerate | last | fn(r) => r.index"#, "1"),
+            (r#"enumerate(["a", "b"]) | last | fn(r) => r.value"#, r#""b""#),
         ],
     },
     Signature {
@@ -7457,13 +7503,16 @@ pub static SIGNATURES: &[Signature] = &[
         subject_required: false,
         aliases: &[],
         subject: Some(Ty::Str),
-        params: &[req("b", Ty::Str, "the second ISO date or datetime; the answer is b minus a, so an earlier b is negative"), opt("unit", Ty::Str, "days (the default: whole 24-hour periods), hours, minutes or seconds")],
+        params: &[req("b", Ty::Str, "the second ISO date or datetime; the answer is b minus a, so an earlier b is negative"), opt("unit", Ty::Str, "days (the default: whole 24-hour periods), weeks, months, years, hours, minutes or seconds")],
         returns: "Int",
-        doc: "The time from the first date a to the second date b: the answer is b minus a, as a count of whole units truncated toward zero, so the sign is kept. date_diff(a, b) with a before b is positive, and with b before a it is negative: date_diff(\"2026-11-09\", \"2024-02-29\") is -984. The default unit, days, counts whole 24-hour periods of elapsed time: a partial day is dropped, so 23:00 to 01:00 the next day is 0 days. Hours, minutes and seconds count whole elapsed units. Dates are ISO strings as date_parse answers them; a date alone is midnight UTC, so two dates count calendar days. A bad unit is E_BAD_ARG. Direct date_diff(a, b, unit?) or text | date_diff(b, unit?).",
+        doc: "The time from the first date a to the second date b: the answer is b minus a, as a count of whole units truncated toward zero, so the sign is kept. date_diff(a, b) with a before b is positive, and with b before a it is negative: date_diff(\"2026-11-09\", \"2024-02-29\") is -984. The default unit, days, counts whole 24-hour periods of elapsed time: a partial day is dropped, so 23:00 to 01:00 the next day is 0 days. Weeks, hours, minutes and seconds count whole elapsed units. Months and years are calendar units, the inverse of date_add: the most whole months n for which date_add(a, n, \"months\") does not pass b, so 2024-01-31 to 2024-02-29 is 1 month and 2024-02-29 to 2025-02-28 is 1 year. Dates are ISO strings as date_parse answers them; a date alone is midnight UTC, so two dates count calendar days. A bad unit is E_BAD_ARG. Direct date_diff(a, b, unit?) or text | date_diff(b, unit?).",
         examples: &[
             (r#"date_diff("2024-02-29", "2026-11-09")"#, "984"),
             (r#"date_diff("2026-11-09", "2024-02-29")"#, "-984"),
             (r#"date_diff("2024-02-29", "2026-11-09", "hours")"#, "23616"),
+            (r#"date_diff("2024-01-31", "2024-02-29", "months")"#, "1"),
+            (r#"date_diff("2024-02-29", "2025-02-28", "years")"#, "1"),
+            (r#"date_diff("2024-03-15", "2024-01-20", "months")"#, "-1"),
             (r#""2024-02-29" | date_diff("2024-03-01")"#, "1"),
             (r#"date_diff("2026-11-01T23:00:00Z", "2026-11-02T01:00:00Z")"#, "0"),
             (r#"date_diff("2026-11-01T23:00:00Z", "2026-11-02T01:00:00Z", "hours")"#, "2"),
@@ -13750,9 +13799,9 @@ pub static SIGNATURES: &[Signature] = &[
         subject_required: false,
         aliases: &["rewind"],
         subject: None,
-        params: &[opt("steps_or_options", Ty::Any, "how many of the most recent recorded steps to put back, default 1; or a Record {id: Int} or {force: Bool}"), opt("options", Ty::Record, "{id: Int} undoes the one journal entry with that id (the seq a journal row shows) and leaves the others in place; {force: Bool}: put a file back even though it changed after its step (default false)")],
+        params: &[opt("steps_or_options", Ty::Any, "a bare Int n undoes the last n steps (default 1, not the step with id n); or a Record {id: Int} or {force: Bool}"), opt("options", Ty::Record, "{id: Int} undoes the one journal step with that id (the seq a journal row shows) and leaves the others in place; {force: Bool}: put a file back even though it changed after its step (default false)")],
         returns: "Record",
-        doc: "Put back what the last steps overwrote, reporting each step and whether all of them were restored. Steps that cannot be reversed are listed, not hidden. A step whose restore fails stays in the journal and stops the undo, so it can be retried. A file changed after its step (by a hand edit, say) is not overwritten: the undo is E_BAD_STATE and names the file, unless force is set, which restores it and discards those changes. undo({id: N}) undoes the one step with journal id N and leaves the later steps in place. It is E_BAD_STATE, naming the later step, when a later step changed the same file, unless force is set; undo the later step first. Writes are recorded only in agent mode (--agent, or IRONSHELL_MODE=agent) or with IRONSHELL_JOURNAL=on; in a human session undo is refused with E_BAD_STATE, because nothing was recorded to put back.",
+        doc: "undo(n) undoes the last n steps; to undo the step with id n, write undo({id: n}). Put back what the last steps overwrote, reporting each step (with its id, seq) and whether all of them were restored. Steps that cannot be reversed are listed, not hidden. A step whose restore fails stays in the journal and stops the undo, so it can be retried. A file changed after its step (by a hand edit, say) is not overwritten: the undo is E_BAD_STATE and names the file, unless force is set, which restores it and discards those changes. undo({id: N}) undoes the one step with journal id N and leaves the later steps in place. It is E_BAD_STATE, naming the later step, when a later step changed the same file, unless force is set; undo the later step first. Writes are recorded only in agent mode (--agent, or IRONSHELL_MODE=agent) or with IRONSHELL_JOURNAL=on; in a human session undo is refused with E_BAD_STATE, because nothing was recorded to put back.",
         examples: &[
             (r#"(try { undo("x") } catch e { e.error.code })"#, "E_BAD_ARG"),
             (r#"(try { undo(-1) } catch e { e.error.code })"#, "E_BAD_ARG"),
@@ -14930,6 +14979,21 @@ pub fn validate(name: &str, args: &[Value], input: Option<&Value>) -> anyhow::Re
                 ));
             }
         }
+    }
+
+    // `sql("select ... ?", ["Ann"])` with no rows piped in: the query was taken
+    // as the source, and the Array is not a query. Say what sql needs first.
+    if input.is_none()
+        && matches!(sig.name, "sql" | "sql_value")
+        && matches!(args, [Value::Str(_), Value::Array(_)])
+    {
+        return Err(crate::safety::bad_arg_in(
+            name,
+            format!(
+                "{name}: with no piped rows, {name} needs a source first: {name}(source, query, params) or rows | {name}(query, params)"
+            ),
+            &format!("name the source, e.g. {name}(\"people.csv\", \"select ... ?\", [\"Ann\"])"),
+        ));
     }
 
     let required = sig.params.iter().filter(|p| p.required).count();

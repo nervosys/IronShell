@@ -3944,6 +3944,9 @@ fn mapped_spelling(name: &str) -> Vec<String> {
             vec!["read_text".to_string(), "file.read".to_string()]
         }
         "exists_file" => vec!["exists".to_string()],
+        // Deleting a file is rm, which takes the path. No builtin is named delete.
+        "delete" | "remove" | "unlink" | "file_delete" | "file_remove" | "remove_file"
+        | "delete_file" => vec!["rm".to_string()],
         // No repeat builtin. For one character, pad_left repeats it:
         // "-" | pad_left(10, "-") is ten dashes.
         "repeat" | "str_repeat" => vec!["pad_left".to_string()],
@@ -3967,6 +3970,12 @@ pub fn mapped_module_spelling(module: &str, member: &str) -> Vec<String> {
         ("regex" | "re", "search") => &["regex_find"],
         ("regex" | "re", "findall" | "find_all") => &["regex_find_all"],
         ("regex" | "re", "sub") => &["regex_replace"],
+        ("path", "exists" | "isfile" | "isdir") => &["path_exists"],
+        ("path", "realpath" | "abspath" | "resolve" | "canonicalize") => &["fs_realpath"],
+        ("path", "normpath" | "normalize") => &["platform_normalize_path"],
+        // Python's and Node's path module has no IronShell counterpart: these
+        // name what does exist, rather than `math`, one edit from `path`.
+        ("path", _) => &["path_exists", "fs_realpath", "platform_normalize_path"],
         _ => &[],
     };
     names.iter().map(|name| name.to_string()).collect()
@@ -4233,6 +4242,7 @@ pub const FALLBACK_BUILTINS: &[(&str, &str)] = &[
     ("complete", "bi_ai_complete"),
     ("csv_columns", "bi_csv_columns"),
     ("describe", "bi_describe"),
+    ("enumerate", "bi_enumerate"),
     ("explain", "bi_ai_explain"),
     ("explain_effects", "bi_explain_effects"),
     ("fix", "bi_ai_fix"),
@@ -4256,6 +4266,7 @@ pub const FALLBACK_BUILTINS: &[(&str, &str)] = &[
     ("is_type", "bi_is_type"),
     ("journal", "bi_journal"),
     ("journal_clear", "bi_journal_clear"),
+    ("json_set", "bi_json_set"),
     ("lines", "bi_lines"),
     ("measure", "bi_measure_object"),
     ("measure-object", "bi_measure_object"),
@@ -4462,6 +4473,8 @@ fn call_with_input_inner(
         "from-csv" | "from_csv" => bi_from_csv(args, input),
         "to-csv" | "to_csv" => bi_to_csv(args, input),
         "csv_columns" => bi_csv_columns(args, input),
+        "enumerate" => bi_enumerate(args, input),
+        "json_set" => bi_json_set(args, input),
         "from-yaml" | "from_yaml" => bi_from_yaml(args, input),
         "to-yaml" | "to_yaml" => bi_to_yaml(args, input),
         "columns" => bi_columns(args, input),
@@ -4923,6 +4936,8 @@ fn with_param_slots<T>(
 
 /// help() is the short reference; help("name") is ontology_describe("name").
 fn bi_help_entry(args: Vec<Value>) -> Result<Value> {
+    // Documentation is read whole; a handle to it is a round trip for nothing.
+    crate::handles::show_next_whole();
     if args.is_empty() {
         bi_help()
     } else {
@@ -5397,10 +5412,18 @@ fn bi_where(args: Vec<Value>, input: Option<Value>, env: &mut Env) -> Result<Val
                 Value::Bool(true) => out.push(v),
                 Value::Bool(false) => {}
                 other => {
-                    return Err(crate::safety::arg_err(format!(
-                        "where predicate must return Bool, got {:?}",
-                        other
-                    )))
+                    // Plain display, not Debug: "got Int 0", not "got Int(0)".
+                    let got = match &other {
+                        Value::Null | Value::Int(_) | Value::Float(_) | Value::Bool(_) => {
+                            format!("{} {}", other.type_name(), other.to_display_string())
+                        }
+                        _ => other.type_name().to_string(),
+                    };
+                    return Err(crate::safety::bad_arg_in(
+                        "where",
+                        format!("where predicate must return Bool, got {got}"),
+                        "return a Bool from the predicate, e.g. fn(x) => x != 0",
+                    ));
                 }
             }
         }
@@ -5932,7 +5955,11 @@ fn config_value_ok(path: &str, value: &Value) -> Result<()> {
         "history.enabled",
     ];
     let refuse = |expected: String| {
-        crate::safety::bad_arg(B, &expected, &format!("{} {value}", value.type_name()))
+        crate::safety::bad_arg(
+            B,
+            &expected,
+            &format!("{} {}", value.type_name(), value.to_display_string()),
+        )
     };
     if BOOL_PATHS.contains(&path) {
         return match value {
@@ -8788,6 +8815,21 @@ fn without_bom(text: String) -> String {
 /// jail applies to each match, not only to the pattern. `cat` and `grep` both
 /// read their paths this way.
 fn read_named_files(builtin: &str, path_str: &str) -> Result<String> {
+    let mut all = String::new();
+    for (_, text) in read_named_file_list(builtin, path_str)? {
+        // A file that ends without a newline would run into the next one, so
+        // `lines` would count the two as one line. Separate them.
+        if !all.is_empty() && !all.ends_with('\n') {
+            all.push('\n');
+        }
+        all.push_str(&text);
+    }
+    Ok(all)
+}
+
+/// Each file a path names, with its text, in order: a glob names every file it
+/// matches, and any other path names itself. `read_named_files` joins these.
+fn read_named_file_list(builtin: &str, path_str: &str) -> Result<Vec<(String, String)>> {
     if crate::posix::has_glob_meta(path_str) && !std::path::Path::new(path_str).exists() {
         let paths = expand_glob_for(builtin, path_str)?;
         let files: Vec<&String> = paths
@@ -8797,18 +8839,16 @@ fn read_named_files(builtin: &str, path_str: &str) -> Result<String> {
         if files.is_empty() {
             return Err(crate::safety::not_found(builtin, "file matching", path_str));
         }
-        let mut all = String::new();
+        let mut out = Vec::with_capacity(files.len());
         for p in files {
-            // A file that ends without a newline would run into the next one, so
-            // `lines` would count the two as one line. Separate them.
-            if !all.is_empty() && !all.ends_with('\n') {
-                all.push('\n');
-            }
-            all.push_str(&read_named_file(builtin, p)?);
+            out.push((p.clone(), read_named_file(builtin, p)?));
         }
-        return Ok(all);
+        return Ok(out);
     }
-    read_named_file(builtin, path_str)
+    Ok(vec![(
+        path_str.to_string(),
+        read_named_file(builtin, path_str)?,
+    )])
 }
 
 fn read_named_file(builtin: &str, path_str: &str) -> Result<String> {
@@ -9415,8 +9455,13 @@ fn bi_grep(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
         .iter()
         .any(|arg| matches!(arg, Value::Str(s) if s == "-v" || s == "--invert-match"));
 
-    let content = if let Some(input) = input {
-        match input {
+    // The options Record, when there is one, is read before the source is.
+    let line_numbers = grep_line_numbers(&args)?;
+
+    // Each source is its file's name (None for piped text) and its text. A
+    // glob searches each file on its own, so a match can name the file.
+    let sources: Vec<(Option<String>, String)> = if let Some(input) = input {
+        let content = match input {
             Value::Str(s) => s,
             Value::Array(arr) => {
                 let lines: Vec<String> = arr
@@ -9436,7 +9481,8 @@ fn bi_grep(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
                     "grep: input must be a string or array",
                 ))
             }
-        }
+        };
+        vec![(None, content)]
     } else if args.len() > 1 {
         let path = match &args[1] {
             Value::Str(s) if !s.starts_with('-') => s,
@@ -9448,7 +9494,10 @@ fn bi_grep(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
                 ))
             }
         };
-        grep_source_text(path)?
+        grep_source_files(path)?
+            .into_iter()
+            .map(|(file, text)| (Some(file), text))
+            .collect()
     } else {
         return Err(crate::safety::bad_arg(
             "grep",
@@ -9475,22 +9524,60 @@ fn bi_grep(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
                 pattern,
             )
         })?;
-    let matching_lines: Vec<Value> = content
-        .lines()
-        .filter(|line| re.is_match(line) != invert)
-        .map(|line| Value::Str(line.to_string()))
-        .collect();
+    let mut matching: Vec<Value> = Vec::new();
+    for (file, text) in &sources {
+        for (index, line) in text.lines().enumerate() {
+            if re.is_match(line) == invert {
+                continue;
+            }
+            matching.push(if line_numbers {
+                Value::Record(BTreeMap::from([
+                    (
+                        "file".to_string(),
+                        file.clone().map_or(Value::Null, Value::Str),
+                    ),
+                    ("line".to_string(), Value::Int(index as i64 + 1)),
+                    ("text".to_string(), Value::Str(line.to_string())),
+                ]))
+            } else {
+                Value::Str(line.to_string())
+            });
+        }
+    }
 
-    Ok(Value::Array(matching_lines))
+    Ok(Value::Array(matching))
 }
 
-/// The text `grep(pattern, path)` searches. The path is read as `cat` reads
-/// it, so a glob searches every matching file in order and
+/// The options Record of `grep`, when one is given after the pattern. Its only
+/// key is `line_numbers`, a Bool; any other key or value is a bad argument.
+fn grep_line_numbers(args: &[Value]) -> Result<bool> {
+    let mut line_numbers = false;
+    for arg in args.iter().skip(1) {
+        if let Value::Record(options) = arg {
+            for (key, value) in options {
+                match (key.as_str(), value) {
+                    ("line_numbers", Value::Bool(on)) => line_numbers = *on,
+                    _ => {
+                        return Err(crate::safety::bad_arg(
+                            "grep",
+                            "options: a Record with line_numbers: Bool",
+                            key,
+                        ))
+                    }
+                }
+            }
+        }
+    }
+    Ok(line_numbers)
+}
+
+/// The files `grep(pattern, path)` searches, each with its text. The path is
+/// read as `cat` reads it, so a glob searches every matching file in order and
 /// `grep("fn ", "src/*.rs")` answers what `cat("src/*.rs") | grep("fn ")`
 /// does. A directory is not text. Reading it gave E_OS_DENIED with a
 /// permissions hint, which was the wrong cause, so it is refused as a bad
 /// argument instead.
-fn grep_source_text(path: &str) -> Result<String> {
+fn grep_source_files(path: &str) -> Result<Vec<(String, String)>> {
     crate::security::check_share_egress("grep", path)?;
     let named = std::path::Path::new(path);
     if named.exists() {
@@ -9504,7 +9591,35 @@ fn grep_source_text(path: &str) -> Result<String> {
             ));
         }
     }
-    read_named_files("grep", path)
+    read_named_file_list("grep", path)
+}
+
+/// enumerate(items): each element with its position, as {index, value} records
+/// counted from 0. The Array is piped in or passed as the argument.
+fn bi_enumerate(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
+    let items = match input.or_else(|| args.into_iter().next()) {
+        Some(Value::Array(items)) => items,
+        Some(other) => {
+            return Err(crate::safety::bad_arg(
+                "enumerate",
+                "an Array",
+                other.type_name(),
+            ))
+        }
+        None => return Err(subject_refusal("enumerate", "an Array")),
+    };
+    Ok(Value::Array(
+        items
+            .into_iter()
+            .enumerate()
+            .map(|(index, value)| {
+                Value::Record(BTreeMap::from([
+                    ("index".to_string(), Value::Int(index as i64)),
+                    ("value".to_string(), value),
+                ]))
+            })
+            .collect(),
+    ))
 }
 
 // --------------- Formatting helpers ---------------
@@ -10232,6 +10347,12 @@ fn bi_to_json(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
         },
     };
 
+    let json_val = value_to_json(value);
+    // An Int is the indent in spaces, 0 to 8; 0 is compact.
+    if let Some(Value::Int(indent)) = flags.first() {
+        return Ok(Value::Str(json_indented("to_json", &json_val, *indent)?));
+    }
+
     let pretty = flags
         .first()
         .and_then(|arg| match arg {
@@ -10241,7 +10362,6 @@ fn bi_to_json(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
         })
         .unwrap_or(false);
 
-    let json_val = value_to_json(value);
     let json_str = if pretty {
         serde_json::to_string_pretty(&json_val)?
     } else {
@@ -10360,47 +10480,71 @@ fn bi_from_csv(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
     Ok(Value::Array(rows.into_iter().map(Value::Record).collect()))
 }
 
-/// A CSV cell, typed as its text parses: an Int, a Float or a Bool, else a
-/// String.
-fn csv_cell(field: &str) -> Value {
-    if let Ok(i) = field.parse::<i64>() {
-        Value::Int(i)
-    } else if let Ok(f) = field.parse::<f64>() {
-        Value::Float(f)
-    } else if let Ok(b) = field.parse::<bool>() {
-        Value::Bool(b)
-    } else {
-        Value::Str(field.to_string())
-    }
-}
-
-/// Whether a cell reads as a number, by the same parsers `csv_cell` uses.
+/// Whether a cell is a number a numeric column can hold: it parses as an Int or
+/// a Float, has no leading "+", and has no leading zero before another digit.
+/// So "0", "0.5" and "-0.5" are numbers, while "007", "00" and "-01" are not:
+/// their zeros are part of an identifier or a code, not a magnitude.
 fn is_number(field: &str) -> bool {
+    if field.starts_with('+') {
+        return false;
+    }
+    let unsigned = field.strip_prefix('-').unwrap_or(field).as_bytes();
+    if unsigned.len() > 1 && unsigned[0] == b'0' && unsigned[1].is_ascii_digit() {
+        return false;
+    }
     field.parse::<i64>().is_ok() || field.parse::<f64>().is_ok()
 }
 
-/// The rows of a parsed CSV table, each cell typed by its column.
+/// One numeric cell as its column's type: an Int when every non-empty cell of
+/// the column is an integer (`all_int`), else a Float.
+fn numeric_cell(field: &str, all_int: bool) -> Value {
+    if all_int {
+        if let Ok(i) = field.parse::<i64>() {
+            return Value::Int(i);
+        }
+    }
+    match field.parse::<f64>() {
+        Ok(f) => Value::Float(f),
+        Err(_) => Value::Str(field.to_string()),
+    }
+}
+
+/// The rows of a parsed CSV table, each column typed as a whole.
 ///
-/// In a column whose non-empty cells are all numbers, an empty cell is Null,
-/// not `""`: the column is numeric, so a sum or a count over it does not meet
-/// a blank String. Any other column keeps `""` for a blank, because a blank
-/// there is text. A column with no non-empty cell keeps `""` too, since
-/// nothing in it says what type it is.
+/// A column is numeric only when every non-empty cell is a number (see
+/// `is_number`). Its cells are then Int when all of them are integers, else
+/// Float, and an empty cell is Null, so a sum or a count over it does not meet a
+/// blank String. Every other column is all Strings, a blank being `""`: one
+/// cell such as "007" or "NA" makes the whole column text. A column with no
+/// non-empty cell is text too, since nothing in it says what type it is.
 pub(crate) fn csv_rows(
     headers: &[String],
     records: &[csv::StringRecord],
 ) -> Vec<BTreeMap<String, Value>> {
-    let numeric: Vec<bool> = (0..headers.len())
+    // Per column: None for text, Some(Some(all_int)) for a numeric column,
+    // Some(None) for a column of true and false.
+    let kinds: Vec<Option<Option<bool>>> = (0..headers.len())
         .map(|column| {
-            let mut any = false;
+            let mut numbers = 0usize;
+            let mut flags = 0usize;
+            let mut all_int = true;
             for record in records {
                 match record.get(column) {
                     Some("") | None => {}
-                    Some(field) if is_number(field) => any = true,
-                    Some(_) => return false,
+                    Some("true" | "false") => flags += 1,
+                    Some(field) if is_number(field) => {
+                        numbers += 1;
+                        all_int &= field.parse::<i64>().is_ok();
+                    }
+                    Some(_) => return None,
                 }
             }
-            any
+            match (numbers, flags) {
+                (0, 0) => None,
+                (_, 0) => Some(Some(all_int)),
+                (0, _) => Some(None),
+                _ => None,
+            }
         })
         .collect();
 
@@ -10410,10 +10554,11 @@ pub(crate) fn csv_rows(
             let mut row = BTreeMap::new();
             for (i, field) in record.iter().enumerate() {
                 if let Some(header) = headers.get(i) {
-                    let value = if field.is_empty() && numeric[i] {
-                        Value::Null
-                    } else {
-                        csv_cell(field)
+                    let value = match kinds[i] {
+                        Some(_) if field.is_empty() => Value::Null,
+                        Some(Some(all_int)) => numeric_cell(field, all_int),
+                        Some(None) => Value::Bool(field == "true"),
+                        None => Value::Str(field.to_string()),
                     };
                     row.insert(header.clone(), value);
                 }
@@ -10479,7 +10624,17 @@ fn bi_to_csv(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
             let headers: Vec<String> = match (columns, arr.first()) {
                 (Some(names), _) => names,
                 (None, None) => return Ok(Value::Str(String::new())),
-                (None, Some(Value::Record(first_record))) => first_record.keys().cloned().collect(),
+                (None, Some(Value::Record(_))) => {
+                    // The keys of every record, sorted, so a key that only a later
+                    // row has is a column too and is not dropped.
+                    let mut keys = std::collections::BTreeSet::new();
+                    for item in &arr {
+                        if let Value::Record(record) = item {
+                            keys.extend(record.keys().cloned());
+                        }
+                    }
+                    keys.into_iter().collect()
+                }
                 (None, Some(_)) => {
                     return Err(crate::safety::arg_err(
                         "to-csv: input must be array of records",
@@ -10546,8 +10701,9 @@ fn csv_escape(s: &str) -> String {
 /// csv_columns(path_or_text): the header row, in file order.
 ///
 /// A String that names an existing file is read as that file; any other String
-/// is CSV text. Quoting is parsed as `from_csv` parses it, so a quoted header
-/// with a comma is one column.
+/// is CSV text. A single line that ends in .csv, .tsv or .txt and names no file
+/// is E_NOT_FOUND, not a header. Quoting is parsed as `from_csv` parses it, so a
+/// quoted header with a comma is one column.
 fn bi_csv_columns(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
     // Piped, the path or text is the input; called directly, it is the first argument.
     let subject = match input.or_else(|| args.into_iter().next()) {
@@ -10563,11 +10719,26 @@ fn bi_csv_columns(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
     };
 
     // A remote-share string is never probed: exists() on it opens a connection.
-    if !crate::safety::names_a_remote_share(&subject) && std::path::Path::new(&subject).is_file() {
+    let is_file =
+        !crate::safety::names_a_remote_share(&subject) && std::path::Path::new(&subject).is_file();
+    if is_file {
         let validated = validate_read_path(&subject)?;
         let file = std::fs::File::open(&validated)
             .map_err(|e| crate::safety::fs_error("csv_columns", &validated, &e))?;
         return csv_header_row(std::io::BufReader::new(file));
+    }
+    // One line that ends like a file name and names no file is a mistyped path,
+    // not a header: refuse it rather than return the name as the only column.
+    let lower = subject.to_ascii_lowercase();
+    let names_a_file = [".csv", ".tsv", ".txt"]
+        .iter()
+        .any(|ext| lower.ends_with(ext));
+    if names_a_file && !subject.contains(['\n', '\r']) {
+        return Err(crate::safety::not_found_with(
+            "csv_columns",
+            format!("csv_columns: no file named '{subject}'"),
+            "pass CSV text with a newline, or an existing file",
+        ));
     }
     csv_header_row(subject.as_bytes())
 }
@@ -11823,7 +11994,7 @@ fn weighted_strategy(
                 return Err(crate::safety::bad_arg(
                     builtin,
                     &format!("weight for {key}: a whole number from 0 to {}", u32::MAX),
-                    &other.to_string(),
+                    &other.to_display_string(),
                 ))
             }
         };
@@ -12674,7 +12845,8 @@ fn bi_type_fields(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
                         }
                         Value::Array(a) => format!("[…] ({} items)", a.len()),
                         Value::Record(r) => format!("{{…}} ({} fields)", r.len()),
-                        other => format!("{}", other),
+                        Value::Str(s) => format!("\"{s}\""),
+                        other => other.to_display_string(),
                     };
                     r.insert("preview".to_string(), Value::Str(preview));
                     Value::Record(r)
@@ -15323,12 +15495,16 @@ fn bi_date_parse(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
 /// Args:
 ///   - a: String (or the piped text) - an ISO date or datetime, as date_parse answers
 ///   - b: String - the later date, in the same form
-///   - unit: String (optional) - "days" (the default: whole 24-hour periods of elapsed time), "hours", "minutes" or "seconds"
+///   - unit: String (optional) - "days" (the default: whole 24-hour periods of elapsed time), "weeks", "months", "years", "hours", "minutes" or "seconds"
 /// Returns: Int - b minus a, in whole units, truncated toward zero
+///
+/// Months and years are calendar units, the inverse of date_add: the count is
+/// the most whole months n for which date_add(a, n, "months") does not pass b.
 ///
 /// Example:
 ///   date_diff("2024-02-29", "2026-11-09")                                # 984
 ///   date_diff("2024-02-29", "2026-11-09", "hours")                       # 23616
+///   date_diff("2024-01-31", "2024-02-29", "months")                      # 1
 ///   date_diff("2026-11-01T23:00:00Z", "2026-11-02T01:00:00Z")            # 0
 ///   date_diff("2026-11-01T23:00:00Z", "2026-11-02T01:00:00Z", "hours")   # 2
 fn bi_date_diff(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
@@ -15338,7 +15514,11 @@ fn bi_date_diff(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
         [second] => (string_arg(B, "a second ISO date String", second)?, "days"),
         [second, unit] => (
             string_arg(B, "a second ISO date String", second)?,
-            string_arg(B, "a unit String: days, hours, minutes or seconds", unit)?,
+            string_arg(
+                B,
+                "a unit String: days, weeks, months, years, hours, minutes or seconds",
+                unit,
+            )?,
         ),
         _ => {
             return Err(arity_error(
@@ -15348,10 +15528,44 @@ fn bi_date_diff(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
             ))
         }
     };
-    let per = unit_seconds(B, unit)?;
     let (a, _) = parse_iso(B, &first)?;
     let (b, _) = parse_iso(B, second)?;
-    Ok(Value::Int((b - a).num_seconds() / per))
+    match unit {
+        "weeks" => Ok(Value::Int((b - a).num_seconds() / (7 * 86_400))),
+        "months" => Ok(Value::Int(whole_calendar_months(a, b))),
+        "years" => Ok(Value::Int(whole_calendar_months(a, b) / 12)),
+        _ => {
+            let per = unit_seconds(B, unit).map_err(|_| {
+                crate::safety::bad_arg(
+                    B,
+                    "a unit: days, weeks, months, years, hours, minutes or seconds",
+                    unit,
+                )
+            })?;
+            Ok(Value::Int((b - a).num_seconds() / per))
+        }
+    }
+}
+
+/// The whole calendar months from `a` to `b`, truncated toward zero: the
+/// largest n (by magnitude, with b's sign) for which add_calendar_months(a, n)
+/// does not pass b. The inverse of date_add's "months".
+fn whole_calendar_months(
+    a: chrono::DateTime<chrono::Utc>,
+    b: chrono::DateTime<chrono::Utc>,
+) -> i64 {
+    use chrono::Datelike as _;
+    let index = |d: chrono::DateTime<chrono::Utc>| i64::from(d.year()) * 12 + i64::from(d.month0());
+    let mut n = index(b) - index(a);
+    let passes = |n: i64| match add_calendar_months(a, n) {
+        Some(d) if n >= 0 => d > b,
+        Some(d) => d < b,
+        None => true,
+    };
+    while n != 0 && passes(n) {
+        n -= n.signum();
+    }
+    n
 }
 
 /// date_format(iso, format) - Format a date or datetime with a strftime layout.
@@ -16054,16 +16268,197 @@ fn bi_json_parse(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
 /// Example:
 ///   {a: 1} | json_stringify()     # Returns "{\"a\":1}"
 fn bi_json_stringify(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
-    let val = if args.is_empty() {
-        input.ok_or_else(|| crate::safety::arg_err("json_stringify requires value"))?
-    } else {
-        args[0].clone()
+    // Piped, the value is the input and an optional indent the first argument;
+    // called directly, the value is the first argument and the indent the second.
+    let (val, rest) = match input {
+        Some(value) => (value, args.as_slice()),
+        None => match args.split_first() {
+            Some((value, rest)) => (value.clone(), rest),
+            None => return Err(crate::safety::arg_err("json_stringify requires value")),
+        },
     };
 
     let json_val = value_to_json(val);
-    let json_str = serde_json::to_string(&json_val).context("Failed to stringify to JSON")?;
+    let json_str = match rest.first() {
+        Some(Value::Int(indent)) => json_indented("json_stringify", &json_val, *indent)?,
+        _ => serde_json::to_string(&json_val).context("Failed to stringify to JSON")?,
+    };
 
     Ok(Value::Str(json_str))
+}
+
+/// `json` as text with each nesting level indented by `indent` spaces. An indent
+/// of 0 is compact JSON. An indent outside 0 to 8 is a bad argument.
+fn json_indented(builtin: &str, json: &serde_json::Value, indent: i64) -> Result<String> {
+    if !(0..=8).contains(&indent) {
+        return Err(crate::safety::bad_arg_in(
+            builtin,
+            format!("{builtin}: indent must be 0 to 8 spaces, got {indent}"),
+            "pass an indent from 0 to 8, or leave it out for compact JSON",
+        ));
+    }
+    if indent == 0 {
+        return Ok(serde_json::to_string(json)?);
+    }
+    let unit = vec![b' '; indent as usize];
+    Ok(String::from_utf8(serialize_with_unit(json, &unit)?)?)
+}
+
+/// `json` as bytes, each nesting level indented by `unit`.
+fn serialize_with_unit(json: &serde_json::Value, unit: &[u8]) -> Result<Vec<u8>> {
+    let mut buf = Vec::new();
+    let formatter = serde_json::ser::PrettyFormatter::with_indent(unit);
+    let mut serializer = serde_json::Serializer::with_formatter(&mut buf, formatter);
+    serde::Serialize::serialize(json, &mut serializer)?;
+    Ok(buf)
+}
+
+/// json_set(path, key_path, value): set one key of a JSON file and write the
+/// file back in place.
+///
+/// The file keeps its key order and its indentation: a tab, two or four spaces,
+/// or none for compact JSON, read from the text. `key_path` is dot-separated:
+/// "version", "a.b.c", "items.0.name". A missing object key is created; an
+/// array index must already exist. A path that would create a key inside a
+/// value that is not an object is refused. The write is guarded and atomic, as
+/// file_write's is.
+fn bi_json_set(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
+    if input.is_some() {
+        return Err(crate::safety::bad_arg(
+            "json_set",
+            "no pipeline input: json_set(path, key_path, value)",
+            "a piped value",
+        ));
+    }
+    let (Some(Value::Str(path)), Some(Value::Str(key_path)), Some(value)) =
+        (args.first(), args.get(1), args.get(2))
+    else {
+        return Err(crate::safety::arg_err(
+            "json_set requires a file path, a key path and a value",
+        ));
+    };
+    let segments: Vec<&str> = key_path.split('.').collect();
+    if segments.iter().any(|segment| segment.is_empty()) {
+        return Err(crate::safety::bad_arg_in(
+            "json_set",
+            format!("json_set: key path '{key_path}' has an empty key"),
+            "name keys separated by dots, such as version or a.b.c or items.0.name",
+        ));
+    }
+
+    let path = crate::safety::resolve_path_str(path);
+    crate::safety::guard(crate::safety::GuardCtx {
+        builtin: "json_set",
+        effect: crate::safety::Effect::WriteLocal,
+        what: "write",
+        targets: vec![path.clone()],
+        blast_radius: serde_json::json!({ "key": key_path }),
+        reversible: true,
+        fs_paths: true,
+    })?;
+
+    let text = std::fs::read_to_string(&path).map_err(|e| {
+        if e.kind() == std::io::ErrorKind::NotFound {
+            crate::safety::not_found("json_set", "file", &path)
+        } else {
+            crate::safety::fs_error("json_set", &path, &e)
+        }
+    })?;
+    // serde_json's Map keeps insertion order here, so a set key stays where it was.
+    let mut json: serde_json::Value = serde_json::from_str(&text).map_err(|e| {
+        crate::safety::bad_value(
+            format!("json_set: {path} is not valid JSON: {e}"),
+            "json_set edits well-formed JSON only; fix the file's syntax first",
+        )
+    })?;
+    if let Err(reason) = set_json_path(&mut json, &segments, value_to_json(value.clone())) {
+        return Err(crate::safety::bad_arg_in(
+            "json_set",
+            format!("json_set: cannot set '{key_path}' in {path}: {reason}"),
+            "only object keys are created, and an array index must already exist; the path must lead through objects and arrays",
+        ));
+    }
+
+    // Written as the file was indented, with its line endings and its final newline.
+    let newline = if text.contains("\r\n") { "\r\n" } else { "\n" };
+    let mut bytes = match json_indent_unit(&text) {
+        Some(unit) => serialize_with_unit(&json, &unit)?,
+        None => serde_json::to_vec(&json)?,
+    };
+    if newline != "\n" {
+        bytes = String::from_utf8(bytes)?
+            .replace('\n', newline)
+            .into_bytes();
+    }
+    if text.ends_with('\n') {
+        bytes.extend_from_slice(newline.as_bytes());
+    }
+
+    crate::tx::snapshot(&path); // record pre-write state if a transaction is active
+    write_file_atomically("json_set", &path, &bytes)?;
+
+    let mut result = BTreeMap::new();
+    result.insert("path".to_string(), Value::Str(path));
+    result.insert("key".to_string(), Value::Str(key_path.clone()));
+    result.insert("success".to_string(), Value::Bool(true));
+    Ok(Value::Record(result))
+}
+
+/// Set the value at `segments` inside `node`. An object gets a missing key; an
+/// array's index must already exist; any other value refuses, and the reason
+/// names the segment.
+fn set_json_path(
+    node: &mut serde_json::Value,
+    segments: &[&str],
+    value: serde_json::Value,
+) -> std::result::Result<(), String> {
+    let Some((segment, rest)) = segments.split_first() else {
+        *node = value;
+        return Ok(());
+    };
+    match node {
+        serde_json::Value::Object(map) => {
+            let child = map
+                .entry(segment.to_string())
+                .or_insert_with(|| serde_json::Value::Object(serde_json::Map::new()));
+            set_json_path(child, rest, value)
+        }
+        serde_json::Value::Array(items) => {
+            let index = segment
+                .parse::<usize>()
+                .ok()
+                .filter(|index| *index < items.len())
+                .ok_or_else(|| format!("'{segment}' is not an index of this array"))?;
+            set_json_path(&mut items[index], rest, value)
+        }
+        other => {
+            let kind = match other {
+                serde_json::Value::Null => "null",
+                serde_json::Value::Bool(_) => "boolean",
+                serde_json::Value::Number(_) => "number",
+                _ => "string",
+            };
+            Err(format!(
+                "'{segment}' would be created inside a {kind} value, which is not an object"
+            ))
+        }
+    }
+}
+
+/// The indentation a JSON text uses: a tab, or the spaces of its least-indented
+/// line. None when no line is indented, which is compact JSON.
+fn json_indent_unit(text: &str) -> Option<Vec<u8>> {
+    let mut spaces: Option<usize> = None;
+    for line in text.lines() {
+        if line.starts_with('\t') {
+            return Some(b"\t".to_vec());
+        }
+        let indent = line.len() - line.trim_start_matches(' ').len();
+        if indent > 0 {
+            spaces = Some(spaces.map_or(indent, |least| least.min(indent)));
+        }
+    }
+    spaces.map(|n| vec![b' '; n])
 }
 
 // ==================== Syntax Knowledge Base Functions ====================
@@ -22291,7 +22686,8 @@ pub fn render_agent(v: &Value, budget: Option<usize>) -> Option<String> {
             // and referenced instead. The agent narrows it down with a pipeline
             // and only the small answer crosses back — the saving no encoder can
             // reach, because it is the bytes never sent.
-            if crate::handles::worth_handling(v.as_ref(), full.len()) {
+            let whole = crate::handles::take_show_whole();
+            if !whole && crate::handles::worth_handling(v.as_ref(), full.len()) {
                 match render_handle(v.into_owned(), full.len()) {
                     Ok(handle) => Some(handle),
                     // At the handle cap the result is not sent: it is over the
@@ -22308,6 +22704,11 @@ pub fn render_agent(v: &Value, budget: Option<usize>) -> Option<String> {
         }
     }
 }
+
+/// The hint for a bad bare step count. A bare Int counts steps; an id needs the
+/// Record form. Spelled out because the two read alike.
+const UNDO_STEP_HINT: &str =
+    "undo(n) undoes the last n steps; to undo the step with id n, write undo({id: n})";
 
 /// `undo(n = 1)` — put back what the last `n` mutating steps overwrote.
 ///
@@ -22333,15 +22734,23 @@ fn bi_undo(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
     let n = match args.iter().find(|v| !matches!(v, Value::Record(_))) {
         None => 1,
         Some(Value::Int(n)) if *n < 0 => {
-            return Err(crate::safety::bad_arg(
+            return Err(crate::safety::bad_arg_with_hint(
                 "undo",
                 "a step count from 0",
                 &n.to_string(),
+                UNDO_STEP_HINT,
             ))
         }
         Some(v) => v
             .as_int()
-            .map_err(|_| crate::safety::bad_arg("undo", "a step count", "a non-integer"))?
+            .map_err(|_| {
+                crate::safety::bad_arg_with_hint(
+                    "undo",
+                    "a step count",
+                    "a non-integer",
+                    UNDO_STEP_HINT,
+                )
+            })?
             .max(0) as usize,
     };
     let force = undo_force("undo", &args)?;
@@ -22411,7 +22820,7 @@ fn undo_id(builtin: &str, args: &[Value]) -> Result<Option<usize>> {
                 return Err(crate::safety::bad_arg(
                     builtin,
                     "id: the Int id a journal row shows, from 1",
-                    &format!("{value}"),
+                    &value.to_display_string(),
                 ))
             }
         }
@@ -22424,9 +22833,7 @@ fn undo_by_id_record(builtin: &str, seq: usize, force: bool) -> Result<Value> {
     use crate::journal::UndoRefusal;
     let force_call = format!("{builtin}({{id: {seq}, force: true}})");
     let outcomes = crate::journal::undo_by_id(seq, force).map_err(|refusal| match refusal {
-        UndoRefusal::NotFound => {
-            crate::safety::not_found(builtin, "journal entry", &seq.to_string())
-        }
+        UndoRefusal::NotFound => crate::safety::journal_step_not_found(builtin, seq),
         UndoRefusal::LaterStep { seq: later, path } => crate::safety::bad_state_with_hint(
             builtin,
             &format!(
@@ -22486,14 +22893,18 @@ fn refuse_unless_recording(builtin: &str) -> Result<()> {
 /// applied. The counts are kept apart because "3 restored" and "3 restored, 1
 /// skipped" call for different decisions.
 fn rewind_record(
-    outcomes: &[crate::journal::Outcome],
+    outcomes: &[crate::journal::Rewound],
     applied_key: &str,
 ) -> std::collections::BTreeMap<String, Value> {
     let (mut applied, mut removed, mut skipped, mut failed) = (0, 0, 0, 0);
     let mut rows = Vec::with_capacity(outcomes.len());
-    for o in outcomes {
+    for r in outcomes {
         let mut m = std::collections::BTreeMap::new();
-        let (action, what, why) = match o {
+        // The step's id, as journal() and session_history() name it.
+        if let Some(seq) = r.seq {
+            m.insert("seq".to_string(), Value::Int(seq as i64));
+        }
+        let (action, what, why) = match &r.outcome {
             crate::journal::Outcome::Restored(w) => {
                 applied += 1;
                 ("restored", w.clone(), String::new())
@@ -22630,7 +23041,12 @@ fn bi_handle(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
         .map(|s| s.to_string())
         .ok_or_else(|| crate::safety::arg_err("handle(id): a handle id is required"))?;
     match crate::handles::get(&id) {
-        Some(v) => Ok(v),
+        Some(v) => {
+            // Reading a handle whole is asking for its value, not for a new
+            // handle to it.
+            crate::handles::show_next_whole();
+            Ok(v)
+        }
         None => {
             let live: Vec<String> = crate::handles::list().into_iter().map(|h| h.id).collect();
             let got = if live.is_empty() {
@@ -23800,6 +24216,7 @@ fn bi_ontology_manifest(_args: Vec<Value>, _input: Option<Value>) -> Result<Valu
 /// builtins (name, signature, effect), or a builtin name → its full definition
 /// (effect, params, examples).
 fn bi_ontology_describe(args: Vec<Value>, _input: Option<Value>) -> Result<Value> {
+    crate::handles::show_next_whole();
     let q = match args.first() {
         Some(Value::Str(s)) => s.clone(),
         other => {
@@ -24660,10 +25077,14 @@ fn bi_audit_verify(args: Vec<Value>, _input: Option<Value>) -> Result<Value> {
     let keyed = crate::safety::audit_key().is_some();
     rec.insert("keyed".to_string(), Value::Bool(keyed));
     if !keyed {
-        rec.insert(
-            "note".to_string(),
-            Value::Str(UNKEYED_AUDIT_NOTE.to_string()),
-        );
+        let note = match crate::safety::audit_key_rejected() {
+            Some(var) => format!(
+                "{} is set, but the key it gives is shorter than 32 characters, so the chain is not keyed; {}",
+                var, UNKEYED_AUDIT_NOTE
+            ),
+            None => UNKEYED_AUDIT_NOTE.to_string(),
+        };
+        rec.insert("note".to_string(), Value::Str(note));
     }
     match crate::safety::verify_audit(&path) {
         // A log with no entries is what a truncation leaves behind, so it
@@ -54662,10 +55083,11 @@ fn bi_session_undo(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
 fn bi_session_redo(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
     let n = step_count_arg("session_redo", &args, &input)?;
     refuse_unless_recording("session_redo")?;
-    Ok(Value::Record(rewind_record(
-        &crate::journal::redo(n),
-        "reapplied",
-    )))
+    let outcomes: Vec<crate::journal::Rewound> = crate::journal::redo(n)
+        .into_iter()
+        .map(|outcome| crate::journal::Rewound { seq: None, outcome })
+        .collect();
+    Ok(Value::Record(rewind_record(&outcomes, "reapplied")))
 }
 
 fn bi_session_checkpoint(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
@@ -72484,9 +72906,10 @@ fn bi_tee_output(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
             append = *flag;
         }
     }
+    // Plain text, never the coloured terminal rendering: the file is data.
     let text = match value {
         Value::Str(text) => text,
-        other => format!("{other}"),
+        other => other.to_display_string(),
     };
     crate::safety::guard(crate::safety::GuardCtx {
         builtin: "tee_output",

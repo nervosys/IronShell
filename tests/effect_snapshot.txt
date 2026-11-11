@@ -359,6 +359,7 @@ ends_with	Pure
 entities	ReadLocal
 entr	Exec
 entr_watch	Exec
+enumerate	Pure
 env	ReadLocal
 env_activate	Pure
 env_container	ReadLocal
@@ -632,6 +633,7 @@ jq	Pure
 jq_filter	Exec
 jq_query	Pure
 json_parse	Pure
+json_set	WriteLocal
 json_stringify	Pure
 just	Exec
 just_list	ReadLocal

@@ -127,37 +127,45 @@ fn note_failed_lambda_call(name: &str) {
 pub fn eval_program(stmts: &[Stmt], env: &mut Env) -> Result<Value> {
     let mut last = Value::Null;
     for (i, s) in stmts.iter().enumerate() {
-        // Clear any pipe input between statements to prevent leakage
-        env.set_input(None);
-        last = match s {
-            // Only the last statement's value is the program's, so a binding
-            // before it does not copy its value out (`s = s + "x"` stays linear).
-            Stmt::Let {
-                name,
-                value,
-                is_mut,
-                visibility,
-                ty,
-            } if i + 1 < stmts.len() => {
-                eval_let(name, value, *is_mut, *visibility, ty.as_deref(), env, false)?
-            }
-            _ => eval_stmt(s, env)?,
-        };
-        note_lambda_binding(s);
-        // An error value that a statement *produces* and nothing binds or
-        // catches is an uncaught error. `throw` and `assert` produce error
-        // values rather than unwinding, so without this `throw "x"` was
-        // followed by the next statement and the program exited 0 --
-        // `assert(false)` included. Bound with `let` or handled in `try`, an
-        // error value is still an ordinary value, and naming one (`r` on its
-        // own line) shows it rather than raising it.
-        if let (Stmt::Expr(e), Value::Error(msg)) = (s, &last) {
-            if !matches!(e, Expr::Ident(_) | Expr::MemberAccess { .. }) {
-                return Err(anyhow::anyhow!("uncaught error: {msg}"));
-            }
-        }
+        // Only the last statement's value is the program's, so a binding
+        // before it does not copy its value out (`s = s + "x"` stays linear).
+        last = eval_program_statement(s, i + 1 < stmts.len(), env)?;
     }
     Ok(last)
+}
+
+/// One statement of a program, as [`eval_program`] runs it. `discard` says the
+/// statement's value is not the program's, because another statement follows
+/// it: a binding then does not copy its value out. The REPL runs each top-level
+/// statement on its own, and passes `discard` for all but the last, so a loop of
+/// `a = a + [x]` lines is not a copy of `a` per line.
+pub fn eval_program_statement(s: &Stmt, discard: bool, env: &mut Env) -> Result<Value> {
+    // Clear any pipe input between statements to prevent leakage
+    env.set_input(None);
+    let value = match s {
+        Stmt::Let {
+            name,
+            value,
+            is_mut,
+            visibility,
+            ty,
+        } if discard => eval_let(name, value, *is_mut, *visibility, ty.as_deref(), env, false)?,
+        _ => eval_stmt(s, env)?,
+    };
+    note_lambda_binding(s);
+    // An error value that a statement *produces* and nothing binds or
+    // catches is an uncaught error. `throw` and `assert` produce error
+    // values rather than unwinding, so without this `throw "x"` was
+    // followed by the next statement and the program exited 0 --
+    // `assert(false)` included. Bound with `let` or handled in `try`, an
+    // error value is still an ordinary value, and naming one (`r` on its
+    // own line) shows it rather than raising it.
+    if let (Stmt::Expr(e), Value::Error(msg)) = (s, &value) {
+        if !matches!(e, Expr::Ident(_) | Expr::MemberAccess { .. }) {
+            return Err(anyhow::anyhow!("uncaught error: {msg}"));
+        }
+    }
+    Ok(value)
 }
 
 /// Streaming evaluation (docs/AGENTIC_FIRST_DESIGN.md §6.3): evaluate `code` and
@@ -233,7 +241,21 @@ pub fn eval_stream_with_stats(
     // Evaluate the leading statements eagerly (bindings, imports, side effects).
     for s in init {
         env.set_input(None);
-        eval_stmt(s, env)?;
+        // Their values are not the program's: a binding does not copy its value out.
+        match s {
+            Stmt::Let {
+                name,
+                value,
+                is_mut,
+                visibility,
+                ty,
+            } => {
+                eval_let(name, value, *is_mut, *visibility, ty.as_deref(), env, false)?;
+            }
+            _ => {
+                eval_stmt(s, env)?;
+            }
+        }
     }
     env.set_input(None);
     // Try to stream the final statement if it is a streamable pipeline.
@@ -1082,10 +1104,23 @@ pub fn eval_expr(expr: &Expr, env: &mut Env) -> Result<Value> {
             let a = eval_expr(left, env)?;
             // `&&` and `||` short-circuit, as in every shell and C-family
             // language: `x != "" && x >= 1` must not compare "" with 1.
-            match op {
-                BinOp::And if !is_truthy(&a) => return Ok(Value::Bool(false)),
-                BinOp::Or if is_truthy(&a) => return Ok(Value::Bool(true)),
-                _ => {}
+            // Their operands must be Bool, as `if` and `where` require: `1 && 2`
+            // used to be true, and `"false" && true` used to be true too.
+            if matches!(op, BinOp::And | BinOp::Or) {
+                let x = match a {
+                    Value::Bool(x) => x,
+                    other => return Err(logic_operand_error(op, &other)),
+                };
+                match op {
+                    BinOp::And if !x => return Ok(Value::Bool(false)),
+                    BinOp::Or if x => return Ok(Value::Bool(true)),
+                    _ => {}
+                }
+                let b = eval_expr(right, env)?;
+                return match b {
+                    Value::Bool(y) => Ok(Value::Bool(y)),
+                    other => Err(logic_operand_error(op, &other)),
+                };
             }
             let b = eval_expr(right, env)?;
             binop(op, a, b)
@@ -1284,7 +1319,27 @@ fn set_field_path(target: &mut Value, label: &str, path: &[String], new: Value) 
     };
     let kind = target.type_name();
     let Value::Record(map) = target else {
-        return Err(crate::safety::bad_arg(label, "a Record", kind));
+        // `r.a.b = 5` with `r.a` an Int: the fix is to replace `r.a`, which
+        // the hint shows as the record literal the path would need.
+        let article = if matches!(kind.chars().next(), Some('A' | 'E' | 'I' | 'O' | 'U')) {
+            "an"
+        } else {
+            "a"
+        };
+        let literal = path.iter().rev().fold(
+            match new {
+                Value::Int(_) | Value::Float(_) | Value::Bool(_) => new.to_display_string(),
+                Value::Str(ref s) => format!("\"{s}\""),
+                _ => "...".to_string(),
+            },
+            |inner, field| format!("{{{field}: {inner}}}"),
+        );
+        return Err(crate::safety::bad_arg_with_hint(
+            label,
+            "a Record",
+            kind,
+            &format!("{label} is {article} {kind}; assign {label} = {literal} to replace it"),
+        ));
     };
     if rest.is_empty() {
         map.insert(field.clone(), new);
@@ -2433,8 +2488,10 @@ fn binop(op: &BinOp, a: Value, b: Value) -> Result<Value> {
         (Gt, Value::Str(x), Value::Str(y)) => Value::Bool(x > y),
         (Gte, Value::Str(x), Value::Str(y)) => Value::Bool(x >= y),
 
-        (And, x, y) => Value::Bool(is_truthy(&x) && is_truthy(&y)),
-        (Or, x, y) => Value::Bool(is_truthy(&x) || is_truthy(&y)),
+        (And, Value::Bool(x), Value::Bool(y)) => Value::Bool(x && y),
+        (Or, Value::Bool(x), Value::Bool(y)) => Value::Bool(x || y),
+        (And | Or, Value::Bool(_), b) => return Err(logic_operand_error(op, &b)),
+        (And | Or, a, _) => return Err(logic_operand_error(op, &a)),
 
         // Power: numeric exponentiation. Promote to float when necessary.
         (Pow, Value::Int(x), Value::Int(y)) => {
@@ -2497,6 +2554,10 @@ fn binop(op: &BinOp, a: Value, b: Value) -> Result<Value> {
         (op, a, b) => {
             let hint = if is_empty_string_number_mix(&a, &b) {
                 EMPTY_STRING_HINT
+            } else if is_lambda(&a) || is_lambda(&b) {
+                // `len > 0` after a pipe: the pipe binds loosest, so the
+                // comparison ran on the function, not on the piped value.
+                PIPE_PRECEDENCE_HINT
             } else {
                 match op {
                     Lt | Lte | Gt | Gte => {
@@ -2513,6 +2574,17 @@ fn binop(op: &BinOp, a: Value, b: Value) -> Result<Value> {
             ));
         }
     })
+}
+
+/// The refusal for a non-Bool operand of `&&` or `||`. Truthiness is not used
+/// for these operators, so `1 && 2` is refused rather than read as true.
+fn logic_operand_error(op: &BinOp, got: &Value) -> anyhow::Error {
+    crate::safety::bad_arg_with_hint(
+        &format!("operator {op:?}"),
+        "Bool operands",
+        got.type_name(),
+        "compare explicitly, e.g. x != 0, s != \"\", len(a) > 0",
+    )
 }
 
 /// The Int result of an operation, or the overflow refusal when it does not fit.
@@ -2558,6 +2630,16 @@ fn number_string_error(op: &BinOp, a: &Value, b: &Value) -> anyhow::Error {
 /// field. Arithmetic and comparison refusals both name it.
 const EMPTY_STRING_HINT: &str =
     "the String is empty, often a blank CSV field; filter it out (where(.x != \"\")) or default it";
+
+/// For a comparison or arithmetic operator given a function: `|` binds loosest,
+/// so `a | f > 0` runs `f > 0` on the function, not on the piped value.
+const PIPE_PRECEDENCE_HINT: &str =
+    "`|` binds loosest: `a | f > 0` is `a | (f > 0)`; parenthesize the pipe: `(a | f) > 0`";
+
+/// Whether an operand is a function value (a lambda, sync or async).
+fn is_lambda(v: &Value) -> bool {
+    matches!(v, Value::Lambda(_) | Value::AsyncLambda(_))
+}
 
 /// Whether a number meets an empty String, in either order.
 fn is_empty_string_number_mix(a: &Value, b: &Value) -> bool {

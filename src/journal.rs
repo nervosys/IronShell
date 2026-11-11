@@ -165,6 +165,8 @@ pub struct RedoEntry {
 struct State {
     journal: Vec<Entry>,
     redo: Vec<RedoEntry>,
+    /// The lowest id not yet handed out in this session. See [`take_seq`].
+    next_id: usize,
 }
 
 lazy_static::lazy_static! {
@@ -513,12 +515,49 @@ fn held_bytes(s: &State) -> usize {
     total_bytes(&s.journal) + redo_bytes(&s.redo)
 }
 
-/// The id for a new journal entry: one more than the largest id held. An entry
-/// can be undone out of order (see [`undo_by_id`]), so the count of entries is
-/// not a free id: the next entry would take the id of a newer one, and its
-/// persisted file would overwrite that one's.
-fn next_seq(s: &State) -> usize {
-    s.journal.iter().map(|e| e.seq).max().unwrap_or(0) + 1
+/// The file, beside the entries, that holds the next id to hand out. Its name is
+/// not a number, so [`load_dir`] never reads it as an entry.
+const NEXT_ID_FILE: &str = "next_id";
+
+fn read_next_id(dir: Option<&Path>) -> usize {
+    dir.and_then(|d| std::fs::read_to_string(d.join(NEXT_ID_FILE)).ok())
+        .and_then(|text| text.trim().parse::<usize>().ok())
+        .unwrap_or(0)
+}
+
+fn persist_next_id(dir: Option<PathBuf>, next: usize) {
+    let Some(dir) = dir else { return };
+    let path = dir.join(NEXT_ID_FILE);
+    let written =
+        make_private_dir(&dir).and_then(|()| write_private(&path, next.to_string().as_bytes()));
+    if let Err(err) = written {
+        tracing::warn!(
+            target: "journal",
+            "the next undo id was not persisted, so a later process may reuse one: {}: {err}",
+            path.display()
+        );
+    }
+}
+
+/// The id for a new step. Ids only grow within a session: an id is never handed
+/// out twice, not after its step is undone, re-applied or cleared, so a saved id
+/// cannot come to name a different step. The largest id still held is not enough
+/// for that (an undone step's id is gone from the journal), so the next free id
+/// is kept on disk beside the entries and read here, since each process loads
+/// the journal afresh.
+fn take_seq(s: &mut State) -> usize {
+    let dir = session_dir();
+    let held = s
+        .journal
+        .iter()
+        .map(|e| e.seq)
+        .chain(s.redo.iter().map(|r| r.seq))
+        .max()
+        .unwrap_or(0);
+    let id = s.next_id.max(read_next_id(dir.as_deref())).max(held + 1);
+    s.next_id = id + 1;
+    persist_next_id(dir, s.next_id);
+    id
 }
 
 /// The argument that names the file a builtin writes, for the builtins that
@@ -703,7 +742,7 @@ pub fn record_group(builtin: &str, effect: Effect, paths: Vec<String>) {
     }
     let mut s = state();
     discard_redo(&mut s);
-    let group = Some(next_seq(&s));
+    let group = Some(take_seq(&mut s));
     for path in paths {
         push_capture(&mut s, builtin, effect, path, group);
     }
@@ -735,7 +774,7 @@ fn push_capture(s: &mut State, builtin: &str, effect: Effect, path: String, grou
         Ok(before) => before,
         Err(why) => Before::Irreversible(why),
     };
-    let seq = next_seq(s);
+    let seq = take_seq(s);
     let entry = Entry {
         seq,
         builtin: builtin.to_string(),
@@ -776,7 +815,7 @@ pub fn record_irreversible(builtin: &str, effect: Effect, why: &str) {
     }
     let mut s = state();
     discard_redo(&mut s);
-    let seq = next_seq(&s);
+    let seq = take_seq(&mut s);
     let entry = Entry {
         seq,
         builtin: builtin.to_string(),
@@ -851,6 +890,15 @@ pub enum Outcome {
     },
 }
 
+/// One outcome of [`undo`] or [`undo_by_id`], with the id of the step it came
+/// from, so the record names the step the way `journal()` does. `seq` is None
+/// only for an outcome that belongs to no step.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Rewound {
+    pub seq: Option<usize>,
+    pub outcome: Outcome,
+}
+
 /// Undo the last `n` recorded steps, most recent first.
 ///
 /// Returns an outcome per entry — including the ones it could not reverse.
@@ -871,7 +919,7 @@ pub enum Outcome {
 /// When the first step in line is refused nothing has been undone, and the
 /// path and whether it was removed since the step are returned as the error. A
 /// later step's refusal is an outcome, as the others are, and ends the undo.
-pub fn undo(n: usize, force: bool) -> Result<Vec<Outcome>, (String, bool)> {
+pub fn undo(n: usize, force: bool) -> Result<Vec<Rewound>, (String, bool)> {
     let mut s = state();
     let mut out = Vec::new();
     // Steps counted so far, and the group of the step in progress: the entries
@@ -909,9 +957,10 @@ enum Step {
 }
 
 /// Undo the journal entry at `index`, which the caller has checked is in the
-/// journal. The outcome is pushed onto `out`; the entry leaves the journal when
-/// it is finished with.
-fn undo_at(s: &mut State, index: usize, force: bool, out: &mut Vec<Outcome>) -> Step {
+/// journal. The outcome is pushed onto `out`, tagged with the entry's id; the
+/// entry leaves the journal when it is finished with.
+fn undo_at(s: &mut State, index: usize, force: bool, out: &mut Vec<Rewound>) -> Step {
+    let seq = s.journal.get(index).map(|e| e.seq);
     // Checked before anything is taken: a step left alone stays in the
     // journal, and nothing older is undone past it, so the order is kept.
     if let Some(why) = s
@@ -924,7 +973,10 @@ fn undo_at(s: &mut State, index: usize, force: bool, out: &mut Vec<Outcome>) -> 
             .get(index)
             .map(|e| e.path.clone())
             .unwrap_or_default();
-        out.push(Outcome::Skipped { what, why });
+        out.push(Rewound {
+            seq,
+            outcome: Outcome::Skipped { what, why },
+        });
         return Step::Stop;
     }
     // Cloned, not popped. The entry stays in the journal and on disk until
@@ -965,12 +1017,15 @@ fn undo_at(s: &mut State, index: usize, force: bool, out: &mut Vec<Outcome>) -> 
             if out.is_empty() {
                 return Step::Refused((entry.path.clone(), removed));
             }
-            out.push(Outcome::Skipped {
-                what,
-                why: if removed {
-                    REMOVED_SINCE_STEP.to_string()
-                } else {
-                    CHANGED_SINCE_STEP.to_string()
+            out.push(Rewound {
+                seq,
+                outcome: Outcome::Skipped {
+                    what,
+                    why: if removed {
+                        REMOVED_SINCE_STEP.to_string()
+                    } else {
+                        CHANGED_SINCE_STEP.to_string()
+                    },
                 },
             });
             return Step::Stop;
@@ -982,12 +1037,15 @@ fn undo_at(s: &mut State, index: usize, force: bool, out: &mut Vec<Outcome>) -> 
     // check; the restore below reports it.
     if !matches!(entry.before, Before::Irreversible(_)) && Path::new(&entry.path).is_file() {
         if let Err(why) = &after {
-            out.push(Outcome::Skipped {
+            out.push(Rewound {
+                seq,
+                outcome: Outcome::Skipped {
                     what,
                     why: format!(
-                        "current contents could not be kept for redo, so left as they are:                          {why}. Move the file away to undo this step"
+                        "current contents could not be kept for redo, so left as they are: {why}. Move the file away to undo this step"
                     ),
-                });
+                },
+            });
             return Step::Stop;
         }
     }
@@ -1031,14 +1089,14 @@ fn undo_at(s: &mut State, index: usize, force: bool, out: &mut Vec<Outcome>) -> 
     if matches!(outcome, Outcome::Failed { .. }) {
         // The step stays where it was, for a retry. Older steps are not
         // undone past it.
-        out.push(outcome);
+        out.push(Rewound { seq, outcome });
         return Step::Stop;
     }
     // Restored, removed, or finished with (nothing to take back): the step
     // is done with, so it leaves the journal and the disk now.
     s.journal.remove(index);
     forget_persisted(entry.seq);
-    out.push(outcome);
+    out.push(Rewound { seq, outcome });
     Step::Next
 }
 
@@ -1062,7 +1120,7 @@ pub enum UndoRefusal {
 /// is refused when a later entry recorded one of its paths: restoring that path
 /// would also undo the later change. The same checks as [`undo`] apply to each
 /// entry undone.
-pub fn undo_by_id(seq: usize, force: bool) -> Result<Vec<Outcome>, UndoRefusal> {
+pub fn undo_by_id(seq: usize, force: bool) -> Result<Vec<Rewound>, UndoRefusal> {
     let mut s = state();
     let first = s
         .journal
@@ -1111,7 +1169,9 @@ const REMOVED_SINCE_STEP: &str = "was removed after this step; undoing would rec
 fn push_redo(s: &mut State, undone: &Entry, after: Result<Before, String>) {
     let Ok(after) = after else { return };
     let r = RedoEntry {
-        seq: s.redo.len() + 1,
+        // The undone step keeps the id it was recorded under, so the undone list
+        // and the journal name a step the same way.
+        seq: undone.seq,
         builtin: undone.builtin.clone(),
         effect: undone.effect.clone(),
         path: undone.path.clone(),
@@ -1220,8 +1280,9 @@ pub fn redo(n: usize) -> Vec<Outcome> {
         if matches!(outcome, Outcome::Reapplied(_) | Outcome::Removed(_)) {
             // Only a write that actually happened is recorded, so the redo is
             // itself undoable.
+            let seq = take_seq(&mut s);
             let entry = Entry {
-                seq: next_seq(&s),
+                seq,
                 builtin: r.builtin,
                 effect: r.effect,
                 path: r.path,
@@ -1322,6 +1383,9 @@ pub fn try_clear() -> Result<(), (PathBuf, std::io::Error)> {
     let mut s = STATE.lock().unwrap_or_else(|e| e.into_inner());
     s.journal.clear();
     s.redo.clear();
+    // Read before the directory goes: a process that cleared without taking an
+    // id of its own knows only what the file says.
+    let next = s.next_id.max(read_next_id(session_dir().as_deref()));
     if let Some(dir) = session_dir() {
         // Windows reports a directory as Access denied while another process
         // holds one of its files (a virus scanner, the indexer) or a delete is
@@ -1333,7 +1397,12 @@ pub fn try_clear() -> Result<(), (PathBuf, std::io::Error)> {
             |d| std::fs::remove_dir_all(d),
             std::thread::sleep,
         );
-        remove_if_present(removed).map_err(|err| (dir, err))?;
+        remove_if_present(removed).map_err(|err| (dir.clone(), err))?;
+        // A cleared journal is not a fresh session: the ids handed out so far
+        // stay handed out.
+        if next > 0 {
+            persist_next_id(Some(dir), next);
+        }
     }
     Ok(())
 }
