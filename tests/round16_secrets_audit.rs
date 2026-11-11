@@ -145,6 +145,34 @@ fn audit_stats_and_audit_query_count_the_chained_log() {
     );
 }
 
+// ── Item 6: the journal and audit builtins are described by name ──
+
+#[test]
+fn the_journal_and_audit_builtins_are_described_not_refused() {
+    let cases = [
+        ("undo", "undo"),
+        ("rewind", "undo"),
+        ("session_undo", "session_undo"),
+        ("session_redo", "session_redo"),
+        ("journal", "journal"),
+        ("journal_clear", "journal_clear"),
+        ("audit_log", "audit_log"),
+        ("audit_tail", "audit_tail"),
+        ("audit_verify", "audit_verify"),
+        ("audit_query", "audit_query"),
+        ("audit_stats", "audit_stats"),
+    ];
+    for (name, canonical) in cases {
+        let d = iron_shell::agent_api::ontology_describe_json(name);
+        assert!(d.get("error").is_none(), "{name} is not described: {d}");
+        assert_eq!(d["builtin"], canonical, "{name}: {d}");
+        assert!(
+            d["examples"].as_array().is_some_and(|e| !e.is_empty()),
+            "{name} declares no examples: {d}"
+        );
+    }
+}
+
 #[test]
 fn the_typechecker_accepts_array_plus_array() {
     use iron_shell::types::Type;
