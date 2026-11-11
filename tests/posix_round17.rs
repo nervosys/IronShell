@@ -93,3 +93,32 @@ fn printf_decodes_hex_in_format_and_in_b() {
     assert_eq!(code, 0, "{err}");
     assert_eq!(out, "AB\nC\n|");
 }
+
+#[test]
+fn printf_e_uses_c_exponent_form() {
+    let dir = scratch("printf_e");
+    let s = script(
+        &dir,
+        "e.sh",
+        "printf '%e\\n' 12345.678\nprintf '%.2e\\n' 0.000123\nprintf '%E\\n' 12345.678\nprintf '[%12.3e]\\n' 3.14159\nprintf '%010.2e\\n' 3.14159\nprintf '%e\\n' 0\n",
+    );
+    let (code, out, err) = ish(&dir, &["-b", &s]);
+    assert_eq!(code, 0, "{err}");
+    assert_eq!(
+        out,
+        "1.234568e+04\n1.23e-04\n1.234568E+04\n[   3.142e+00]\n003.14e+00\n0.000000e+00"
+    );
+}
+
+#[test]
+fn printf_g_uses_the_shorter_of_f_and_e() {
+    let dir = scratch("printf_g");
+    let s = script(
+        &dir,
+        "g.sh",
+        "printf '%g\\n' 0.0001\nprintf '%g\\n' 123456789\nprintf '%g\\n' 100\nprintf '%G\\n' 0.00001234\nprintf '%.3g\\n' 3.14159\nprintf '%g\\n' 1e20\nprintf '%g\\n' 0\n",
+    );
+    let (code, out, err) = ish(&dir, &["-b", &s]);
+    assert_eq!(code, 0, "{err}");
+    assert_eq!(out, "0.0001\n1.23457e+08\n100\n1.234E-05\n3.14\n1e+20\n0");
+}

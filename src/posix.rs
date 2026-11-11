@@ -3654,6 +3654,19 @@ fn printf(args: &[String], sink: &mut Sink) -> Util {
                     Err(_) if arg.is_empty() => format!("{:.*}", precision.unwrap_or(6), 0.0),
                     _ => return Util::Decline,
                 },
+                'e' | 'E' | 'g' | 'G' => {
+                    let value = match arg.trim().parse::<f64>() {
+                        Ok(v) if v.is_finite() => v,
+                        Err(_) if arg.is_empty() => 0.0,
+                        _ => return Util::Decline,
+                    };
+                    let upper = conv.is_ascii_uppercase();
+                    if matches!(conv, 'e' | 'E') {
+                        c_exp(value, precision.unwrap_or(6), upper)
+                    } else {
+                        c_general(value, precision.unwrap_or(6), upper)
+                    }
+                }
                 'c' => arg.chars().next().map(String::from).unwrap_or_default(),
                 _ => return Util::Decline,
             };
@@ -3661,7 +3674,12 @@ fn printf(args: &[String], sink: &mut Sink) -> Util {
             if left {
                 out.push_str(&body);
                 out.push_str(&" ".repeat(pad));
-            } else if zero && matches!(conv, 'd' | 'i' | 'x' | 'X' | 'o' | 'f') {
+            } else if zero
+                && matches!(
+                    conv,
+                    'd' | 'i' | 'x' | 'X' | 'o' | 'f' | 'e' | 'E' | 'g' | 'G'
+                )
+            {
                 let (sign, digits) = body
                     .strip_prefix('-')
                     .map_or(("", body.as_str()), |d| ("-", d));
@@ -3679,6 +3697,50 @@ fn printf(args: &[String], sink: &mut Sink) -> Util {
     }
     sink.out.extend_from_slice(out.as_bytes());
     Util::Done(0)
+}
+
+/// C's `%e`: one digit, the decimals, then `e`, a sign and at least two
+/// exponent digits (`1.234568e+04`). Rust's `{:e}` writes `1.234568e4`, so the
+/// exponent is rewritten.
+fn c_exp(v: f64, precision: usize, upper: bool) -> String {
+    let s = format!("{:.*e}", precision, v);
+    let (mantissa, exp) = s.split_once('e').unwrap_or((s.as_str(), "0"));
+    let exp: i32 = exp.parse().unwrap_or(0);
+    format!(
+        "{mantissa}{}{}{:02}",
+        if upper { 'E' } else { 'e' },
+        if exp < 0 { '-' } else { '+' },
+        exp.abs()
+    )
+}
+
+/// C's `%g`: `precision` significant digits (6 by default, 1 for 0). The `%e`
+/// form is used when the exponent is below -4 or at least the precision, else
+/// `%f`; trailing zeros of the fraction are removed (the `#` flag is not in the
+/// subset).
+fn c_general(v: f64, precision: usize, upper: bool) -> String {
+    let p = precision.max(1);
+    // The exponent `%e` would show with this precision decides the form.
+    let probe = format!("{:.*e}", p - 1, v);
+    let x: i64 = probe
+        .split_once('e')
+        .and_then(|(_, e)| e.parse().ok())
+        .unwrap_or(0);
+    fn strip_zeros(s: &str) -> String {
+        if s.contains('.') {
+            s.trim_end_matches('0').trim_end_matches('.').to_string()
+        } else {
+            s.to_string()
+        }
+    }
+    if x < -4 || x >= p as i64 {
+        let s = c_exp(v, p - 1, upper);
+        let at = s.find(['e', 'E']).unwrap_or(s.len());
+        format!("{}{}", strip_zeros(&s[..at]), &s[at..])
+    } else {
+        let decimals = (p as i64 - 1 - x) as usize;
+        strip_zeros(&format!("{:.*}", decimals, v))
+    }
 }
 
 fn test(args: &[String], sink: &mut Sink) -> i32 {
