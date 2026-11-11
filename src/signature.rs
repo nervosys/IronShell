@@ -2943,10 +2943,10 @@ pub static SIGNATURES: &[Signature] = &[
         subject_required: false,
         aliases: &[],
         subject: None,
-        params: &[req("pattern", Ty::Str, "a basic regular expression, as grep takes it: ^ and $ anchor, . is any character"), opt("path", Ty::Str, "file to search; omit to search the piped text")],
+        params: &[req("pattern", Ty::Str, "a basic regular expression, as grep takes it: ^ and $ anchor, . is any character"), opt("path", Ty::Str, "file to search; omit to search the piped text"), opt("options", Ty::Record, "{line_numbers: true} returns {file, line, text} records instead of lines; line counts from 1 in each file, and file is null for piped text")],
         returns: "Array",
-        doc: "Lines matching a basic regular expression.",
-        examples: &[(r#"grep("fn main", "src/main.rs") | len"#, "1"), (r#"(grep("fn", "src/main.rs") | len) > 0"#, "true"), (r#"grep("^version", "Cargo.toml") | len"#, "1")],
+        doc: "Lines matching a basic regular expression. With {line_numbers: true} each match is a record {file, line, text} instead, the line numbered from 1 within its file (null for piped text).",
+        examples: &[(r#"grep("fn main", "src/main.rs") | len"#, "1"), (r#"(grep("fn", "src/main.rs") | len) > 0"#, "true"), (r#"grep("^version", "Cargo.toml") | len"#, "1"), (r#"grep("^version", "Cargo.toml", {line_numbers: true}) | first | fn(r) => r.file"#, r#""Cargo.toml""#), (r#""a\nb\na" | grep("a", {line_numbers: true}) | last | fn(r) => r.line"#, "3")],
     },
     Signature {
         name: "find",
@@ -7023,6 +7023,21 @@ pub static SIGNATURES: &[Signature] = &[
         doc: "A value as compact JSON.",
         examples: &[
             (r#"json_stringify({a: 1})"#, r#"{"a":1}"#),
+        ],
+    },
+    Signature {
+        // The position of each element, for the loops that IronShell does not have.
+        name: "enumerate",
+        category: None,
+        subject_required: false,
+        aliases: &[],
+        subject: Some(Ty::Array),
+        params: &[],
+        returns: "Array",
+        doc: "Each element of an Array with its position: an Array of {index, value} records, counted from 0. The Array is piped in or passed as the argument: enumerate(items).",
+        examples: &[
+            (r#"["a", "b"] | enumerate | last | fn(r) => r.index"#, "1"),
+            (r#"enumerate(["a", "b"]) | last | fn(r) => r.value"#, r#""b""#),
         ],
     },
     Signature {

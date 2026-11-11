@@ -403,6 +403,7 @@ fn is_builtin(name: &str) -> bool {
             | "from-csv" | "from_csv"
             | "to-csv" | "to_csv"
             | "csv_columns"
+            | "enumerate"
             | "from-yaml" | "from_yaml"
             | "to-yaml" | "to_yaml"
             | "columns"

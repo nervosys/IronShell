@@ -4233,6 +4233,7 @@ pub const FALLBACK_BUILTINS: &[(&str, &str)] = &[
     ("complete", "bi_ai_complete"),
     ("csv_columns", "bi_csv_columns"),
     ("describe", "bi_describe"),
+    ("enumerate", "bi_enumerate"),
     ("explain", "bi_ai_explain"),
     ("explain_effects", "bi_explain_effects"),
     ("fix", "bi_ai_fix"),
@@ -4462,6 +4463,7 @@ fn call_with_input_inner(
         "from-csv" | "from_csv" => bi_from_csv(args, input),
         "to-csv" | "to_csv" => bi_to_csv(args, input),
         "csv_columns" => bi_csv_columns(args, input),
+        "enumerate" => bi_enumerate(args, input),
         "from-yaml" | "from_yaml" => bi_from_yaml(args, input),
         "to-yaml" | "to_yaml" => bi_to_yaml(args, input),
         "columns" => bi_columns(args, input),
@@ -8788,6 +8790,21 @@ fn without_bom(text: String) -> String {
 /// jail applies to each match, not only to the pattern. `cat` and `grep` both
 /// read their paths this way.
 fn read_named_files(builtin: &str, path_str: &str) -> Result<String> {
+    let mut all = String::new();
+    for (_, text) in read_named_file_list(builtin, path_str)? {
+        // A file that ends without a newline would run into the next one, so
+        // `lines` would count the two as one line. Separate them.
+        if !all.is_empty() && !all.ends_with('\n') {
+            all.push('\n');
+        }
+        all.push_str(&text);
+    }
+    Ok(all)
+}
+
+/// Each file a path names, with its text, in order: a glob names every file it
+/// matches, and any other path names itself. `read_named_files` joins these.
+fn read_named_file_list(builtin: &str, path_str: &str) -> Result<Vec<(String, String)>> {
     if crate::posix::has_glob_meta(path_str) && !std::path::Path::new(path_str).exists() {
         let paths = expand_glob_for(builtin, path_str)?;
         let files: Vec<&String> = paths
@@ -8797,18 +8814,16 @@ fn read_named_files(builtin: &str, path_str: &str) -> Result<String> {
         if files.is_empty() {
             return Err(crate::safety::not_found(builtin, "file matching", path_str));
         }
-        let mut all = String::new();
+        let mut out = Vec::with_capacity(files.len());
         for p in files {
-            // A file that ends without a newline would run into the next one, so
-            // `lines` would count the two as one line. Separate them.
-            if !all.is_empty() && !all.ends_with('\n') {
-                all.push('\n');
-            }
-            all.push_str(&read_named_file(builtin, p)?);
+            out.push((p.clone(), read_named_file(builtin, p)?));
         }
-        return Ok(all);
+        return Ok(out);
     }
-    read_named_file(builtin, path_str)
+    Ok(vec![(
+        path_str.to_string(),
+        read_named_file(builtin, path_str)?,
+    )])
 }
 
 fn read_named_file(builtin: &str, path_str: &str) -> Result<String> {
@@ -9415,8 +9430,13 @@ fn bi_grep(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
         .iter()
         .any(|arg| matches!(arg, Value::Str(s) if s == "-v" || s == "--invert-match"));
 
-    let content = if let Some(input) = input {
-        match input {
+    // The options Record, when there is one, is read before the source is.
+    let line_numbers = grep_line_numbers(&args)?;
+
+    // Each source is its file's name (None for piped text) and its text. A
+    // glob searches each file on its own, so a match can name the file.
+    let sources: Vec<(Option<String>, String)> = if let Some(input) = input {
+        let content = match input {
             Value::Str(s) => s,
             Value::Array(arr) => {
                 let lines: Vec<String> = arr
@@ -9436,7 +9456,8 @@ fn bi_grep(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
                     "grep: input must be a string or array",
                 ))
             }
-        }
+        };
+        vec![(None, content)]
     } else if args.len() > 1 {
         let path = match &args[1] {
             Value::Str(s) if !s.starts_with('-') => s,
@@ -9448,7 +9469,10 @@ fn bi_grep(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
                 ))
             }
         };
-        grep_source_text(path)?
+        grep_source_files(path)?
+            .into_iter()
+            .map(|(file, text)| (Some(file), text))
+            .collect()
     } else {
         return Err(crate::safety::bad_arg(
             "grep",
@@ -9475,22 +9499,60 @@ fn bi_grep(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
                 pattern,
             )
         })?;
-    let matching_lines: Vec<Value> = content
-        .lines()
-        .filter(|line| re.is_match(line) != invert)
-        .map(|line| Value::Str(line.to_string()))
-        .collect();
+    let mut matching: Vec<Value> = Vec::new();
+    for (file, text) in &sources {
+        for (index, line) in text.lines().enumerate() {
+            if re.is_match(line) == invert {
+                continue;
+            }
+            matching.push(if line_numbers {
+                Value::Record(BTreeMap::from([
+                    (
+                        "file".to_string(),
+                        file.clone().map_or(Value::Null, Value::Str),
+                    ),
+                    ("line".to_string(), Value::Int(index as i64 + 1)),
+                    ("text".to_string(), Value::Str(line.to_string())),
+                ]))
+            } else {
+                Value::Str(line.to_string())
+            });
+        }
+    }
 
-    Ok(Value::Array(matching_lines))
+    Ok(Value::Array(matching))
 }
 
-/// The text `grep(pattern, path)` searches. The path is read as `cat` reads
-/// it, so a glob searches every matching file in order and
+/// The options Record of `grep`, when one is given after the pattern. Its only
+/// key is `line_numbers`, a Bool; any other key or value is a bad argument.
+fn grep_line_numbers(args: &[Value]) -> Result<bool> {
+    let mut line_numbers = false;
+    for arg in args.iter().skip(1) {
+        if let Value::Record(options) = arg {
+            for (key, value) in options {
+                match (key.as_str(), value) {
+                    ("line_numbers", Value::Bool(on)) => line_numbers = *on,
+                    _ => {
+                        return Err(crate::safety::bad_arg(
+                            "grep",
+                            "options: a Record with line_numbers: Bool",
+                            key,
+                        ))
+                    }
+                }
+            }
+        }
+    }
+    Ok(line_numbers)
+}
+
+/// The files `grep(pattern, path)` searches, each with its text. The path is
+/// read as `cat` reads it, so a glob searches every matching file in order and
 /// `grep("fn ", "src/*.rs")` answers what `cat("src/*.rs") | grep("fn ")`
 /// does. A directory is not text. Reading it gave E_OS_DENIED with a
 /// permissions hint, which was the wrong cause, so it is refused as a bad
 /// argument instead.
-fn grep_source_text(path: &str) -> Result<String> {
+fn grep_source_files(path: &str) -> Result<Vec<(String, String)>> {
     crate::security::check_share_egress("grep", path)?;
     let named = std::path::Path::new(path);
     if named.exists() {
@@ -9504,7 +9566,35 @@ fn grep_source_text(path: &str) -> Result<String> {
             ));
         }
     }
-    read_named_files("grep", path)
+    read_named_file_list("grep", path)
+}
+
+/// enumerate(items): each element with its position, as {index, value} records
+/// counted from 0. The Array is piped in or passed as the argument.
+fn bi_enumerate(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
+    let items = match input.or_else(|| args.into_iter().next()) {
+        Some(Value::Array(items)) => items,
+        Some(other) => {
+            return Err(crate::safety::bad_arg(
+                "enumerate",
+                "an Array",
+                other.type_name(),
+            ))
+        }
+        None => return Err(subject_refusal("enumerate", "an Array")),
+    };
+    Ok(Value::Array(
+        items
+            .into_iter()
+            .enumerate()
+            .map(|(index, value)| {
+                Value::Record(BTreeMap::from([
+                    ("index".to_string(), Value::Int(index as i64)),
+                    ("value".to_string(), value),
+                ]))
+            })
+            .collect(),
+    ))
 }
 
 // --------------- Formatting helpers ---------------

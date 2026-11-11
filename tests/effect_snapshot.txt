@@ -359,6 +359,7 @@ ends_with	Pure
 entities	ReadLocal
 entr	Exec
 entr_watch	Exec
+enumerate	Pure
 env	ReadLocal
 env_activate	Pure
 env_container	ReadLocal

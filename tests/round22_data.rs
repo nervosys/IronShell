@@ -166,3 +166,99 @@ fn csv_columns_still_reads_one_line_text_and_multi_line_text() {
         Value::Array(vec![s("name")])
     );
 }
+
+// ── item 5: enumerate and grep line numbers ─────────────────────────────
+
+/// A fresh directory for one test. The tag keeps parallel tests apart.
+fn fresh_dir(tag: &str) -> std::path::PathBuf {
+    let dir = std::env::temp_dir().join(format!("ae_round22_{tag}_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    dir
+}
+
+/// A path as a string the source can hold without escapes.
+fn fwd(p: &std::path::Path) -> String {
+    p.to_string_lossy().replace('\\', "/")
+}
+
+#[test]
+fn enumerate_pairs_each_element_with_its_index_from_zero() {
+    assert_eq!(
+        eval(r#"enumerate(["a", "b"]) | last | fn(r) => r.index"#).unwrap(),
+        Value::Int(1)
+    );
+    assert_eq!(
+        eval(r#"["a", "b"] | enumerate | last | fn(r) => r.value"#).unwrap(),
+        s("b")
+    );
+    assert_eq!(eval("enumerate([]) | len").unwrap(), Value::Int(0));
+}
+
+#[test]
+fn enumerate_refuses_what_is_not_an_array() {
+    let e = eval("enumerate(5)").expect_err("an Int");
+    assert!(e.to_string().contains("E_BAD_ARG"), "{e}");
+}
+
+#[test]
+fn grep_without_options_still_returns_lines() {
+    assert_eq!(
+        eval(r#""a\nb\na" | grep("a") | len"#).unwrap(),
+        Value::Int(2)
+    );
+    assert_eq!(eval(r#""a\nb\na" | grep("a") | first"#).unwrap(), s("a"));
+}
+
+#[test]
+fn grep_line_numbers_returns_records_numbered_from_one() {
+    assert_eq!(
+        eval(r#""a\nb\na" | grep("a", {line_numbers: true}) | map(fn(r) => r.line)"#).unwrap(),
+        Value::Array(vec![Value::Int(1), Value::Int(3)])
+    );
+    assert_eq!(
+        eval(r#""a\nb\na" | grep("a", {line_numbers: true}) | map(fn(r) => r.text)"#).unwrap(),
+        Value::Array(vec![s("a"), s("a")])
+    );
+    // Piped text has no file.
+    assert_eq!(
+        eval(r#""a\nb\na" | grep("a", {line_numbers: true}) | first | fn(r) => r.file"#).unwrap(),
+        Value::Null
+    );
+}
+
+#[test]
+fn grep_line_numbers_names_the_file_and_numbers_each_file_from_one() {
+    let dir = fresh_dir("grep_lines");
+    std::fs::write(dir.join("a.txt"), "x\ny\n").unwrap();
+    std::fs::write(dir.join("b.txt"), "y\n").unwrap();
+    let glob = format!("{}/*.txt", fwd(&dir));
+    let got = eval(&format!(
+        r#"grep("y", "{glob}", {{line_numbers: true}}) | map(fn(r) => r.line)"#
+    ));
+    let files = eval(&format!(
+        r#"grep("y", "{glob}", {{line_numbers: true}}) | map(fn(r) => r.file)"#
+    ));
+    let _ = std::fs::remove_dir_all(&dir);
+    assert_eq!(
+        got.unwrap(),
+        Value::Array(vec![Value::Int(2), Value::Int(1)])
+    );
+    let Value::Array(names) = files.unwrap() else {
+        panic!("file names are an Array")
+    };
+    assert!(
+        names
+            .first()
+            .is_some_and(|n| matches!(n, Value::Str(s) if s.ends_with("a.txt"))),
+        "{names:?}"
+    );
+}
+
+#[test]
+fn grep_refuses_an_option_it_does_not_take() {
+    let e = eval(r#""a" | grep("a", {colour: true})"#).expect_err("unknown option");
+    assert!(e.to_string().contains("E_BAD_ARG"), "{e}");
+    let e = eval(r#""a" | grep("a", {line_numbers: 1})"#).expect_err("not a Bool");
+    assert!(e.to_string().contains("E_BAD_ARG"), "{e}");
+}

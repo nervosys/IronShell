@@ -342,6 +342,8 @@ fn classified_effect(name: &str) -> Option<Effect> {
     match name {
         // Native regex substitution only: no process or file access.
         "sd_replace" => Some(Effect::Pure),
+        // Pairs each element with its position: no input but its argument.
+        "enumerate" => Some(Effect::Pure),
         // Stated Pure until pure-audit-3, which read each body. ReadLocal: reads
         // mutable in-process state (a lock, an atomic, a registry), walks a
         // directory tree, reads the cwd or an environment variable, or stats a
