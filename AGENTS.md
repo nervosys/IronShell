@@ -73,7 +73,7 @@ tools = get_agent_api_tools("http://localhost:3002")
 `if`/`for`/`while`, `test`, and GNU-compatible `ls`/`find`/`grep`/`head`/`tail`/
 `wc`/`sort`/`uniq`/`cut`/`sed`/`cat`/`tee`/`tr`/`mkdir`/`touch`/`echo`/`printf` (the common GNU flags, not all: `ls` takes `-a` but not `-l`;
 `sort -k`/`-t`, `cat -n` and printf `%x` and `%.Nf` run in-process too). `tee` takes `-a`, and each file it names
-is judged as a `>` redirection is, so `tee ../f` is refused and writes nothing; so is each operand of `mkdir [-p]` and `touch`. `tr` takes `-d`, `-s`, ranges and `[:upper:]`-style classes. On Windows, an unsupported flag
+is judged as a `>` redirection is, so `tee ../f` is refused and writes nothing; so is each operand of `mkdir [-p]` and `touch`. That refusal is the workspace jail's, so it applies in agent mode (`--agent`) or when a workspace is set (`--workspace`, or `IRONSHELL_WORKSPACE`); in a plain human session with no workspace, `ish -b` writes where bash would. `tr` takes `-d`, `-s`, ranges and `[:upper:]`-style classes. On Windows, an unsupported flag
 runs a GNU-compatible program if one is on PATH, and otherwise exits 2 naming the flag (elsewhere it runs the
 PATH program of that name). Other commands run as the
 real program, directly, through the effect gate — never via `bash -c` — so
@@ -91,6 +91,7 @@ A script outside the subset (functions, `case`, `$((…))`, here-documents, subs
 background jobs) is refused before any of it runs, naming the construct and its line, unless
 `IRONSHELL_ALLOW_SH` is set. With it, the unsupported parts fall back to the transpiler, which may
 delegate them to `bash -lc`; that fallback is not contained.
+Its own refusals exit 2 for a syntax error (`E_PARSE`, which runs nothing in either mode) and for a flag no GNU-compatible program can run on Windows, 77 for a construct outside the subset (refused before anything runs), 1 for a write or read the workspace jail refuses (that command fails and the script goes on unless `set -e` stops it), and 75 for a program that needs approval, whose command fails the same way.
 Zsh and PowerShell input still goes through the transpilers only.
 On Windows, a script run as a command (`./x.sh` whose first line is a `#!/bin/sh` or `#!/bin/bash` shebang, or `sh FILE` / `bash FILE`) runs in a child `ish -b` with the same mode and workspace, and its status becomes the command's status; the child gates its own commands, so the script itself has no Exec gate.
 
