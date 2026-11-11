@@ -2406,7 +2406,7 @@ impl FinetuneStatus {
 static BUILTIN_DISPATCH: &[fn(Vec<Value>, Option<Value>, &mut Env) -> Result<Value>] = &[
     // 0-9: General and file system functions
     // help() is the short reference; help("name") is ontology_describe("name").
-    |args, input, _| bi_help_entry(args, input),
+    |args, _, _| bi_help_entry(args),
     |args, input, env| bi_call(args, input, env),
     |_, _, _| bi_clear(),
     |args, input, _| bi_echo(&args, input),
@@ -4898,11 +4898,11 @@ fn with_param_slots<T>(
 // --------------- General builtins ---------------
 
 /// help() is the short reference; help("name") is ontology_describe("name").
-fn bi_help_entry(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
+fn bi_help_entry(args: Vec<Value>) -> Result<Value> {
     if args.is_empty() {
         bi_help()
     } else {
-        bi_ontology_describe(args, input)
+        bi_ontology_describe(args, None)
     }
 }
 
