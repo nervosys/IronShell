@@ -103,3 +103,41 @@ fn subtraction_negative_numbers_and_mid_statement_words_are_not_flags() {
         );
     }
 }
+
+// ── directories are named as directories ────────────────────────────────
+
+#[test]
+fn rm_of_a_directory_is_refused_as_a_directory_with_the_rmdir_call() {
+    let out = text(run("let d = fs_tempdir(\"ae_r15_rm_dir\"); \
+         let r = try { rm(d) } catch e { e.error.code + \"|\" + e.error.hint }; \
+         rmdir(d, true); r"));
+    assert!(out.starts_with("E_BAD_ARG|"), "{out}");
+    assert!(!out.contains("E_OS_DENIED"), "{out}");
+    assert!(
+        out.contains("is a directory; remove it with rmdir("),
+        "{out}"
+    );
+    assert!(out.contains(", true)"), "{out}");
+}
+
+#[test]
+fn rm_still_removes_a_file() {
+    let out = text(run("let d = fs_tempdir(\"ae_r15_rm_file\"); \
+         file_write(d + \"/a.txt\", \"x\"); \
+         let r = rm(d + \"/a.txt\"); \
+         rmdir(d, true); r"));
+    assert!(out.starts_with("removed:"), "{out}");
+}
+
+#[test]
+fn crypto_hash_file_of_a_directory_says_so_and_names_the_glob() {
+    let out = text(run("let d = fs_tempdir(\"ae_r15_hash_dir\"); \
+         let r = try { crypto_hash_file(d) } catch e { e.error.code + \"|\" + e.error.hint }; \
+         rmdir(d, true); r"));
+    assert!(out.starts_with("E_BAD_ARG|"), "{out}");
+    assert!(!out.contains("E_OS_DENIED"), "{out}");
+    assert!(
+        out.contains("is a directory; hash its files with glob("),
+        "{out}"
+    );
+}

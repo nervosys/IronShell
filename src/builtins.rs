@@ -45046,6 +45046,20 @@ fn bi_crypto_hash_file(args: Vec<Value>, _input: Option<Value>) -> Result<Value>
     };
     let algo = algo_param("crypto_hash_file", args.get(1..).unwrap_or(&[]), "sha256")?;
     let validated = crate::security::validate_read_path(&path)?;
+    // A directory is hashed file by file, not as one read, which failed with
+    // E_OS_DENIED and a permissions hint. Named here, before the read.
+    if !crate::safety::names_a_remote_share(&path)
+        && std::fs::metadata(&validated).is_ok_and(|m| m.is_dir())
+    {
+        return Err(crate::safety::bad_arg_with_hint(
+            "crypto_hash_file",
+            "a file path",
+            "a directory",
+            &format!(
+                "'{path}' is a directory; hash its files with glob(\"{path}/**/*\") | map(...)"
+            ),
+        ));
+    }
     let bytes = read_bytes_capped("crypto_hash_file", &validated)?;
     Ok(Value::Str(digest_hex("crypto_hash_file", &algo, &bytes)?))
 }
@@ -62888,6 +62902,7 @@ pub fn bi_rm(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
         }
     };
     let force = fs_flag("rm", "force", args.get(1))?;
+    let written = path.clone();
     // Jailed: relative paths are workspace-relative; resolve before the jail check
     // so the guard validates the path that is actually deleted.
     let path = crate::safety::resolve_path_str(&path);
@@ -62924,6 +62939,19 @@ pub fn bi_rm(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
         reversible: crate::journal::would_capture(&path),
         fs_paths: true,
     })?;
+    // A directory is not a file: remove_file on one answered E_OS_DENIED with a
+    // permissions hint. Refused after the gate, which is unchanged, and before
+    // the OS call. A symlink is not followed here, so a link still removes itself.
+    if !crate::safety::names_a_remote_share(&path)
+        && std::fs::symlink_metadata(&path).is_ok_and(|m| m.is_dir())
+    {
+        return Err(crate::safety::bad_arg_with_hint(
+            "rm",
+            "a file path",
+            "a directory",
+            &format!("'{written}' is a directory; remove it with rmdir(\"{written}\", true)"),
+        ));
+    }
     crate::tx::snapshot(&path); // record pre-delete state if a transaction is active
                                 // `force` excuses a file that is already gone, as `rm -f` does, and nothing
                                 // else. It used to turn every failure -- a directory, a locked file, a
