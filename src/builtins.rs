@@ -25545,7 +25545,9 @@ fn chained_entry_matches(
     let Some(filter) = filter else {
         return true;
     };
-    let text = |v: Option<&serde_json::Value>| v.and_then(|v| v.as_str()).unwrap_or("");
+    fn text(v: Option<&serde_json::Value>) -> &str {
+        v.and_then(|v| v.as_str()).unwrap_or("")
+    }
     let builtin_ok = ["builtin", "action"]
         .iter()
         .all(|key| match filter.get(*key) {
