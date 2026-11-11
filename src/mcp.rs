@@ -847,6 +847,16 @@ impl McpServer {
                     continue;
                 }
             };
+            // A repeated key would be resolved to its last value, and a reader
+            // of the line could take the first: refuse it, as agent execute does.
+            if let Some(repeated) = crate::agent_api::first_repeated_key(line) {
+                let id = req.get("id").cloned().unwrap_or(JsonValue::Null);
+                Self::write_message(
+                    &mut out,
+                    &Self::rpc_error(id, -32600, &format!("duplicate key \"{repeated}\"")),
+                )?;
+                continue;
+            }
             if let Some(response) = self.handle_rpc(&req) {
                 Self::write_message(&mut out, &response)?;
             }

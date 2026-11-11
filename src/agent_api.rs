@@ -7207,36 +7207,111 @@ pub fn process_json_request(json_str: &str) -> Result<String> {
 /// The hint for input that is not an agent request.
 const REQUEST_HINT: &str = "a request is {\"action\":\"call\",\"builtin\":NAME,\"args\":[...]}; actions: call, pipeline, eval, describe, list_builtins, schema, type_info";
 
-/// The top-level keys of a JSON object in the order the text gives them, with a
-/// repeated key kept each time. `serde_json::Value` keeps only the last of a
-/// repeated key, so a `Value` cannot show that a request repeated one.
-struct TopLevelKeys(Vec<String>);
+/// The first key an object repeats anywhere in a JSON text, as a path such as
+/// `args.path`. `serde_json::Value` keeps only the last of a repeated key, so a
+/// `Value` cannot show that a request repeated one; this walks the text itself.
+struct FirstRepeatedKey(Option<String>);
 
-impl<'de> serde::Deserialize<'de> for TopLevelKeys {
-    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        struct KeyVisitor;
+/// Walks one JSON value, noting the first repeated key under `path`.
+struct RepeatSeed<'p> {
+    path: &'p str,
+}
 
-        impl<'de> serde::de::Visitor<'de> for KeyVisitor {
-            type Value = Vec<String>;
+impl<'de> serde::de::DeserializeSeed<'de> for RepeatSeed<'_> {
+    type Value = Option<String>;
 
-            fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-                f.write_str("a JSON object")
-            }
+    fn deserialize<D: serde::Deserializer<'de>>(self, d: D) -> Result<Option<String>, D::Error> {
+        d.deserialize_any(RepeatVisitor { path: self.path })
+    }
+}
 
-            fn visit_map<A: serde::de::MapAccess<'de>>(
-                self,
-                mut map: A,
-            ) -> Result<Vec<String>, A::Error> {
-                let mut keys = Vec::new();
-                while let Some(key) = map.next_key::<String>()? {
-                    map.next_value::<serde::de::IgnoredAny>()?;
-                    keys.push(key);
+struct RepeatVisitor<'p> {
+    path: &'p str,
+}
+
+impl<'de> serde::de::Visitor<'de> for RepeatVisitor<'_> {
+    type Value = Option<String>;
+
+    fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        f.write_str("JSON")
+    }
+
+    fn visit_bool<E>(self, _: bool) -> Result<Option<String>, E> {
+        Ok(None)
+    }
+    fn visit_i64<E>(self, _: i64) -> Result<Option<String>, E> {
+        Ok(None)
+    }
+    fn visit_u64<E>(self, _: u64) -> Result<Option<String>, E> {
+        Ok(None)
+    }
+    fn visit_f64<E>(self, _: f64) -> Result<Option<String>, E> {
+        Ok(None)
+    }
+    fn visit_str<E>(self, _: &str) -> Result<Option<String>, E> {
+        Ok(None)
+    }
+    fn visit_unit<E>(self) -> Result<Option<String>, E> {
+        Ok(None)
+    }
+
+    fn visit_seq<A: serde::de::SeqAccess<'de>>(
+        self,
+        mut seq: A,
+    ) -> Result<Option<String>, A::Error> {
+        let mut found = None;
+        let mut i = 0usize;
+        loop {
+            let path = format!("{}[{i}]", self.path);
+            match seq.next_element_seed(RepeatSeed { path: &path })? {
+                Some(inner) => {
+                    if found.is_none() {
+                        found = inner;
+                    }
                 }
-                Ok(keys)
+                None => break,
+            }
+            i += 1;
+        }
+        Ok(found)
+    }
+
+    fn visit_map<A: serde::de::MapAccess<'de>>(
+        self,
+        mut map: A,
+    ) -> Result<Option<String>, A::Error> {
+        let mut seen = std::collections::HashSet::new();
+        let mut found = None;
+        while let Some(key) = map.next_key::<String>()? {
+            let path = if self.path.is_empty() {
+                key.clone()
+            } else {
+                format!("{}.{key}", self.path)
+            };
+            let inner = map.next_value_seed(RepeatSeed { path: &path })?;
+            if found.is_none() {
+                if !seen.insert(key) {
+                    found = Some(path);
+                } else {
+                    found = inner;
+                }
             }
         }
+        Ok(found)
+    }
+}
 
-        deserializer.deserialize_map(KeyVisitor).map(TopLevelKeys)
+/// The path of the first key an object in `text` repeats, if any. `None` also
+/// when `text` is not JSON; the caller's own parse reports that.
+pub(crate) fn first_repeated_key(text: &str) -> Option<String> {
+    serde_json::from_str::<FirstRepeatedKey>(text)
+        .ok()
+        .and_then(|k| k.0)
+}
+
+impl<'de> serde::Deserialize<'de> for FirstRepeatedKey {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        serde::de::DeserializeSeed::deserialize(RepeatSeed { path: "" }, d).map(FirstRepeatedKey)
     }
 }
 
@@ -7259,15 +7334,13 @@ pub fn parse_request(text: &str) -> Result<AgentRequest, AgentResponse> {
     // A key the request repeats is refused, not resolved to its last value: a
     // reader of the text and the parser could disagree about which one counts.
     if value.is_object() {
-        if let Ok(TopLevelKeys(keys)) = serde_json::from_str::<TopLevelKeys>(text) {
-            let mut seen = std::collections::HashSet::new();
-            if let Some(repeated) = keys.iter().find(|k| !seen.insert(k.as_str())) {
-                return Err(bad_request(
-                    "E_PARSE",
-                    format!("Invalid JSON request: duplicate key \"{repeated}\""),
-                    REQUEST_HINT.to_string(),
-                ));
-            }
+        if let Ok(FirstRepeatedKey(Some(repeated))) = serde_json::from_str::<FirstRepeatedKey>(text)
+        {
+            return Err(bad_request(
+                "E_PARSE",
+                format!("Invalid JSON request: duplicate key \"{repeated}\""),
+                REQUEST_HINT.to_string(),
+            ));
         }
     }
     // A pipeline that does not parse is most often written with `stages` for

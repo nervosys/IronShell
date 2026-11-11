@@ -123,12 +123,25 @@ fn item4_a_request_that_repeats_a_top_level_key_is_refused() {
 }
 
 #[test]
-fn item4_a_repeated_key_nested_below_the_top_level_is_not_refused() {
-    // The check is for the request object only.
-    let text = r#"{"action":"eval","code":"1 + 1","meta":{"x":1,"x":2}}"#;
+fn item4_a_repeated_key_nested_below_the_top_level_is_refused_by_path() {
+    // Since round 21 every object is checked: `args` is where a repeated key
+    // changes what runs, and the message names the path.
+    let text =
+        r#"{"action":"call","builtin":"file_write","args":{"path":"a.txt","path":"../b.txt"}}"#;
+    let err = parse_request(text).expect_err("a nested repeated key is refused");
+    assert_eq!(err.code.as_deref(), Some("E_PARSE"), "{err:?}");
+    let message = err.error.unwrap_or_default();
+    assert!(message.contains("duplicate key \"args.path\""), "{message}");
+
+    let in_array = r#"{"action":"pipeline","steps":[{"builtin":"len","builtin":"rm"}]}"#;
+    let err = parse_request(in_array).expect_err("a repeat inside an array is refused");
+    let message = err.error.unwrap_or_default();
+    assert!(message.contains("steps[0].builtin"), "{message}");
+
+    let distinct = r#"{"action":"eval","code":"1 + 1","meta":{"x":1,"y":{"x":2}}}"#;
     assert!(
-        parse_request(text).is_ok(),
-        "nested repeats are not refused"
+        parse_request(distinct).is_ok(),
+        "the same key in different objects is fine"
     );
 }
 
