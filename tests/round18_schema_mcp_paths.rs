@@ -348,3 +348,66 @@ fn item3_a_plain_missing_file_stays_not_found_outside_agent_mode() {
     );
     assert!(text.contains("E_NOT_FOUND"), "{text}");
 }
+
+// ── Item 4: did-you-mean for names agents guess ─────────────────────────────
+
+#[test]
+fn item4_guessed_read_names_point_at_read_text_first() {
+    use iron_shell::builtins::did_you_mean;
+    for guess in ["file_read", "read_file", "readfile"] {
+        let dym = did_you_mean(guess);
+        assert_eq!(
+            dym.first().map(String::as_str),
+            Some("read_text"),
+            "{guess}: {dym:?}"
+        );
+        assert!(dym.iter().any(|s| s == "file.read"), "{guess}: {dym:?}");
+    }
+}
+
+#[test]
+fn item4_exists_file_points_at_exists_and_repeat_at_pad_left() {
+    use iron_shell::builtins::did_you_mean;
+    assert_eq!(
+        did_you_mean("exists_file").first().map(String::as_str),
+        Some("exists")
+    );
+    assert_eq!(
+        did_you_mean("repeat").first().map(String::as_str),
+        Some("pad_left")
+    );
+}
+
+#[test]
+fn item4_every_suggested_name_is_real() {
+    use iron_shell::builtins::is_served;
+    for name in ["read_text", "exists", "pad_left"] {
+        assert!(is_served(name), "{name} is suggested but not served");
+    }
+    assert!(
+        iron_shell::modules::builtin_for_member("file", "read").is_some(),
+        "file.read is suggested but is not a module member"
+    );
+}
+
+#[test]
+fn item4_the_cli_names_the_real_builtin_for_file_read() {
+    let ws = fresh_workspace("guess");
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_ish"))
+        .args(["-c", r#"file_read("x")"#])
+        .current_dir(&ws)
+        .env("IRONSHELL_SESSION_DIR", ws.join("session"))
+        .env("NO_COLOR", "1")
+        .output()
+        .expect("run ish");
+    let text = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(text.contains("E_UNKNOWN_BUILTIN"), "{text}");
+    assert!(
+        text.contains("did you mean: read_text, file.read"),
+        "{text}"
+    );
+}

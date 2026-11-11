@@ -236,13 +236,15 @@ fn an_unknown_name_is_reported_unknown_before_the_approval_gate() {
 
 #[test]
 fn did_you_mean_offers_the_module_spelling_ahead_of_edit_distance_guesses() {
-    // `file_read` is not a builtin; `file.read` is the call the agent meant.
+    // `file_read` is not a builtin; the real name `read_text` comes first, then
+    // the `file.read` call the agent meant, ahead of any edit-distance guess.
     let dym = iron_shell::builtins::did_you_mean("file_read");
     assert_eq!(
         dym.first().map(String::as_str),
-        Some("file.read"),
+        Some("read_text"),
         "{dym:?}"
     );
+    assert_eq!(dym.get(1).map(String::as_str), Some("file.read"), "{dym:?}");
     // A name whose prefix is not a module gets no module-form guess.
     let none = iron_shell::builtins::did_you_mean("nosuch_thing");
     assert!(none.iter().all(|s| !s.contains('.')), "{none:?}");
@@ -253,7 +255,10 @@ fn the_agent_sees_the_module_spelling_in_did_you_mean() {
     let (code, text) = agent_run(r#"file_read("a.txt")"#);
     assert_eq!(code, 127, "{text}");
     assert!(text.contains("E_UNKNOWN_BUILTIN"), "{text}");
-    assert!(text.contains(r#""did_you_mean":["file.read""#), "{text}");
+    assert!(
+        text.contains(r#""did_you_mean":["read_text","file.read""#),
+        "{text}"
+    );
 }
 
 #[test]
