@@ -124,3 +124,49 @@ fn a_comparison_on_a_function_says_the_pipe_binds_loosest() {
     assert!(text.contains("(a | f) > 0"), "{text}");
     assert!(!text.contains("convert with int(x)"), "{text}");
 }
+
+// ---- 4. assignment in the wrong place ----
+
+#[test]
+fn an_indexed_element_cannot_be_assigned() {
+    let text = parse_refusal("rows = [{n: 1}]\nrows[0].n = 99\n");
+    assert!(
+        text.contains("an indexed element cannot be assigned; rebuild the array"),
+        "{text}"
+    );
+    assert!(!text.contains("use `==`"), "{text}");
+}
+
+#[test]
+fn a_field_assignment_in_a_block_gets_the_one_expression_hint() {
+    let text = parse_refusal("r = {a: 1}\nif true { r.a = 7 }\n");
+    assert!(
+        text.contains("a block holds one expression; bind values before it"),
+        "{text}"
+    );
+}
+
+#[test]
+fn a_field_assignment_in_parentheses_gets_the_one_expression_hint() {
+    let text = parse_refusal("r = {a: 1}\nf = fn(v) => (r.a = v)\n");
+    assert!(
+        text.contains("a block holds one expression; bind values before it"),
+        "{text}"
+    );
+}
+
+#[test]
+fn a_lambda_comparison_still_says_use_double_equals() {
+    let text = parse_refusal("where([{a: 1}], fn(r) => r.a = 1)\n");
+    assert!(text.contains("use `==` to compare; `=` assigns"), "{text}");
+}
+
+#[test]
+fn a_nested_field_assignment_through_an_int_names_the_replacement() {
+    let text = run_refusal("mut r = {a: 1}\nr.a.b = 5\n");
+    assert!(text.contains("r.a: expected a Record, got Int"), "{text}");
+    assert!(
+        text.contains("r.a is an Int; assign r.a = {b: 5} to replace it"),
+        "{text}"
+    );
+}

@@ -1297,7 +1297,27 @@ fn set_field_path(target: &mut Value, label: &str, path: &[String], new: Value) 
     };
     let kind = target.type_name();
     let Value::Record(map) = target else {
-        return Err(crate::safety::bad_arg(label, "a Record", kind));
+        // `r.a.b = 5` with `r.a` an Int: the fix is to replace `r.a`, which
+        // the hint shows as the record literal the path would need.
+        let article = if matches!(kind.chars().next(), Some('A' | 'E' | 'I' | 'O' | 'U')) {
+            "an"
+        } else {
+            "a"
+        };
+        let literal = path.iter().rev().fold(
+            match new {
+                Value::Int(_) | Value::Float(_) | Value::Bool(_) => new.to_display_string(),
+                Value::Str(ref s) => format!("\"{s}\""),
+                _ => "...".to_string(),
+            },
+            |inner, field| format!("{{{field}: {inner}}}"),
+        );
+        return Err(crate::safety::bad_arg_with_hint(
+            label,
+            "a Record",
+            kind,
+            &format!("{label} is {article} {kind}; assign {label} = {literal} to replace it"),
+        ));
     };
     if rest.is_empty() {
         map.insert(field.clone(), new);
