@@ -2983,7 +2983,7 @@ fn check_write(path: &str) -> Result<String, String> {
 /// `mkdir` creates nothing in place and uses [`check_write`].
 fn check_write_in_place(path: &str) -> Result<String, String> {
     let resolved = check_write(path)?;
-    crate::safety::guard_in_place_write("posix", path).map_err(|e| e.to_string())?;
+    crate::safety::refuse_hard_linked_write("posix", path).map_err(|e| e.to_string())?;
     Ok(resolved)
 }
 

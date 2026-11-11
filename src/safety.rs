@@ -3803,7 +3803,7 @@ pub(crate) fn hard_link_count(_path: &Path) -> Option<u64> {
 /// hard-links node_modules into its store, and reading through a link changes
 /// nothing. This is a known limit: a link planted after a file was judged is not
 /// seen again here, as the check and the write are separate calls.
-pub(crate) fn guard_in_place_write(builtin: &str, path: &str) -> anyhow::Result<()> {
+pub(crate) fn refuse_hard_linked_write(builtin: &str, path: &str) -> anyhow::Result<()> {
     if !jail_enforced(current_mode()) {
         return Ok(());
     }
