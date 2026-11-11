@@ -51,6 +51,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `rm` and `crypto_hash_file` refuse a directory with E_BAD_ARG naming the call that fits it, and `mv` names a missing destination folder or a directory target, instead of a permissions error or a missing source.
 - A `-` after an operand on the same line is subtraction, even after a space: `n = 4` then `r = n -1` is 3. It used to read `-1` as a literal, so `r = n -1` set `r` to 4 and `n -1` called `n`. A word call no longer takes a negative literal argument; write `f(-1)`.
 - `take` refuses a negative count instead of returning `[]`. `tar_create` refuses an archive name other than `.tar`, `.tar.gz` or `.tgz` (a `.zip` name points at `zip_create`).
+- On Windows, `ish -b` runs a script given as a command (`./x.sh` with a `sh` or `bash` shebang, or `sh FILE` / `bash FILE`) in a child `ish -b` with the same mode and workspace, and passes back its status. It used to fail with "%1 is not a valid Win32 application". Elsewhere the real shell still runs it.
+- Reading a file that is not UTF-8 is E_BAD_VALUE naming the offset of the first bad byte, not E_IO. The recursion limit is E_BUDGET_EXCEEDED, with a hint for intended deep recursion. JSON nested deeper than 128 levels is refused as nesting, not as a position to fix.
 
 ### Added
 
@@ -82,6 +84,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `[1, 2] + [3]` concatenates Arrays.
 - `delete_lines(path, {regex: "..."})` deletes the lines a regular expression matches. A literal selector holding regex syntax that deletes nothing says so in a `note`.
 - `head` and `tail` take an Array as their first argument, as they do piped.
+- `ish -b`: `read` splits on `IFS` (`IFS=, read -r a b c`), and a one-command `IFS=` prefix does not persist; `${10}` and later positional parameters; `\xHH` in `echo -e` and `printf`; `printf` `%e`, `%E`, `%g` and `%G`.
 
 ### Fixed
 
@@ -124,6 +127,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `group_by` keeps Int `1` and String `"1"` in different groups.
 - `tar_create` names a missing member (E_NOT_FOUND) instead of a garbled tar error. Its docs say the workspace jail applies in agent mode or when a workspace is set.
 - `help("")` is refused as an empty name; `format_number`'s decimals error names the range and the value; `delete_lines` errors name `delete_lines` and list its selector forms.
+- `ish -b`: `read` returns 1 for a last line without a newline (assigning it), so `while read` skips it as bash does. A here-string (`<<<`) is refused as a here-string, with a pipe hint.
+- A leading UTF-8 byte-order mark (Windows PowerShell writes one) is dropped by `cat`, `file.read`, `read_text`, `open` (every format) and `json.parse`; `open` of a `.json` file with a BOM failed.
 
 
 ## [14.0.1] - 2026-11-08
