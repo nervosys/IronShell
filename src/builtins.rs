@@ -62970,6 +62970,15 @@ pub fn bi_rmdir(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
         reversible: false,
         fs_paths: true,
     })?;
+    // Undo does not restore a directory: the step is recorded as irreversible so
+    // that undo reports it as not reversed. A failed removal leaves no step.
+    crate::journal::record_irreversible(
+        "rmdir",
+        crate::safety::Effect::Destructive,
+        &format!(
+            "a directory removal is not journaled: {path} and what it held cannot be restored by undo"
+        ),
+    );
     crate::tx::snapshot(&path); // back up the directory tree if a transaction is active
                                 // `remove_dir_all` removes a symbolic link rather than following it, so a
                                 // link inside the workspace to a directory outside it is not a way out.

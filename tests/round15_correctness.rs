@@ -304,3 +304,47 @@ fn redo_of_an_undone_move_applies_both_ends_again() {
     assert!(!ws.join("a.txt").exists(), "redo moves the source again");
     assert_eq!(std::fs::read_to_string(ws.join("b.txt")).unwrap(), "new\n");
 }
+
+// ── Item 4: undo of a directory removal says it is not journaled ──
+
+#[test]
+fn undo_of_a_recursive_rmdir_says_the_removal_is_not_journaled() {
+    let dir = scratch("rmdir_honest");
+    let ws = dir.join("proj");
+    std::fs::create_dir_all(ws.join("tree")).unwrap();
+    std::fs::write(ws.join("tree").join("x.txt"), "kept\n").unwrap();
+
+    let first = ish_agent(&dir, r#"rmdir("tree", true)"#, None);
+    assert!(!first.status.success(), "the first removal must be refused");
+    let json = first_error(&first);
+    assert_eq!(json["error"]["approval"]["reversible"], false, "{json}");
+    let token = token_from_refusal(&first);
+
+    let removed = ish_agent(&dir, r#"rmdir("tree", true)"#, Some(&token));
+    assert!(
+        removed.status.success(),
+        "the approved removal must run: {}",
+        String::from_utf8_lossy(&removed.stderr)
+    );
+    assert!(!ws.join("tree").exists());
+
+    let undone = ish_agent(&dir, "undo()", None);
+    assert!(
+        undone.status.success(),
+        "undo must run: {}",
+        String::from_utf8_lossy(&undone.stderr)
+    );
+    let said = String::from_utf8_lossy(&undone.stdout);
+    assert!(
+        said.contains("a directory removal is not journaled"),
+        "undo names the real reason: {said}"
+    );
+    assert!(
+        !said.contains("was absent before"),
+        "the removed tree was present before: {said}"
+    );
+    assert!(
+        !ws.join("tree").exists(),
+        "undo does not restore a directory, and says so"
+    );
+}

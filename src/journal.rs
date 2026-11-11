@@ -652,11 +652,14 @@ pub fn record_before(builtin: &str, effect: Effect, args: &[Value]) {
     }
 }
 
-/// Builtins that record their own steps with [`record_group`], because one
-/// argument does not name every path they change: a move changes both ends.
+/// Builtins that record their own steps, because the dispatcher's guess at their
+/// paths is wrong for them: a move changes both ends ([`record_group`]), and a
+/// directory removal is recorded as irreversible ([`record_irreversible`]). The
+/// guess resolves a relative name against the process directory, not the
+/// workspace, so it captured the wrong path.
 fn records_its_own_steps(builtin: &str) -> bool {
     let canonical = crate::signature::signature_of(builtin).map_or(builtin, |s| s.name);
-    canonical == "file_move"
+    matches!(canonical, "file_move" | "rmdir")
 }
 
 /// Record the pre-state of named paths that a builtin is about to write or
