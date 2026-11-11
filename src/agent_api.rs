@@ -1506,8 +1506,9 @@ fn named_args_to_positional(
 
     // The positions, in order: the subject first when there is one, then the
     // declared parameters. Each is a name and whether it must be given.
+    // A definition built from the signature already lists the subject first.
     let mut positions: Vec<(String, bool)> = Vec::new();
-    if has_subject {
+    if has_subject && params.first().is_none_or(|p| p.name != "subject") {
         let required = signature.is_some_and(|s| s.subject_required);
         positions.push(("subject".to_string(), required));
     }
