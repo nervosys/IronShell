@@ -3005,10 +3005,14 @@ pub static SIGNATURES: &[Signature] = &[
             ),
         ],
         returns: "Array",
-        doc: "Run a read-only SQL query over piped rows, a JSON/CSV file or a SQLite database, returning rows as records. A trailing params Array binds its values to the query's ? placeholders in order, so a value is never spliced into the query text.",
+        doc: "Run a read-only SQL query over piped rows, rows given as the first argument, a JSON/CSV file or a SQLite database, returning rows as records. A trailing params Array binds its values to the query's ? placeholders in order, so a value is never spliced into the query text. Without piped rows, name a source first: sql(source, query, params).",
         examples: &[
             (
                 r#"[{n: 1}, {n: 2}, {n: 3}] | sql("select sum(n) as total from t") | first | fn(r) => r.total"#,
+                "6",
+            ),
+            (
+                r#"sql([{n: 1}, {n: 2}, {n: 3}], "select sum(n) as total from t") | first | fn(r) => r.total"#,
                 "6",
             ),
             (
@@ -3101,9 +3105,10 @@ pub static SIGNATURES: &[Signature] = &[
             ),
         ],
         returns: "Any",
-        doc: "Run a read-only SQL query that yields exactly one row of one column, returning that value. A trailing params Array binds its values to the query's ? placeholders in order, as for sql.",
+        doc: "Run a read-only SQL query that yields exactly one row of one column, returning that value. Rows may be piped in or given as the first argument, as for sql. A trailing params Array binds its values to the query's ? placeholders in order, as for sql.",
         examples: &[
             (r#"[{n: 1}, {n: 2}, {n: 3}] | sql_value("select max(n) from t")"#, "3"),
+            (r#"sql_value([{n: 1}, {n: 2}, {n: 3}], "select count(*) from t where n > ?", [1])"#, "2"),
             (r#"sql_value(":memory:", "select 6 * 7")"#, "42"),
             (r#"sql_value(":memory:", "select ? * 6", [7])"#, "42"),
             (r#"[{n: 1}, {n: 2}, {n: 3}] | sql_value("select count(*) from t where n > ?", [1])"#, "2"),
@@ -14933,6 +14938,21 @@ pub fn validate(name: &str, args: &[Value], input: Option<&Value>) -> anyhow::Re
                 ));
             }
         }
+    }
+
+    // `sql("select ... ?", ["Ann"])` with no rows piped in: the query was taken
+    // as the source, and the Array is not a query. Say what sql needs first.
+    if input.is_none()
+        && matches!(sig.name, "sql" | "sql_value")
+        && matches!(args, [Value::Str(_), Value::Array(_)])
+    {
+        return Err(crate::safety::bad_arg_in(
+            name,
+            format!(
+                "{name}: with no piped rows, {name} needs a source first: {name}(source, query, params) or rows | {name}(query, params)"
+            ),
+            &format!("name the source, e.g. {name}(\"people.csv\", \"select ... ?\", [\"Ann\"])"),
+        ));
     }
 
     let required = sig.params.iter().filter(|p| p.required).count();

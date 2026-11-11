@@ -604,6 +604,14 @@ fn connect(
             load(&conn, builtin, &tables)?;
             Ok((conn, query, None))
         }
+        // Rows given as the first argument are the rows, as if piped: `sql(rows, query)`.
+        2 if subject.is_none() && matches!(args[0], Value::Array(_)) => {
+            let query = str_arg(1, "the query")?;
+            let tables = tables_from_subject(builtin, args[0].clone())?;
+            let conn = memory()?;
+            load(&conn, builtin, &tables)?;
+            Ok((conn, query, None))
+        }
         2 => {
             let source = str_arg(0, "the source")?;
             let query = str_arg(1, "the query")?;
@@ -648,6 +656,18 @@ fn connect(
                 )
             })?;
             Ok((conn, query, None))
+        }
+        // `sql(source, query, "Ann")`: the bind values are the trailing Array, so
+        // a third argument that is not one is named as the mistake.
+        n if n >= 3 && !matches!(args.last(), Some(Value::Array(_))) => {
+            let got = args.last().map(|v| v.type_name()).unwrap_or("nothing");
+            Err(bad(
+                builtin,
+                format!("params must be an Array, e.g. [\"Ann\"], got {got}"),
+                format!("pass the bind values as an Array: {builtin}(source, query, [value, ...])"),
+                "Array",
+                got.to_string(),
+            ))
         }
         n => Err(bad(
             builtin,

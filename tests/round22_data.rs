@@ -107,6 +107,54 @@ fn csv_columns_refuses_a_one_line_file_name_that_is_not_a_file() {
     }
 }
 
+// ── item 4: sql's argument messages and rows as the first argument ──────
+
+#[test]
+fn sql_with_params_and_no_rows_says_it_needs_a_source_first() {
+    let e = eval(r#"sql("select name from t where name = ?", ["Ann"])"#).expect_err("no rows");
+    let text = e.to_string();
+    assert!(text.contains("needs a source first"), "{text}");
+    assert!(
+        text.contains("sql(source, query, params) or rows | sql(query, params)"),
+        "{text}"
+    );
+    assert!(!text.contains("source_or_query"), "{text}");
+}
+
+#[test]
+fn sql_params_that_are_not_an_array_are_named_as_the_mistake() {
+    let dir = std::env::temp_dir().join(format!("ae_round22_sql_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("people.csv");
+    std::fs::write(&path, "name\nAnn\nBo\n").unwrap();
+    let p = path.to_string_lossy().replace('\\', "/");
+    let got = eval(&format!(
+        r#"sql("{p}", "select name from people where name = ?", "Ann")"#
+    ));
+    let _ = std::fs::remove_dir_all(&dir);
+    let text = got.expect_err("params as a String").to_string();
+    assert!(text.contains("params must be an Array"), "{text}");
+    assert!(text.contains("pass the bind values as an Array"), "{text}");
+}
+
+#[test]
+fn sql_and_sql_value_accept_rows_as_the_first_argument() {
+    assert_eq!(
+        eval(r#"sql([{n: 1}, {n: 2}, {n: 3}], "select n from t where n > ?", [1]) | len"#).unwrap(),
+        Value::Int(2)
+    );
+    assert_eq!(
+        eval(r#"sql_value([{n: 1}, {n: 2}, {n: 3}], "select count(*) from t where n > ?", [1])"#)
+            .unwrap(),
+        Value::Int(2)
+    );
+    assert_eq!(
+        eval(r#"sql_value([{n: 1}, {n: 2}, {n: 3}], "select max(n) from t")"#).unwrap(),
+        Value::Int(3)
+    );
+}
+
 #[test]
 fn csv_columns_still_reads_one_line_text_and_multi_line_text() {
     assert_eq!(
