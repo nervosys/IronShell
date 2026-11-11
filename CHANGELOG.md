@@ -60,6 +60,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - The Agent API's `execute` returns JSON values, not display text. A malformed request is a coded error (E_PARSE or E_BAD_ARG) on stdout with exit status 1, and `error` is always an object.
 - Generated tool schemas list a builtin's piped value as a `subject` parameter, first; `ontology_describe` marks it `subject: true`.
 - MCP `tools/call`: `{}` means no arguments, named arguments map to parameters, an unknown argument name is refused, and an unknown tool is a -32602 error whose data suggests names.
+- `&&` and `||` short-circuit: the right operand runs only when the left one does not decide the result, so `r.amount != "" && r.amount > 100` no longer fails on the empty row it guards.
+- `ish agent execute` exits 1 whenever the response has `success: false`, not only for a malformed request. `retryable` is false for E_PARSE, E_BAD_ARG, E_UNKNOWN_BUILTIN and E_UNKNOWN_NAME in Agent API responses.
+- A write to the audit log is refused as E_POLICY_DENY (the log is protected), not E_OUTSIDE_WORKSPACE. A script outside the workspace refused in `ish -b` names `sh`, not `cat`.
 
 ### Added
 
@@ -95,6 +98,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Global flags may come before a subcommand: `ish --agent agent serve`.
 - Schema format aliases (`gpt` and `chatgpt` for `openai`, `hf` for `huggingface`, `json` for the full JSON Schema, and others).
 - An unknown builtin guessed from another tool (`file_read`, `read_file`) names the real one (`read_text`).
+- `date_add` takes `weeks`, `months` and `years`. Months and years are calendar steps that clamp to the month's last day: `date_add("2024-01-31", 1, "months")` is `2024-02-29`.
+- Agent API `call` accepts a module-qualified name (`math.sqrt`), as `eval` does. The MCP `ironshell` tool takes `args` as an object of named parameters too.
 
 ### Fixed
 
@@ -142,6 +147,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - The Agent API's interactive banner goes to stderr, so stdout carries only JSON lines. `code_executed` is capped; object arguments accept `subject` or `input`; JSON `null` is IronShell null.
 - A refusal from a path check names the builtin instead of starting with an empty name.
 - A failed write names the path and says it cannot write, not a bare OS error.
+- MCP `ironshell` and `ontology_describe` refuse an unknown argument key instead of ignoring it; a missing tool name is a JSON-RPC error object.
+- A missing parameter after a subject given as the first argument names the parameter (`pow: missing required argument 'exponent'`), not "0 of 1 required". `sqrt` of a negative number says the value must be at least 0.
+- A number added to or compared with an empty String says the String is empty, the usual sign of a blank CSV field. `date_diff`'s docs say it answers b minus a.
+- A pipeline request without `steps`, and several requests on one `execute` stdin, get hints showing the right shape.
 
 
 ## [14.0.1] - 2026-11-08
