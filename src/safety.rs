@@ -7668,6 +7668,49 @@ fn centrally_enforced(effect: Effect) -> bool {
     )
 }
 
+/// Declared parameter names whose argument names a path or a host. Only these
+/// reach the audit log for a call the gate does not judge.
+const TARGET_PARAMS: &[&str] = &[
+    "path",
+    "file",
+    "filename",
+    "file_path",
+    "source",
+    "destination",
+    "dest",
+    "target",
+    "url",
+    "host",
+    "hostname",
+];
+
+/// The audit resource for a call the gate does not judge: the arguments that
+/// the signature declares as paths or hosts, with a count in place of the rest.
+/// Content arguments (the text a write puts in a file, a request body) are never
+/// named, because the log outlives the call and would keep its secrets.
+fn target_resource(builtin: &str, args: &[crate::value::Value]) -> String {
+    let named: Vec<&str> = crate::signature::signature_of(builtin)
+        .map(|sig| {
+            sig.params
+                .iter()
+                .enumerate()
+                .filter(|(_, p)| !p.variadic && TARGET_PARAMS.contains(&p.name))
+                .filter_map(|(i, _)| match args.get(i) {
+                    Some(crate::value::Value::Str(s)) => Some(s.as_str()),
+                    _ => None,
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    let rest = args.len() - named.len();
+    match (named.is_empty(), rest) {
+        (true, 0) => String::new(),
+        (true, n) => format!("<{n} arguments>"),
+        (false, 0) => named.join(", "),
+        (false, n) => format!("{}, <{n} more arguments>", named.join(", ")),
+    }
+}
+
 /// Enforce policy for a builtin that does not guard itself. Called from the
 /// dispatcher immediately before a builtin runs.
 ///
@@ -7839,7 +7882,7 @@ pub fn guard_dispatch(builtin: &str, args: &[crate::value::Value]) -> Result<(),
                 builtin,
                 effect,
                 "allow_unguarded",
-                &args_as_strings.join(", "),
+                &target_resource(builtin, args),
                 json!({ "central": true }),
             );
         }
@@ -7946,7 +7989,12 @@ lazy_static! {
     /// value ≥6 chars to skip trivial placeholders). Group 1 (key + separator)
     /// is kept; group 2 (the value) is redacted.
     static ref SECRET_ASSIGN_RE: regex::Regex = regex::Regex::new(
-        r#"(?i)((?:password|passwd|pwd|secret|token|api[_-]?key|access[_-]?key|client[_-]?secret|auth[_-]?token)["']?\s*[:=]\s*["']?)([^\s"',}]{6,})"#
+        // A backslash ends the value when it begins a JSON escape (`\n`, `\t`,
+        // `\"`, `\\`, `\u`...): in JSON text a newline is the two characters `\n`,
+        // and a value that ran through it swallowed the next line. A backslash
+        // before any other character is still part of the value, so a Windows
+        // path or a password containing `\x` stays whole.
+        r#"(?i)((?:password|passwd|pwd|secret|token|api[_-]?key|access[_-]?key|client[_-]?secret|auth[_-]?token)["']?\s*[:=]\s*["']?)((?:[^\s"',}\\]|\\[^nrtbfu"\\/\s]){6,})"#
     ).unwrap();
 }
 
@@ -9097,6 +9145,19 @@ mod tests {
         // A mixed-case value is still a secret.
         let (r, _) = redact_str("token: Ab_Cd_EfGh123");
         assert_eq!(r, "token: [REDACTED]");
+        // In JSON text a newline is the two characters `\n`. The value stops
+        // there, so the second assignment is redacted on its own, not swallowed.
+        let env = r#"{"x":"API_KEY=sk-test-123456789\nDB_PASSWORD=hunter2hunter2"}"#;
+        let (r, c) = redact_str(env);
+        assert!(c);
+        assert!(r.contains(r"\nDB_PASSWORD=[REDACTED]"), "{r}");
+        assert!(
+            !r.contains("sk-test-123456789") && !r.contains("hunter2hunter2"),
+            "{r}"
+        );
+        // A backslash that is not a JSON escape stays inside the value.
+        let (r, _) = redact_str(r"password=ab\cdefgh");
+        assert_eq!(r, "password=[REDACTED]");
     }
 
     #[test]

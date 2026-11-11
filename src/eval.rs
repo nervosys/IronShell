@@ -2161,6 +2161,11 @@ fn binop(op: &BinOp, a: Value, b: Value) -> Result<Value> {
         // String concatenation. A number and a String do not combine: see the
         // refusal arm below, which is what `"a" + 1` now reaches.
         (Add, Value::Str(x), Value::Str(y)) => checked_string(format!("{}{}", x, y))?,
+        // Array concatenation: `[1, 2] + [3]` is `[1, 2, 3]`, a new Array.
+        (Add, Value::Array(mut x), Value::Array(y)) => {
+            x.extend(y);
+            Value::Array(x)
+        }
 
         (Sub, Value::Int(x), Value::Int(y)) => Value::Int(checked_int(x.checked_sub(y), "Sub")?),
         (Sub, Value::Float(x), Value::Float(y)) => Value::Float(x - y),

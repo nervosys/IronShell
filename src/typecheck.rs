@@ -475,6 +475,14 @@ fn type_binary(op: &BinOp, lt: Type, rt: Type) -> Result<Type, TypeError> {
         Add | Sub | Mul | Div | Rem | BinOp::Pow => match (lt.clone(), rt.clone()) {
             (Int, Int) => Int,
             (Float, Int) | (Int, Float) | (Float, Float) => Float,
+            // `+` concatenates two Arrays into an Array of their common element type.
+            (Array(a), Array(b)) if *op == Add => {
+                if a == b {
+                    Array(a)
+                } else {
+                    Array(Box::new(Any))
+                }
+            }
             (Any, t) | (t, Any) => t,
             _ => {
                 return Err(TypeError::BadBinary {

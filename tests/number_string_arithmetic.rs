@@ -4,7 +4,7 @@
 //! agent that wrote `total + 1` where `total` was text got text back without a
 //! failure. Every mixed pair is now `E_BAD_ARG` naming the operator and the two
 //! types, with a hint that names the conversions that exist. String + String,
-//! Array + Array, string repetition with `*`, and concatenation with a
+//! Array + Array (concatenation), string repetition with `*`, and concatenation with a
 //! non-number (`"x" + true`) are unchanged.
 
 use iron_shell::env::Env;
@@ -111,10 +111,10 @@ fn what_is_not_a_number_mix_is_unchanged() {
         run("\"x\" + true").unwrap(),
         Value::Str("xtrue".to_string())
     );
-    // Array + Array has never been arithmetic here; it is refused as before.
+    // Array + Array concatenates into a new Array.
     assert_eq!(
-        refusal("[1] + [2]").message,
-        "operator Add: expected operands it applies to, got Array and Array"
+        run("[1] + [2]").unwrap(),
+        Value::Array(vec![Value::Int(1), Value::Int(2)])
     );
     assert_eq!(run("1 + 2").unwrap(), Value::Int(3));
 }

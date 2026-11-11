@@ -8770,6 +8770,11 @@ fn read_named_files(builtin: &str, path_str: &str) -> Result<String> {
         }
         let mut all = String::new();
         for p in files {
+            // A file that ends without a newline would run into the next one, so
+            // `lines` would count the two as one line. Separate them.
+            if !all.is_empty() && !all.ends_with('\n') {
+                all.push('\n');
+            }
             all.push_str(&read_named_file(builtin, p)?);
         }
         return Ok(all);
@@ -25436,11 +25441,11 @@ fn bi_audit_query(args: Vec<Value>, _input: Option<Value>) -> Result<Value> {
         Some(Value::Record(rec)) => {
             if let Some(bad) = rec
                 .keys()
-                .find(|k| !matches!(k.as_str(), "action" | "resource"))
+                .find(|k| !matches!(k.as_str(), "builtin" | "action" | "resource"))
             {
                 return Err(crate::safety::bad_arg(
                     "audit_query",
-                    "a filter with only the fields action and resource",
+                    "a filter with only the fields builtin (or its alias action) and resource",
                     &format!("field {bad:?}"),
                 ));
             }
@@ -25449,11 +25454,22 @@ fn bi_audit_query(args: Vec<Value>, _input: Option<Value>) -> Result<Value> {
         Some(other) => {
             return Err(crate::safety::bad_arg(
                 "audit_query",
-                "a filter Record such as {action: \"login\"}",
+                "a filter Record such as {builtin: \"file_replace\"}",
                 other.type_name(),
             ))
         }
     };
+
+    // With a chained log active, the query reads the entries `audit_verify`
+    // checks, as records, so a filter on `builtin` finds the calls the gate saw.
+    if let Some(entries) = chained_audit_entries("audit_query")? {
+        let rows: Vec<Value> = entries
+            .iter()
+            .filter(|e| chained_entry_matches(e, filter.as_ref()))
+            .map(Value::from_json)
+            .collect();
+        return Ok(Value::Array(rows));
+    }
 
     let log = AUDIT_LOG.read().unwrap();
 
@@ -25461,8 +25477,11 @@ fn bi_audit_query(args: Vec<Value>, _input: Option<Value>) -> Result<Value> {
         .iter()
         .filter(|e| {
             if let Some(ref f) = filter {
+                // In-process assertions were all recorded by audit_log, so the
+                // name a filter gives is the action they were asserted under.
                 let action_match = f
                     .get("action")
+                    .or_else(|| f.get("builtin"))
                     .map(|v| e.action.contains(&v.to_display_string()))
                     .unwrap_or(true);
                 let resource_match = f
@@ -25536,11 +25555,66 @@ fn bi_audit_export(args: Vec<Value>, _input: Option<Value>) -> Result<Value> {
     Ok(Value::Record(result))
 }
 
-/// audit_stats() - Get audit log statistics
+/// The entries of the chained audit log that `audit_verify` reads with no
+/// argument, one per line, oldest first. `None` when no log is active; a log
+/// not yet written holds nothing. Shared so that the statistics, the query and
+/// the verifier all count the same entries.
+fn chained_audit_entries(builtin: &str) -> Result<Option<Vec<serde_json::Value>>> {
+    let Some(path) = crate::safety::audit_path() else {
+        return Ok(None);
+    };
+    let content = match std::fs::read_to_string(&path) {
+        Ok(c) => c,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Some(Vec::new())),
+        Err(e) => return Err(crate::safety::fs_error(builtin, &path, &e)),
+    };
+    Ok(Some(
+        content
+            .lines()
+            .filter(|l| !l.trim().is_empty())
+            .filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok())
+            .collect(),
+    ))
+}
+
+/// Whether a chained entry matches an `audit_query` filter. `builtin` names the
+/// call the entry records, and `action` is its alias. An `audit_log` assertion
+/// records its own name in `detail.action`, which `action` also matches.
+fn chained_entry_matches(
+    entry: &serde_json::Value,
+    filter: Option<&BTreeMap<String, Value>>,
+) -> bool {
+    let Some(filter) = filter else {
+        return true;
+    };
+    fn text(v: Option<&serde_json::Value>) -> &str {
+        v.and_then(|v| v.as_str()).unwrap_or("")
+    }
+    let builtin_ok = ["builtin", "action"]
+        .iter()
+        .all(|key| match filter.get(*key) {
+            Some(want) => {
+                let want = want.to_display_string();
+                text(entry.get("builtin")).contains(&want)
+                    || text(entry.get("detail").and_then(|d| d.get("action"))).contains(&want)
+            }
+            None => true,
+        });
+    let resource_ok = filter.get("resource").map_or(true, |want| {
+        text(entry.get("resource")).contains(&want.to_display_string())
+    });
+    builtin_ok && resource_ok
+}
+
+/// audit_stats() - Get audit log statistics.
+///
+/// `total` and `by_decision` count the chained log that `audit_verify` reads,
+/// so the two agree. With no active log they are the in-process list's count.
+/// `info`, `warning` and `critical` count the in-process `audit_log` assertions
+/// by severity, which the chained entries do not carry.
 fn bi_audit_stats(_args: Vec<Value>, _input: Option<Value>) -> Result<Value> {
     let log = AUDIT_LOG.read().unwrap();
 
-    let total = log.len();
     let mut info_count = 0;
     let mut warning_count = 0;
     let mut critical_count = 0;
@@ -25553,8 +25627,33 @@ fn bi_audit_stats(_args: Vec<Value>, _input: Option<Value>) -> Result<Value> {
         }
     }
 
+    let chained = chained_audit_entries("audit_stats")?;
+    let mut by_decision: BTreeMap<String, i64> = BTreeMap::new();
+    let total = match &chained {
+        Some(entries) => {
+            for entry in entries {
+                let decision = entry
+                    .get("decision")
+                    .and_then(|d| d.as_str())
+                    .unwrap_or("unknown");
+                *by_decision.entry(decision.to_string()).or_insert(0) += 1;
+            }
+            entries.len()
+        }
+        None => log.len(),
+    };
+
     let mut result = BTreeMap::new();
     result.insert("total".to_string(), Value::Int(total as i64));
+    result.insert(
+        "by_decision".to_string(),
+        Value::Record(
+            by_decision
+                .into_iter()
+                .map(|(k, n)| (k, Value::Int(n)))
+                .collect(),
+        ),
+    );
     result.insert("info".to_string(), Value::Int(info_count));
     result.insert("warning".to_string(), Value::Int(warning_count));
     result.insert("critical".to_string(), Value::Int(critical_count));
