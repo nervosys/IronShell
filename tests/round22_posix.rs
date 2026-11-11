@@ -96,3 +96,16 @@ fn a_refused_sed_form_names_the_part_it_does_not_support() {
         "{err}"
     );
 }
+
+#[test]
+fn an_arithmetic_refusal_is_at_the_dollar_sign() {
+    // Nothing runs when the script is refused, and the refusal names the
+    // `$((` itself: line 3, column 3, not the start of the statement.
+    let sb = Sandbox::new("arith-col");
+    let (out, err, _) = sb.run("echo a\necho b\nn=$((2+3))\n");
+    assert_eq!(out, "");
+    assert!(
+        err.contains("arithmetic expansion $((...)) at line 3, column 3"),
+        "{err}"
+    );
+}

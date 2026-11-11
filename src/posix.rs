@@ -148,6 +148,23 @@ fn unsupported<T>(what: &str) -> PResult<T> {
     })
 }
 
+/// [`unsupported`] placed at character offset `at`: the construct's own
+/// position, not the start of the word it sits in.
+fn unsupported_at<T>(what: &str, at: usize) -> PResult<T> {
+    Err(Unsupported {
+        what: what.to_string(),
+        at: Some(at),
+        syntax: None,
+    })
+}
+
+/// `e`, placed at `at`. An error found while lexing the operand of a `${...}`
+/// reports the expansion's own position, not an offset into the operand.
+fn at_outer(mut e: Unsupported, at: usize) -> Unsupported {
+    e.at = Some(at);
+    e
+}
+
 // ── lexer ────────────────────────────────────────────────────────────────
 
 struct Lexer<'a> {
@@ -276,7 +293,13 @@ impl<'a> Lexer<'a> {
                             syntax: None,
                         })?;
                     self.i = j;
-                    out.push(Tok::Redir(self.redir(Some(fd))?));
+                    // A refusal of the redirection is at its operator, not at
+                    // the descriptor digits before it.
+                    let redir = self.redir(Some(fd)).map_err(|mut e| {
+                        e.at.get_or_insert(j);
+                        e
+                    })?;
+                    out.push(Tok::Redir(redir));
                     return Ok(());
                 }
                 out.push(Tok::Word(self.word()?));
@@ -501,11 +524,12 @@ impl<'a> Lexer<'a> {
 
     /// `$…` at `self.i`.
     fn dollar(&mut self, parts: &mut Word, quoted: bool) -> PResult<()> {
+        let dollar_at = self.i;
         self.i += 1;
         match self.peek() {
             Some('(') => {
                 if self.peek_at(1) == Some('(') {
-                    return unsupported("arithmetic expansion $((...))");
+                    return unsupported_at("arithmetic expansion $((...))", dollar_at);
                 }
                 self.i += 1;
                 let start = self.i;
@@ -529,7 +553,7 @@ impl<'a> Lexer<'a> {
                     self.i += 1;
                 }
                 if self.peek() != Some(')') {
-                    return unsupported("unterminated $(");
+                    return unsupported_at("unterminated $(", dollar_at);
                 }
                 let body: String = self.s[start..self.i].iter().collect();
                 self.i += 1;
@@ -541,7 +565,7 @@ impl<'a> Lexer<'a> {
                     self.i += 1;
                     let name = self.name();
                     if self.peek() != Some('}') {
-                        return unsupported("${#...} form");
+                        return unsupported_at("${#...} form", dollar_at);
                     }
                     self.i += 1;
                     parts.push(Part::Len(name));
@@ -563,7 +587,7 @@ impl<'a> Lexer<'a> {
                         self.i += 1;
                         c.to_string()
                     }
-                    _ => return unsupported("${...} form"),
+                    _ => return unsupported_at("${...} form", dollar_at),
                 };
                 if self.peek() == Some('}') {
                     self.i += 1;
@@ -582,7 +606,7 @@ impl<'a> Lexer<'a> {
                     }
                     _ => {
                         let named = param_operator(op.starts_with(':'), &self.s[self.i..]);
-                        return unsupported(&format!("${{...}} operator `{named}`"));
+                        return unsupported_at(&format!("${{...}} operator `{named}`"), dollar_at);
                     }
                 }
                 // The operator's word, up to the matching brace.
@@ -602,7 +626,7 @@ impl<'a> Lexer<'a> {
                     self.i += 1;
                 }
                 if self.peek() != Some('}') {
-                    return unsupported("unterminated ${");
+                    return unsupported_at("unterminated ${", dollar_at);
                 }
                 let inner: Vec<char> = self.s[start..self.i].to_vec();
                 self.i += 1;
@@ -617,26 +641,27 @@ impl<'a> Lexer<'a> {
                         let mut chars = inner.clone();
                         chars.push('"');
                         let mut q = Lexer { s: &chars, i: 0 };
-                        q.double_quoted(&mut w)?;
+                        q.double_quoted(&mut w)
+                            .map_err(|e| at_outer(e, dollar_at))?;
                     } else {
                         // The operand runs to the closing brace, blanks
                         // included (`${1:?usage: f COLUMN}`), as in bash; its
                         // words are kept apart by the blanks between them.
-                        w = sub.word()?;
+                        w = sub.word().map_err(|e| at_outer(e, dollar_at))?;
                         while sub.i < inner.len() {
                             let blanks: String = inner[sub.i..]
                                 .iter()
                                 .take_while(|c| matches!(c, ' ' | '\t'))
                                 .collect();
                             if blanks.is_empty() {
-                                return unsupported("${...} operand");
+                                return unsupported_at("${...} operand", dollar_at);
                             }
                             sub.i += blanks.chars().count();
                             w.push(Part::Lit(blanks, false));
                             let before = sub.i;
-                            w.extend(sub.word()?);
+                            w.extend(sub.word().map_err(|e| at_outer(e, dollar_at))?);
                             if sub.i == before && sub.i < inner.len() {
-                                return unsupported("${...} operand");
+                                return unsupported_at("${...} operand", dollar_at);
                             }
                         }
                     }
@@ -653,7 +678,7 @@ impl<'a> Lexer<'a> {
                 // `$@` and `$*` are the positional parameters; `$!` and `$-`
                 // are not in the subset.
                 if matches!(c, '!' | '-') {
-                    return unsupported("special parameter");
+                    return unsupported_at("special parameter", dollar_at);
                 }
                 parts.push(Part::Var(c.to_string(), None, quoted));
             }
