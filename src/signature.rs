@@ -980,7 +980,7 @@ pub static SIGNATURES: &[Signature] = &[
     Signature {
         name: "file_copy", category: None, subject_required: false, aliases: &["copy_file", "cp"],
         subject: None, params: &[req("source", Ty::Str, "regular file or directory tree without symlink entries"), req("destination", Ty::Str, "non-overlapping destination with an existing parent")], returns: "Record",
-        doc: "Copy binary files or merge directory trees, bounded to 10000 entries and 64 MiB total. Preflight destination types and guard all writes; replace files atomically and snapshot modifications for transactions. Pipeline input is refused. Source reads may be outside the workspace.",
+        doc: "Copy binary files or merge directory trees, bounded to 10000 entries and 64 MiB total. Preflight destination types and guard all writes; replace files atomically and snapshot modifications for transactions. Pipeline input is refused. In agent mode the source is judged by the read jail, as `cat` is: an outside source is E_OUTSIDE_WORKSPACE.",
         examples: &[
             (r#"let d = fs_tempdir("ae_copy"); file_write(d + "/x", "hi"); let result = file_copy(d + "/x", d + "/y"); rmdir(d, true); result.bytes"#, "2"),
             (r#"let d = fs_tempdir("ae_copy_tree"); file_mkdir(d + "/a"); file_write(d + "/a/x", "hi"); let result = cp(d + "/a", d + "/b"); rmdir(d, true); result.success"#, "true"),
