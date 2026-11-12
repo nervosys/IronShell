@@ -360,6 +360,10 @@ fn plain_scalar(s: &str) -> Value {
         "" | "~" | "null" | "Null" | "NULL" => Value::Null,
         "true" | "True" | "TRUE" => Value::Bool(true),
         "false" | "False" | "FALSE" => Value::Bool(false),
+        // The YAML 1.2 core spellings of the special floats.
+        ".inf" | ".Inf" | ".INF" | "+.inf" | "+.Inf" | "+.INF" => Value::Float(f64::INFINITY),
+        "-.inf" | "-.Inf" | "-.INF" => Value::Float(f64::NEG_INFINITY),
+        ".nan" | ".NaN" | ".NAN" => Value::Float(f64::NAN),
         _ => {
             if let Ok(i) = s.parse::<i64>() {
                 Value::Int(i)
@@ -509,7 +513,15 @@ fn scalar_to_yaml(v: &Value) -> String {
         Value::Int(i) => i.to_string(),
         Value::Float(f) => {
             if f.is_finite() {
-                f.to_string()
+                // Debug keeps the point on whole numbers (1.0, -0.0) so they read
+                // back as Float; an exponent form such as 1e20 gets one too.
+                let text = format!("{f:?}");
+                match text.find('e') {
+                    Some(i) if !text[..i].contains('.') => {
+                        format!("{}.0{}", &text[..i], &text[i..])
+                    }
+                    _ => text,
+                }
             } else if f.is_nan() {
                 ".nan".to_string()
             } else if *f > 0.0 {
