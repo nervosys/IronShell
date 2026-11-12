@@ -92,3 +92,15 @@ fn get_is_still_suggested_as_http_get() {
         Some("http_get")
     );
 }
+
+#[test]
+fn a_source_with_params_and_no_query_is_named_as_missing_its_query() {
+    let e = eval(r#"sql("people.csv", ["Ann"])"#).expect_err("no query");
+    let text = e.to_string();
+    assert!(text.contains("needs a query after its source"), "{text}");
+    let e = eval(r#"sql_value("people.csv", ["Ann"])"#).expect_err("no query");
+    assert!(
+        e.to_string().contains("needs a query after its source"),
+        "{e}"
+    );
+}

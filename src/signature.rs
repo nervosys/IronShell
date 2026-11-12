@@ -15001,6 +15001,23 @@ pub fn validate(name: &str, args: &[Value], input: Option<&Value>) -> anyhow::Re
         }
     }
 
+    // `sql("people.csv", ["Ann"])` with no rows piped in: a String with no
+    // whitespace is not a query but a source, and the query is missing. A lone
+    // query with params runs over the empty database; this one would only be
+    // a SQLite syntax error, so say what sql needs.
+    if input.is_none()
+        && matches!(sig.name, "sql" | "sql_value")
+        && matches!(args, [Value::Str(s), Value::Array(_)] if !s.trim().contains(char::is_whitespace))
+    {
+        return Err(crate::safety::bad_arg_in(
+            name,
+            format!(
+                "{name}: with no piped rows, {name} needs a query after its source: {name}(source, query, params) or rows | {name}(query, params)"
+            ),
+            &format!("name the query, e.g. {name}(\"people.csv\", \"select * from t where name = ?\", [\"Ann\"])"),
+        ));
+    }
+
     // `sql(rows, "select ... ?", 5)`: the query is the String before the last
     // argument, so the last argument is the params and must be an Array. Named
     // as the mistake, rather than as a bad `query`.
