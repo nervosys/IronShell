@@ -89,6 +89,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - An explicit did-you-mean mapping is the whole suggestion: `redo()` suggests `session_redo` alone.
 - `file_write` and `file_append` refuse a Record, a number, a Bool, or an Array holding one, with E_BAD_ARG naming the type and a conversion (`to_json(value)`, `str(value)`), instead of writing Rust debug text such as `Record({...})`.
 - In a file whose line breaks are all CRLF, `file_replace` and `file_patch` read the LF in a find text as CRLF, so a multi-line find matches, and write the replacement's line breaks as CRLF.
+- `to_json`, `json_stringify`, `save_json` and `to_csv` refuse a NaN or an infinity with E_BAD_VALUE and the path to it; they wrote 0. CSV reads the words NaN and inf as text.
+- `from_json`, `json_parse`, `open` and `from_yaml` refuse an integer past the 64-bit range with E_BAD_VALUE and its path, with a hint to quote it; they read it as a lossy Float. A CSV column of such integers stays text.
+- `from_csv`, `open`, `sql` and `db_csv_query` refuse a CSV header that names a column twice, naming its columns; the later column used to replace the earlier one.
+- `regex_replace` refuses a replacement that names a group the pattern does not have, listing the groups it has (`$1x` hints `${1}x`); it inserted nothing.
 
 ### Added
 
@@ -213,6 +217,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - A directory given to a file builtin is E_BAD_ARG `is a directory, not a file`, not an operating-system denial.
 - `file_patch` given a unified diff, and `file_edit` given a line past the end, say what they take (`[{find, replace}]` records; the file's line count) instead of `takes String`.
 - An agent call missing its subject says that `subject` (or `input`) is the value the builtin works on and lists the valid keys.
+- `to_yaml` writes an empty Record or Array as `{}` or `[]`, not Rust debug text; keeps a whole Float as `1.0`; and quotes yes, no, on, off, y and n so YAML 1.1 readers keep them as text. `from_yaml` reads `.inf` and `.nan` as Floats, decodes double-quoted escapes (`é`, `\U0001F600`, `\n`), and drops a comment after a quoted scalar.
+- A JSON lines error gives the file's line and the column, in `open` and in `sql`; a CSV error under CRLF gives the right line and says how many fields the row has.
+- A `from_json` parse error is not retryable; `from_toml` names a 64-bit overflow as one and gives a reason for a value missing after `=`.
 
 
 ## [14.0.1] - 2026-11-08
