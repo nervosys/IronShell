@@ -153,3 +153,19 @@ fn tee_names_its_one_option_when_given_another() {
     assert!(!dir.join("t.txt").exists(), "nothing is written");
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn redo_and_get_are_suggested_as_the_builtins_an_agent_means() {
+    assert_eq!(
+        iron_shell::builtins::did_you_mean("redo")
+            .first()
+            .map(String::as_str),
+        Some("session_redo")
+    );
+    assert_eq!(
+        iron_shell::builtins::did_you_mean("get")
+            .first()
+            .map(String::as_str),
+        Some("http_get")
+    );
+}

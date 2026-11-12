@@ -3950,6 +3950,12 @@ fn mapped_spelling(name: &str) -> Vec<String> {
         // No repeat builtin. For one character, pad_left repeats it:
         // "-" | pad_left(10, "-") is ten dashes.
         "repeat" | "str_repeat" => vec!["pad_left".to_string()],
+        // Redo re-applies the step undo took back: session_redo. Without this a
+        // nearby name (sed) was offered instead.
+        "redo" => vec!["session_redo".to_string()],
+        // A bare `get` is an HTTP GET: http_get, which http.get calls. Its
+        // nearest name is wget, a program, not a builtin.
+        "get" => vec!["http_get".to_string()],
         _ => Vec::new(),
     }
 }
