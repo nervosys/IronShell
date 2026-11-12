@@ -653,14 +653,22 @@ pub fn read_jail_dispatch(builtin: &str, args: &[crate::value::Value], piped: bo
         return Ok(());
     }
     let judge = |s: &str| -> Result<()> {
-        // No file is named by these: the builtin refuses a NUL itself, and a
-        // URL (`rsync://host/mod`, `https://...`) is not a local path.
-        if s.is_empty() || s.len() > 4096 || s.contains('\n') || s.contains('\0') || is_url(s) {
+        // No file is named by these: the builtin refuses a NUL itself.
+        if s.is_empty() || s.len() > 4096 || s.contains('\n') || s.contains('\0') {
+            return Ok(());
+        }
+        // A builtin that takes a remote location is not reading a local file
+        // when given one (`rsync://host/mod`, `host:/dir`). Only those: to any
+        // other builtin, `http://x/../../etc` is a relative path on Unix.
+        if TAKES_REMOTE.contains(&builtin) && (is_url(s) || is_remote_spec(s)) {
             return Ok(());
         }
         // A glob reads the files under its literal directory, so that
         // directory is what is judged: `../*.rs` is outside, `src/*.rs` is not.
-        let s = glob_base(s);
+        // A name that exists is judged whole, even with `[` or `?` in it. A
+        // `\\host\share` name is not probed: that opens an SMB connection.
+        let exists = !crate::safety::names_a_remote_share(s) && Path::new(s).exists();
+        let s = if exists { s } else { glob_base(s) };
         let resolved = crate::safety::resolve_path_str(s);
         // The shell's own audit log may be verified wherever the operator put it.
         if builtin == "audit_verify" && is_the_audit_log(&resolved) {
@@ -711,6 +719,25 @@ const NOT_A_PATH: &[(&str, &str)] = &[
     ("test_run_file", "file"),
 ];
 
+/// Builtins whose path parameters also take a remote location.
+const TAKES_REMOTE: &[&str] = &[
+    "rsync_sync",
+    "scp_download",
+    "scp_upload",
+    "wget_download",
+    "git_remote",
+    "http_get",
+];
+
+/// Whether `s` is an scp-style remote (`host:path`, `user@host:path`): a colon
+/// after two or more characters with no separator before it. `C:` is a drive.
+fn is_remote_spec(s: &str) -> bool {
+    match s.find(':') {
+        Some(i) if i >= 2 => !s[..i].contains(['/', '\\']),
+        _ => false,
+    }
+}
+
 /// Whether `s` is a URL (`scheme://...`), not a local path.
 fn is_url(s: &str) -> bool {
     match s.find("://") {
@@ -724,7 +751,12 @@ fn is_url(s: &str) -> bool {
 /// The literal directory a glob reads under: the part before its first
 /// wildcard, up to the last separator. A string without a wildcard is itself.
 fn glob_base(s: &str) -> &str {
-    let Some(w) = s.find(['*', '?', '[']) else {
+    // The `?` of a Windows verbatim or device prefix is not a wildcard.
+    let body = ["\\\\?\\", "\\\\.\\", "//?/", "//./"]
+        .iter()
+        .find(|p| s.starts_with(**p))
+        .map_or(0, |p| p.len());
+    let Some(w) = s[body..].find(['*', '?', '[']).map(|w| w + body) else {
         return s;
     };
     match s[..w].rfind(['/', '\\']) {
@@ -2059,6 +2091,22 @@ pub fn sanitize_tui_output(text: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn glob_base_and_remote_specs() {
+        assert_eq!(glob_base("../outside/*.txt"), "../outside");
+        assert_eq!(glob_base("*.rs"), ".");
+        assert_eq!(glob_base("/*.rs"), "/");
+        assert_eq!(glob_base("src/a.rs"), "src/a.rs");
+        assert_eq!(glob_base(r"\\?\C:\ws\new.txt"), r"\\?\C:\ws\new.txt");
+        assert_eq!(glob_base(r"\\?\C:\ws\*.txt"), r"\\?\C:\ws");
+        assert!(is_remote_spec("host:/srv"));
+        assert!(is_remote_spec("user@-oProxyCommand=x:/tmp"));
+        assert!(!is_remote_spec("C:/tmp"));
+        assert!(!is_remote_spec("dir/a:b"));
+        assert!(is_url("rsync://example.invalid/mod"));
+        assert!(!is_url("a/b://c"));
+    }
 
     #[test]
     fn test_path_validation_basic() {
