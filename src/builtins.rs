@@ -10353,7 +10353,7 @@ fn bi_from_json(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
             && std::path::Path::new(path).is_file()
         {
             return anyhow::Error::new(crate::safety::SafetyError {
-                code: crate::safety::ErrorCode::BadArg,
+                code: crate::safety::ErrorCode::BadValue,
                 message: format!("from_json: {path:?} is a file name, not JSON text"),
                 builtin: "from_json".to_string(),
                 hint: format!(
@@ -10366,8 +10366,18 @@ fn bi_from_json(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
                 extra: serde_json::Map::new(),
             });
         }
-        crate::safety::bad_arg("from_json", "valid JSON", &e.to_string())
+        // The text is wrong, not the call: a corrected call with the same text
+        // fails again, so this is E_BAD_ARG and not retryable.
+        let (detail, hint) = json_failure(&e);
+        crate::safety::bad_value_in(
+            "from_json",
+            format!("from_json: the text is not JSON: {detail}"),
+            &hint,
+        )
     })?;
+    if let Some(refusal) = wide_integer_refusal("from_json", &json_str) {
+        return Err(refusal);
+    }
     Ok(json_to_value(parsed))
 }
 
@@ -10383,7 +10393,7 @@ fn bi_to_json(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
         },
     };
 
-    let json_val = value_to_json(value);
+    let json_val = value_to_json_strict("to_json", &value, "value")?;
     // An Int is the indent in spaces, 0 to 8; 0 is compact.
     if let Some(Value::Int(indent)) = flags.first() {
         return Ok(Value::Str(json_indented("to_json", &json_val, *indent)?));
@@ -10472,6 +10482,166 @@ fn value_to_json(value: Value) -> serde_json::Value {
     }
 }
 
+/// `value_to_json` for a user-facing JSON write (to_json, json_stringify,
+/// save_json). A float JSON cannot hold, NaN or an infinity, is refused with
+/// the path to it, where `value_to_json` writes 0. `path` starts at "value".
+/// `value_to_json` itself stays for internal encodings.
+fn value_to_json_strict(builtin: &str, value: &Value, path: &str) -> Result<serde_json::Value> {
+    Ok(match value {
+        Value::Float(f) if !f.is_finite() => {
+            let what = if f.is_nan() {
+                "NaN"
+            } else if *f > 0.0 {
+                "infinity"
+            } else {
+                "negative infinity"
+            };
+            return Err(crate::safety::value_not_representable(
+                builtin,
+                format!("{builtin}: {path} is {what}, which JSON cannot hold"),
+                "JSON has no NaN or infinity: replace it with a number or null, or keep it as text",
+            ));
+        }
+        Value::Array(items) => serde_json::Value::Array(
+            items
+                .iter()
+                .enumerate()
+                .map(|(i, item)| value_to_json_strict(builtin, item, &format!("{path}[{i}]")))
+                .collect::<Result<Vec<_>>>()?,
+        ),
+        Value::Record(map) => {
+            let mut obj = serde_json::Map::new();
+            for (k, v) in map {
+                obj.insert(
+                    k.clone(),
+                    value_to_json_strict(builtin, v, &path_key(path, k))?,
+                );
+            }
+            serde_json::Value::Object(obj)
+        }
+        other => value_to_json(other.clone()),
+    })
+}
+
+/// Whether `token` is an integer literal (an optional sign, then digits only)
+/// that does not fit in a 64-bit Int. Such a number has no Int, and as a Float
+/// it would lose its digits.
+pub(crate) fn is_wide_integer(token: &str) -> bool {
+    let digits = token.strip_prefix(['-', '+']).unwrap_or(token);
+    !digits.is_empty()
+        && digits.bytes().all(|b| b.is_ascii_digit())
+        && token.parse::<i64>().is_err()
+}
+
+/// One open container while `wide_json_integer` reads JSON text.
+struct JsonFrame {
+    object: bool,
+    /// The index of the element being read, for an Array.
+    index: usize,
+    /// The key of the member being read, for an object.
+    key: String,
+    /// Whether the next string in an object is a key.
+    expect_key: bool,
+}
+
+/// The path a JSON scan is at, as a refusal names it: `value[0].id`.
+fn json_path(stack: &[JsonFrame]) -> String {
+    stack.iter().fold(String::from("value"), |path, frame| {
+        if frame.object {
+            path_key(&path, &frame.key)
+        } else {
+            format!("{path}[{}]", frame.index)
+        }
+    })
+}
+
+/// The first integer in JSON text that does not fit in a 64-bit Int, with its
+/// path and its literal. serde_json reads such a number as a Float, which keeps
+/// about 17 digits, so the text is scanned for it. Only text serde_json has
+/// already accepted is scanned.
+fn wide_json_integer(text: &str) -> Option<(String, String)> {
+    let bytes = text.as_bytes();
+    let mut stack: Vec<JsonFrame> = Vec::new();
+    let mut i = 0;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'"' => {
+                let start = i;
+                i += 1;
+                while i < bytes.len() && bytes[i] != b'"' {
+                    i += if bytes[i] == b'\\' { 2 } else { 1 };
+                }
+                // The quotes and backslashes are ASCII, so these are char boundaries.
+                let end = (i + 1).min(bytes.len());
+                if let Some(frame) = stack.last_mut() {
+                    if frame.object && frame.expect_key {
+                        frame.key =
+                            serde_json::from_str::<String>(&text[start..end]).unwrap_or_default();
+                        frame.expect_key = false;
+                    }
+                }
+                i = end;
+            }
+            b'{' | b'[' => {
+                let object = bytes[i] == b'{';
+                stack.push(JsonFrame {
+                    object,
+                    index: 0,
+                    key: String::new(),
+                    expect_key: object,
+                });
+                i += 1;
+            }
+            b'}' | b']' => {
+                stack.pop();
+                i += 1;
+            }
+            b',' => {
+                if let Some(frame) = stack.last_mut() {
+                    if frame.object {
+                        frame.expect_key = true;
+                    } else {
+                        frame.index += 1;
+                    }
+                }
+                i += 1;
+            }
+            b':' => {
+                if let Some(frame) = stack.last_mut() {
+                    frame.expect_key = false;
+                }
+                i += 1;
+            }
+            b'-' | b'0'..=b'9' => {
+                let start = i;
+                while i < bytes.len()
+                    && matches!(bytes[i], b'0'..=b'9' | b'-' | b'+' | b'.' | b'e' | b'E')
+                {
+                    i += 1;
+                }
+                let token = &text[start..i];
+                if is_wide_integer(token) {
+                    return Some((json_path(&stack), token.to_string()));
+                }
+            }
+            _ => i += 1,
+        }
+    }
+    None
+}
+
+/// The refusal for an integer in JSON text that does not fit in a 64-bit Int,
+/// or None when every integer fits. Call it only on text that parsed as JSON.
+/// `builtin` names the reader, which is what the error says it came from.
+pub(crate) fn wide_integer_refusal(builtin: &str, text: &str) -> Option<anyhow::Error> {
+    let (path, literal) = wide_json_integer(text)?;
+    Some(crate::safety::value_not_representable(
+        builtin,
+        format!("{builtin}: integer overflow at {path}: {literal} does not fit in a 64-bit Int"),
+        &format!("quote it as a string to keep the digits, such as \"{literal}\""),
+    ))
+}
+
 /// from-csv: Parse CSV into structured data
 /// The refusal for a conversion called with no value: it takes its subject
 /// piped in or as the first argument, and the hint shows both forms.
@@ -10528,7 +10698,13 @@ fn is_number(field: &str) -> bool {
     if unsigned.len() > 1 && unsigned[0] == b'0' && unsigned[1].is_ascii_digit() {
         return false;
     }
-    field.parse::<i64>().is_ok() || field.parse::<f64>().is_ok()
+    // A word for a non-finite float ("NaN", "inf", "-Infinity") is a label in
+    // CSV, not a number: JSON cannot hold it, so the column is text.
+    // An integer past the 64-bit range would become a Float and lose its digits.
+    if is_wide_integer(field) {
+        return false;
+    }
+    field.parse::<i64>().is_ok() || matches!(field.parse::<f64>(), Ok(f) if f.is_finite())
 }
 
 /// One numeric cell as its column's type: an Int when every non-empty cell of
@@ -10559,7 +10735,8 @@ fn csv_bool(field: &str) -> Option<bool> {
 /// The rows of a parsed CSV table, each column typed as a whole.
 ///
 /// A column is numeric only when every non-empty cell is a number (see
-/// `is_number`). Its cells are then Int when all of them are integers, else
+/// `is_number`): a cell that is an integer past the 64-bit range makes its
+/// column text. Its cells are then Int when all of them are integers, else
 /// Float, and an empty cell is Null, so a sum or a count over it does not meet a
 /// blank String. Every other column is all Strings, a blank being `""`: one
 /// cell such as "007" or "NA" makes the whole column text. A column with no
@@ -10848,7 +11025,14 @@ fn bi_from_yaml(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
             None => return Err(crate::safety::arg_err("from-yaml: requires YAML input")),
         },
     };
-    crate::yaml::parse(&yaml_str).map_err(|e| crate::safety::arg_err(format!("from-yaml: {e}")))
+    crate::yaml::parse(&yaml_str).map_err(|e| {
+        // A refusal the parser coded (an integer past 64 bits) keeps its code.
+        if e.downcast_ref::<crate::safety::SafetyError>().is_some() {
+            e
+        } else {
+            crate::safety::arg_err(format!("from-yaml: {e}"))
+        }
+    })
 }
 
 /// to-yaml: Convert structured data to YAML.
@@ -15887,11 +16071,15 @@ fn bi_from_toml(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
         return Err(arity_error(B, "the TOML text alone", rest.len()));
     }
     let parsed: toml::Value = toml::from_str(&text).map_err(|e| {
-        crate::safety::value_not_representable(
-            B,
-            format!("{B}: the text is not TOML: {}", e.message()),
-            &toml_failure_hint(&text, &e),
-        )
+        // An integer past 64 bits is valid TOML that this reader cannot hold, so
+        // the refusal says so instead of calling the text not TOML.
+        let message = match oversized_toml_integer(&text) {
+            Some((line, literal)) if e.message().contains("too large") => format!(
+                "{B}: the integer {literal} at line {line} is out of the 64-bit Int range (the text is valid TOML)"
+            ),
+            _ => format!("{B}: the text is not TOML: {}", toml_reason(&text, &e)),
+        };
+        crate::safety::value_not_representable(B, message, &toml_failure_hint(&text, &e))
     })?;
     Ok(crate::plugins::toml_to_value(parsed))
 }
@@ -16341,6 +16529,9 @@ fn bi_json_parse(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
         )
     })?;
 
+    if let Some(refusal) = wide_integer_refusal("json_parse", &json_str) {
+        return Err(refusal);
+    }
     Ok(json_to_value(json_val))
 }
 
@@ -16362,7 +16553,7 @@ fn bi_json_stringify(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
         },
     };
 
-    let json_val = value_to_json(val);
+    let json_val = value_to_json_strict("json_stringify", &val, "value")?;
     let json_str = match rest.first() {
         Some(Value::Int(indent)) => json_indented("json_stringify", &json_val, *indent)?,
         _ => serde_json::to_string(&json_val).context("Failed to stringify to JSON")?,
@@ -25370,8 +25561,8 @@ fn bi_save_json(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
     // call nothing checked the path, so an agent could write any file.
     let path = guard_local_write("save_json", &path)?;
 
-    // Convert Value to JSON using existing function
-    let json = value_to_json(value);
+    // Convert Value to JSON: a NaN or an infinity is refused before the write.
+    let json = value_to_json_strict("save_json", &value, "value")?;
     let json_str = serde_json::to_string_pretty(&json).map_err(|e| {
         crate::safety::arg_err(format!(
             "save_json: the value cannot be written as JSON: {e}"
@@ -30464,6 +30655,30 @@ fn oversized_toml_integer(text: &str) -> Option<(usize, String)> {
     None
 }
 
+/// Why a TOML text will not read, as a refusal gives it. For an integer past 64
+/// bits the parser says only "number too large to fit in target type", which
+/// names no value, so the literal and its line are given instead. Some errors
+/// come with no message (`a = ` is one): the reason for those is named here.
+fn toml_reason(text: &str, err: &toml::de::Error) -> String {
+    if err.message().contains("too large") {
+        if let Some((line, literal)) = oversized_toml_integer(text) {
+            return format!("the integer {literal} at line {line} is out of the 64-bit Int range");
+        }
+    }
+    let message = err.message().trim();
+    if !message.is_empty() {
+        return message.to_string();
+    }
+    match text
+        .lines()
+        .enumerate()
+        .find(|(_, line)| line.trim_end().ends_with('='))
+    {
+        Some((index, _)) => format!("a value is missing after '=' on line {}", index + 1),
+        None => "the text ends before a complete TOML value".to_string(),
+    }
+}
+
 /// The hint for a TOML text that will not read. An integer past the 64-bit
 /// range is named as such, since the parser's own message does not say which
 /// value it is; otherwise the hint gives the line and column of the error.
@@ -30478,10 +30693,10 @@ fn toml_failure_hint(text: &str, err: &toml::de::Error) -> String {
             let (line, column) = line_column(text, span.start);
             format!(
                 "fix the TOML at line {line}, column {column}: {}",
-                err.message()
+                toml_reason(text, err)
             )
         }
-        None => format!("fix the TOML: {}", err.message()),
+        None => format!("fix the TOML: {}", toml_reason(text, err)),
     }
 }
 
@@ -30559,6 +30774,9 @@ fn bi_open(args: Vec<Value>, _input: Option<Value>) -> Result<Value> {
                 let (detail, hint) = json_failure(&e);
                 unparsed_data(&path, "JSON", &detail, hint)
             })?;
+            if let Some(refusal) = wide_integer_refusal("open", &text) {
+                return Err(refusal);
+            }
             Ok(Value::from_json(&j))
         }
         "jsonl" | "ndjson" => {
@@ -30572,13 +30790,21 @@ fn bi_open(args: Vec<Value>, _input: Option<Value>) -> Result<Value> {
                         format!("fix the line of JSON that fails: {}", json_message(&e)),
                     )
                 })?;
+                if let Some(refusal) = wide_integer_refusal("open", line) {
+                    return Err(refusal);
+                }
                 rows.push(Value::from_json(&j));
             }
             Ok(Value::Array(rows))
         }
         "toml" => {
             let t: toml::Value = toml::from_str(&text).map_err(|e| {
-                unparsed_data(&path, "TOML", e.message(), toml_failure_hint(&text, &e))
+                unparsed_data(
+                    &path,
+                    "TOML",
+                    &toml_reason(&text, &e),
+                    toml_failure_hint(&text, &e),
+                )
             })?;
             Ok(crate::plugins::toml_to_value(t))
         }

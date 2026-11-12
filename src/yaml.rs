@@ -328,7 +328,10 @@ fn parse_scalar(raw: &str, number: usize) -> Result<Value> {
     // rather than guessed at.
     if s.starts_with('[') || s.starts_with('{') {
         return match serde_json::from_str::<serde_json::Value>(s) {
-            Ok(j) => Ok(json_to_value(j)),
+            Ok(j) => match crate::builtins::wide_integer_refusal("from_yaml", s) {
+                Some(refusal) => Err(refusal),
+                None => Ok(json_to_value(j)),
+            },
             Err(e) => Err(anyhow!(
                 "line {number}: flow collection {s:?} is not valid JSON ({e}); \
                  IronShell's YAML subset supports JSON-compatible flow style only"
@@ -342,6 +345,14 @@ fn parse_scalar(raw: &str, number: usize) -> Result<Value> {
         None => s,
     };
 
+    // An integer past the 64-bit range would read as a Float and lose its digits.
+    if crate::builtins::is_wide_integer(s) {
+        return Err(crate::safety::value_not_representable(
+            "from_yaml",
+            format!("from_yaml: line {number}: integer overflow at {s}: it does not fit in a 64-bit Int"),
+            &format!("quote it as a string to keep the digits, such as \"{s}\""),
+        ));
+    }
     Ok(plain_scalar(s))
 }
 
