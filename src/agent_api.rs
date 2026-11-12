@@ -1595,9 +1595,24 @@ pub(crate) fn named_args_to_positional(
         .find(|((_, required), slot)| *required && slot.is_none())
         .map(|(position, _)| position)
     {
+        // The subject's slot is keyed `subject` (or `input`), which is the key
+        // an args object takes it under; the name is not a parameter's. When the
+        // caller has written neither that key nor the first declared parameter,
+        // name that parameter instead: a subject stands for the first argument,
+        // so `sql_value()` says `source_or_query`. Only the name changes.
+        let shown = match signature.and_then(|s| s.params.first()) {
+            Some(first)
+                if name.as_str() == "subject"
+                    && first.required
+                    && !obj.contains_key(first.name) =>
+            {
+                first.name
+            }
+            _ => name.as_str(),
+        };
         return Err(anyhow!(
             "missing required argument '{}' for '{}'",
-            name,
+            shown,
             builtin
         ));
     }
