@@ -50473,6 +50473,25 @@ fn file_line_break(text: &str) -> &'static str {
     }
 }
 
+/// `text` with each bare LF written as `eol`. A LF that already follows a CR is
+/// left alone, so a CRLF in `text` is not doubled. With `eol` = LF it is `text`.
+fn with_file_line_breaks(text: &str, eol: &str) -> String {
+    if eol == "\n" || !text.contains('\n') {
+        return text.to_string();
+    }
+    let mut out = String::with_capacity(text.len() + eol.len() * 4);
+    let mut previous = '\0';
+    for c in text.chars() {
+        if c == '\n' && previous != '\r' {
+            out.push_str(eol);
+        } else {
+            out.push(c);
+        }
+        previous = c;
+    }
+    out
+}
+
 /// A line of a file without its line break (LF or CRLF), read as `str::lines`
 /// reads it. The segment is one `split_inclusive('\n')` piece of the file.
 fn file_line_text(segment: &str) -> &str {
@@ -50581,6 +50600,9 @@ fn bi_file_patch(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
 
     // Read current content
     let mut content = read_text_capped(builtin, &path)?;
+    // In a CRLF file the replace text is written with CRLF line breaks, so no
+    // bare LF is written into it.
+    let eol = file_line_break(&content);
 
     let mut applied = Vec::new();
     let mut failed = Vec::new();
@@ -50625,9 +50647,10 @@ fn bi_file_patch(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
             }
         };
 
+        let replacement = with_file_line_breaks(&replace_str, eol);
         if content.contains(&find_str) {
             let count = content.matches(&find_str).count();
-            content = content.replace(&find_str, &replace_str);
+            content = content.replace(&find_str, &replacement);
 
             let mut patch_result = BTreeMap::new();
             patch_result.insert("find".to_string(), Value::Str(find_str));

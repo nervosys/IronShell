@@ -162,3 +162,98 @@ fn insert_into_a_mixed_file_keeps_its_bytes_and_writes_lf() {
 
     assert_eq!(s.read("m.txt"), "z\na\r\nb\n");
 }
+
+// ---- file_replace and file_patch write CRLF into a CRLF file ----
+
+fn replace(s: &Session, file: &str, old: &str, new: &str) -> Value {
+    call(
+        "file_replace",
+        vec![
+            Value::Str(s.path(file)),
+            Value::Str(old.into()),
+            Value::Str(new.into()),
+        ],
+    )
+    .expect("file_replace")
+}
+
+fn patch(s: &Session, file: &str, find: &str, replacement: &str) -> Value {
+    let mut m = BTreeMap::new();
+    m.insert("find".to_string(), Value::Str(find.into()));
+    m.insert("replace".to_string(), Value::Str(replacement.into()));
+    call(
+        "file_patch",
+        vec![
+            Value::Str(s.path(file)),
+            Value::Array(vec![Value::Record(m)]),
+        ],
+    )
+    .expect("file_patch")
+}
+
+fn field(v: &Value, key: &str) -> Value {
+    match v {
+        Value::Record(m) => m.get(key).cloned().unwrap_or(Value::Null),
+        other => panic!("expected a record, got {other:?}"),
+    }
+}
+
+#[test]
+fn replace_with_a_multi_line_text_in_a_crlf_file_writes_crlf() {
+    let _g = LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let s = Session::new("rep_multi");
+    s.seed("c.txt", "one\r\ntwo\r\n");
+
+    let r = replace(&s, "c.txt", "two", "x\ny");
+
+    assert_eq!(s.read("c.txt"), "one\r\nx\r\ny\r\n");
+    assert_eq!(field(&r, "success"), Value::Bool(true));
+}
+
+#[test]
+fn patch_with_a_multi_line_text_in_a_crlf_file_writes_crlf() {
+    let _g = LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let s = Session::new("pat_multi");
+    s.seed("p.txt", "one\r\ntwo\r\n");
+
+    let r = patch(&s, "p.txt", "two", "2\nzwei");
+
+    assert_eq!(s.read("p.txt"), "one\r\n2\r\nzwei\r\n");
+    assert_eq!(field(&r, "success"), Value::Bool(true));
+}
+
+#[test]
+fn replace_and_patch_in_an_lf_file_write_lf() {
+    let _g = LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let s = Session::new("lf_repl");
+    s.seed("r.txt", "one\ntwo\n");
+    s.seed("p.txt", "one\ntwo\n");
+
+    replace(&s, "r.txt", "two", "x\ny");
+    patch(&s, "p.txt", "two", "2\nzwei");
+
+    assert_eq!(s.read("r.txt"), "one\nx\ny\n");
+    assert_eq!(s.read("p.txt"), "one\n2\nzwei\n");
+}
+
+#[test]
+fn replace_in_a_mixed_file_writes_the_text_as_given() {
+    let _g = LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let s = Session::new("rep_mixed");
+    s.seed("m.txt", "one\r\ntwo\n");
+
+    replace(&s, "m.txt", "two", "x\ny");
+
+    assert_eq!(s.read("m.txt"), "one\r\nx\ny\n");
+}
+
+#[test]
+fn a_replacement_that_already_has_crlf_is_not_doubled() {
+    let _g = LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let s = Session::new("rep_crlf_given");
+    s.seed("c.txt", "one\r\ntwo\r\n");
+
+    replace(&s, "c.txt", "two", "x\r\ny");
+
+    assert_eq!(s.read("c.txt"), "one\r\nx\r\ny\r\n");
+}
