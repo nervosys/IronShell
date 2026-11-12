@@ -105,3 +105,32 @@ fn file_write_into_a_missing_folder_says_to_create_the_folder() {
     assert!(!dir.join("nodir").exists(), "nothing is created");
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn file_append_creates_a_missing_file_and_undo_removes_it() {
+    let dir = scratch("append_creates");
+    let (_, err, code) = run_script(&dir, "file_append(\"log.txt\", \"one\")\n");
+    assert_eq!(code, 0, "stderr: {err}");
+    assert_eq!(
+        std::fs::read_to_string(dir.join("log.txt")).expect("created"),
+        "one"
+    );
+    let (_, err, code) = run_script(&dir, "file_append(\"new.txt\", \"x\")\nundo()\n");
+    assert_eq!(code, 0, "stderr: {err}");
+    assert!(
+        !dir.join("new.txt").exists(),
+        "undo removes the file the append created"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn file_append_into_a_missing_folder_names_the_folder() {
+    let dir = scratch("append_missing_folder");
+    let (out, err, code) = run_script(&dir, "file_append(\"nodir/log.txt\", \"x\")\n");
+    let text = format!("{out}{err}");
+    assert_ne!(code, 0, "{text}");
+    assert!(text.contains("does not exist"), "{text}");
+    assert!(!dir.join("nodir").exists(), "nothing is created");
+    let _ = std::fs::remove_dir_all(&dir);
+}
