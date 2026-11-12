@@ -24,6 +24,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `ish --explain` judges the POSIX subset's file operands (`rm`, `tee`, `mkdir`, `touch`, `cp`, `mv`) against the workspace jail, so a plan that would be refused is reported as denied rather than allowed.
 - An audit chain key that is set but too short is named once on stderr and in `audit_verify`'s note, instead of being dropped silently. A hash mismatch in an unkeyed chain says it was edited or corrupted, not tampered with: an unkeyed chain cannot tell which.
 - rusqlite 0.41 (bundled SQLite via libsqlite3-sys 0.39) for RUSTSEC-2026-0459, and openssl 0.10.82 for RUSTSEC-2026-0473 to -0479. The minimum supported Rust version is now 1.89, which rusqlite 0.41 requires.
+- The agent-mode read jail runs at the dispatcher: every argument of a parameter whose declared name says it is a path is judged before the builtin runs, existing or not. A sweep of every reading builtin had found 52 builtin/parameter pairs that answered for a file outside the workspace (the `db_sqlite_*` readers, `shellcheck`, `audit_verify`, `fs_lstat`, `fs_realpath`, `fs_tree`, `acl_get`, `file_type` and others), and many that refused an existing outside file answered E_NOT_FOUND for a missing one, which told the agent what exists there.
+- `cp`/`file_copy` judge their source by the read jail: copying an outside file into the workspace used to give the agent a copy of a file `cat` refuses to read. `sql` and `sql_value` judge a file source the same way.
+- `--explain` agrees with the run: a reading, writing or destructive call whose literal path is outside the workspace is `deny`, and in `-b` so are a `<` redirection's file and `cd`'s directory.
 
 ### Changed
 
@@ -77,6 +80,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `to_csv` without a columns Array writes the sorted union of every record's keys, not only the first record's.
 - `json_stringify` with piped input takes an indent as its first argument.
 - A relative path under the jail is joined with the platform's separator throughout, so the journal and audit log record `proj\src\a.py` on Windows, not `proj\src/a.py`.
+- `ish --workspace DIR` run from outside DIR starts in DIR (the script file made absolute first), so a read's and a write's relative paths name the same file. Run from inside it, nothing changes.
+- `file_append` creates a missing file in an existing folder, as `>>` does; a missing folder is named, with the `mkdir` to create it.
+- `sql(query)` and `sql_value(query)` with no source run against an empty in-memory database: `sql("select 1 as x")` is `[{x: 1}]`.
+- Date units are case-insensitive and take the singular (`day`, `MONTHS`).
+- CSV columns of `true`/`false` in any case are Bool; `to_csv` writes a whole Float as `1.0`, so it reads back as a Float.
 
 ### Added
 
@@ -125,6 +133,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `to_json(v, indent)` and `json_stringify(v, indent)` take an indent of 0 to 8; `json_set(path, key_path, value)` edits one value in a JSON file in place, keeping its key order and indentation.
 - `sql` and `sql_value` take an Array of records as the first argument, as piped rows.
 - String literals accept `\0`, `\'` and `\xHH` up to `\x7F`.
+- `ish -b` runs `${name%pat}`, `${name%%pat}`, `${name#pat}` and `${name##pat}`, and sed's `\U`, `\L`, `\u`, `\l` and `\E` in a replacement, as GNU sed does.
+- `journal()` rows carry `id`, the value `undo({id})` takes.
 
 ### Fixed
 
@@ -189,6 +199,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `csv_columns("name.csv")` for a file that does not exist is E_NOT_FOUND, not CSV text with one column.
 - `sql` names a missing source and a non-Array params argument; its params doc lists SQLite's placeholder forms and that a String binds as text.
 - `delete`, `remove`, `unlink` and similar spellings suggest `rm`; `path.*` suggests the path builtins, not `math`.
+- `ish -b`: a construct outside the subset inside `$(...)` or backquotes (such as `$((1+1))`) is refused before anything runs, at its own line and column; it used to run with an empty result and exit 0. A function definition is placed at column 1, an array assignment is named as one, and an arithmetic expansion inside `${x:-...}` at its own `$((`. A sed command outside the subset is named as that, not as a missing tool.
+- `json_set` edits are journaled, so `undo()` reverses them; an index into a missing array is refused instead of creating an object.
+- `audit_verify` of a missing log is E_NOT_FOUND naming the path, with a nonzero exit.
+- Clearer errors: grep's options and invalid patterns, sql's params and a JSON file holding a Record, `to_csv`'s input, `tee`'s options, `csv_columns` of a directory; `redo` suggests `session_redo` and `get` suggests `http_get`; the MCP `ironshell` tool's description matches its schema.
 
 
 ## [14.0.1] - 2026-11-08
