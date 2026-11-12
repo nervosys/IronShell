@@ -50497,9 +50497,13 @@ fn bi_file_patch(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
             Value::Array(arr) => arr.clone(),
             Value::Record(r) => vec![Value::Record(r.clone())],
             _ => {
-                return Err(crate::safety::arg_err(format!(
-                    "{builtin}: patches must be an array of records"
-                )))
+                return Err(crate::safety::bad_arg_in(
+                    builtin,
+                    format!("{builtin}: patches must be an array of records"),
+                    &format!(
+                        "{builtin} takes [{{find, replace}}] records and does not read a unified diff; each record's find text is replaced with its replace text, in order"
+                    ),
+                ))
             }
         }
     } else {
@@ -51271,10 +51275,16 @@ fn bi_file_edit(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
             result.insert("lines_inserted".into(), Value::Int(inserted as i64));
         } else {
             if edit.start >= lines.len() {
-                return Err(crate::safety::arg_err(format!(
-                    "file_edit edit {}: start line out of range",
-                    edit.index
-                )));
+                let hint = if count == 0 {
+                    format!("{path} is empty, so it has no line to edit; use file_insert or file_write to add lines")
+                } else {
+                    format!("{path} has {count} lines; line numbers count from 1 up to {count}")
+                };
+                return Err(crate::safety::bad_arg_in(
+                    "file_edit",
+                    format!("file_edit edit {}: start line out of range", edit.index),
+                    &hint,
+                ));
             }
             let end = edit.end.min(lines.len() - 1);
             result.insert("start_line".into(), Value::Int((edit.start + 1) as i64));

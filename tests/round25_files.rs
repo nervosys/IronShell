@@ -1,5 +1,11 @@
-//! Round 25: `file_write` and `file_append` refuse what they cannot write as
-//! text, instead of writing Rust Debug text.
+//! Round 25: the file builtins say what they refused.
+//!
+//! - `file_write` and `file_append` refuse what they cannot write as text,
+//!   instead of writing Rust Debug text.
+//! - A directory given to an edit builtin is E_BAD_ARG "is a directory", not
+//!   E_OS_DENIED, which Windows reports for a directory opened as a file.
+//! - `file_patch` given a unified diff, and `file_edit` given an out-of-range
+//!   line, say what they take, not the generic "takes String".
 //!
 //! `file_write("w.txt", {a: 1})` wrote `Record({"a": Int(1)})` and reported
 //! success. A String is written as is and an Array of Strings is joined; any
@@ -220,4 +226,64 @@ fn file_replace_on_a_directory_is_a_bad_value_not_a_permission_problem() {
             se.message
         );
     }
+}
+
+#[test]
+fn file_patch_given_a_unified_diff_names_the_record_form() {
+    let _guard = LOCK.lock().unwrap_or_else(|p| p.into_inner());
+    let s = Session::new("diff");
+    let target = s.path("p.txt");
+    call(
+        "file_write",
+        vec![Value::Str(target.clone()), Value::Str("a\n".into())],
+    )
+    .expect("setup write");
+    let diff = "--- a/p.txt\n+++ b/p.txt\n@@ -1 +1 @@\n-a\n+b\n";
+    let se = refusal(
+        "file_patch",
+        vec![Value::Str(target.clone()), Value::Str(diff.into())],
+    );
+    assert_eq!(se.code.as_str(), "E_BAD_ARG");
+    assert!(
+        se.message.contains("patches must be an array of records"),
+        "{}",
+        se.message
+    );
+    assert!(se.hint.contains("[{find, replace}]"), "{}", se.hint);
+    assert!(se.hint.contains("unified diff"), "{}", se.hint);
+    assert!(!se.hint.contains("takes String"), "{}", se.hint);
+    assert_eq!(std::fs::read_to_string(&target).unwrap(), "a\n");
+}
+
+#[test]
+fn file_edit_out_of_range_names_the_line_count() {
+    let _guard = LOCK.lock().unwrap_or_else(|p| p.into_inner());
+    let s = Session::new("edit");
+    let target = s.path("e.txt");
+    call(
+        "file_write",
+        vec![Value::Str(target.clone()), Value::Str("a\nb".into())],
+    )
+    .expect("setup write");
+    let se = refusal(
+        "file_edit",
+        vec![
+            Value::Str(target.clone()),
+            record(&[
+                ("op", Value::Str("replace".into())),
+                ("line", Value::Int(9)),
+                ("content", Value::Str("x".into())),
+            ]),
+        ],
+    );
+    assert_eq!(se.code.as_str(), "E_BAD_ARG");
+    assert!(
+        se.message.contains("start line out of range"),
+        "{}",
+        se.message
+    );
+    assert!(se.hint.contains("2 lines"), "{}", se.hint);
+    assert!(se.hint.contains("from 1"), "{}", se.hint);
+    assert!(!se.hint.contains("takes String"), "{}", se.hint);
+    assert_eq!(std::fs::read_to_string(&target).unwrap(), "a\nb");
 }
