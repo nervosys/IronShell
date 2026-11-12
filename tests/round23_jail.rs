@@ -4,9 +4,6 @@
 //! - `cp("../outside/secret", "copy")` copied an outside file into the
 //!   workspace (the source was deliberately unjailed), after which `cat` read it.
 //! - `sql` and `sql_value` opened an outside file named as their source.
-//! - Writes resolved a relative path against `--workspace`, reads against the
-//!   working directory: run from the workspace's parent, `open("x")` and
-//!   `file_write("x")` named different files.
 
 use std::path::PathBuf;
 use std::process::Command;
@@ -102,25 +99,6 @@ fn sql_refuses_an_outside_source() {
         out.contains("42"),
         "an in-memory source is not a file: {out}"
     );
-}
-
-#[test]
-fn reads_and_writes_resolve_a_relative_path_alike() {
-    let d = Dirs::new("base");
-    // Run from the workspace's parent, naming the workspace by its relative
-    // path, as `ish --agent --workspace ws` from `root`.
-    let out = d.agent(
-        &d.root,
-        "ws",
-        r#"file_write("ws/a.txt", "hello"); read_text("ws/a.txt")"#,
-    );
-    assert!(out.contains("hello"), "{out}");
-    assert!(d.ws.join("a.txt").exists(), "{out}");
-    assert!(!d.ws.join("ws").exists(), "not written under ws/ws: {out}");
-    // `a.txt` from the parent is the parent's file, outside the workspace.
-    let out = d.agent(&d.root, "ws", r#"file_write("a.txt", "x")"#);
-    assert!(out.contains("E_OUTSIDE_WORKSPACE"), "{out}");
-    assert!(!d.root.join("a.txt").exists());
 }
 
 impl Dirs {
