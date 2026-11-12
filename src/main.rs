@@ -297,7 +297,7 @@ fn main() -> Result<()> {
     // Parsing argv here rather than inside the closure keeps `--help` and
     // argument errors on the real main thread, so their exit codes and output
     // are unchanged.
-    let mut cli = parse_cli();
+    let cli = parse_cli();
     iron_shell::safety::with_eval_stack(move || run(cli))
 }
 
@@ -430,7 +430,7 @@ fn serves_an_agent(cmd: &Option<Commands>) -> bool {
     )
 }
 
-fn run(cli: Cli) -> Result<()> {
+fn run(mut cli: Cli) -> Result<()> {
     // An output token budget applies to all eval/print paths via the REPL.
     if let Some(n) = cli.budget {
         std::env::set_var("IRONSHELL_TOKEN_BUDGET", n.to_string());
