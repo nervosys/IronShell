@@ -110,14 +110,13 @@ fn csv_columns_refuses_a_one_line_file_name_that_is_not_a_file() {
 // ── item 4: sql's argument messages and rows as the first argument ──────
 
 #[test]
-fn sql_with_params_and_no_rows_says_it_needs_a_source_first() {
-    let e = eval(r#"sql("select name from t where name = ?", ["Ann"])"#).expect_err("no rows");
+fn sql_with_params_and_no_rows_runs_over_the_empty_database() {
+    // Round 24 lets a lone query take params; the table `t` is absent, so the
+    // refusal is SQLite's, not a demand for a source.
+    let e = eval(r#"sql("select name from t where name = ?", ["Ann"])"#).expect_err("no table t");
     let text = e.to_string();
-    assert!(text.contains("needs a source first"), "{text}");
-    assert!(
-        text.contains("sql(source, query, params) or rows | sql(query, params)"),
-        "{text}"
-    );
+    assert!(!text.contains("needs a source first"), "{text}");
+    assert!(text.contains("no such table"), "{text}");
     assert!(!text.contains("source_or_query"), "{text}");
 }
 
