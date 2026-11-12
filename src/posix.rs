@@ -169,11 +169,20 @@ fn unterminated<T>(what: &str, open: usize, closing: &str) -> PResult<T> {
     })
 }
 
-/// `e`, placed at `at`. An error found while lexing the operand of a `${...}`
-/// reports the expansion's own position, not an offset into the operand.
-fn at_outer(mut e: Unsupported, at: usize) -> Unsupported {
-    e.at = Some(at);
+/// `e` moved from the text it was found in (an operand or a substitution's
+/// body, whose offsets count from `base`) to the outer source. An error with a
+/// position of its own is at `base + offset`; one without is placed at
+/// `fallback`, the expansion's own `$`.
+fn relocate(mut e: Unsupported, base: usize, fallback: usize) -> Unsupported {
+    e.at = Some(e.at.map_or(fallback, |off| base + off));
     e
+}
+
+/// Parses the body of a command substitution, which runs later as a script of
+/// its own. A construct the subset refuses inside it is refused with the whole
+/// script, before anything runs: its error is returned for the caller to place.
+fn check_body(body: &str) -> PResult<()> {
+    parse(body).map(|_| ())
 }
 
 // ── lexer ────────────────────────────────────────────────────────────────
@@ -528,19 +537,32 @@ impl<'a> Lexer<'a> {
         let open = self.i;
         self.i += 1;
         let mut body = String::new();
+        // The source offset of each character of `body`: its escapes are
+        // gone, so a refusal inside it is mapped back through this.
+        let mut from: Vec<usize> = Vec::new();
         loop {
             match self.peek() {
                 None => return unterminated("unterminated backquote", open, "a closing backquote"),
                 Some('`') => {
+                    let close = self.i;
                     self.i += 1;
+                    check_body(&body).map_err(|mut e| {
+                        e.at = Some(match e.at {
+                            Some(off) => from.get(off).copied().unwrap_or(close),
+                            None => open,
+                        });
+                        e
+                    })?;
                     return Ok(body);
                 }
                 Some('\\') if matches!(self.peek_at(1), Some('`') | Some('\\') | Some('$')) => {
                     body.push(self.peek_at(1).unwrap_or('\\'));
+                    from.push(self.i + 1);
                     self.i += 2;
                 }
                 Some(c) => {
                     body.push(c);
+                    from.push(self.i);
                     self.i += 1;
                 }
             }
@@ -581,6 +603,8 @@ impl<'a> Lexer<'a> {
                     return unterminated("unterminated $(", dollar_at, "a `)`");
                 }
                 let body: String = self.s[start..self.i].iter().collect();
+                // The body's offsets count from `start`.
+                check_body(&body).map_err(|e| relocate(e, start, dollar_at))?;
                 self.i += 1;
                 parts.push(Part::Cmd(body, quoted));
             }
@@ -667,12 +691,12 @@ impl<'a> Lexer<'a> {
                         chars.push('"');
                         let mut q = Lexer { s: &chars, i: 0 };
                         q.double_quoted(&mut w)
-                            .map_err(|e| at_outer(e, dollar_at))?;
+                            .map_err(|e| relocate(e, start, dollar_at))?;
                     } else {
                         // The operand runs to the closing brace, blanks
                         // included (`${1:?usage: f COLUMN}`), as in bash; its
                         // words are kept apart by the blanks between them.
-                        w = sub.word().map_err(|e| at_outer(e, dollar_at))?;
+                        w = sub.word().map_err(|e| relocate(e, start, dollar_at))?;
                         while sub.i < inner.len() {
                             let blanks: String = inner[sub.i..]
                                 .iter()
@@ -684,7 +708,7 @@ impl<'a> Lexer<'a> {
                             sub.i += blanks.chars().count();
                             w.push(Part::Lit(blanks, false));
                             let before = sub.i;
-                            w.extend(sub.word().map_err(|e| at_outer(e, dollar_at))?);
+                            w.extend(sub.word().map_err(|e| relocate(e, start, dollar_at))?);
                             if sub.i == before && sub.i < inner.len() {
                                 return unsupported_at("${...} operand", dollar_at);
                             }
