@@ -15060,10 +15060,7 @@ pub fn validate(name: &str, args: &[Value], input: Option<&Value>) -> anyhow::Re
             if let Some(missing) = sig.params.iter().skip(supplied).find(|p| p.required) {
                 return Err(crate::safety::bad_arg_in(
                     name,
-                    format!(
-                        "{name}: missing required argument '{}' (the first argument is the subject)",
-                        missing.name
-                    ),
+                    format!("{name}: missing required argument '{}'", missing.name),
                     &format!(
                         "pass '{}' as the argument after the subject: {}",
                         missing.name,

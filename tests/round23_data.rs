@@ -189,3 +189,17 @@ fn an_unknown_date_unit_is_still_refused() {
         assert!(text.contains("E_BAD_ARG"), "{src}: {text}");
     }
 }
+
+// ── item 8: a direct call's missing argument is not called "the subject" ─
+
+#[test]
+fn a_missing_unit_on_a_direct_call_is_named_without_the_subject_note() {
+    let text = eval(r#"date_add("2024-01-01", 1)"#)
+        .expect_err("no unit")
+        .to_string();
+    assert!(text.contains("missing required argument 'unit'"), "{text}");
+    assert!(
+        !text.contains("the first argument is the subject"),
+        "{text}"
+    );
+}
