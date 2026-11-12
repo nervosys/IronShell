@@ -323,8 +323,42 @@ fn key_name(raw: &str, number: usize) -> Result<String> {
 }
 
 /// Parse a scalar: quoted string, JSON flow collection, or plain scalar.
+/// The quoted scalar at the start of `s` when only a ` #` comment follows it:
+/// `"x" # note` gives `"x"`. `None` when `s` is not quoted or something other
+/// than a comment follows the closing quote.
+fn quoted_before_comment(s: &str) -> Option<&str> {
+    let quote = s.chars().next().filter(|c| *c == '"' || *c == '\'')?;
+    let bytes = s.as_bytes();
+    let mut i = 1;
+    let end = loop {
+        let b = *bytes.get(i)?;
+        if quote == '"' && b == b'\\' {
+            i += 2;
+            continue;
+        }
+        if b == quote as u8 {
+            // In single quotes, '' is an escaped quote, not the end.
+            if quote == '\'' && bytes.get(i + 1) == Some(&b'\'') {
+                i += 2;
+                continue;
+            }
+            break i;
+        }
+        i += 1;
+    };
+    let rest = &s[end + 1..];
+    let trimmed = rest.trim_start();
+    if trimmed.is_empty() {
+        return None;
+    }
+    (trimmed.starts_with('#') && rest.len() > trimmed.len()).then(|| &s[..=end])
+}
+
 fn parse_scalar(raw: &str, number: usize) -> Result<Value> {
     let s = raw.trim();
+    // A quoted scalar followed by a comment, `"x" # note`: the comment goes,
+    // and the quoted scalar is read as one, quotes and all.
+    let s = quoted_before_comment(s).unwrap_or(s);
 
     // Quoted strings keep everything inside verbatim (after escapes), so a `#`
     // or `:` inside quotes is data, not syntax.

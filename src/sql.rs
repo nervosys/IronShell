@@ -204,8 +204,16 @@ fn table_from_file(builtin: &str, path: &str, kind: &str) -> Result<Vec<Loaded>>
                 if line.trim().is_empty() {
                     continue;
                 }
-                let json: serde_json::Value =
-                    serde_json::from_str(line).map_err(|e| parse_err(Some(i + 1), &e))?;
+                // serde places the error within this one record ("at line 1
+                // column 5"), which reads as the file's line 1: keep its
+                // reason, and give the column after the file's own line.
+                let json: serde_json::Value = serde_json::from_str(line).map_err(|e| {
+                    let full = e.to_string();
+                    let reason = full
+                        .rsplit_once(" at line ")
+                        .map_or(full.as_str(), |(r, _)| r);
+                    parse_err(Some(i + 1), &format!("column {}: {reason}", e.column()))
+                })?;
                 rows.push(Value::from_json(&json));
             }
             vec![Loaded {

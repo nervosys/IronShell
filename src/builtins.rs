@@ -10931,32 +10931,41 @@ fn bi_to_csv(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
             csv_output.push('\n');
 
             // Write data rows
-            for item in arr {
+            for (index, item) in arr.iter().enumerate() {
                 if let Value::Record(record) = item {
                     let row: Vec<String> = headers
                         .iter()
-                        .map(|header| {
-                            record
+                        .map(|header| -> Result<String> {
+                            Ok(record
                                 .get(header)
-                                .map(|v| match v {
-                                    // An empty CSV field, not "<null>".
-                                    Value::Null => String::new(),
-                                    // A nested record or array is written as its
-                                    // compact JSON, not a "{…}" or "[len=1]" placeholder
-                                    // that loses the data.
-                                    Value::Record(_) | Value::Array(_) => {
-                                        csv_escape(&value_to_json(v.clone()).to_string())
-                                    }
-                                    // A whole Float keeps its point, so it reads back as a
-                                    // Float and not as an Int column.
-                                    Value::Float(f) if f.is_finite() && f.fract() == 0.0 => {
-                                        csv_escape(&format!("{f:.1}"))
-                                    }
-                                    v => csv_escape(&value_to_string(v)),
+                                .map(|v| -> Result<String> {
+                                    Ok(match v {
+                                        // An empty CSV field, not "<null>".
+                                        Value::Null => String::new(),
+                                        // A nested record or array is written as its
+                                        // compact JSON, not a "{…}" or "[len=1]" placeholder
+                                        // that loses the data. A NaN inside it is
+                                        // refused, as to_json refuses it, not written as 0.
+                                        Value::Record(_) | Value::Array(_) => csv_escape(
+                                            &value_to_json_strict(
+                                                "to_csv",
+                                                v,
+                                                &format!("rows[{index}].{header}"),
+                                            )?
+                                            .to_string(),
+                                        ),
+                                        // A whole Float keeps its point, so it reads back as a
+                                        // Float and not as an Int column.
+                                        Value::Float(f) if f.is_finite() && f.fract() == 0.0 => {
+                                            csv_escape(&format!("{f:.1}"))
+                                        }
+                                        v => csv_escape(&value_to_string(v)),
+                                    })
                                 })
-                                .unwrap_or_default()
+                                .transpose()?
+                                .unwrap_or_default())
                         })
-                        .collect();
+                        .collect::<Result<Vec<_>>>()?;
                     csv_output.push_str(&row.join(","));
                     csv_output.push('\n');
                 }
@@ -48309,6 +48318,9 @@ fn bi_db_csv_query(args: Vec<Value>, _input: Option<Value>) -> Result<Value> {
         crate::safety::bad_arg("db_csv_query", "CSV with equal-length rows", &e.to_string())
     };
     let headers = reader.headers().map_err(csv_error)?.clone();
+    // A repeated header would let the later column replace the earlier one.
+    let names: Vec<String> = headers.iter().map(str::to_string).collect();
+    check_csv_headers("db_csv_query", &names)?;
     let rows = reader
         .records()
         .map(|record| {
