@@ -190,3 +190,34 @@ fn file_append_refuses_a_record_and_leaves_the_file_alone() {
     assert!(se.hint.contains("to_json(value)"), "{}", se.hint);
     assert_eq!(std::fs::read_to_string(&target).unwrap(), "keep");
 }
+
+#[test]
+fn file_replace_on_a_directory_is_a_bad_value_not_a_permission_problem() {
+    let _guard = LOCK.lock().unwrap_or_else(|p| p.into_inner());
+    let s = Session::new("dir");
+    let dir = s.path("somedir");
+    std::fs::create_dir_all(&dir).expect("a directory");
+    let se = refusal(
+        "file_replace",
+        vec![
+            Value::Str(dir.clone()),
+            Value::Str("a".into()),
+            Value::Str("b".into()),
+        ],
+    );
+    assert_ne!(se.code.as_str(), "E_OS_DENIED", "{}", se.message);
+    // Linux answers EISDIR as its own I/O error, whose text is capitalised.
+    assert!(
+        se.message.to_lowercase().contains("is a directory"),
+        "{}",
+        se.message
+    );
+    if cfg!(windows) {
+        assert_eq!(se.code.as_str(), "E_BAD_ARG", "{}", se.message);
+        assert!(
+            se.message.contains("is a directory, not a file"),
+            "{}",
+            se.message
+        );
+    }
+}

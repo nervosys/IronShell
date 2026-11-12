@@ -2625,6 +2625,21 @@ fn fs_error_as(
             Some(parent) => parent_missing(builtin, path, &parent),
             None => not_found(builtin, "file", path),
         },
+        // Windows refuses a read or write that opens a directory with access
+        // denied. The caller named a directory where a file belongs, which is
+        // not a permission problem; a remote-share name is not probed (see
+        // names_a_remote_share).
+        std::io::ErrorKind::PermissionDenied
+            if !names_a_remote_share(path) && std::path::Path::new(path).is_dir() =>
+        {
+            bad_value_in(
+                builtin,
+                format!("{builtin}: `{path}` is a directory, not a file"),
+                &format!(
+                    "pass a file; to act on a directory's files, name them with a glob such as '{path}/**/*'"
+                ),
+            )
+        }
         // The OS refused, not our policy.
         std::io::ErrorKind::PermissionDenied => os_denied(
             builtin,
