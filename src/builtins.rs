@@ -10533,6 +10533,17 @@ fn numeric_cell(field: &str, all_int: bool) -> Value {
     }
 }
 
+/// The Bool a CSV cell spells: true or false in any case, else None.
+fn csv_bool(field: &str) -> Option<bool> {
+    if field.eq_ignore_ascii_case("true") {
+        Some(true)
+    } else if field.eq_ignore_ascii_case("false") {
+        Some(false)
+    } else {
+        None
+    }
+}
+
 /// The rows of a parsed CSV table, each column typed as a whole.
 ///
 /// A column is numeric only when every non-empty cell is a number (see
@@ -10546,7 +10557,7 @@ pub(crate) fn csv_rows(
     records: &[csv::StringRecord],
 ) -> Vec<BTreeMap<String, Value>> {
     // Per column: None for text, Some(Some(all_int)) for a numeric column,
-    // Some(None) for a column of true and false.
+    // Some(None) for a column of true and false in any case.
     let kinds: Vec<Option<Option<bool>>> = (0..headers.len())
         .map(|column| {
             let mut numbers = 0usize;
@@ -10555,7 +10566,7 @@ pub(crate) fn csv_rows(
             for record in records {
                 match record.get(column) {
                     Some("") | None => {}
-                    Some("true" | "false") => flags += 1,
+                    Some(field) if csv_bool(field).is_some() => flags += 1,
                     Some(field) if is_number(field) => {
                         numbers += 1;
                         all_int &= field.parse::<i64>().is_ok();
@@ -10581,7 +10592,7 @@ pub(crate) fn csv_rows(
                     let value = match kinds[i] {
                         Some(_) if field.is_empty() => Value::Null,
                         Some(Some(all_int)) => numeric_cell(field, all_int),
-                        Some(None) => Value::Bool(field == "true"),
+                        Some(None) => Value::Bool(csv_bool(field).unwrap_or(false)),
                         None => Value::Str(field.to_string()),
                     };
                     row.insert(header.clone(), value);

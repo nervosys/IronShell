@@ -235,3 +235,13 @@ fn grep_reads_bare_plus_bar_and_braces_as_literals() {
         Value::Int(2)
     );
 }
+
+// ── item 10: CSV Bool columns take any case of true and false ───────────
+
+#[test]
+fn a_column_of_any_case_true_and_false_is_bool() {
+    assert_eq!(
+        eval(r#"from_csv("a\nTRUE\nFalse\n") | map(fn(r) => r.a)"#).unwrap(),
+        Value::Array(vec![Value::Bool(true), Value::Bool(false)])
+    );
+}

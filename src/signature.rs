@@ -1745,7 +1745,7 @@ pub static SIGNATURES: &[Signature] = &[
     Signature {
         name: "from_csv", category: None, subject_required: false, aliases: &["from-csv"],
         subject: Some(Ty::Str), params: &[], returns: "Array",
-        doc: "Parse a CSV string with headers. Each column is typed as a whole: it is numeric only when every non-empty cell is a number, with no leading \"+\" and no leading zero before another digit (\"007\" is text, \"0.5\" is a number). A numeric column holds Ints when every non-empty cell is an integer, else Floats, and its empty cells are null. A column whose non-empty cells are all true or false holds Bools, its empty cells null. Any other column holds only Strings, and its empty cells are \"\". The text is piped in or passed as the argument: from_csv(text).",
+        doc: "Parse a CSV string with headers. Each column is typed as a whole: it is numeric only when every non-empty cell is a number, with no leading \"+\" and no leading zero before another digit (\"007\" is text, \"0.5\" is a number). A numeric column holds Ints when every non-empty cell is an integer, else Floats, and its empty cells are null. A column whose non-empty cells are all true or false, in any case (TRUE, False), holds Bools, its empty cells null. Any other column holds only Strings, and its empty cells are \"\". The text is piped in or passed as the argument: from_csv(text).",
         examples: &[
             (r#"("n\n7\n" | from_csv | first).n"#, "7"),
             (r#"from_csv("n\n7\n") | len"#, "1"),
