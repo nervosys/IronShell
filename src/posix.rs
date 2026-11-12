@@ -653,6 +653,15 @@ impl<'a> Lexer<'a> {
                         op.push(c);
                         self.i += 1;
                     }
+                    // `%`, `%%`, `#`, `##`: the word is a glob pattern.
+                    Some(c @ ('%' | '#')) if op.is_empty() => {
+                        op.push(c);
+                        self.i += 1;
+                        if self.peek() == Some(c) {
+                            op.push(c);
+                            self.i += 1;
+                        }
+                    }
                     _ => {
                         let named = param_operator(op.starts_with(':'), &self.s[self.i..]);
                         return unsupported_at(&format!("${{...}} operator `{named}`"), dollar_at);
@@ -1769,7 +1778,7 @@ impl Shell {
                     }
                 }
                 Part::Var(name, op, quoted) => {
-                    let value = self.param(name, op, stdin);
+                    let value = self.param(name, op, *quoted, stdin);
                     self.splice(&value, *quoted, &mut fields, &mut cur, &mut mask, &mut have);
                 }
                 Part::Cmd(body, quoted) => {
@@ -1856,7 +1865,16 @@ impl Shell {
         }
     }
 
-    fn param(&mut self, name: &str, op: &Option<(String, Word)>, stdin: &mut Input) -> String {
+    /// The value of `${name...}` (or `$name`). `quoted` is whether the
+    /// expansion is inside double quotes, which is how its operand's
+    /// quoting is read (see [`Shell::pattern`]).
+    fn param(
+        &mut self,
+        name: &str,
+        op: &Option<(String, Word)>,
+        quoted: bool,
+        stdin: &mut Input,
+    ) -> String {
         let value = self.var(name);
         // Unset is an error under `set -u`, except for `$@` and `$*`, and for
         // the forms that supply their own value: `${x:-d}`, `${x-d}`, `${x:=d}`
@@ -1901,6 +1919,15 @@ impl Shell {
                     operand(self, stdin)
                 }
             }
+            // `${x%pat}`, `${x%%pat}`, `${x#pat}`, `${x##pat}`: the value less
+            // the part the pattern matches. An unset name is empty (and an
+            // error under `set -u`, noted above).
+            "%" | "%%" | "#" | "##" => {
+                let pat = self.pattern(word, quoted, stdin);
+                value
+                    .as_deref()
+                    .map_or(String::new(), |v| trim_affix(v, &pat, op))
+            }
             // `${x:?msg}` / `${x?msg}`: an error whatever `set -u` says, with
             // the message given, or bash's own when there is none. The command
             // that made the expansion does not run, and the script ends with 1.
@@ -1924,6 +1951,39 @@ impl Shell {
             }
             _ => value.unwrap_or_default(),
         }
+    }
+
+    /// The glob pattern of a `${name%pat}`-style operand. Literal text quoted
+    /// in the operand is literal, so its glob characters are escaped; unquoted
+    /// text, and the unquoted results of expansions, keep theirs. Inside double
+    /// quotes (`quoted`) the operand's text is still read as a pattern, since
+    /// its quoting is not told apart here.
+    fn pattern(&mut self, word: &Word, quoted: bool, stdin: &mut Input) -> String {
+        let mut out = String::new();
+        for part in word {
+            match part {
+                Part::Lit(s, lit_quoted) => {
+                    if *lit_quoted && !quoted {
+                        out.push_str(&escape_glob(s));
+                    } else {
+                        out.push_str(s);
+                    }
+                }
+                Part::Var(_, _, part_quoted) | Part::Cmd(_, part_quoted) => {
+                    let text = self.expand_assign(&vec![part.clone()], stdin);
+                    if *part_quoted {
+                        out.push_str(&escape_glob(&text));
+                    } else {
+                        out.push_str(&text);
+                    }
+                }
+                Part::Len(_) => {
+                    let text = self.expand_assign(&vec![part.clone()], stdin);
+                    out.push_str(&text);
+                }
+            }
+        }
+        out
     }
 
     /// `$(…)`: run the body and take its stdout, less trailing newlines.
@@ -1992,8 +2052,8 @@ impl Shell {
                 Part::Var(name, None, _) if name == "@" || name == "*" => {
                     out.push_str(&self.positional.join(" "));
                 }
-                Part::Var(name, op, _) => {
-                    let value = self.param(name, op, stdin);
+                Part::Var(name, op, quoted) => {
+                    let value = self.param(name, op, *quoted, stdin);
                     out.push_str(&value);
                 }
                 Part::Cmd(body, _) => {
@@ -3297,6 +3357,42 @@ fn glob_match(pat: &str, s: &str) -> bool {
     let p: Vec<char> = pat.chars().collect();
     let s: Vec<char> = s.chars().collect();
     go(&p, &s)
+}
+
+/// `s` with its glob characters escaped, so a pattern matches them literally.
+fn escape_glob(s: &str) -> String {
+    let mut out = String::new();
+    for c in s.chars() {
+        if matches!(c, '*' | '?' | '[' | '\\') {
+            out.push('\\');
+        }
+        out.push(c);
+    }
+    out
+}
+
+/// `value` less what `op` removes: `%` and `%%` take the shortest and the
+/// longest suffix that matches `pat`, `#` and `##` the shortest and the longest
+/// prefix, as bash does. `value` itself when nothing matches.
+fn trim_affix(value: &str, pat: &str, op: &str) -> String {
+    let chars: Vec<char> = value.chars().collect();
+    let n = chars.len();
+    let prefix = op.starts_with('#');
+    let longest = op.len() == 2;
+    // How many characters to remove, the shortest removal first.
+    let counts: Vec<usize> = if longest {
+        (0..=n).rev().collect()
+    } else {
+        (0..=n).collect()
+    };
+    for k in counts {
+        let (head, tail) = chars.split_at(if prefix { k } else { n - k });
+        let (removed, kept) = if prefix { (head, tail) } else { (tail, head) };
+        if glob_match(pat, &removed.iter().collect::<String>()) {
+            return kept.iter().collect();
+        }
+    }
+    value.to_string()
 }
 
 /// Pathname expansion, component by component, sorted as `ls` would sort.
@@ -6378,8 +6474,6 @@ pub fn refusal_hint(construct: &str) -> String {
             "pipe it instead: printf '%s\\n' \"abc\" | grep -c b, or write the text to a file first".into()
         }
         c if c.starts_with("${...} operator") => match op {
-            "%" | "%%" => "strip a suffix with sed, e.g. sed 's/PATTERN$//'".into(),
-            "#" | "##" => "strip a prefix with sed, e.g. sed 's/^PATTERN//', or cut -d/ -f2-".into(),
             "/" | "//" => "replace text with sed, e.g. sed 's/OLD/NEW/g'".into(),
             ":offset" => "take a substring with cut -c, e.g. cut -c4-, or sed".into(),
             _ => "change the text with tr or sed".into(),

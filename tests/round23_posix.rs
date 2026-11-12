@@ -158,6 +158,36 @@ fn an_arithmetic_refusal_in_an_operand_is_at_its_own_dollar_sign() {
     );
 }
 
+// ── 7. ${name%pat}, %%, #, ## with glob patterns ─────────────────────────
+
+#[test]
+fn trim_operators_strip_the_shortest_or_longest_match_as_bash_does() {
+    let sb = Sandbox::new("trim-ops");
+    let cases = [
+        ("name=hello; echo ${name%o*}", "hell\n"),
+        ("name=hello; echo ${name#*l}", "lo\n"),
+        ("name=hello; echo ${name%%l*}", "he\n"),
+        ("name=hello; echo ${name##*l}", "o\n"),
+        (
+            "f=a.b.c; echo ${f%.*} ${f%%.*} ${f#*.} ${f##*.}",
+            "a.b a b.c c\n",
+        ),
+        ("name=hello; echo \"${name%o*}\"", "hell\n"),
+        // No match leaves the value as it is; an unset name is empty.
+        ("name=hello; echo ${name%z}", "hello\n"),
+        ("echo x${unset%a}y", "xy\n"),
+        // A quoted part of the pattern is literal: the `*` here is a star.
+        ("p='a*b'; echo ${p%\"*\"b}", "a\n"),
+        // `?` and a bracket expression are glob characters too.
+        ("v=abc; echo ${v%?}", "ab\n"),
+        ("v=abc; echo ${v#[a-b]}", "bc\n"),
+    ];
+    for (script, want) in cases {
+        let (out, err, code) = sb.run(script);
+        assert_eq!((out.as_str(), code), (want, 0), "{script}: {err}");
+    }
+}
+
 // ── 6. a sed command outside the subset is named as one ──────────────────
 
 #[cfg(windows)]
