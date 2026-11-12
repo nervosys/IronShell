@@ -98,6 +98,39 @@ fn sort_n_equal_numbers_fall_back_to_the_whole_line() {
 }
 
 #[test]
+fn printf_integer_arguments_are_read_as_c_constants() {
+    // bash: a leading 0 is octal, 0x is hex, a sign is allowed.
+    let (out, err, code) = run("pf1", &[], r"printf '%d\n' 007 010");
+    assert_eq!((out.as_str(), err.as_str(), code), ("7\n8\n", "", 0));
+    let (out, err, code) = run("pf2", &[], r"printf '%d\n' 0x1f -010");
+    assert_eq!((out.as_str(), err.as_str(), code), ("31\n-8\n", "", 0));
+    // A leading quote gives the code of the character after it.
+    let (out, err, code) = run("pf3", &[], r#"printf '%d\n' "'A""#);
+    assert_eq!((out.as_str(), err.as_str(), code), ("65\n", "", 0));
+    // %x and %o read their argument the same way.
+    let (out, err, code) = run("pf4", &[], r"printf '%x %o\n' 010 8");
+    assert_eq!((out.as_str(), err.as_str(), code), ("8 10\n", "", 0));
+}
+
+#[test]
+fn printf_invalid_integer_prints_what_was_read_and_fails() {
+    // bash: printf: 08: invalid octal number; the value read is 0, and the
+    // format goes on to the next argument, with exit status 1.
+    let (out, err, code) = run("pf5", &[], r"printf '%d\n' 08");
+    assert_eq!(out, "0\n");
+    assert!(err.contains("printf: 08: invalid octal number"), "{err}");
+    assert_eq!(code, 1);
+    let (out, err, code) = run("pf6", &[], r"printf '%d|%d\n' 08 5");
+    assert_eq!((out.as_str(), code), ("0|5\n", 1));
+    assert!(err.contains("printf: 08: invalid octal number"), "{err}");
+    // bash: printf: 12abc: invalid number; the value read is 12.
+    let (out, err, code) = run("pf7", &[], r"printf '%d\n' 12abc");
+    assert_eq!(out, "12\n");
+    assert!(err.contains("printf: 12abc: invalid number"), "{err}");
+    assert_eq!(code, 1);
+}
+
+#[test]
 fn sort_u_with_keys_keeps_the_first_of_each_run_in_input_order() {
     // GNU: sort -u -k1,1 dup.txt (no last resort under -u)
     let (out, err, code) = run("u", &[("dup.txt", DUP)], "sort -u -k1,1 dup.txt");

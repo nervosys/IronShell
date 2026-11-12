@@ -4014,6 +4014,9 @@ fn printf(args: &[String], sink: &mut Sink) -> Util {
     let fmt: Vec<char> = fmt.chars().collect();
     let mut rest = args[1..].iter();
     let mut out = String::new();
+    // bash's complaints about integer arguments; they go to stderr only once the
+    // whole format is done, so a declined format is not reported twice.
+    let mut complaints: Vec<String> = Vec::new();
     loop {
         let mut consumed = false;
         let mut i = 0;
@@ -4103,21 +4106,28 @@ fn printf(args: &[String], sink: &mut Sink) -> Util {
                     }
                 }
                 'd' | 'i' | 'x' | 'X' | 'o' if precision.is_some() => return Util::Decline,
-                'd' | 'i' => match arg.trim().parse::<i64>() {
-                    Ok(n) => n.to_string(),
-                    Err(_) if arg.is_empty() => "0".into(),
-                    Err(_) => return Util::Decline,
-                },
-                'x' | 'X' | 'o' => match arg.trim().parse::<i64>() {
-                    // As bash does, a negative number is shown as 64 bits.
-                    Ok(n) => match conv {
+                'd' | 'i' | 'x' | 'X' | 'o' => {
+                    let n = if arg.is_empty() {
+                        0
+                    } else {
+                        match printf_int_arg(&arg) {
+                            Some((n, complaint)) => {
+                                if let Some(c) = complaint {
+                                    complaints.push(format!("printf: {arg}: {c}"));
+                                }
+                                n
+                            }
+                            None => return Util::Decline,
+                        }
+                    };
+                    match conv {
+                        'd' | 'i' => n.to_string(),
+                        // As bash does, a negative number is shown as 64 bits.
                         'x' => format!("{:x}", n as u64),
                         'X' => format!("{:X}", n as u64),
                         _ => format!("{:o}", n as u64),
-                    },
-                    Err(_) if arg.is_empty() => "0".into(),
-                    Err(_) => return Util::Decline,
-                },
+                    }
+                }
                 'f' => match arg.trim().parse::<f64>() {
                     Ok(v) if v.is_finite() => format!("{:.*}", precision.unwrap_or(6), v),
                     Err(_) if arg.is_empty() => format!("{:.*}", precision.unwrap_or(6), 0.0),
@@ -4165,7 +4175,68 @@ fn printf(args: &[String], sink: &mut Sink) -> Util {
         }
     }
     sink.out.extend_from_slice(out.as_bytes());
-    Util::Done(0)
+    for c in &complaints {
+        sink.eline(c);
+    }
+    Util::Done(if complaints.is_empty() { 0 } else { 1 })
+}
+
+/// How bash reads an integer argument of `printf` (its `getintmax`). A leading
+/// quote gives the code of the character after it. Otherwise the text is a C
+/// integer constant (`strtoimax` in base 0): leading blanks, an optional sign,
+/// `0x` for hex, a leading `0` for octal, decimal otherwise. The value is what
+/// was read before any text that is not part of the number, and the complaint
+/// is bash's words for that text. `None` when the value does not fit in 64
+/// bits, which is left to the real printf.
+fn printf_int_arg(arg: &str) -> Option<(i64, Option<&'static str>)> {
+    if let Some(rest) = arg.strip_prefix(['\'', '"']) {
+        return Some((rest.chars().next().map_or(0, |c| c as u32 as i64), None));
+    }
+    let body = arg.trim_start_matches([' ', '\t', '\n', '\r', '\x0b', '\x0c']);
+    let (neg, body) = match body.as_bytes().first().copied() {
+        Some(b'-') => (true, &body[1..]),
+        Some(b'+') => (false, &body[1..]),
+        _ => (false, body),
+    };
+    let hex = body.starts_with("0x") || body.starts_with("0X");
+    let (radix, prefix) = if hex {
+        (16, 2)
+    } else if body.starts_with('0') {
+        (8, 1)
+    } else {
+        (10, 0)
+    };
+    let digits = &body[prefix..];
+    let n = digits
+        .bytes()
+        .take_while(|b| (*b as char).is_digit(radix))
+        .count();
+    // In hex with no digit after `0x`, only the `0` is read.
+    let (value_digits, rest) = if radix == 16 && n == 0 {
+        ("", &body[1..])
+    } else if radix == 10 && n == 0 {
+        ("", body)
+    } else {
+        (&digits[..n], &digits[n..])
+    };
+    let complaint = if radix == 10 && n == 0 {
+        Some("invalid number")
+    } else if rest.is_empty() {
+        None
+    } else if hex {
+        Some("invalid hex number")
+    } else if body.as_bytes().get(1).is_some_and(u8::is_ascii_digit) {
+        Some("invalid octal number")
+    } else {
+        Some("invalid number")
+    };
+    let mag = if value_digits.is_empty() {
+        0
+    } else {
+        u64::from_str_radix(value_digits, radix).ok()?
+    };
+    let value = if neg { -(mag as i128) } else { mag as i128 };
+    Some((i64::try_from(value).ok()?, complaint))
 }
 
 /// C's `%e`: one digit, the decimals, then `e`, a sign and at least two
