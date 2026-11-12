@@ -3878,12 +3878,16 @@ pub fn did_you_mean(name: &str) -> Vec<String> {
 }
 
 /// `did_you_mean` for a bare name that may also be a bound variable: `extra`
-/// are the variable names, searched alongside the builtins. The mapped
-/// spellings (`date` -> `now_iso`, `raise` -> `error`) come first in both the
-/// builtin and the unknown-name paths, so they are never pushed out by a
-/// nearby but unrelated name.
+/// are the variable names, searched alongside the builtins. An explicit
+/// mapping (`date` -> `now_iso`, `redo` -> `session_redo`) is the whole answer:
+/// a nearby name offered beside it (`sed` for `redo`) is noise. Only a name
+/// with no mapping gets the module spelling and the edit-distance guesses.
 pub fn did_you_mean_among<'a>(name: &str, extra: impl Iterator<Item = &'a str>) -> Vec<String> {
-    let mut out: Vec<String> = mapped_spelling(name);
+    let mapped = mapped_spelling(name);
+    if !mapped.is_empty() {
+        return mapped;
+    }
+    let mut out: Vec<String> = Vec::new();
     // The module spelling comes next. `file_read` is not a builtin, but
     // `file.read` is the call an agent meant, and an edit-distance guess
     // (`file_rename`) is a worse answer than that one. It is offered only when

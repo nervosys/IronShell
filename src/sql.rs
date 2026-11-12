@@ -676,7 +676,9 @@ fn connect(
         n => Err(bad(
             builtin,
             format!("takes 1 or 2 arguments, got {n}"),
-            format!("{builtin}(query) over piped rows, or {builtin}(source, query)"),
+            format!(
+                "{builtin}(query) over piped rows, or {builtin}(source, query); either may end with a params Array"
+            ),
             "1 or 2 arguments",
             n.to_string(),
         )),

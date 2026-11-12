@@ -3005,7 +3005,7 @@ pub static SIGNATURES: &[Signature] = &[
             ),
         ],
         returns: "Array",
-        doc: "Run a read-only SQL query over piped rows, rows given as the first argument, a JSON/CSV file or a SQLite database, returning rows as records. A query with no rows and no source runs over an empty database: sql(\"select 1 as x\") answers [{x: 1}]. A trailing params Array binds its values to the query's ? placeholders in order, so a value is never spliced into the query text. A query with params and no rows needs a source first: sql(source, query, params).",
+        doc: "Run a read-only SQL query over piped rows, rows given as the first argument, a JSON/CSV file or a SQLite database, returning rows as records. A query with no rows and no source runs over an empty database: sql(\"select 1 as x\") answers [{x: 1}]. A trailing params Array binds its values to the query's ? placeholders in order, so a value is never spliced into the query text. With params and no rows the query runs over the same empty database: sql(\"select ? + 1 as y\", [41]) answers [{y: 42}]. A table in the query needs rows or a source first: sql(source, query, params).",
         examples: &[
             (
                 r#"sql("select 1 as x") | first | fn(r) => r.x"#,
@@ -3031,6 +3031,10 @@ pub static SIGNATURES: &[Signature] = &[
             (
                 r#"sql(":memory:", "SELECT ? AS n", [7]) | first | fn(r) => r.n"#,
                 "7",
+            ),
+            (
+                r#"sql("select ? + 1 as y", [41]) | first | fn(r) => r.y"#,
+                "42",
             ),
         ],
     },
@@ -3117,6 +3121,7 @@ pub static SIGNATURES: &[Signature] = &[
             (r#"sql_value(":memory:", "select ? * 6", [7])"#, "42"),
             (r#"[{n: 1}, {n: 2}, {n: 3}] | sql_value("select count(*) from t where n > ?", [1])"#, "2"),
             (r#"sql_value("select 1 + 1")"#, "2"),
+            (r#"sql_value("select ? * 2", [21])"#, "42"),
         ],
     },
     Signature {
@@ -14960,9 +14965,11 @@ pub fn validate(name: &str, args: &[Value], input: Option<&Value>) -> anyhow::Re
     // subject as its first argument instead, and the parameters shift by one.
     // `sql("select 1")` and `sql_value("select 1")` have no source: the one
     // String is the query, not a subject.
+    // A lone query, with or without a trailing params Array, runs over the
+    // empty database: `sql("select 1")` and `sql("select ? + 1", [41])`.
     let lone_query = matches!(sig.name, "sql" | "sql_value")
         && input.is_none()
-        && matches!(args, [Value::Str(_)]);
+        && matches!(args, [Value::Str(_)] | [Value::Str(_), Value::Array(_)]);
     let params_start =
         usize::from(input.is_none() && sig.subject.is_some() && !args.is_empty() && !lone_query);
     let supplied = args.len().saturating_sub(params_start);
@@ -14994,18 +15001,20 @@ pub fn validate(name: &str, args: &[Value], input: Option<&Value>) -> anyhow::Re
         }
     }
 
-    // `sql("select ... ?", ["Ann"])` with no rows piped in: the query was taken
-    // as the source, and the Array is not a query. Say what sql needs first.
+    // `sql("people.csv", ["Ann"])` with no rows piped in: a String with no
+    // whitespace is not a query but a source, and the query is missing. A lone
+    // query with params runs over the empty database; this one would only be
+    // a SQLite syntax error, so say what sql needs.
     if input.is_none()
         && matches!(sig.name, "sql" | "sql_value")
-        && matches!(args, [Value::Str(_), Value::Array(_)])
+        && matches!(args, [Value::Str(s), Value::Array(_)] if !s.trim().contains(char::is_whitespace))
     {
         return Err(crate::safety::bad_arg_in(
             name,
             format!(
-                "{name}: with no piped rows, {name} needs a source first: {name}(source, query, params) or rows | {name}(query, params)"
+                "{name}: with no piped rows, {name} needs a query after its source: {name}(source, query, params) or rows | {name}(query, params)"
             ),
-            &format!("name the source, e.g. {name}(\"people.csv\", \"select ... ?\", [\"Ann\"])"),
+            &format!("name the query, e.g. {name}(\"people.csv\", \"select * from t where name = ?\", [\"Ann\"])"),
         ));
     }
 
