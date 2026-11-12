@@ -6019,16 +6019,22 @@ fn sed(args: &[String], stdin: &mut Input, sink: &mut Sink) -> Util {
     let mut status = 0;
     let mut data = Vec::new();
     for (_, d) in read_inputs("sed", &files, stdin, sink, &mut status) {
+        // A file without a final newline still ends its last line: GNU sed
+        // does not join it to the next file's first line.
+        if !data.is_empty() && !data.ends_with(b"\n") {
+            data.push(b'\n');
+        }
         data.extend_from_slice(&d);
     }
     let mut out = Vec::new();
-    sed_run(&mut prog, quiet, &data, false, &mut out);
+    // As GNU sed, a last line with no final newline is printed without one.
+    sed_run(&mut prog, quiet, &data, true, &mut out);
     sink.out.extend_from_slice(&out);
     Util::Done(status)
 }
 
 /// Runs the sed program `prog` over the lines of `data`, appending what it prints
-/// to `out`. With `keep_missing_newline` (`-i`), a last line with no final newline
+/// to `out`. With `keep_missing_newline`, a last line with no final newline
 /// is printed without one, as GNU sed does; otherwise each printed line ends in a
 /// newline. Returns true when `q` ran, so no later input is read.
 fn sed_run(

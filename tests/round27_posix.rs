@@ -136,3 +136,17 @@ fn sort_u_with_keys_keeps_the_first_of_each_run_in_input_order() {
     let (out, err, code) = run("u", &[("dup.txt", DUP)], "sort -u -k1,1 dup.txt");
     assert_eq!((out.as_str(), err.as_str(), code), ("a 1\nb 2\n", "", 0));
 }
+
+#[test]
+fn sed_keeps_a_missing_final_newline_on_stdout_as_gnu_does() {
+    // Recorded from GNU sed 4.9: `printf 'a\nb' | sed s/a/A/` writes "A\nb".
+    let (out, err, code) = run("sednl", &[("nonl.txt", "a\nb")], "sed s/a/A/ nonl.txt");
+    assert_eq!((out.as_str(), code), ("A\nb", 0), "{err}");
+    // A file without a final newline does not join the next file's first line.
+    let (out, err, code) = run(
+        "sednl2",
+        &[("one.txt", "a"), ("two.txt", "b\n")],
+        "sed s/b/B/ one.txt two.txt",
+    );
+    assert_eq!((out.as_str(), code), ("a\nB\n", 0), "{err}");
+}
