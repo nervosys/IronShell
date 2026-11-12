@@ -10503,6 +10503,7 @@ fn bi_from_csv(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
         .map(|h| h.to_string())
         .collect();
 
+    check_csv_headers("from-csv", &headers)?;
     let mut records = Vec::new();
     for record in reader.records() {
         // A malformed row (unequal field counts, bad quoting) is the caller's
@@ -10514,6 +10515,26 @@ fn bi_from_csv(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
 
     let rows = csv_rows(&headers, &records);
     Ok(Value::Array(rows.into_iter().map(Value::Record).collect()))
+}
+
+/// The refusal for a header row that names a column twice. Each row is a record
+/// keyed by its header, so the second column would overwrite the first and one
+/// column would vanish without a word. Names match exactly, as the keys do.
+pub(crate) fn check_csv_headers(builtin: &str, headers: &[String]) -> Result<()> {
+    for (i, name) in headers.iter().enumerate() {
+        if let Some(first) = headers[..i].iter().position(|h| h == name) {
+            return Err(crate::safety::bad_arg_in(
+                builtin,
+                format!(
+                    "{builtin}: duplicate CSV column '{name}' at columns {} and {}",
+                    first + 1,
+                    i + 1
+                ),
+                "rename one column, or read the file with csv_columns(...) to see the header",
+            ));
+        }
+    }
+    Ok(())
 }
 
 /// Whether a cell is a number a numeric column can hold: it parses as an Int or
