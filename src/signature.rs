@@ -1790,7 +1790,7 @@ pub static SIGNATURES: &[Signature] = &[
     Signature {
         name: "from_yaml", category: None, subject_required: false, aliases: &["from-yaml"],
         subject: Some(Ty::Str), params: &[], returns: "Any",
-        doc: "Parse the supported YAML subset into a typed value.",
+        doc: "Parse the supported YAML subset into a typed value. Double-quoted escapes decode per YAML 1.2.",
         examples: &[(r#"from_yaml("n: 7").n"#, "7"), (r#"("n: 7" | from_yaml).n"#, "7"), (r#"(try { from_yaml("n: 9223372036854775808") } catch e { e.error.code })"#, "E_BAD_VALUE")],
     },
     Signature {

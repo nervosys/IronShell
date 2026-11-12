@@ -23,7 +23,9 @@
 //! Supported:
 //! - Nested block mappings (indentation-based) and block sequences (`- `)
 //! - Scalars: null/`~`, booleans, integers, floats, strings
-//! - Single- and double-quoted scalars, with `\n`/`\t`/`\"`/`\\` escapes
+//! - Single-quoted scalars (`''` is the one escape) and double-quoted scalars,
+//!   which decode every YAML 1.2 escape: `\0 \a \b \e \n \r \t \" \/ \\`,
+//!   `\xhh`, `\uhhhh` and `\Uhhhhhhhh`
 //! - `#` comments, blank lines, leading `---` and trailing `...`
 //! - Flow collections that are valid JSON (`[1, 2]`, `{"a": 1}`)
 //!
@@ -160,8 +162,17 @@ fn parse_block(lines: &[Line], pos: &mut usize, indent: usize) -> Result<Value> 
     if *pos >= lines.len() {
         return Ok(Value::Null);
     }
-    if lines[*pos].content.starts_with("- ") || lines[*pos].content == "-" {
+    let content = lines[*pos].content.as_str();
+    if content.starts_with("- ") || content == "-" {
         parse_sequence(lines, pos, indent)
+    } else if content.starts_with(['{', '['])
+        && serde_json::from_str::<serde_json::Value>(content).is_ok()
+    {
+        // A whole JSON-style flow collection on its own line: the `{}` or `[]`
+        // that `to-yaml` writes for an empty top-level value.
+        let number = lines[*pos].number;
+        *pos += 1;
+        parse_scalar(content, number)
     } else {
         parse_mapping(lines, pos, indent)
     }
@@ -231,6 +242,7 @@ fn insert_entry(
     indent: usize,
     number: usize,
 ) -> Result<()> {
+    let key = key_name(&key, number)?;
     let parsed = if value.trim().is_empty() {
         parse_nested(lines, pos, indent)?
     } else {
@@ -282,7 +294,7 @@ fn split_key(line: &str) -> Option<(String, String)> {
                     if next.is_none() || next == Some(&' ') {
                         let key = line[..byte_index(line, i)].trim();
                         let value = line[byte_index(line, i + 1)..].trim();
-                        return Some((unquote(key), value.to_string()));
+                        return Some((key.to_string(), value.to_string()));
                     }
                 }
             }
@@ -297,15 +309,16 @@ fn byte_index(s: &str, n: usize) -> usize {
     s.char_indices().nth(n).map(|(b, _)| b).unwrap_or(s.len())
 }
 
-/// Strip surrounding quotes from a key, if present.
-fn unquote(s: &str) -> String {
-    let t = s.trim();
-    if t.len() >= 2
-        && ((t.starts_with('"') && t.ends_with('"')) || (t.starts_with('\'') && t.ends_with('\'')))
-    {
-        t[1..t.len() - 1].to_string()
+/// The name of a mapping key: quotes are stripped, and a double-quoted key
+/// decodes its escapes the same way a double-quoted value does.
+fn key_name(raw: &str, number: usize) -> Result<String> {
+    let t = raw.trim();
+    if t.len() >= 2 && t.starts_with('"') && t.ends_with('"') {
+        unescape_double(&t[1..t.len() - 1], number)
+    } else if t.len() >= 2 && t.starts_with('\'') && t.ends_with('\'') {
+        Ok(t[1..t.len() - 1].replace("''", "'"))
     } else {
-        t.to_string()
+        Ok(t.to_string())
     }
 }
 
@@ -316,7 +329,7 @@ fn parse_scalar(raw: &str, number: usize) -> Result<Value> {
     // Quoted strings keep everything inside verbatim (after escapes), so a `#`
     // or `:` inside quotes is data, not syntax.
     if s.len() >= 2 && s.starts_with('"') && s.ends_with('"') {
-        return Ok(Value::Str(unescape_double(&s[1..s.len() - 1])));
+        return Ok(Value::Str(unescape_double(&s[1..s.len() - 1], number)?));
     }
     if s.len() >= 2 && s.starts_with('\'') && s.ends_with('\'') {
         // Single quotes: only '' is an escape, for a literal quote.
@@ -362,6 +375,10 @@ fn plain_scalar(s: &str) -> Value {
         "" | "~" | "null" | "Null" | "NULL" => Value::Null,
         "true" | "True" | "TRUE" => Value::Bool(true),
         "false" | "False" | "FALSE" => Value::Bool(false),
+        // The YAML 1.2 core spellings of the special floats.
+        ".inf" | ".Inf" | ".INF" | "+.inf" | "+.Inf" | "+.INF" => Value::Float(f64::INFINITY),
+        "-.inf" | "-.Inf" | "-.INF" => Value::Float(f64::NEG_INFINITY),
+        ".nan" | ".NaN" | ".NAN" => Value::Float(f64::NAN),
         _ => {
             if let Ok(i) = s.parse::<i64>() {
                 Value::Int(i)
@@ -380,7 +397,10 @@ fn plain_scalar(s: &str) -> Value {
     }
 }
 
-fn unescape_double(s: &str) -> String {
+/// Decode the escapes of a double-quoted scalar, per YAML 1.2. An unknown
+/// escape, a short hex escape, or a value that is not a Unicode code point is
+/// an error naming the line, not a guess.
+fn unescape_double(s: &str, number: usize) -> Result<String> {
     let mut out = String::with_capacity(s.len());
     let mut chars = s.chars();
     while let Some(c) = chars.next() {
@@ -388,21 +408,52 @@ fn unescape_double(s: &str) -> String {
             out.push(c);
             continue;
         }
-        match chars.next() {
-            Some('n') => out.push('\n'),
-            Some('t') => out.push('\t'),
-            Some('r') => out.push('\r'),
-            Some('0') => out.push('\0'),
-            Some('"') => out.push('"'),
-            Some('\\') => out.push('\\'),
-            Some(other) => {
-                out.push('\\');
-                out.push(other);
+        let Some(e) = chars.next() else {
+            return Err(anyhow!(
+                "line {number}: a double-quoted string ends in a lone backslash"
+            ));
+        };
+        match e {
+            '0' => out.push('\0'),
+            'a' => out.push('\u{7}'),
+            'b' => out.push('\u{8}'),
+            'e' => out.push('\u{1b}'),
+            'n' => out.push('\n'),
+            'r' => out.push('\r'),
+            't' => out.push('\t'),
+            '"' => out.push('"'),
+            '/' => out.push('/'),
+            '\\' => out.push('\\'),
+            'x' => out.push(hex_escape(&mut chars, 'x', 2, number)?),
+            'u' => out.push(hex_escape(&mut chars, 'u', 4, number)?),
+            'U' => out.push(hex_escape(&mut chars, 'U', 8, number)?),
+            other => {
+                return Err(anyhow!(
+                    "line {number}: unknown escape \\{other} in a double-quoted string"
+                ))
             }
-            None => out.push('\\'),
         }
     }
-    out
+    Ok(out)
+}
+
+/// The character named by the `digits` hex digits that follow `\x`, `\u` or `\U`.
+fn hex_escape(
+    chars: &mut std::str::Chars<'_>,
+    kind: char,
+    digits: usize,
+    number: usize,
+) -> Result<char> {
+    let hex: String = chars.by_ref().take(digits).collect();
+    if hex.len() != digits || !hex.chars().all(|c| c.is_ascii_hexdigit()) {
+        return Err(anyhow!(
+            "line {number}: \\{kind} needs {digits} hex digits, found {hex:?}"
+        ));
+    }
+    u32::from_str_radix(&hex, 16)
+        .ok()
+        .and_then(char::from_u32)
+        .ok_or_else(|| anyhow!("line {number}: \\{kind}{hex} is not a Unicode code point"))
 }
 
 fn json_to_value(j: serde_json::Value) -> Value {
@@ -457,6 +508,8 @@ fn emit_into(value: &Value, indent: usize, out: &mut String) {
                         out.push_str(":\n");
                         emit_into(v, indent + 2, out);
                     }
+                    Value::Record(_) => out.push_str(": {}\n"),
+                    Value::Array(_) => out.push_str(": []\n"),
                     _ => {
                         out.push_str(": ");
                         out.push_str(&scalar_to_yaml(v));
@@ -470,6 +523,8 @@ fn emit_into(value: &Value, indent: usize, out: &mut String) {
             for item in items {
                 out.push_str(&pad);
                 match item {
+                    Value::Record(m) if m.is_empty() => out.push_str("- {}\n"),
+                    Value::Array(a) if a.is_empty() => out.push_str("- []\n"),
                     Value::Record(_) | Value::Array(_) => {
                         // Nested collections start on the following line so the
                         // dash does not disturb their indentation.
@@ -507,7 +562,15 @@ fn scalar_to_yaml(v: &Value) -> String {
         Value::Int(i) => i.to_string(),
         Value::Float(f) => {
             if f.is_finite() {
-                f.to_string()
+                // Debug keeps the point on whole numbers (1.0, -0.0) so they read
+                // back as Float; an exponent form such as 1e20 gets one too.
+                let text = format!("{f:?}");
+                match text.find('e') {
+                    Some(i) if !text[..i].contains('.') => {
+                        format!("{}.0{}", &text[..i], &text[i..])
+                    }
+                    _ => text,
+                }
             } else if f.is_nan() {
                 ".nan".to_string()
             } else if *f > 0.0 {
@@ -526,7 +589,7 @@ fn scalar_to_yaml(v: &Value) -> String {
         // Anything else (lambdas, futures, tables) has no YAML representation;
         // render its display form as a quoted string rather than emitting
         // something that would not read back.
-        other => format!("\"{}\"", escape_double(&format!("{other:?}"))),
+        other => format!("\"{}\"", escape_double(&other.to_display_string())),
     }
 }
 
@@ -538,6 +601,28 @@ fn needs_quoting(s: &str) -> bool {
     // Anything that would re-parse as a different type, or that contains
     // structural characters, has to be quoted.
     if !matches!(plain_scalar(s), Value::Str(_)) {
+        return true;
+    }
+    // YAML 1.1 readers (PyYAML and others) read these words as booleans. This
+    // reader keeps them as strings, but the output must mean the same everywhere.
+    if matches!(
+        s,
+        "y" | "Y"
+            | "yes"
+            | "Yes"
+            | "YES"
+            | "n"
+            | "N"
+            | "no"
+            | "No"
+            | "NO"
+            | "on"
+            | "On"
+            | "ON"
+            | "off"
+            | "Off"
+            | "OFF"
+    ) {
         return true;
     }
     s.contains(':')
