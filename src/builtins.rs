@@ -9557,11 +9557,21 @@ fn grep_line_numbers(args: &[Value]) -> Result<bool> {
             for (key, value) in options {
                 match (key.as_str(), value) {
                     ("line_numbers", Value::Bool(on)) => line_numbers = *on,
-                    _ => {
-                        return Err(crate::safety::bad_arg(
+                    ("line_numbers", other) => {
+                        return Err(crate::safety::bad_arg_in(
                             "grep",
-                            "options: a Record with line_numbers: Bool",
-                            key,
+                            format!(
+                                "grep: line_numbers must be a Bool, got {}",
+                                other.type_name()
+                            ),
+                            "pass {line_numbers: true} or {line_numbers: false}",
+                        ))
+                    }
+                    _ => {
+                        return Err(crate::safety::bad_arg_in(
+                            "grep",
+                            format!("grep: unknown option {key}; grep takes line_numbers"),
+                            "the options Record takes one key: {line_numbers: true}",
                         ))
                     }
                 }
