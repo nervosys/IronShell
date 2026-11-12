@@ -51465,6 +51465,10 @@ fn bi_file_copy(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
     };
     let source = crate::safety::resolve_path_str(&source);
     let dest = crate::safety::resolve_path_str(&dest);
+    // The source is read: under the jail, a file outside the workspace may not
+    // be copied in, or `cp("../outside/secret", "x")` then `cat("x")` reads
+    // what `cat("../outside/secret")` is refused.
+    crate::security::check_read_jail("file_copy", &source)?;
     let source_path = std::path::Path::new(&source);
     let dest_path = std::path::Path::new(&dest);
     let metadata = fs::symlink_metadata(source_path)
@@ -51506,7 +51510,7 @@ fn bi_file_copy(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
             "file_copy source and destination must not overlap",
         ));
     }
-    // Source reads are intentionally unjailed. Only destination paths are guarded.
+    // The source was judged by the read jail above; destinations are guarded.
     let mut plan = vec![(
         source_path.to_path_buf(),
         dest_path.to_path_buf(),

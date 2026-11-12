@@ -615,6 +615,11 @@ fn connect(
         2 => {
             let source = str_arg(0, "the source")?;
             let query = str_arg(1, "the query")?;
+            // A file source is read: the jail judges it as it judges `open`,
+            // before the cache, so a copy cached earlier is not a way around it.
+            if source != ":memory:" {
+                crate::security::check_read_jail(builtin, &source)?;
+            }
             if let Some(kind) = tabular_kind(&source) {
                 let key = file_key(&source);
                 if let Some(conn) = key.as_ref().and_then(cache_take) {
