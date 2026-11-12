@@ -846,7 +846,7 @@ pub static SIGNATURES: &[Signature] = &[
     Signature {
         name: "file_append", category: None, subject_required: false, aliases: &["append_file"],
         subject: None, params: &[req("path", Ty::Str, "file to append or create"), opt("content", Ty::Any, "content; omitted uses pipeline input")], returns: "Record",
-        doc: "Append content exactly as given, and return path, bytes appended and success. A file that does not exist is created, as >> does; its folder must already exist. No newline is added before or after the content, so a line that should end needs its own newline. An Array is joined with newlines, with none after its last item.",
+        doc: "Append content exactly as given, and return path, bytes appended and success. A file that does not exist is created, as >> does; its folder must already exist. No newline is added before or after the content, so a line that should end needs its own newline. An Array of Strings is joined with newlines, with none after its last item. Any other content (a Record, a number, a Bool) is refused with E_BAD_ARG and nothing is written; convert it first, e.g. to_json(value) or str(value).",
         examples: &[
             (r#"let d = fs_tempdir("ae_append"); let f = d + "/x"; let result = file_append(f, "hello"); rmdir(d, true); result.bytes_appended"#, "5"),
             (r#"let d = fs_tempdir("ae_append"); let f = d + "/x"; let result = "hi" | file_append(f); rmdir(d, true); result.bytes_appended"#, "2"),
@@ -863,10 +863,11 @@ pub static SIGNATURES: &[Signature] = &[
     Signature {
         name: "file_write", category: None, subject_required: false, aliases: &["write_file", "text_write"],
         subject: None, params: &[req("path", Ty::Str, "destination path"), opt("content", Ty::Any, "content; omitted uses pipeline input")], returns: "Record",
-        doc: "Atomically write content, returning path, bytes, lines and success. Arrays are joined as lines.",
+        doc: "Atomically write content, returning path, bytes, lines and success. Content must be a String, or an Array of Strings joined as lines; any other value (a Record, a number, a Bool) is refused with E_BAD_ARG and nothing is written, so convert it first, e.g. to_json(value) or str(value).",
         examples: &[
             (r#"let d = fs_tempdir("ae_write"); let f = d + "/x"; let result = file_write(f, "hello"); rmdir(d, true); result.bytes"#, "5"),
             (r#"let d = fs_tempdir("ae_write"); let f = d + "/x"; let result = "hi" | file_write(f); rmdir(d, true); result.bytes"#, "2"),
+            (r#"let d = fs_tempdir("ae_write"); let f = d + "/x"; let result = try { file_write(f, {a: 1}) } catch e { e.code }; rmdir(d, true); result"#, r#""E_BAD_ARG""#),
         ],
     },
     Signature {

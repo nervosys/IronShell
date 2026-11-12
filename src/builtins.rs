@@ -50222,6 +50222,42 @@ fn sync_parent_directory(parent: &std::path::Path) {
 #[cfg(not(unix))]
 fn sync_parent_directory(_parent: &std::path::Path) {}
 
+/// The text a file_write or file_append writes for `value`: a String as is, an
+/// Array of Strings joined with newlines. Any other value is refused before a
+/// byte is written, with a hint for converting it; its Debug text is never written.
+fn text_to_write(builtin: &str, value: &Value) -> Result<String> {
+    match value {
+        Value::Str(s) => Ok(s.clone()),
+        Value::Array(items) => {
+            let mut lines = Vec::with_capacity(items.len());
+            for item in items {
+                match item {
+                    Value::Str(s) => lines.push(s.as_str()),
+                    other => return Err(not_text_to_write(builtin, other, true)),
+                }
+            }
+            Ok(lines.join("\n"))
+        }
+        other => Err(not_text_to_write(builtin, other, false)),
+    }
+}
+
+fn not_text_to_write(builtin: &str, value: &Value, in_array: bool) -> anyhow::Error {
+    let got = value.type_name();
+    let message = if in_array {
+        format!("{builtin}: an Array of content must hold Strings, got {got}")
+    } else {
+        format!("{builtin}: content must be a String or an Array of Strings, got {got}")
+    };
+    let hint = match value {
+        Value::Bool(_) | Value::Int(_) | Value::Float(_) => {
+            "convert it first, e.g. str(value) or to_json(value)"
+        }
+        _ => "convert it first, e.g. to_json(value) or to_toml(value)",
+    };
+    crate::safety::bad_arg_in(builtin, message, hint)
+}
+
 fn bi_file_write(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
     if args.is_empty() {
         return Err(crate::safety::arg_err("file_write requires a file path"));
@@ -50243,30 +50279,10 @@ fn bi_file_write(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
 
     // Get content from args or pipeline input
     let content = if args.len() > 1 {
-        match &args[1] {
-            Value::Str(s) => s.clone(),
-            Value::Array(arr) => arr
-                .iter()
-                .map(|v| match v {
-                    Value::Str(s) => s.clone(),
-                    other => format!("{:?}", other),
-                })
-                .collect::<Vec<_>>()
-                .join("\n"),
-            other => format!("{:?}", other),
-        }
+        text_to_write("file_write", &args[1])?
     } else {
         match input {
-            Some(Value::Str(s)) => s,
-            Some(Value::Array(arr)) => arr
-                .iter()
-                .map(|v| match v {
-                    Value::Str(s) => s.clone(),
-                    other => format!("{:?}", other),
-                })
-                .collect::<Vec<_>>()
-                .join("\n"),
-            Some(other) => format!("{:?}", other),
+            Some(value) => text_to_write("file_write", &value)?,
             None => {
                 return Err(crate::safety::arg_err(
                     "file_write requires content to write",
@@ -50341,30 +50357,10 @@ fn bi_file_append(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
 
     // Get content from args or pipeline input
     let content = if args.len() > 1 {
-        match &args[1] {
-            Value::Str(s) => s.clone(),
-            Value::Array(arr) => arr
-                .iter()
-                .map(|v| match v {
-                    Value::Str(s) => s.clone(),
-                    other => format!("{:?}", other),
-                })
-                .collect::<Vec<_>>()
-                .join("\n"),
-            other => format!("{:?}", other),
-        }
+        text_to_write("file_append", &args[1])?
     } else {
         match input {
-            Some(Value::Str(s)) => s,
-            Some(Value::Array(arr)) => arr
-                .iter()
-                .map(|v| match v {
-                    Value::Str(s) => s.clone(),
-                    other => format!("{:?}", other),
-                })
-                .collect::<Vec<_>>()
-                .join("\n"),
-            Some(other) => format!("{:?}", other),
+            Some(value) => text_to_write("file_append", &value)?,
             None => {
                 return Err(crate::safety::arg_err(
                     "file_append requires content to append",
