@@ -86,3 +86,22 @@ fn audit_verify_of_a_missing_log_is_an_error_naming_the_path() {
     assert!(text.contains("no-such-audit.log"), "{text}");
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn file_write_into_a_missing_folder_says_to_create_the_folder() {
+    let dir = scratch("write_missing_folder");
+    let (out, err, code) = run_script(&dir, "file_write(\"nodir/new.txt\", \"x\")\n");
+    let text = format!("{out}{err}");
+    assert_ne!(code, 0, "{text}");
+    assert!(
+        text.contains("the folder") && text.contains("does not exist"),
+        "the folder is what is missing: {text}"
+    );
+    assert!(text.contains("mkdir"), "the hint says to create it: {text}");
+    assert!(
+        !text.contains("file.write first"),
+        "writing the file cannot create its folder, so the hint must not say to: {text}"
+    );
+    assert!(!dir.join("nodir").exists(), "nothing is created");
+    let _ = std::fs::remove_dir_all(&dir);
+}
