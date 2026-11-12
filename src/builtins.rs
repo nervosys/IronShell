@@ -50462,6 +50462,26 @@ fn file_insert_past_end(path: &str, line: usize, count: usize) -> anyhow::Error 
     )
 }
 
+/// The line break a file is written with: CRLF when every line break in the
+/// text is CRLF, LF otherwise (a file with no line break is LF).
+fn file_line_break(text: &str) -> &'static str {
+    let lf = text.matches('\n').count();
+    if lf > 0 && text.matches("\r\n").count() == lf {
+        "\r\n"
+    } else {
+        "\n"
+    }
+}
+
+/// A line of a file without its line break (LF or CRLF), read as `str::lines`
+/// reads it. The segment is one `split_inclusive('\n')` piece of the file.
+fn file_line_text(segment: &str) -> &str {
+    match segment.strip_suffix('\n') {
+        Some(line) => line.strip_suffix('\r').unwrap_or(line),
+        None => segment,
+    }
+}
+
 thread_local! {
     /// The builtin `bi_file_patch` reports its errors under; see bi_file_replace.
     static PATCH_CALLER: std::cell::Cell<&'static str> = const { std::cell::Cell::new("file_patch") };
@@ -50855,9 +50875,12 @@ fn bi_file_insert(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
         ));
     }
 
-    let mut file_content = read_text_capped("file_insert", &path)?;
+    let file_content = read_text_capped("file_insert", &path)?;
 
-    let mut lines: Vec<String> = file_content.lines().map(|s| s.to_string()).collect();
+    // Every file line keeps its own bytes, line break included; only the inserted
+    // lines are new. Positions count the lines `str::lines` counts.
+    let segments: Vec<&str> = file_content.split_inclusive('\n').collect();
+    let lines: Vec<&str> = segments.iter().map(|&s| file_line_text(s)).collect();
     let insert_lines: Vec<String> = content.lines().map(|s| s.to_string()).collect();
     let insert_pos: usize;
     let mut pattern_found = true;
@@ -50943,17 +50966,30 @@ fn bi_file_insert(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
         ));
     }
 
-    for (i, line) in insert_lines.iter().enumerate() {
-        lines.insert(insert_pos + i, line.clone());
+    // The inserted lines take the file's line break (CRLF in a CRLF file, else
+    // LF), and the rest of the file is written back byte for byte. The last line
+    // of a file may have no line break: an insert before it leaves it that way,
+    // while an insert after it ends that line first, so the new text ends with a
+    // line break.
+    let eol = file_line_break(&file_content);
+    let (before, after) = segments.split_at(insert_pos);
+    let mut out = String::with_capacity(file_content.len() + content.len() + 2 * eol.len());
+    for segment in before {
+        out.push_str(segment);
     }
-
-    file_content = lines.join("\n");
-    if !file_content.ends_with('\n') {
-        file_content.push('\n');
+    if insert_pos == segments.len() && !file_content.is_empty() && !file_content.ends_with('\n') {
+        out.push_str(eol);
+    }
+    for line in &insert_lines {
+        out.push_str(line);
+        out.push_str(eol);
+    }
+    for segment in after {
+        out.push_str(segment);
     }
 
     crate::tx::snapshot(&path); // record pre-insert state if a transaction is active
-    write_file_atomically("file_insert", &path, file_content.as_bytes())?;
+    write_file_atomically("file_insert", &path, out.as_bytes())?;
 
     let mut result = BTreeMap::new();
     result.insert("path".to_string(), Value::Str(path));
