@@ -2991,7 +2991,7 @@ pub static SIGNATURES: &[Signature] = &[
             req(
                 "source_or_query",
                 Ty::Str,
-                "with rows piped in, the query (they are table `t`); otherwise a source: a .json/.jsonl/.csv file (a table named after the file, also `t`), a SQLite file, or \":memory:\"",
+                "with rows piped in, the query (they are table `t`); alone, the query over an empty database; otherwise a source: a .json/.jsonl/.csv file (a table named after the file, also `t`), a SQLite file, or \":memory:\"",
             ),
             opt(
                 "query",
@@ -3005,8 +3005,12 @@ pub static SIGNATURES: &[Signature] = &[
             ),
         ],
         returns: "Array",
-        doc: "Run a read-only SQL query over piped rows, rows given as the first argument, a JSON/CSV file or a SQLite database, returning rows as records. A trailing params Array binds its values to the query's ? placeholders in order, so a value is never spliced into the query text. Without piped rows, name a source first: sql(source, query, params).",
+        doc: "Run a read-only SQL query over piped rows, rows given as the first argument, a JSON/CSV file or a SQLite database, returning rows as records. A query with no rows and no source runs over an empty database: sql(\"select 1 as x\") answers [{x: 1}]. A trailing params Array binds its values to the query's ? placeholders in order, so a value is never spliced into the query text. A query with params and no rows needs a source first: sql(source, query, params).",
         examples: &[
+            (
+                r#"sql("select 1 as x") | first | fn(r) => r.x"#,
+                "1",
+            ),
             (
                 r#"[{n: 1}, {n: 2}, {n: 3}] | sql("select sum(n) as total from t") | first | fn(r) => r.total"#,
                 "6",
@@ -3105,13 +3109,14 @@ pub static SIGNATURES: &[Signature] = &[
             ),
         ],
         returns: "Any",
-        doc: "Run a read-only SQL query that yields exactly one row of one column, returning that value. Rows may be piped in or given as the first argument, as for sql. A trailing params Array binds its values to the query's ? placeholders in order, as for sql.",
+        doc: "Run a read-only SQL query that yields exactly one row of one column, returning that value. Rows may be piped in or given as the first argument, as for sql; a query alone runs over an empty database, so sql_value(\"select 1 + 1\") is 2. A trailing params Array binds its values to the query's ? placeholders in order, as for sql.",
         examples: &[
             (r#"[{n: 1}, {n: 2}, {n: 3}] | sql_value("select max(n) from t")"#, "3"),
             (r#"sql_value([{n: 1}, {n: 2}, {n: 3}], "select count(*) from t where n > ?", [1])"#, "2"),
             (r#"sql_value(":memory:", "select 6 * 7")"#, "42"),
             (r#"sql_value(":memory:", "select ? * 6", [7])"#, "42"),
             (r#"[{n: 1}, {n: 2}, {n: 3}] | sql_value("select count(*) from t where n > ?", [1])"#, "2"),
+            (r#"sql_value("select 1 + 1")"#, "2"),
         ],
     },
     Signature {
@@ -14951,7 +14956,13 @@ pub fn validate(name: &str, args: &[Value], input: Option<&Value>) -> anyhow::Re
     // In a pipeline the subject is the input, so the arguments are the
     // parameters. Called directly, a subject-taking builtin may receive the
     // subject as its first argument instead, and the parameters shift by one.
-    let params_start = usize::from(input.is_none() && sig.subject.is_some() && !args.is_empty());
+    // `sql("select 1")` and `sql_value("select 1")` have no source: the one
+    // String is the query, not a subject.
+    let lone_query = matches!(sig.name, "sql" | "sql_value")
+        && input.is_none()
+        && matches!(args, [Value::Str(_)]);
+    let params_start =
+        usize::from(input.is_none() && sig.subject.is_some() && !args.is_empty() && !lone_query);
     let supplied = args.len().saturating_sub(params_start);
 
     // When the subject arrives as the first argument rather than through the

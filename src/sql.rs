@@ -595,17 +595,9 @@ fn connect(
     match args.len() {
         1 => {
             let query = str_arg(0, "the query")?;
-            let subject = subject.ok_or_else(|| {
-                bad(
-                    builtin,
-                    "no rows to query".to_string(),
-                    "sql runs over piped rows ([{a: 1}] | sql(\"select * from t\")) or a file \
-                     (sql_value(\"data.csv\", \"select ...\"))"
-                        .to_string(),
-                    "piped rows, or a source argument",
-                    "nothing".to_string(),
-                )
-            })?;
+            // No rows piped in and no source named: the query runs over an empty
+            // database, so `sql("select 1 as x")` answers its own constant.
+            let subject = subject.unwrap_or_else(|| Value::Array(Vec::new()));
             let tables = tables_from_subject(builtin, subject)?;
             let conn = memory()?;
             load(&conn, builtin, &tables)?;

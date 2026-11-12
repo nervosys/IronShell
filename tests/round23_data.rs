@@ -107,3 +107,16 @@ fn sql_on_a_json_object_of_arrays_still_queries_each_field() {
         )])
     );
 }
+
+// ── item 4: a lone query runs over an empty database ────────────────────
+
+#[test]
+fn a_lone_query_runs_over_an_empty_database() {
+    assert_eq!(
+        eval(r#"sql("select 1 as x")"#).unwrap(),
+        Value::Array(vec![Value::Record(
+            [("x".to_string(), Value::Int(1))].into_iter().collect()
+        )])
+    );
+    assert_eq!(eval(r#"sql_value("select 1 + 1")"#).unwrap(), Value::Int(2));
+}

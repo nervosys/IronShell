@@ -341,16 +341,12 @@ fn a_missing_import_says_paths_are_relative_to_the_importer() {
     );
 }
 
-// 16. sql with no input says what it runs over.
+// 16. sql with no input runs its query over an empty database.
 
 #[test]
-fn sql_with_no_input_names_the_two_ways_to_give_it_rows() {
+fn sql_with_no_input_runs_over_an_empty_database() {
     let s = Scratch::new("sql");
-    let out = s.ish(&["-c", "sql(\"select 1\")"]);
-    assert!(!out.status.success());
-    assert!(
-        stderr(&out).contains("sql runs over piped rows"),
-        "{}",
-        stderr(&out)
-    );
+    let out = s.ish(&["-c", "sql(\"select 1 as x\") | len"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert_eq!(stdout(&out).trim(), "1");
 }
