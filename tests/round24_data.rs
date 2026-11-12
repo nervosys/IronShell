@@ -73,3 +73,22 @@ fn source_and_query_with_params_still_reads_the_file() {
     assert_eq!(got.unwrap(), Value::Int(1));
 }
 
+// ── item 2: an explicit did-you-mean mapping is the only suggestion ─────
+
+#[test]
+fn redo_is_suggested_as_session_redo_and_nothing_else() {
+    assert_eq!(
+        iron_shell::builtins::did_you_mean("redo"),
+        vec!["session_redo".to_string()]
+    );
+}
+
+#[test]
+fn get_is_still_suggested_as_http_get() {
+    assert_eq!(
+        iron_shell::builtins::did_you_mean("get")
+            .first()
+            .map(String::as_str),
+        Some("http_get")
+    );
+}
