@@ -148,3 +148,44 @@ fn to_csv_writes_a_whole_float_with_a_point_and_reads_it_back_as_a_float() {
         Value::Float(1.0)
     );
 }
+
+// ── item 7: date units are case-insensitive and take the singular ───────
+
+#[test]
+fn date_add_accepts_any_case_and_the_singular_unit() {
+    assert_eq!(
+        eval(r#"date_add("2024-01-01", 1, "DAYS")"#).unwrap(),
+        s("2024-01-02")
+    );
+    assert_eq!(
+        eval(r#"date_add("2024-01-31", 1, "Month")"#).unwrap(),
+        s("2024-02-29")
+    );
+    assert_eq!(
+        eval(r#"date_add("2024-01-01T10:00:00Z", 2, "hour")"#).unwrap(),
+        s("2024-01-01T12:00:00Z")
+    );
+}
+
+#[test]
+fn date_diff_accepts_any_case_and_the_singular_unit() {
+    assert_eq!(
+        eval(r#"date_diff("2024-02-29", "2024-03-02", "day")"#).unwrap(),
+        Value::Int(2)
+    );
+    assert_eq!(
+        eval(r#"date_diff("2024-01-01", "2024-01-15", "WEEKS")"#).unwrap(),
+        Value::Int(2)
+    );
+}
+
+#[test]
+fn an_unknown_date_unit_is_still_refused() {
+    for src in [
+        r#"date_add("2024-01-01", 1, "fortnights")"#,
+        r#"date_diff("2024-01-01", "2024-01-15", "fortnight")"#,
+    ] {
+        let text = eval(src).expect_err(src).to_string();
+        assert!(text.contains("E_BAD_ARG"), "{src}: {text}");
+    }
+}

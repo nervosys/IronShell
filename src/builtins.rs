@@ -15383,6 +15383,21 @@ fn bi_regex_replace(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
     Ok(Value::Str(re.replace_all(&text, replacement).into_owned()))
 }
 
+/// The plural name of a unit the date builtins take. The case is ignored and
+/// the singular is accepted, so "DAY", "Week" and "months" all name a unit.
+fn canonical_unit(unit: &str) -> Option<&'static str> {
+    Some(match unit.to_ascii_lowercase().as_str() {
+        "day" | "days" => "days",
+        "week" | "weeks" => "weeks",
+        "month" | "months" => "months",
+        "year" | "years" => "years",
+        "hour" | "hours" => "hours",
+        "minute" | "minutes" => "minutes",
+        "second" | "seconds" => "seconds",
+        _ => return None,
+    })
+}
+
 /// The seconds in one of the units the date builtins take.
 fn unit_seconds(builtin: &str, unit: &str) -> Result<i64> {
     match unit {
@@ -15510,7 +15525,7 @@ fn bi_date_parse(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
 /// Args:
 ///   - a: String (or the piped text) - an ISO date or datetime, as date_parse answers
 ///   - b: String - the later date, in the same form
-///   - unit: String (optional) - "days" (the default: whole 24-hour periods of elapsed time), "weeks", "months", "years", "hours", "minutes" or "seconds"
+///   - unit: String (optional) - "days" (the default: whole 24-hour periods of elapsed time), "weeks", "months", "years", "hours", "minutes" or "seconds"; any case, and the singular, is accepted
 /// Returns: Int - b minus a, in whole units, truncated toward zero
 ///
 /// Months and years are calendar units, the inverse of date_add: the count is
@@ -15545,6 +15560,13 @@ fn bi_date_diff(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
     };
     let (a, _) = parse_iso(B, &first)?;
     let (b, _) = parse_iso(B, second)?;
+    let unit = canonical_unit(unit).ok_or_else(|| {
+        crate::safety::bad_arg(
+            B,
+            "a unit: days, weeks, months, years, hours, minutes or seconds",
+            unit,
+        )
+    })?;
     match unit {
         "weeks" => Ok(Value::Int((b - a).num_seconds() / (7 * 86_400))),
         "months" => Ok(Value::Int(whole_calendar_months(a, b))),
@@ -15636,7 +15658,7 @@ fn add_calendar_months(
 /// Args:
 ///   - iso: String (or the piped text) - an ISO date or datetime
 ///   - amount: Int - may be negative
-///   - unit: String - "weeks", "days", "months", "years", "hours", "minutes" or "seconds"
+///   - unit: String - "weeks", "days", "months", "years", "hours", "minutes" or "seconds"; any case, and the singular, is accepted
 /// Returns: String - a date when the input is a date and the unit is weeks, days, months or years; otherwise a UTC datetime ending in Z
 ///
 /// Months and years are calendar units: 2024-01-31 plus one month is
@@ -15661,6 +15683,7 @@ fn bi_date_add(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
         ));
     };
     let unit = string_arg(B, UNITS, unit)?;
+    let unit = canonical_unit(unit).ok_or_else(|| crate::safety::bad_arg(B, UNITS, unit))?;
     // Months and years are calendar steps; the other units are fixed lengths.
     let (months, per): (Option<i64>, i64) = match unit {
         "months" => (Some(1), 0),
