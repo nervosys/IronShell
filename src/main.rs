@@ -481,6 +481,20 @@ fn run(cli: Cli) -> Result<()> {
     // the serving subcommands, `-b`, `-c`, the REPL). Fix the workspace root
     // before anything reads it: `cd` must not move the jail or the audit log.
     iron_shell::safety::pin_workspace_root();
+    // A serving subcommand takes no file arguments, and its clients name paths
+    // relative to the workspace: start it there, since relative paths resolve
+    // against the working directory.
+    if serves_an_agent(&cli.subcommand) {
+        if let Some(ws) = std::env::var_os("IRONSHELL_WORKSPACE") {
+            if let Err(e) = std::env::set_current_dir(&ws) {
+                eprintln!(
+                    "ish: cannot enter the workspace {}: {e}",
+                    std::path::Path::new(&ws).display()
+                );
+                std::process::exit(2);
+            }
+        }
+    }
     if let Some(p) = &cli.policy {
         std::env::set_var("IRONSHELL_POLICY", p);
     }

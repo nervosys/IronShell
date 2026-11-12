@@ -4010,22 +4010,19 @@ pub fn write_jail_refusal(path: &str) -> Option<String> {
 /// Resolve a user-supplied path the way an effecting builtin should operate on it.
 ///
 /// Absolute paths are returned unchanged. In a **jailed** context (agent mode, or
-/// an explicit `IRONSHELL_WORKSPACE`) a relative path is resolved against the
-/// workspace root, so writes/deletes land inside the jail and agree with both the
-/// `within_workspace` check and the transaction journal — closing the gap where a
-/// relative path was resolved against the process CWD (escaping the workspace when
-/// CWD ≠ workspace). In plain human mode the path is left as-is, so the OS resolves
-/// it against the current directory like any normal shell.
+/// an explicit `IRONSHELL_WORKSPACE`) a relative path is made absolute against the
+/// working directory, as every read and the OS itself take it, and the jail
+/// judges that absolute path against the pinned root. Writes used to resolve
+/// against the workspace root while reads resolved against the working
+/// directory, so with `--workspace proj` run from proj's parent `open("x")` read
+/// `./x` and `file_write("x")` wrote `proj/x`. The serving subcommands change
+/// into the workspace at startup, so for them relative still means the
+/// workspace. In plain human mode the path is left as-is.
 pub fn resolve_path_str(path: &str) -> String {
     let p = std::path::Path::new(path);
     if p.is_absolute() || !jail_enforced(current_mode()) {
         path.to_string()
-    } else if std::env::var_os("IRONSHELL_WORKSPACE").is_some() {
-        join_native(workspace_root(), path)
     } else {
-        // No workspace was named, so a relative path means what it means to any
-        // program: the working directory. The jail still judges the result
-        // against the pinned root.
         join_native(
             std::env::current_dir().unwrap_or_else(|_| workspace_root()),
             path,
@@ -4123,19 +4120,22 @@ fn walk_segments(path: &Path) -> Vec<WalkSeg> {
 }
 
 /// The absolute form of a user-supplied path, without any lexical cleaning: a
-/// relative path is joined to the workspace root, itself made absolute.
+/// relative path is joined to the working directory, where the OS and
+/// [`resolve_path_str`] put it, so the jail judges the place the bytes land.
 fn absolute_form(path: &str) -> PathBuf {
     let given = Path::new(path);
     if given.is_absolute() {
         return given.to_path_buf();
     }
-    let root = workspace_root();
-    let root = if root.is_absolute() {
-        root
-    } else {
-        std::env::current_dir().unwrap_or_default().join(root)
-    };
-    root.join(given)
+    let base = std::env::current_dir().unwrap_or_else(|_| {
+        let root = workspace_root();
+        if root.is_absolute() {
+            root
+        } else {
+            PathBuf::from(".").join(root)
+        }
+    });
+    base.join(given)
 }
 
 /// The place the OS would reach for `path`, with every symbolic link resolved in
