@@ -7462,11 +7462,12 @@ pub static SIGNATURES: &[Signature] = &[
         subject: Some(Ty::Str),
         params: &[req("pattern", Ty::Str, "a Rust regex pattern"), req("replacement", Ty::Str, "replacement text; $1, $name and $$ expand as the regex crate expands them; write a named group as \\${name}, since ${name} interpolates")],
         returns: "String",
-        doc: "Replace every match of a Rust regex in a String. The replacement expands $1, $name, ${name} and $$ as the regex crate does. In a double-quoted string ${name} is interpolation, so write \\${name} to pass ${name} to the regex: regex_replace(\"2024-02\", \"(?P<y>[0-9]+)-(?P<m>[0-9]+)\", \"\\${m}/\\${y}\") is \"02/2024\". An invalid pattern, or one over the size cap (compiled patterns are limited to 1 MiB), is E_BAD_ARG. Direct regex_replace(text, pattern, replacement) or text | regex_replace(pattern, replacement).",
+        doc: "Replace every match of a Rust regex in a String. The replacement expands $1, $name, ${name} and $$ as the regex crate does. In a double-quoted string ${name} is interpolation, so write \\${name} to pass ${name} to the regex: regex_replace(\"2024-02\", \"(?P<y>[0-9]+)-(?P<m>[0-9]+)\", \"\\${m}/\\${y}\") is \"02/2024\". An invalid pattern, or one over the size cap (compiled patterns are limited to 1 MiB), is E_BAD_ARG. A replacement that refers to a group the pattern does not have, such as $5 or $1x, is E_BAD_ARG too, and its hint says how to write it: ${1}x is group 1 followed by x. Direct regex_replace(text, pattern, replacement) or text | regex_replace(pattern, replacement).",
         examples: &[
             (r#"regex_replace("a1b2", "([0-9])", "<$1>")"#, r#""a<1>b<2>""#),
             (r##""a1" | regex_replace("[0-9]", "#")"##, r#""a#""#),
             (r#"regex_replace("2024-02", "(?P<y>[0-9]+)-(?P<m>[0-9]+)", "\${m}/\${y}")"#, r#""02/2024""#),
+            (r#"(try { regex_replace("a1", "([0-9])", "<$5>") } catch e { e.error.code })"#, r#""E_BAD_ARG""#),
         ],
     },
     Signature {

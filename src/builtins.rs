@@ -15447,7 +15447,88 @@ fn bi_regex_replace(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
     };
     let re = text_regex(B, string_arg(B, "a String pattern", pattern)?)?;
     let replacement = string_arg(B, "a String replacement", replacement)?;
+    check_replacement_groups(B, &re, replacement)?;
     Ok(Value::Str(re.replace_all(&text, replacement).into_owned()))
+}
+
+/// The group references a replacement makes, read as the regex crate reads
+/// them: `$` then the longest run of letters, digits and underscores is a name,
+/// `${name}` braces it, and `$$` is a literal dollar. Any other `$` is literal.
+fn replacement_references(replacement: &str) -> Vec<&str> {
+    let bytes = replacement.as_bytes();
+    let is_name = |b: u8| b == b'_' || b.is_ascii_alphanumeric();
+    let mut refs = Vec::new();
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] != b'$' {
+            i += 1;
+            continue;
+        }
+        if bytes.get(i + 1) == Some(&b'$') {
+            i += 2;
+            continue;
+        }
+        let braced = bytes.get(i + 1) == Some(&b'{');
+        let start = i + 1 + usize::from(braced);
+        let mut end = start;
+        while end < bytes.len() && is_name(bytes[end]) {
+            end += 1;
+        }
+        if end == start || (braced && bytes.get(end) != Some(&b'}')) {
+            i += 1;
+            continue;
+        }
+        refs.push(&replacement[start..end]);
+        i = if braced { end + 1 } else { end };
+    }
+    refs
+}
+
+/// The refusal for a replacement that names a group the pattern does not have.
+/// The regex crate expands such a reference to nothing, so "<$5>" silently lost
+/// its text. A reference to a group the pattern has is unchanged.
+fn check_replacement_groups(builtin: &str, re: &regex::Regex, replacement: &str) -> Result<()> {
+    let count = re.captures_len() - 1;
+    let names: Vec<Option<&str>> = re.capture_names().skip(1).collect();
+    for reference in replacement_references(replacement) {
+        let numeric = reference.bytes().all(|b| b.is_ascii_digit());
+        let known = if numeric {
+            reference.parse::<usize>().is_ok_and(|n| n <= count)
+        } else {
+            names.iter().any(|name| *name == Some(reference))
+        };
+        if known {
+            continue;
+        }
+        let listed = if count == 0 {
+            "the pattern has no groups besides the whole match, group 0".to_string()
+        } else {
+            let items: Vec<String> = (1..=count)
+                .map(|i| match names.get(i - 1).copied().flatten() {
+                    Some(name) => format!("{i} ({name})"),
+                    None => i.to_string(),
+                })
+                .collect();
+            format!("the pattern has {count} group(s): {}", items.join(", "))
+        };
+        let digits = reference.bytes().take_while(u8::is_ascii_digit).count();
+        let hint = if digits > 0 && !numeric {
+            let (number, rest) = reference.split_at(digits);
+            format!("write ${{{number}}}{rest} to put {rest} after group {number}")
+        } else if count == 0 {
+            "write $0 for the whole match, or add a group to the pattern".to_string()
+        } else {
+            format!("use a group number from 0 to {count}, or the name of a group the pattern has")
+        };
+        return Err(crate::safety::bad_arg_in(
+            builtin,
+            format!(
+                "{builtin}: the replacement refers to group '{reference}', which the pattern does not have; {listed}"
+            ),
+            &hint,
+        ));
+    }
+    Ok(())
 }
 
 /// The plural name of a unit the date builtins take. The case is ignored and

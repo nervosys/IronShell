@@ -84,3 +84,85 @@ fn sql_refuses_a_csv_file_with_a_duplicate_header() {
         "{got}"
     );
 }
+
+// ── item 2: a replacement may only name a group the pattern has ─────────
+
+#[test]
+fn regex_replace_refuses_a_group_number_the_pattern_does_not_have() {
+    let text = refusal(r#"regex_replace("a1", "([0-9])", "<$5>")"#);
+    assert!(text.contains("E_BAD_ARG"), "{text}");
+    assert!(
+        text.contains("refers to group '5', which the pattern does not have"),
+        "{text}"
+    );
+    assert!(text.contains("the pattern has 1 group(s): 1"), "{text}");
+}
+
+#[test]
+fn regex_replace_refuses_a_name_that_is_a_group_number_and_letters() {
+    let text = refusal(r#"regex_replace("a1", "([0-9])", "<$1x>")"#);
+    assert!(text.contains("E_BAD_ARG"), "{text}");
+    assert!(text.contains("group '1x'"), "{text}");
+    assert!(
+        text.contains("write ${1}x to put x after group 1"),
+        "{text}"
+    );
+}
+
+#[test]
+fn regex_replace_lists_the_named_groups_it_has() {
+    let text = refusal(r#"regex_replace("2024-02", "(?P<y>[0-9]+)-(?P<m>[0-9]+)", "$yr")"#);
+    assert!(text.contains("E_BAD_ARG"), "{text}");
+    assert!(
+        text.contains("the pattern has 2 group(s): 1 (y), 2 (m)"),
+        "{text}"
+    );
+}
+
+#[test]
+fn regex_replace_refuses_any_reference_when_the_pattern_has_no_groups() {
+    let text = refusal(r#"regex_replace("a", "a", "$1")"#);
+    assert!(text.contains("E_BAD_ARG"), "{text}");
+    assert!(text.contains("no groups besides the whole match"), "{text}");
+}
+
+#[test]
+fn regex_replace_valid_references_work_as_before() {
+    assert_eq!(
+        eval(r#"regex_replace("a1", "([0-9])", "<$1>")"#).unwrap(),
+        Value::Str("a<1>".to_string())
+    );
+    assert_eq!(
+        eval(r#"regex_replace("a1", "([0-9])", "[$0]")"#).unwrap(),
+        Value::Str("a[1]".to_string())
+    );
+    assert_eq!(
+        eval(r#"regex_replace("a1", "([0-9])", "<\${1}x>")"#).unwrap(),
+        Value::Str("a<1x>".to_string())
+    );
+    assert_eq!(
+        eval(r#"regex_replace("2024-02", "(?P<y>[0-9]+)-(?P<m>[0-9]+)", "\${m}/\${y}")"#).unwrap(),
+        Value::Str("02/2024".to_string())
+    );
+}
+
+#[test]
+fn regex_replace_double_dollar_and_a_bare_dollar_are_literal() {
+    assert_eq!(
+        eval(r#"regex_replace("a1", "([0-9])", "$$1")"#).unwrap(),
+        Value::Str("a$1".to_string())
+    );
+    assert_eq!(
+        eval(r#"regex_replace("a1", "([0-9])", "$ 5")"#).unwrap(),
+        Value::Str("a$ 5".to_string())
+    );
+}
+
+#[test]
+fn regex_replace_refusal_is_caught_as_e_bad_arg() {
+    assert_eq!(
+        eval(r#"(try { regex_replace("a1", "([0-9])", "<$5>") } catch e { e.error.code })"#)
+            .unwrap(),
+        Value::Str("E_BAD_ARG".to_string())
+    );
+}
