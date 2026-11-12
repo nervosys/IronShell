@@ -231,7 +231,7 @@ const UNKEYED_NOTE: &str = "the chain is not keyed";
 #[test]
 fn an_unkeyed_audit_chain_is_reported_as_unkeyed_with_a_note() {
     let d = Dirs::new("auditkey");
-    let log = d.root.join("audit.log");
+    let log = d.workspace.join("audit.log");
     std::fs::write(&log, "").unwrap();
     let call = format!(
         r#"audit_verify("{}")"#,

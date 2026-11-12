@@ -606,7 +606,6 @@ fn names_a_path_param(name: &str) -> bool {
             | "src"
             | "source"
             | "source_dir"
-            | "source_or_query"
             | "count_or_path"
             | "dest"
             | "destination"
@@ -654,12 +653,22 @@ pub fn read_jail_dispatch(builtin: &str, args: &[crate::value::Value], piped: bo
         return Ok(());
     }
     let judge = |s: &str| -> Result<()> {
-        if s.is_empty() || s.len() > 4096 || s.contains('\n') {
+        // No file is named by these: the builtin refuses a NUL itself, and a
+        // URL (`rsync://host/mod`, `https://...`) is not a local path.
+        if s.is_empty() || s.len() > 4096 || s.contains('\n') || s.contains('\0') || is_url(s) {
+            return Ok(());
+        }
+        // A glob reads the files under its literal directory, so that
+        // directory is what is judged: `../*.rs` is outside, `src/*.rs` is not.
+        let s = glob_base(s);
+        let resolved = crate::safety::resolve_path_str(s);
+        // The shell's own audit log may be verified wherever the operator put it.
+        if builtin == "audit_verify" && is_the_audit_log(&resolved) {
             return Ok(());
         }
         // Judged where the builtin will open it: a relative path is the
         // workspace's when the jail is on, as `resolve_path_str` places it.
-        check_read_jail(builtin, &crate::safety::resolve_path_str(s))
+        check_read_jail(builtin, &resolved)
     };
     let Some(sig) = crate::signature::signature_of(builtin) else {
         for s in args.iter().filter_map(|a| match a {
@@ -675,7 +684,7 @@ pub fn read_jail_dispatch(builtin: &str, args: &[crate::value::Value], piped: bo
     // Called directly, a builtin with a subject takes it as its first argument.
     let offset = usize::from(sig.subject.is_some() && !piped);
     for (i, p) in sig.params.iter().enumerate() {
-        if !names_a_path_param(p.name) {
+        if !names_a_path_param(p.name) || NOT_A_PATH.contains(&(builtin, p.name)) {
             continue;
         }
         let Some(arg) = args.get(i + offset) else {
@@ -694,6 +703,44 @@ pub fn read_jail_dispatch(builtin: &str, args: &[crate::value::Value], piped: bo
         }
     }
     Ok(())
+}
+
+/// Parameters whose name reads like a path but whose value is not one.
+const NOT_A_PATH: &[(&str, &str)] = &[
+    // An integration test target's name, refused as E_BAD_ARG if it is a path.
+    ("test_run_file", "file"),
+];
+
+/// Whether `s` is a URL (`scheme://...`), not a local path.
+fn is_url(s: &str) -> bool {
+    match s.find("://") {
+        Some(i) if i >= 2 => s[..i]
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '-' | '.')),
+        _ => false,
+    }
+}
+
+/// The literal directory a glob reads under: the part before its first
+/// wildcard, up to the last separator. A string without a wildcard is itself.
+fn glob_base(s: &str) -> &str {
+    let Some(w) = s.find(['*', '?', '[']) else {
+        return s;
+    };
+    match s[..w].rfind(['/', '\\']) {
+        Some(0) => &s[..1],
+        Some(sep) => &s[..sep],
+        None => ".",
+    }
+}
+
+/// Whether `resolved` names the audit log this shell writes.
+fn is_the_audit_log(resolved: &str) -> bool {
+    let Some(log) = crate::safety::audit_path() else {
+        return false;
+    };
+    let canon = |p: &Path| std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
+    canon(Path::new(resolved)) == canon(&log)
 }
 
 /// The read jail as a builtin's error: `E_OUTSIDE_WORKSPACE` when `path` is

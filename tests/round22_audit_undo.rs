@@ -78,7 +78,7 @@ const SHORT_KEY_WARNING: &str =
 #[test]
 fn a_chain_key_set_but_too_short_warns_on_stderr_and_is_named_in_the_verify_note() {
     let d = Dirs::new("shortkey");
-    let log = d.root.join("audit.log");
+    let log = d.workspace.join("audit.log");
     std::fs::write(&log, "").unwrap();
 
     // 31 bytes: one short of the minimum.
@@ -109,7 +109,7 @@ fn a_chain_key_set_but_too_short_warns_on_stderr_and_is_named_in_the_verify_note
 #[test]
 fn a_chain_key_of_the_minimum_length_is_used_without_a_warning() {
     let d = Dirs::new("okkey");
-    let log = d.root.join("audit.log");
+    let log = d.workspace.join("audit.log");
     std::fs::write(&log, "").unwrap();
 
     let key = "0123456789abcdef0123456789abcdef";
@@ -129,7 +129,7 @@ fn a_chain_key_of_the_minimum_length_is_used_without_a_warning() {
 #[test]
 fn an_edited_unkeyed_entry_is_not_called_tampering() {
     let d = Dirs::new("unkeyedmismatch");
-    let log = d.root.join("audit.log");
+    let log = d.workspace.join("audit.log");
     // One entry whose stored hash cannot match its contents. No `mac` field, so
     // the chain is read as unkeyed.
     std::fs::write(
@@ -152,7 +152,7 @@ fn an_edited_unkeyed_entry_is_not_called_tampering() {
 #[test]
 fn an_edited_keyed_entry_is_still_called_tampering() {
     let d = Dirs::new("keyedmismatch");
-    let log = d.root.join("audit.log");
+    let log = d.workspace.join("audit.log");
     std::fs::write(
         &log,
         "{\"entry_hash\":\"00\",\"mac\":\"hmac-sha256\",\"prev_hash\":\"\",\"seq\":1}\n",

@@ -237,3 +237,57 @@ fn run_from_outside_the_workspace_reads_and_writes_name_the_same_file() {
     assert!(d.ws.join("a.txt").exists(), "{out}");
     assert!(!d.root.join("a.txt").exists(), "{out}");
 }
+
+#[test]
+fn a_glob_is_judged_by_its_literal_directory() {
+    let d = Dirs::new("glob");
+    std::fs::write(d.ws.join("in.txt"), "inside line").unwrap();
+    let out = d.agent(&d.ws, ".", r#"grep("OUTSIDE", "../outside/*.txt")"#);
+    assert!(out.contains("E_OUTSIDE_WORKSPACE"), "{out}");
+    assert!(!out.contains("OUTSIDE-SECRET"), "{out}");
+    let out = d.agent(&d.ws, ".", r#"grep("inside", "*.txt") | len"#);
+    assert!(!out.contains("E_OUTSIDE_WORKSPACE"), "{out}");
+}
+
+#[test]
+fn a_query_and_a_url_are_not_judged_as_paths() {
+    let d = Dirs::new("notpath");
+    let out = d.agent(&d.ws, ".", r#"sql_value("select 6 * 7")"#);
+    assert!(out.contains("42"), "{out}");
+    let out = d.agent(
+        &d.ws,
+        ".",
+        r#"sql_value("../outside/people.csv", "select count(*) from t")"#,
+    );
+    assert!(out.contains("E_OUTSIDE_WORKSPACE"), "{out}");
+}
+
+#[test]
+fn the_configured_audit_log_may_be_verified_and_no_other_outside_file() {
+    let d = Dirs::new("auditlog");
+    let log = d.outside.join("audit.log");
+    std::fs::write(&log, "").unwrap();
+    let run = |expr: &str| {
+        let out = Command::new(env!("CARGO_BIN_EXE_ish"))
+            .args(["--agent", "--workspace", ".", "-c", expr])
+            .current_dir(&d.ws)
+            .env("NO_COLOR", "1")
+            .env("IRONSHELL_SESSION_DIR", d.root.join("session"))
+            .env("IRONSHELL_AUDIT_LOG", &log)
+            .env_remove("IRONSHELL_APPROVE")
+            .env_remove("IRONSHELL_WORKSPACE")
+            .output()
+            .expect("run ish");
+        String::from_utf8_lossy(&out.stdout).into_owned() + &String::from_utf8_lossy(&out.stderr)
+    };
+    let own = log.to_string_lossy().replace('\\', "/");
+    let out = run(&format!(r#"audit_verify("{own}").valid"#));
+    assert!(!out.contains("E_OUTSIDE_WORKSPACE"), "{out}");
+    let other = d
+        .outside
+        .join("secret.txt")
+        .to_string_lossy()
+        .replace('\\', "/");
+    let out = run(&format!(r#"audit_verify("{other}")"#));
+    assert!(out.contains("E_OUTSIDE_WORKSPACE"), "{out}");
+}

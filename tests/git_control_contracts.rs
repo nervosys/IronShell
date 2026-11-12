@@ -198,7 +198,7 @@ fn an_archive_cannot_plant_git_config() {
     use std::io::Write as _;
     let _g = LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let ws = Ws::new(Some("agent"));
-    let archive = ws.outside.join("planted.zip");
+    let archive = ws.root.join("planted.zip");
     {
         let file = std::fs::File::create(&archive).unwrap();
         let mut w = zip::ZipWriter::new(file);

@@ -383,13 +383,13 @@ fn audit_log_assertions_reach_the_chained_log_and_tampering_is_caught() {
 fn audit_verify_is_not_valid_for_a_missing_or_empty_log() {
     let w = world("audit_verify_missing");
     // A missing log is not a verdict at all: it is an error that names the path.
-    let missing = w.root.join("no-such.log");
+    let missing = w.root.join("ws").join("no-such.log");
     refused_with(
         call_v("audit_verify", vec![s(&missing.to_string_lossy())]),
         "E_NOT_FOUND",
     );
 
-    let empty = w.root.join("empty.log");
+    let empty = w.root.join("ws").join("empty.log");
     std::fs::write(&empty, "").expect("empty log");
     let verdict = call_v("audit_verify", vec![s(&empty.to_string_lossy())]).expect("answers");
     assert_eq!(
