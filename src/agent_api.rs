@@ -1595,24 +1595,22 @@ pub(crate) fn named_args_to_positional(
         .find(|((_, required), slot)| *required && slot.is_none())
         .map(|(position, _)| position)
     {
-        // The subject's slot is keyed `subject` (or `input`), which is the key
-        // an args object takes it under; the name is not a parameter's. When the
-        // caller has written neither that key nor the first declared parameter,
-        // name that parameter instead: a subject stands for the first argument,
-        // so `sql_value()` says `source_or_query`. Only the name changes.
-        let shown = match signature.and_then(|s| s.params.first()) {
-            Some(first)
-                if name.as_str() == "subject"
-                    && first.required
-                    && !obj.contains_key(first.name) =>
-            {
-                first.name
-            }
-            _ => name.as_str(),
-        };
+        // `subject` is the key the args object takes the value the builtin works
+        // on (what a pipeline would pipe in), so it is the name to give; say
+        // what it is and list every key, since no declared parameter is called
+        // that. Naming a declared parameter instead would be wrong for a
+        // builtin whose subject comes before its first parameter (date_add's
+        // date, before `amount`).
+        if name == "subject" {
+            return Err(anyhow!(
+                "missing required argument 'subject' for '{}': the value it works on, which a pipeline would pipe in (the key 'input' is accepted too); valid parameters: {}",
+                builtin,
+                valid
+            ));
+        }
         return Err(anyhow!(
             "missing required argument '{}' for '{}'",
-            shown,
+            name,
             builtin
         ));
     }
