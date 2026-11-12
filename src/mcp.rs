@@ -503,7 +503,7 @@ impl McpServer {
             },
             McpTool {
                 name: "ontology_describe".to_string(),
-                description: "Expand one slice of the ontology: a category name -> its builtins (name, signature, effect); or a builtin name -> full detail (params, examples, effect class). Arg: a single query string.".to_string(),
+                description: "Expand one slice of the ontology: a category name -> its builtins (name, signature, effect); or a builtin name -> full detail (params, examples, effect class). Arg: name, a category or builtin name; or args, an array holding that one name.".to_string(),
                 input_schema: serde_json::json!({
                     "type": "object",
                     "properties": {

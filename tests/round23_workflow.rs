@@ -187,3 +187,24 @@ fn every_journal_row_has_the_id_undo_takes() {
     );
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn ontology_describe_is_described_as_the_argument_its_schema_takes() {
+    let server = iron_shell::mcp::McpServer::new();
+    let tool = server
+        .list_builtin_tools()
+        .into_iter()
+        .find(|t| t.name == "ontology_describe")
+        .expect("ontology_describe is listed");
+    assert!(
+        !tool.description.contains("single query string"),
+        "the schema takes name, not a query: {}",
+        tool.description
+    );
+    assert!(tool.description.contains("name"), "{}", tool.description);
+    assert!(
+        tool.input_schema["properties"]["name"].is_object(),
+        "the schema the description describes: {}",
+        tool.input_schema
+    );
+}
