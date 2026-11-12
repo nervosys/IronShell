@@ -872,16 +872,17 @@ pub static SIGNATURES: &[Signature] = &[
     Signature {
         name: "file_patch", category: None, subject_required: false, aliases: &["patch_file"],
         subject: None, params: &[req("path", Ty::Str, "file to patch"), opt("patches", Ty::Any, "patch record or array; omitted uses pipeline input")], returns: "Record",
-        doc: "Apply find/replace patches in order, all or nothing. A patch whose find text is not in the file is an E_NOT_FOUND error and nothing is written; a success reports the applied patches. In a file whose line breaks are all CRLF, the replacement text is written with CRLF line breaks; any other file is written exactly as given.",
+        doc: "Apply find/replace patches in order, all or nothing. A patch whose find text is not in the file is an E_NOT_FOUND error and nothing is written; a success reports the applied patches. In a file whose line breaks are all CRLF, the LF in a find or replace text counts as CRLF: a multi-line find matches, and the replacement is written with CRLF line breaks; any other file is matched and written exactly as given.",
         examples: &[
             (r#"let d = fs_tempdir("ae_patch"); let f = d + "/x"; file_write(f, "hello"); let result = file_patch(f, {find: "hello", replace: "hi"}); rmdir(d, true); result.patches_applied"#, "1"),
             (r#"let d = fs_tempdir("ae_patch"); let f = d + "/x"; file_write(f, "hello"); let result = [{find: "hello", replace: "hi"}] | file_patch(f); rmdir(d, true); result.success"#, "true"),
+            (r#"let d = fs_tempdir("ae_patch_crlf"); let f = d + "/x"; file_write(f, "one\r\ntwo\r\n"); file_patch(f, {find: "one\ntwo", replace: "X"}); let t = read_text(f); rmdir(d, true); t == "X\r\n""#, "true"),
         ],
     },
     Signature {
         name: "file_replace", category: None, subject_required: false, aliases: &["str_replace_in_file", "text_replace"],
         subject: None, params: &[req("path", Ty::Str, "file to edit"), req("old_text", Ty::Str, "text to replace"), req("new_text", Ty::Str, "replacement text")], returns: "Record",
-        doc: "Replace all occurrences of text in a file and return the patch result. Text that is not in the file is an E_NOT_FOUND error and nothing is written. A file that does not exist is also E_NOT_FOUND, reported as a missing file before any text is looked for. In a file whose line breaks are all CRLF, new_text is written with CRLF line breaks; any other file is written exactly as given.",
+        doc: "Replace all occurrences of text in a file and return the patch result. Text that is not in the file is an E_NOT_FOUND error and nothing is written. A file that does not exist is also E_NOT_FOUND, reported as a missing file before any text is looked for. In a file whose line breaks are all CRLF, the LF in old_text counts as CRLF, so a multi-line old_text matches, and new_text is written with CRLF line breaks; any other file is matched and written exactly as given.",
         examples: &[
             (r#"let d = fs_tempdir("ae_replace"); let f = d + "/x"; file_write(f, "hello"); let result = file_replace(f, "hello", "hi"); rmdir(d, true); result.success"#, "true"),
             (r#"let d = fs_tempdir("ae_replace_crlf"); let f = d + "/x"; file_write(f, "one\r\ntwo\r\n"); file_replace(f, "two", "x\ny"); let t = read_text(f); rmdir(d, true); t == "one\r\nx\r\ny\r\n""#, "true"),

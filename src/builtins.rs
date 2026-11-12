@@ -50600,8 +50600,8 @@ fn bi_file_patch(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
 
     // Read current content
     let mut content = read_text_capped(builtin, &path)?;
-    // In a CRLF file the replace text is written with CRLF line breaks, so no
-    // bare LF is written into it.
+    // In a CRLF file the find and replace texts are written with CRLF line
+    // breaks, so a multi-line find matches and no bare LF is written into it.
     let eol = file_line_break(&content);
 
     let mut applied = Vec::new();
@@ -50647,10 +50647,11 @@ fn bi_file_patch(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
             }
         };
 
+        let search = with_file_line_breaks(&find_str, eol);
         let replacement = with_file_line_breaks(&replace_str, eol);
-        if content.contains(&find_str) {
-            let count = content.matches(&find_str).count();
-            content = content.replace(&find_str, &replacement);
+        if content.contains(&search) {
+            let count = content.matches(&search).count();
+            content = content.replace(&search, &replacement);
 
             let mut patch_result = BTreeMap::new();
             patch_result.insert("find".to_string(), Value::Str(find_str));

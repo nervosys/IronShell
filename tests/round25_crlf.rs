@@ -247,6 +247,64 @@ fn replace_in_a_mixed_file_writes_the_text_as_given() {
     assert_eq!(s.read("m.txt"), "one\r\nx\ny\n");
 }
 
+// ---- a multi-line find matches across CRLF ----
+
+#[test]
+fn replace_with_a_multi_line_find_matches_a_crlf_file() {
+    let _g = LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let s = Session::new("find_multi");
+    s.seed("c.txt", "one\r\ntwo\r\n");
+
+    let r = replace(&s, "c.txt", "one\ntwo", "X");
+
+    assert_eq!(s.read("c.txt"), "X\r\n");
+    assert_eq!(field(&r, "success"), Value::Bool(true));
+    assert_eq!(field(&r, "patches_applied"), Value::Int(1));
+}
+
+#[test]
+fn patch_with_a_multi_line_find_matches_a_crlf_file() {
+    let _g = LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let s = Session::new("find_pat");
+    s.seed("p.txt", "one\r\ntwo\r\nthree\r\n");
+
+    let r = patch(&s, "p.txt", "one\ntwo", "X");
+
+    assert_eq!(s.read("p.txt"), "X\r\nthree\r\n");
+    assert_eq!(field(&r, "success"), Value::Bool(true));
+}
+
+#[test]
+fn a_multi_line_find_that_is_not_in_a_crlf_file_still_writes_nothing() {
+    let _g = LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let s = Session::new("find_miss");
+    s.seed("c.txt", "one\r\ntwo\r\n");
+
+    let err = call(
+        "file_replace",
+        vec![
+            Value::Str(s.path("c.txt")),
+            Value::Str("two\nthree".into()),
+            Value::Str("X".into()),
+        ],
+    )
+    .expect_err("the find is not in the file");
+
+    assert!(err.contains("pattern not found"), "{err}");
+    assert_eq!(s.read("c.txt"), "one\r\ntwo\r\n");
+}
+
+#[test]
+fn a_multi_line_find_in_an_lf_file_is_unchanged() {
+    let _g = LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let s = Session::new("find_lf");
+    s.seed("l.txt", "one\ntwo\n");
+
+    replace(&s, "l.txt", "one\ntwo", "X");
+
+    assert_eq!(s.read("l.txt"), "X\n");
+}
+
 #[test]
 fn a_replacement_that_already_has_crlf_is_not_doubled() {
     let _g = LOCK.lock().unwrap_or_else(|e| e.into_inner());
