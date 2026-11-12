@@ -221,6 +221,7 @@ fn table_from_file(builtin: &str, path: &str, kind: &str) -> Result<Vec<Loaded>>
                 .iter()
                 .map(str::to_string)
                 .collect();
+            crate::builtins::check_csv_headers(builtin, &headers)?;
             // Typed as from_csv and open type them, blanks in numeric columns included.
             let mut records = Vec::new();
             for (i, record) in reader.records().enumerate() {

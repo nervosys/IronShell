@@ -1751,7 +1751,7 @@ pub static SIGNATURES: &[Signature] = &[
     Signature {
         name: "from_csv", category: None, subject_required: false, aliases: &["from-csv"],
         subject: Some(Ty::Str), params: &[], returns: "Array",
-        doc: "Parse a CSV string with headers. Each column is typed as a whole: it is numeric only when every non-empty cell is a number, with no leading \"+\" and no leading zero before another digit (\"007\" is text, \"0.5\" is a number). A numeric column holds Ints when every non-empty cell is an integer, else Floats, and its empty cells are null. A column whose non-empty cells are all true or false, in any case (TRUE, False), holds Bools, its empty cells null. Any other column holds only Strings, and its empty cells are \"\". A cell that spells NaN or an infinity (inf, -Infinity), or an integer past the 64-bit Int range, is text, so such a column is a String column: in CSV these are labels, JSON cannot hold a non-finite float, and a Float would lose the digits of a large integer. The text is piped in or passed as the argument: from_csv(text).",
+        doc: "Parse a CSV string with headers. Each column is typed as a whole: it is numeric only when every non-empty cell is a number, with no leading \"+\" and no leading zero before another digit (\"007\" is text, \"0.5\" is a number). A numeric column holds Ints when every non-empty cell is an integer, else Floats, and its empty cells are null. A column whose non-empty cells are all true or false, in any case (TRUE, False), holds Bools, its empty cells null. Any other column holds only Strings, and its empty cells are \"\". A cell that spells NaN or an infinity (inf, -Infinity), or an integer past the 64-bit Int range, is text, so such a column is a String column: in CSV these are labels, JSON cannot hold a non-finite float, and a Float would lose the digits of a large integer. A header that names a column twice is E_BAD_ARG, since the second column would replace the first. A row whose field count differs from the header is E_BAD_ARG, and its message gives the CSV line, counting CRLF lines correctly. The text is piped in or passed as the argument: from_csv(text).",
         examples: &[
             (r#"("n\n7\n" | from_csv | first).n"#, "7"),
             (r#"from_csv("n\n7\n") | len"#, "1"),
@@ -1759,6 +1759,7 @@ pub static SIGNATURES: &[Signature] = &[
             (r#"from_csv("n,s\n7,\n8,x\n") | first | fn(r) => r.s"#, r#""""#),
             (r#"from_csv("n\n007\nNA\n12\n") | first | fn(r) => r.n"#, r#""007""#),
             (r#"from_csv("v\nNaN\n1\n") | first | fn(r) => r.v"#, r#""NaN""#),
+            (r#"(try { from_csv("a,a\n1,2\n") } catch e { e.error.code })"#, r#""E_BAD_ARG""#),
         ],
     },
     Signature {
@@ -7463,11 +7464,12 @@ pub static SIGNATURES: &[Signature] = &[
         subject: Some(Ty::Str),
         params: &[req("pattern", Ty::Str, "a Rust regex pattern"), req("replacement", Ty::Str, "replacement text; $1, $name and $$ expand as the regex crate expands them; write a named group as \\${name}, since ${name} interpolates")],
         returns: "String",
-        doc: "Replace every match of a Rust regex in a String. The replacement expands $1, $name, ${name} and $$ as the regex crate does. In a double-quoted string ${name} is interpolation, so write \\${name} to pass ${name} to the regex: regex_replace(\"2024-02\", \"(?P<y>[0-9]+)-(?P<m>[0-9]+)\", \"\\${m}/\\${y}\") is \"02/2024\". An invalid pattern, or one over the size cap (compiled patterns are limited to 1 MiB), is E_BAD_ARG. Direct regex_replace(text, pattern, replacement) or text | regex_replace(pattern, replacement).",
+        doc: "Replace every match of a Rust regex in a String. The replacement expands $1, $name, ${name} and $$ as the regex crate does. In a double-quoted string ${name} is interpolation, so write \\${name} to pass ${name} to the regex: regex_replace(\"2024-02\", \"(?P<y>[0-9]+)-(?P<m>[0-9]+)\", \"\\${m}/\\${y}\") is \"02/2024\". An invalid pattern, or one over the size cap (compiled patterns are limited to 1 MiB), is E_BAD_ARG. A replacement that refers to a group the pattern does not have, such as $5 or $1x, is E_BAD_ARG too, and its hint says how to write it: ${1}x is group 1 followed by x. Direct regex_replace(text, pattern, replacement) or text | regex_replace(pattern, replacement).",
         examples: &[
             (r#"regex_replace("a1b2", "([0-9])", "<$1>")"#, r#""a<1>b<2>""#),
             (r##""a1" | regex_replace("[0-9]", "#")"##, r#""a#""#),
             (r#"regex_replace("2024-02", "(?P<y>[0-9]+)-(?P<m>[0-9]+)", "\${m}/\${y}")"#, r#""02/2024""#),
+            (r#"(try { regex_replace("a1", "([0-9])", "<$5>") } catch e { e.error.code })"#, r#""E_BAD_ARG""#),
         ],
     },
     Signature {

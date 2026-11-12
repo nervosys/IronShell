@@ -10673,17 +10673,68 @@ fn bi_from_csv(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
         .map(|h| h.to_string())
         .collect();
 
+    check_csv_headers("from-csv", &headers)?;
     let mut records = Vec::new();
     for record in reader.records() {
         // A malformed row (unequal field counts, bad quoting) is the caller's
         // text, so E_BAD_ARG; it was an uncoded csv::Error, E_UNKNOWN.
-        records.push(
-            record.map_err(|e| crate::safety::bad_arg("from-csv", "CSV text", &e.to_string()))?,
-        );
+        records.push(record.map_err(|e| csv_row_error("from-csv", &csv_str, &e))?);
     }
 
     let rows = csv_rows(&headers, &records);
     Ok(Value::Array(rows.into_iter().map(Value::Record).collect()))
+}
+
+/// The refusal for a header row that names a column twice. Each row is a record
+/// keyed by its header, so the second column would overwrite the first and one
+/// column would vanish without a word. Names match exactly, as the keys do.
+pub(crate) fn check_csv_headers(builtin: &str, headers: &[String]) -> Result<()> {
+    for (i, name) in headers.iter().enumerate() {
+        if let Some(first) = headers[..i].iter().position(|h| h == name) {
+            return Err(crate::safety::bad_arg_in(
+                builtin,
+                format!(
+                    "{builtin}: duplicate CSV column '{name}' at columns {} and {}",
+                    first + 1,
+                    i + 1
+                ),
+                "rename one column, or read the file with csv_columns(...) to see the header",
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// The refusal for a CSV row the reader cannot take. csv counts a row's line
+/// itself, and under CRLF that count is one short, so the line is worked out
+/// from the byte the error names: the newlines up to and including that byte,
+/// plus one. A row with the wrong number of fields is named by its line and by
+/// the two counts.
+fn csv_row_error(builtin: &str, text: &str, e: &csv::Error) -> anyhow::Error {
+    if let csv::ErrorKind::UnequalLengths {
+        pos: Some(pos),
+        expected_len,
+        len,
+    } = e.kind()
+    {
+        let end = usize::try_from(pos.byte())
+            .unwrap_or(usize::MAX)
+            .saturating_add(1)
+            .min(text.len());
+        let line = text.as_bytes()[..end]
+            .iter()
+            .filter(|&&b| b == b'\n')
+            .count()
+            + 1;
+        return crate::safety::bad_arg_in(
+            builtin,
+            format!(
+                "{builtin}: CSV line {line}: found {len} fields where the header has {expected_len}"
+            ),
+            "fix the row so it has as many fields as the header, or quote a field that holds a comma",
+        );
+    }
+    crate::safety::bad_arg(builtin, "CSV text", &e.to_string())
 }
 
 /// Whether a cell is a number a numeric column can hold: it parses as an Int or
@@ -15610,7 +15661,88 @@ fn bi_regex_replace(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
     };
     let re = text_regex(B, string_arg(B, "a String pattern", pattern)?)?;
     let replacement = string_arg(B, "a String replacement", replacement)?;
+    check_replacement_groups(B, &re, replacement)?;
     Ok(Value::Str(re.replace_all(&text, replacement).into_owned()))
+}
+
+/// The group references a replacement makes, read as the regex crate reads
+/// them: `$` then the longest run of letters, digits and underscores is a name,
+/// `${name}` braces it, and `$$` is a literal dollar. Any other `$` is literal.
+fn replacement_references(replacement: &str) -> Vec<&str> {
+    let bytes = replacement.as_bytes();
+    let is_name = |b: u8| b == b'_' || b.is_ascii_alphanumeric();
+    let mut refs = Vec::new();
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] != b'$' {
+            i += 1;
+            continue;
+        }
+        if bytes.get(i + 1) == Some(&b'$') {
+            i += 2;
+            continue;
+        }
+        let braced = bytes.get(i + 1) == Some(&b'{');
+        let start = i + 1 + usize::from(braced);
+        let mut end = start;
+        while end < bytes.len() && is_name(bytes[end]) {
+            end += 1;
+        }
+        if end == start || (braced && bytes.get(end) != Some(&b'}')) {
+            i += 1;
+            continue;
+        }
+        refs.push(&replacement[start..end]);
+        i = if braced { end + 1 } else { end };
+    }
+    refs
+}
+
+/// The refusal for a replacement that names a group the pattern does not have.
+/// The regex crate expands such a reference to nothing, so "<$5>" silently lost
+/// its text. A reference to a group the pattern has is unchanged.
+fn check_replacement_groups(builtin: &str, re: &regex::Regex, replacement: &str) -> Result<()> {
+    let count = re.captures_len() - 1;
+    let names: Vec<Option<&str>> = re.capture_names().skip(1).collect();
+    for reference in replacement_references(replacement) {
+        let numeric = reference.bytes().all(|b| b.is_ascii_digit());
+        let known = if numeric {
+            reference.parse::<usize>().is_ok_and(|n| n <= count)
+        } else {
+            names.iter().any(|name| *name == Some(reference))
+        };
+        if known {
+            continue;
+        }
+        let listed = if count == 0 {
+            "the pattern has no groups besides the whole match, group 0".to_string()
+        } else {
+            let items: Vec<String> = (1..=count)
+                .map(|i| match names.get(i - 1).copied().flatten() {
+                    Some(name) => format!("{i} ({name})"),
+                    None => i.to_string(),
+                })
+                .collect();
+            format!("the pattern has {count} group(s): {}", items.join(", "))
+        };
+        let digits = reference.bytes().take_while(u8::is_ascii_digit).count();
+        let hint = if digits > 0 && !numeric {
+            let (number, rest) = reference.split_at(digits);
+            format!("write ${{{number}}}{rest} to put {rest} after group {number}")
+        } else if count == 0 {
+            "write $0 for the whole match, or add a group to the pattern".to_string()
+        } else {
+            format!("use a group number from 0 to {count}, or the name of a group the pattern has")
+        };
+        return Err(crate::safety::bad_arg_in(
+            builtin,
+            format!(
+                "{builtin}: the replacement refers to group '{reference}', which the pattern does not have; {listed}"
+            ),
+            &hint,
+        ));
+    }
+    Ok(())
 }
 
 /// The plural name of a unit the date builtins take. The case is ignored and
@@ -30781,13 +30913,22 @@ fn bi_open(args: Vec<Value>, _input: Option<Value>) -> Result<Value> {
         }
         "jsonl" | "ndjson" => {
             let mut rows = Vec::new();
-            for line in text.lines().filter(|l| !l.trim().is_empty()) {
+            // The line is the file's, counting blank lines, and the column is within
+            // that line: serde_json's own position is of the record alone.
+            for (index, line) in text.lines().enumerate() {
+                if line.trim().is_empty() {
+                    continue;
+                }
                 let j: serde_json::Value = serde_json::from_str(line).map_err(|e| {
+                    let (number, column) = (index + 1, e.column());
                     unparsed_data(
                         &path,
                         "JSON lines",
-                        &e.to_string(),
-                        format!("fix the line of JSON that fails: {}", json_message(&e)),
+                        &format!("line {number}, column {column}: {}", json_message(&e)),
+                        format!(
+                            "fix the JSON at line {number}, column {column}: {}",
+                            json_message(&e)
+                        ),
                     )
                 })?;
                 if let Some(refusal) = wide_integer_refusal("open", line) {
