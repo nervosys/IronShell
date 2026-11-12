@@ -1147,7 +1147,7 @@ impl Parser {
                         }
                         if let Some(Part::Lit(s, false)) = w.first() {
                             if s.ends_with("()") || s == "function" {
-                                return unsupported("function definition");
+                                return unsupported_at("function definition", start);
                             }
                             if s == "[[" {
                                 return unsupported("[[");
@@ -1165,7 +1165,7 @@ impl Parser {
                 Some(Tok::LParen)
                     if words.len() == 1 && assigns.is_empty() && redirs.is_empty() =>
                 {
-                    return unsupported("function definition");
+                    return unsupported_at("function definition", start);
                 }
                 // `name=(...)`: the assignment with an empty value is the word
                 // before the `(`. Arrays are not in the subset.

@@ -48,7 +48,7 @@ fn a_function_is_told_to_inline_its_body() {
     refused_with(
         "function",
         "f() { echo hi; }\nf\n",
-        "function definition at line 1, column 2",
+        "function definition at line 1, column 1",
         "inline the body, or write the logic in ish.",
     );
 }

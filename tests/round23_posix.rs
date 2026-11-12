@@ -129,3 +129,18 @@ fn an_array_assignment_is_named_as_an_array() {
     assert!(!err.contains("subshell"), "{err}");
     assert!(err.contains("space-separated string"), "{err}");
 }
+
+// ── 4. a function definition is placed at its name ───────────────────────
+
+#[test]
+fn a_function_definition_is_placed_at_its_name() {
+    let sb = Sandbox::new("function-col");
+    let (out, err, code) = sb.run("echo first\ngreet() {\n  echo hi\n}\ngreet\n");
+    assert_eq!((out.as_str(), code), ("", 77), "{err}");
+    assert!(
+        err.contains(
+            "function definition at line 2, column 1 is not in the in-process POSIX subset"
+        ),
+        "{err}"
+    );
+}
