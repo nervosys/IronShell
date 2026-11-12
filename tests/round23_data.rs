@@ -134,3 +134,17 @@ fn to_csv_refusals_use_the_underscore_name_and_one_wording() {
         assert!(!text.contains("to-csv"), "{src}: {text}");
     }
 }
+
+// ── item 6: a whole Float is written with its point ─────────────────────
+
+#[test]
+fn to_csv_writes_a_whole_float_with_a_point_and_reads_it_back_as_a_float() {
+    assert_eq!(
+        eval(r#"[{n: 1.0, m: 2}] | to_csv | lines | last"#).unwrap(),
+        s("2,1.0")
+    );
+    assert_eq!(
+        eval(r#"[{n: 1.0}] | to_csv | from_csv | first | fn(r) => r.n"#).unwrap(),
+        Value::Float(1.0)
+    );
+}

@@ -10682,6 +10682,11 @@ fn bi_to_csv(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
                                     Value::Record(_) | Value::Array(_) => {
                                         csv_escape(&value_to_json(v.clone()).to_string())
                                     }
+                                    // A whole Float keeps its point, so it reads back as a
+                                    // Float and not as an Int column.
+                                    Value::Float(f) if f.is_finite() && f.fract() == 0.0 => {
+                                        csv_escape(&format!("{f:.1}"))
+                                    }
                                     v => csv_escape(&value_to_string(v)),
                                 })
                                 .unwrap_or_default()
