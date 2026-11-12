@@ -130,6 +130,34 @@ fn an_array_assignment_is_named_as_an_array() {
     assert!(err.contains("space-separated string"), "{err}");
 }
 
+// ── 5. an error inside a ${...} operand is placed at the operand's own `$((` ──
+
+#[test]
+fn an_arithmetic_refusal_in_an_operand_is_at_its_own_dollar_sign() {
+    let sb = Sandbox::new("operand-arith");
+    // The `$((` is at column 11, after `${x:-`; not the `${` at column 6.
+    let (out, err, code) = sb.run("echo ${x:-$((1+1))}\n");
+    assert_eq!((out.as_str(), code), ("", 77), "{err}");
+    assert!(
+        err.contains("arithmetic expansion $((...)) at line 1, column 11 is not in the in-process POSIX subset"),
+        "{err}"
+    );
+    // Quoted, the operand is read as double-quoted text: the `$((` at column 12.
+    let (out, err, code) = sb.run("echo \"${x:-$((1+1))}\"\n");
+    assert_eq!((out.as_str(), code), ("", 77), "{err}");
+    assert!(
+        err.contains("arithmetic expansion $((...)) at line 1, column 12"),
+        "{err}"
+    );
+    // Nested operands add their own offsets: the `$((` at column 16.
+    let (_, err, code) = sb.run("echo ${x:-${y:-$((1))}}\n");
+    assert_eq!(code, 77, "{err}");
+    assert!(
+        err.contains("arithmetic expansion $((...)) at line 1, column 16"),
+        "{err}"
+    );
+}
+
 // ── 4. a function definition is placed at its name ───────────────────────
 
 #[test]
