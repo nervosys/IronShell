@@ -5340,24 +5340,28 @@ fn sort(args: &[String], stdin: &mut Input, sink: &mut Sink) -> Util {
         }
         std::cmp::Ordering::Equal
     };
-    // With no keys, equal lines fall back to comparing the whole line, unless
-    // `-s`. With keys, equal lines keep their input order.
-    let last_resort = spec.keys.is_empty() && !spec.stable;
+    // Lines that compare equal fall back to comparing the whole line (GNU's
+    // last resort), unless `-s` or `-u`, which keep input order. A global `-r`
+    // reverses the whole comparison, the fallback included; a stable tie keeps
+    // its input order.
+    let last_resort = !spec.stable && !spec.unique;
     let mut order: Vec<usize> = (0..lines.len()).collect();
     order.sort_by(|&i, &j| {
-        by_keys(i, j).then_with(|| {
+        let o = by_keys(i, j).then_with(|| {
             if last_resort {
                 collate(&lines[i], &lines[j])
             } else {
                 std::cmp::Ordering::Equal
             }
-        })
+        });
+        if spec.reverse {
+            o.reverse()
+        } else {
+            o
+        }
     });
     if spec.unique {
         order.dedup_by(|&mut j, &mut i| by_keys(i, j) == std::cmp::Ordering::Equal);
-    }
-    if spec.reverse {
-        order.reverse();
     }
     for i in order {
         sink.out.extend_from_slice(lines[i].as_bytes());

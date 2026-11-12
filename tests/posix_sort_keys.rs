@@ -178,9 +178,15 @@ fn unique_and_stable_keys_match_gnu() {
 }
 
 #[test]
-fn a_key_with_no_such_field_keeps_input_order_as_gnu_does() {
-    // Field 2 does not exist in these lines, so every key is empty, and with
-    // -k there is no whole-line tie-break: the input order is kept.
-    // GNU: sort -k2 people.csv
-    assert_eq!(sort_run("n", "sort -k2 people.csv"), (PEOPLE.into(), 0));
+fn a_key_with_no_such_field_falls_back_to_the_whole_line() {
+    // Field 2 does not exist in these lines, so every key is empty. The keys
+    // tie, so the whole lines decide (GNU's last resort); -s keeps the input
+    // order instead. words.txt is not in sorted order, so the two differ.
+    // GNU: sort -k2 words.txt
+    assert_eq!(
+        sort_run("n", "sort -k2 words.txt"),
+        ("\napple\napple\nfig\npear\n".into(), 0)
+    );
+    // GNU: sort -s -k2 words.txt
+    assert_eq!(sort_run("o", "sort -s -k2 words.txt"), (WORDS.into(), 0));
 }
