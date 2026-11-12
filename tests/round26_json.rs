@@ -168,6 +168,55 @@ fn from_csv_keeps_a_wide_integer_as_text_and_types_an_i64_as_int() {
     );
 }
 
+// ── item 3: a parse error of the given text is not retryable, and says why ──
+
+#[test]
+fn a_from_json_parse_error_is_e_bad_arg_and_not_retryable() {
+    let err = eval(r#"from_json("{")"#).expect_err("not JSON");
+    let coded = err
+        .downcast_ref::<iron_shell::safety::SafetyError>()
+        .expect("a coded error");
+    assert_eq!(coded.code.as_str(), "E_BAD_ARG");
+    assert!(!coded.is_retryable(), "{}", coded.message);
+    assert!(
+        coded.message.contains("the text is not JSON"),
+        "{}",
+        coded.message
+    );
+    assert!(coded.hint.contains("line 1"), "{}", coded.hint);
+}
+
+#[test]
+fn a_from_toml_parse_error_is_not_retryable() {
+    let err = eval(r#"from_toml("a = ")"#).expect_err("not TOML");
+    let coded = err
+        .downcast_ref::<iron_shell::safety::SafetyError>()
+        .expect("a coded error");
+    assert_eq!(coded.code.as_str(), "E_BAD_VALUE");
+    assert!(!coded.is_retryable(), "{}", coded.message);
+}
+
+#[test]
+fn a_from_toml_missing_value_gives_a_reason() {
+    let text = refusal(r#"from_toml("a = ")"#);
+    let reason = text
+        .split("the text is not TOML: ")
+        .nth(1)
+        .expect("the refusal says the text is not TOML");
+    assert!(!reason.trim().is_empty(), "{text}");
+}
+
+#[test]
+fn a_from_toml_integer_past_64_bits_is_named_as_out_of_range() {
+    let text = refusal(r#"from_toml("n = 9223372036854775808")"#);
+    assert!(
+        text.contains("the integer 9223372036854775808 at line 1 is out of the 64-bit Int range"),
+        "{text}"
+    );
+    assert!(text.contains("the text is valid TOML"), "{text}");
+    assert!(!text.contains("not TOML"), "{text}");
+}
+
 #[test]
 fn from_csv_still_types_real_numbers() {
     assert_eq!(

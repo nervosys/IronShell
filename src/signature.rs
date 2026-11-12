@@ -2211,7 +2211,7 @@ pub static SIGNATURES: &[Signature] = &[
         subject: Some(Ty::Str),
         params: &[],
         returns: "Any",
-        doc: "Parse a JSON string into typed values.",
+        doc: "Parse a JSON string into typed values. Text that is not JSON is E_BAD_ARG and not retryable: the same text fails again, and its hint gives the line and column. An integer past the 64-bit Int range is E_BAD_VALUE and the refusal names its path; quote it as a string to keep the digits.",
         examples: &[
             (r#"cat("issues.json") | from_json | len"#, "500"),
             (r#""[1, 2]" | from_json"#, "[1, 2]"),

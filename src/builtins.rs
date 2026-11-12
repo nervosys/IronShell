@@ -10353,7 +10353,7 @@ fn bi_from_json(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
             && std::path::Path::new(path).is_file()
         {
             return anyhow::Error::new(crate::safety::SafetyError {
-                code: crate::safety::ErrorCode::BadArg,
+                code: crate::safety::ErrorCode::BadValue,
                 message: format!("from_json: {path:?} is a file name, not JSON text"),
                 builtin: "from_json".to_string(),
                 hint: format!(
@@ -10366,7 +10366,14 @@ fn bi_from_json(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
                 extra: serde_json::Map::new(),
             });
         }
-        crate::safety::bad_arg("from_json", "valid JSON", &e.to_string())
+        // The text is wrong, not the call: a corrected call with the same text
+        // fails again, so this is E_BAD_ARG and not retryable.
+        let (detail, hint) = json_failure(&e);
+        crate::safety::bad_value_in(
+            "from_json",
+            format!("from_json: the text is not JSON: {detail}"),
+            &hint,
+        )
     })?;
     if let Some(refusal) = wide_integer_refusal("from_json", &json_str) {
         return Err(refusal);
@@ -16064,11 +16071,15 @@ fn bi_from_toml(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
         return Err(arity_error(B, "the TOML text alone", rest.len()));
     }
     let parsed: toml::Value = toml::from_str(&text).map_err(|e| {
-        crate::safety::value_not_representable(
-            B,
-            format!("{B}: the text is not TOML: {}", e.message()),
-            &toml_failure_hint(&text, &e),
-        )
+        // An integer past 64 bits is valid TOML that this reader cannot hold, so
+        // the refusal says so instead of calling the text not TOML.
+        let message = match oversized_toml_integer(&text) {
+            Some((line, literal)) if e.message().contains("too large") => format!(
+                "{B}: the integer {literal} at line {line} is out of the 64-bit Int range (the text is valid TOML)"
+            ),
+            _ => format!("{B}: the text is not TOML: {}", toml_reason(&text, &e)),
+        };
+        crate::safety::value_not_representable(B, message, &toml_failure_hint(&text, &e))
     })?;
     Ok(crate::plugins::toml_to_value(parsed))
 }
@@ -30644,6 +30655,30 @@ fn oversized_toml_integer(text: &str) -> Option<(usize, String)> {
     None
 }
 
+/// Why a TOML text will not read, as a refusal gives it. For an integer past 64
+/// bits the parser says only "number too large to fit in target type", which
+/// names no value, so the literal and its line are given instead. Some errors
+/// come with no message (`a = ` is one): the reason for those is named here.
+fn toml_reason(text: &str, err: &toml::de::Error) -> String {
+    if err.message().contains("too large") {
+        if let Some((line, literal)) = oversized_toml_integer(text) {
+            return format!("the integer {literal} at line {line} is out of the 64-bit Int range");
+        }
+    }
+    let message = err.message().trim();
+    if !message.is_empty() {
+        return message.to_string();
+    }
+    match text
+        .lines()
+        .enumerate()
+        .find(|(_, line)| line.trim_end().ends_with('='))
+    {
+        Some((index, _)) => format!("a value is missing after '=' on line {}", index + 1),
+        None => "the text ends before a complete TOML value".to_string(),
+    }
+}
+
 /// The hint for a TOML text that will not read. An integer past the 64-bit
 /// range is named as such, since the parser's own message does not say which
 /// value it is; otherwise the hint gives the line and column of the error.
@@ -30658,10 +30693,10 @@ fn toml_failure_hint(text: &str, err: &toml::de::Error) -> String {
             let (line, column) = line_column(text, span.start);
             format!(
                 "fix the TOML at line {line}, column {column}: {}",
-                err.message()
+                toml_reason(text, err)
             )
         }
-        None => format!("fix the TOML: {}", err.message()),
+        None => format!("fix the TOML: {}", toml_reason(text, err)),
     }
 }
 
@@ -30764,7 +30799,12 @@ fn bi_open(args: Vec<Value>, _input: Option<Value>) -> Result<Value> {
         }
         "toml" => {
             let t: toml::Value = toml::from_str(&text).map_err(|e| {
-                unparsed_data(&path, "TOML", e.message(), toml_failure_hint(&text, &e))
+                unparsed_data(
+                    &path,
+                    "TOML",
+                    &toml_reason(&text, &e),
+                    toml_failure_hint(&text, &e),
+                )
             })?;
             Ok(crate::plugins::toml_to_value(t))
         }
