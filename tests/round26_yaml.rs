@@ -59,6 +59,42 @@ fn empty_collections_round_trip_at_every_level() {
     );
 }
 
+// ── item 3: YAML 1.1 boolean words are quoted ───────────────────────────
+
+#[test]
+fn yaml_1_1_boolean_words_are_quoted_on_output() {
+    assert_eq!(
+        eval(r#"to_yaml({x: "no", z: "yes"})"#).unwrap(),
+        Value::Str("x: \"no\"\nz: \"yes\"\n".to_string())
+    );
+}
+
+#[test]
+fn every_yaml_1_1_and_1_2_boolean_spelling_is_quoted_and_reads_back() {
+    let words = [
+        "y", "Y", "yes", "Yes", "YES", "n", "N", "no", "No", "NO", "on", "On", "ON", "off", "Off",
+        "OFF", "true", "True", "TRUE", "false", "False", "FALSE",
+    ];
+    for w in words {
+        let v = rec(&[(w, Value::Str(w.into())), ("v", Value::Str(w.into()))]);
+        let text = yaml::emit(&v);
+        assert!(text.contains(&format!("v: \"{w}\"\n")), "{w}: {text}");
+        assert_eq!(yaml::parse(&text).unwrap(), v, "{w}");
+    }
+}
+
+#[test]
+fn an_unquoted_boolean_word_still_reads_as_a_string() {
+    // ish's own reader is YAML 1.2 core: only true/false are booleans.
+    assert_eq!(
+        yaml::parse("x: yes\nz: off\n").unwrap(),
+        rec(&[
+            ("x", Value::Str("yes".into())),
+            ("z", Value::Str("off".into())),
+        ])
+    );
+}
+
 // ── item 2: floats ──────────────────────────────────────────────────────
 
 #[test]

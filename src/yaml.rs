@@ -554,6 +554,28 @@ fn needs_quoting(s: &str) -> bool {
     if !matches!(plain_scalar(s), Value::Str(_)) {
         return true;
     }
+    // YAML 1.1 readers (PyYAML and others) read these words as booleans. This
+    // reader keeps them as strings, but the output must mean the same everywhere.
+    if matches!(
+        s,
+        "y" | "Y"
+            | "yes"
+            | "Yes"
+            | "YES"
+            | "n"
+            | "N"
+            | "no"
+            | "No"
+            | "NO"
+            | "on"
+            | "On"
+            | "ON"
+            | "off"
+            | "Off"
+            | "OFF"
+    ) {
+        return true;
+    }
     s.contains(':')
         || s.contains('#')
         || s.contains('\n')
