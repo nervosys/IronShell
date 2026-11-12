@@ -10759,8 +10759,17 @@ fn bi_csv_columns(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
     };
 
     // A remote-share string is never probed: exists() on it opens a connection.
-    let is_file =
-        !crate::safety::names_a_remote_share(&subject) && std::path::Path::new(&subject).is_file();
+    let probed = !crate::safety::names_a_remote_share(&subject);
+    // A directory is not a CSV file, and its name is not CSV text either.
+    if probed && std::path::Path::new(&subject).is_dir() {
+        validate_read_path(&subject)?;
+        return Err(crate::safety::bad_arg_in(
+            "csv_columns",
+            format!("csv_columns: '{subject}' names a directory, not a CSV file"),
+            "pass the path of a CSV file, or CSV text with a newline",
+        ));
+    }
+    let is_file = probed && std::path::Path::new(&subject).is_file();
     if is_file {
         let validated = validate_read_path(&subject)?;
         let file = std::fs::File::open(&validated)

@@ -245,3 +245,14 @@ fn a_column_of_any_case_true_and_false_is_bool() {
         Value::Array(vec![Value::Bool(true), Value::Bool(false)])
     );
 }
+
+// ── item 11: a directory name is not a header ───────────────────────────
+
+#[test]
+fn csv_columns_refuses_a_directory_name() {
+    let text = eval(r#"csv_columns(".")"#)
+        .expect_err("a directory")
+        .to_string();
+    assert!(text.contains("E_BAD_ARG"), "{text}");
+    assert!(text.contains("names a directory"), "{text}");
+}
