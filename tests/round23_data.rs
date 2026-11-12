@@ -69,3 +69,41 @@ fn sql_with_an_array_of_params_still_binds_them() {
         Value::Int(1)
     );
 }
+
+// ── item 3: a JSON object is named as a Record, not as a piped one ──────
+
+#[test]
+fn sql_on_a_json_object_says_the_file_holds_a_record() {
+    let dir = std::env::temp_dir().join(format!("ae_round23_sql_obj_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("config.json");
+    std::fs::write(&path, r#"{"host": "a", "port": 8080}"#).unwrap();
+    let p = path.to_string_lossy().replace('\\', "/");
+    let got = eval(&format!(r#"sql("{p}", "select * from config")"#));
+    let _ = std::fs::remove_dir_all(&dir);
+    let text = got.expect_err("an object, not rows").to_string();
+    assert!(text.contains("holds a Record, not rows"), "{text}");
+    assert!(text.contains("JSON Array of records"), "{text}");
+    assert!(!text.contains("piped"), "{text}");
+}
+
+#[test]
+fn sql_on_a_json_object_of_arrays_still_queries_each_field() {
+    let dir = std::env::temp_dir().join(format!("ae_round23_sql_arr_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("data.json");
+    std::fs::write(&path, r#"{"people": [{"n": 1}, {"n": 2}]}"#).unwrap();
+    let p = path.to_string_lossy().replace('\\', "/");
+    let got = eval(&format!(
+        r#"sql("{p}", "select sum(n) as total from people")"#
+    ));
+    let _ = std::fs::remove_dir_all(&dir);
+    assert_eq!(
+        got.unwrap(),
+        Value::Array(vec![Value::Record(
+            [("total".to_string(), Value::Int(3))].into_iter().collect()
+        )])
+    );
+}

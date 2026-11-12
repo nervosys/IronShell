@@ -178,12 +178,19 @@ fn table_from_file(builtin: &str, path: &str, kind: &str) -> Result<Vec<Loaded>>
                     name: stem,
                     rows: rows_of(builtin, path, items)?,
                 }],
-                rec @ Value::Record(_) => tables_from_subject(builtin, rec)?,
+                // An object whose fields are all arrays is one table per field, as
+                // a piped record of arrays is. Any other object is not rows.
+                Value::Record(fields)
+                    if !fields.is_empty()
+                        && fields.values().all(|v| matches!(v, Value::Array(_))) =>
+                {
+                    tables_from_subject(builtin, Value::Record(fields))?
+                }
                 other => {
                     return Err(bad(
                         builtin,
-                        format!("{path} holds a JSON {}, not rows", other.type_name()),
-                        "the file must hold an array of objects, or an object of arrays"
+                        format!("{path} holds a {}, not rows", other.type_name()),
+                        "sql reads a JSON Array of records, JSONL, or an object of arrays"
                             .to_string(),
                         "Array of Record",
                         other.type_name().to_string(),
