@@ -160,8 +160,17 @@ fn parse_block(lines: &[Line], pos: &mut usize, indent: usize) -> Result<Value> 
     if *pos >= lines.len() {
         return Ok(Value::Null);
     }
-    if lines[*pos].content.starts_with("- ") || lines[*pos].content == "-" {
+    let content = lines[*pos].content.as_str();
+    if content.starts_with("- ") || content == "-" {
         parse_sequence(lines, pos, indent)
+    } else if content.starts_with(['{', '['])
+        && serde_json::from_str::<serde_json::Value>(content).is_ok()
+    {
+        // A whole JSON-style flow collection on its own line: the `{}` or `[]`
+        // that `to-yaml` writes for an empty top-level value.
+        let number = lines[*pos].number;
+        *pos += 1;
+        parse_scalar(content, number)
     } else {
         parse_mapping(lines, pos, indent)
     }
@@ -446,6 +455,8 @@ fn emit_into(value: &Value, indent: usize, out: &mut String) {
                         out.push_str(":\n");
                         emit_into(v, indent + 2, out);
                     }
+                    Value::Record(_) => out.push_str(": {}\n"),
+                    Value::Array(_) => out.push_str(": []\n"),
                     _ => {
                         out.push_str(": ");
                         out.push_str(&scalar_to_yaml(v));
@@ -459,6 +470,8 @@ fn emit_into(value: &Value, indent: usize, out: &mut String) {
             for item in items {
                 out.push_str(&pad);
                 match item {
+                    Value::Record(m) if m.is_empty() => out.push_str("- {}\n"),
+                    Value::Array(a) if a.is_empty() => out.push_str("- []\n"),
                     Value::Record(_) | Value::Array(_) => {
                         // Nested collections start on the following line so the
                         // dash does not disturb their indentation.
@@ -515,7 +528,7 @@ fn scalar_to_yaml(v: &Value) -> String {
         // Anything else (lambdas, futures, tables) has no YAML representation;
         // render its display form as a quoted string rather than emitting
         // something that would not read back.
-        other => format!("\"{}\"", escape_double(&format!("{other:?}"))),
+        other => format!("\"{}\"", escape_double(&other.to_display_string())),
     }
 }
 
