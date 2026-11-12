@@ -169,3 +169,21 @@ fn redo_and_get_are_suggested_as_the_builtins_an_agent_means() {
         Some("http_get")
     );
 }
+
+#[test]
+fn every_journal_row_has_the_id_undo_takes() {
+    let dir = scratch("journal_id");
+    let (_, err, code) = run_script(
+        &dir,
+        "file_write(\"a.txt\", \"one\")\nfile_write(\"a.txt\", \"two\")\n",
+    );
+    assert_eq!(code, 0, "stderr: {err}");
+    let (out, err, code) = run_script(&dir, "journal().entries | map(fn(r) => r.id == r.seq)\n");
+    assert_eq!(code, 0, "stderr: {err}");
+    assert!(out.contains("true"), "the rows are there: {out}");
+    assert!(
+        !out.contains("false"),
+        "each id is the seq undo takes: {out}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}

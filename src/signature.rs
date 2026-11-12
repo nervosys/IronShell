@@ -13772,7 +13772,7 @@ pub static SIGNATURES: &[Signature] = &[
         subject: None,
         params: &[],
         returns: "Record",
-        doc: "The recorded steps of this session and how many can be reversed.",
+        doc: "The recorded steps of this session and how many can be reversed. Each row's id is the value undo({id: N}) takes to undo that one step; seq is the same number.",
         examples: &[
             (r#"typeof(journal())"#, r#"Record"#),
         ],

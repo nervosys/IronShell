@@ -22973,6 +22973,8 @@ fn journal_rows(entries: &[crate::journal::Entry]) -> Vec<Value> {
         .iter()
         .map(|e| {
             let mut m = std::collections::BTreeMap::new();
+            // `id` is the value undo({id: N}) takes; `seq` is the same number.
+            m.insert("id".to_string(), Value::Int(e.seq as i64));
             m.insert("seq".to_string(), Value::Int(e.seq as i64));
             m.insert("builtin".to_string(), Value::Str(e.builtin.clone()));
             m.insert("effect".to_string(), Value::Str(e.effect.clone()));
