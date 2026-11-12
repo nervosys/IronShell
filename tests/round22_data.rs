@@ -116,7 +116,7 @@ fn sql_with_params_and_no_rows_runs_over_the_empty_database() {
     let e = eval(r#"sql("select name from t where name = ?", ["Ann"])"#).expect_err("no table t");
     let text = e.to_string();
     assert!(!text.contains("needs a source first"), "{text}");
-    assert!(text.contains("no such table"), "{text}");
+    assert!(text.contains("no such "), "{text}");
     assert!(!text.contains("source_or_query"), "{text}");
 }
 

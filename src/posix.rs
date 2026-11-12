@@ -3134,17 +3134,13 @@ fn sed_missing_refusal(argv: &[String], why: Option<&str>) -> Option<String> {
     if !cfg!(windows) || argv[0] != "sed" {
         return None;
     }
-    let part = why?;
+    why?;
     if path_candidates("sed").next().is_some() {
         return None;
     }
-    let mut msg =
-        format!("{SHELL_NAME}: sed: {part} is not in the in-process subset, and no sed is on PATH");
-    if let Some(hint) = windows_tools_hint() {
-        msg.push('\n');
-        msg.push_str(&hint);
-    }
-    Some(msg)
+    // With no sed on PATH, `resolve_program` runs nothing and gives the
+    // refusal it would give after the gate, word for word.
+    resolve_program(argv, &[], why).err().map(|(_, msg)| msg)
 }
 
 /// On Windows, where to find the GNU tools a script expects: Git for Windows

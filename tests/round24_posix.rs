@@ -30,5 +30,8 @@ fn sed_command_outside_the_subset_with_no_sed_on_path_is_refused_before_approval
     assert_eq!(out.status.code(), Some(2), "{err}");
     assert!(!err.contains("E_NEEDS_APPROVAL"), "{err}");
     assert!(err.contains("sed command `y/abc/xyz/`"), "{err}");
-    assert!(err.contains("no sed is on PATH"), "{err}");
+    assert!(
+        err.contains("is not in the in-process subset, which runs p, d, q and s///"),
+        "{err}"
+    );
 }
