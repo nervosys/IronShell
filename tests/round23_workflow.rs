@@ -75,3 +75,14 @@ fn a_numeric_key_on_an_existing_object_is_an_object_key() {
     assert!(after.contains("\"0\""), "the key is created: {after}");
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn audit_verify_of_a_missing_log_is_an_error_naming_the_path() {
+    let dir = scratch("audit_missing");
+    let (out, err, code) = run_script(&dir, "audit_verify(\"no-such-audit.log\")\n");
+    let text = format!("{out}{err}");
+    assert_ne!(code, 0, "a missing log is not a verdict: {text}");
+    assert!(text.contains("E_NOT_FOUND"), "{text}");
+    assert!(text.contains("no-such-audit.log"), "{text}");
+    let _ = std::fs::remove_dir_all(&dir);
+}

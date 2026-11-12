@@ -25054,7 +25054,8 @@ const UNKEYED_AUDIT_NOTE: &str = "the chain is not keyed: set IRONSHELL_AUDIT_KE
 /// audit_verify(path?) - Verify the tamper-evident, hash-chained audit log
 /// (§7.5). With no argument, verifies the currently active log. Returns a
 /// record {valid, entries, path, keyed} or {valid: false, error, path, keyed}.
-/// An unkeyed chain also carries a note.
+/// An unkeyed chain also carries a note. A log that does not exist is an
+/// E_NOT_FOUND error naming the path, not a record.
 fn bi_audit_verify(args: Vec<Value>, _input: Option<Value>) -> Result<Value> {
     let path = match args.first() {
         Some(Value::Str(s)) if !s.is_empty() => std::path::PathBuf::from(s),
@@ -25078,11 +25079,17 @@ fn bi_audit_verify(args: Vec<Value>, _input: Option<Value>) -> Result<Value> {
             }
         },
     };
+    // A log that is not there is an error, not a verdict: `valid: false` for a
+    // file that does not exist reads like a broken chain. A remote share is not
+    // probed, since asking Windows about one opens a session to its host.
+    let shown = path.to_string_lossy().to_string();
+    if !crate::safety::names_a_remote_share(&shown)
+        && matches!(std::fs::metadata(&path), Err(ref e) if e.kind() == std::io::ErrorKind::NotFound)
+    {
+        return Err(crate::safety::not_found("audit_verify", "file", &shown));
+    }
     let mut rec = BTreeMap::new();
-    rec.insert(
-        "path".to_string(),
-        Value::Str(path.to_string_lossy().to_string()),
-    );
+    rec.insert("path".to_string(), Value::Str(shown));
     // Whether the chain is keyed says how much a `valid` answer proves: an
     // unkeyed chain can be rewritten end to end by anyone who can write the
     // file, so it shows corruption, not tampering.
