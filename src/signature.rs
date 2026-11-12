@@ -6457,8 +6457,8 @@ pub static SIGNATURES: &[Signature] = &[
         returns: "Record",
         doc: "Put back the last n recorded file writes, most recent first; the same record as undo(n), with restored, removed, skipped, failed, steps and complete. Covers local file contents only: a network call, a process or a directory tree is reported as skipped, never restored. Journalling is on in agent mode or with IRONSHELL_JOURNAL=on. Each undone step is kept so session_redo() can re-apply it, until a new recorded write discards that redo stack (a write that is recorded and then refused still discards it). Redo is itself journaled, so session_undo() reverses it. The journal persists per session directory and is bounded to 8 MiB per file and 64 MiB in total, shared with the redo stack.",
         examples: &[
-            (r#"typeof(session_undo())"#, r#"Record"#),
-            (r#"typeof(session_undo(2))"#, r#"Record"#),
+            (r#"let d = fs_tempdir("ae_session_undo1"); file_write(d + "/u", "a"); let r = session_undo(); rmdir(d, true); typeof(r)"#, r#"Record"#),
+            (r#"let d = fs_tempdir("ae_session_undo2"); file_write(d + "/u", "a"); file_write(d + "/u", "b"); let r = session_undo(2); rmdir(d, true); typeof(r)"#, r#"Record"#),
             (r#"(try { session_undo(0, {force: true}) } catch e { e.error.code })"#, "E_BAD_ARG"),
         ],
     },
