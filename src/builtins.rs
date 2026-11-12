@@ -4385,7 +4385,9 @@ fn call_with_input_inner(
     // Enforce policy before the builtin runs. `effect_of` only ever *described*
     // an operation's danger; this is where the description starts to constrain.
     // Builtins that guard themselves are skipped so one action is not admitted
-    // twice.
+    // twice. The read jail comes first, so no approval token is issued for a
+    // path the jail refuses.
+    crate::security::read_jail_dispatch(name, &args, input.is_some())?;
     crate::safety::guard_dispatch(name, &args)?;
 
     // Capture what a mutating call is about to overwrite, so the session can be

@@ -594,6 +594,106 @@ pub fn audit_read_refusal(builtin: &str, path: &str) {
     );
 }
 
+/// Whether a declared parameter's name says its value is a file-system path.
+fn names_a_path_param(name: &str) -> bool {
+    matches!(
+        name,
+        "path"
+            | "paths"
+            | "file"
+            | "files"
+            | "dir"
+            | "src"
+            | "source"
+            | "source_dir"
+            | "source_or_query"
+            | "count_or_path"
+            | "dest"
+            | "destination"
+            | "db"
+            | "archive"
+            | "store"
+            | "script"
+            | "manifest"
+            | "makefile"
+            | "cert"
+    ) || name.starts_with("file_")
+        || name.ends_with("_path")
+        || name.ends_with("_file")
+        || name.ends_with("_dir")
+}
+
+/// The read jail at the dispatcher, before a builtin's body runs.
+///
+/// Each builtin used to apply the read jail itself, and a sweep of every
+/// reading builtin in agent mode found 52 that did not: `fs_lstat`,
+/// `fs_realpath`, `fs_tree`, `acl_get`, the `db_sqlite_*` readers,
+/// `shellcheck` and others answered with the content, metadata or listing of
+/// a file outside the workspace, and many that did refuse an existing outside
+/// file answered E_NOT_FOUND for a missing one, which told the agent what
+/// exists there.
+///
+/// For a builtin with a declared signature, every String (or Array of String)
+/// argument whose parameter's name says it is a path is judged, whether or not
+/// it exists, so a missing outside file is refused as an existing one is. Only
+/// declared path parameters are judged: a search pattern or a replacement text
+/// that reads like `/usr/local` is not a path. A builtin with no signature has
+/// each argument that names an existing path judged, as the dispatcher's write
+/// jail does. Classes that touch files or run programs are judged; `Pure` and
+/// `Network` are not.
+pub fn read_jail_dispatch(builtin: &str, args: &[crate::value::Value], piped: bool) -> Result<()> {
+    use crate::safety::Effect;
+    use crate::value::Value;
+    if !crate::safety::jail_enforced(crate::safety::current_mode()) {
+        return Ok(());
+    }
+    if !matches!(
+        crate::safety::effect_of(builtin),
+        Effect::ReadLocal | Effect::WriteLocal | Effect::Destructive | Effect::Exec
+    ) {
+        return Ok(());
+    }
+    let judge = |s: &str| -> Result<()> {
+        if s.is_empty() || s.len() > 4096 || s.contains('\n') {
+            return Ok(());
+        }
+        check_read_jail(builtin, s)
+    };
+    let Some(sig) = crate::signature::signature_of(builtin) else {
+        for s in args.iter().filter_map(|a| match a {
+            Value::Str(s) => Some(s.as_str()),
+            _ => None,
+        }) {
+            if !crate::safety::existing_paths(&[s.to_string()]).is_empty() {
+                judge(s)?;
+            }
+        }
+        return Ok(());
+    };
+    // Called directly, a builtin with a subject takes it as its first argument.
+    let offset = usize::from(sig.subject.is_some() && !piped);
+    for (i, p) in sig.params.iter().enumerate() {
+        if !names_a_path_param(p.name) {
+            continue;
+        }
+        let Some(arg) = args.get(i + offset) else {
+            continue;
+        };
+        match arg {
+            Value::Str(s) => judge(s)?,
+            Value::Array(items) => {
+                for item in items {
+                    if let Value::Str(s) = item {
+                        judge(s)?;
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
 /// The read jail as a builtin's error: `E_OUTSIDE_WORKSPACE` when `path` is
 /// refused by [`outside_read_jail`]. It runs before any existence check, so a
 /// missing path outside the workspace and an existing one answer alike.

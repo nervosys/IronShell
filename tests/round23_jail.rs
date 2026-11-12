@@ -180,3 +180,67 @@ fn explain_judges_an_input_redirection_and_cd_in_the_posix_subset() {
     let report = d.explain(&["-b"], "cat < a.txt");
     assert_ne!(report["decision"], "deny", "{report}");
 }
+
+#[test]
+fn the_dispatcher_refuses_a_declared_path_outside_before_the_body_runs() {
+    // Each of these answered with content, metadata or a listing of the
+    // outside file in a sweep of every reading builtin.
+    let d = Dirs::new("dispatch");
+    std::fs::create_dir_all(d.outside.join("dir")).unwrap();
+    std::fs::write(d.outside.join("dir").join("inner.txt"), "x").unwrap();
+    for src in [
+        r#"fs_lstat("../outside/secret.txt")"#,
+        r#"fs_realpath("../outside/secret.txt")"#,
+        r#"fs_tree("../outside/dir", 1)"#,
+        r#"file_type("../outside/people.csv")"#,
+        r#"audit_verify("../outside/secret.txt")"#,
+        r#"db_sqlite_count("../outside/people.csv", "t", "1=1")"#,
+    ] {
+        let out = d.agent(&d.ws, ".", src);
+        assert!(out.contains("E_OUTSIDE_WORKSPACE"), "{src}: {out}");
+        assert!(!out.contains("OUTSIDE-SECRET"), "{src}: {out}");
+        assert!(!out.contains("inner.txt"), "{src}: {out}");
+    }
+}
+
+#[test]
+fn a_missing_outside_file_is_refused_as_an_existing_one_is() {
+    // The answer must not tell the agent what exists outside the workspace.
+    let d = Dirs::new("oracle");
+    for builtin in ["open", "fs_lstat", "fs_realpath", "file_replace"] {
+        let call = |file: &str| {
+            if builtin == "file_replace" {
+                format!(r#"{builtin}("../outside/{file}", "a", "b")"#)
+            } else {
+                format!(r#"{builtin}("../outside/{file}")"#)
+            }
+        };
+        let existing = d.agent(&d.ws, ".", &call("secret.txt"));
+        let missing = d.agent(&d.ws, ".", &call("no-such-file.txt"));
+        assert!(
+            existing.contains("E_OUTSIDE_WORKSPACE"),
+            "{builtin}: {existing}"
+        );
+        assert!(
+            missing.contains("E_OUTSIDE_WORKSPACE"),
+            "{builtin}: {missing}"
+        );
+    }
+}
+
+#[test]
+fn a_pattern_that_reads_like_an_outside_path_is_not_judged() {
+    // file_replace's search text is not a path, though it looks like one.
+    let d = Dirs::new("pattern");
+    std::fs::write(d.ws.join("conf.txt"), "prefix=/usr/local\n").unwrap();
+    let out = d.agent(
+        &d.ws,
+        ".",
+        r#"file_replace("conf.txt", "/usr/local", "/opt")"#,
+    );
+    assert!(!out.contains("E_OUTSIDE_WORKSPACE"), "{out}");
+    assert_eq!(
+        std::fs::read_to_string(d.ws.join("conf.txt")).unwrap(),
+        "prefix=/opt\n"
+    );
+}
