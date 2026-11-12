@@ -846,7 +846,7 @@ pub static SIGNATURES: &[Signature] = &[
     Signature {
         name: "file_append", category: None, subject_required: false, aliases: &["append_file"],
         subject: None, params: &[req("path", Ty::Str, "file to append or create"), opt("content", Ty::Any, "content; omitted uses pipeline input")], returns: "Record",
-        doc: "Append content exactly as given, and return path, bytes appended and success. A file that does not exist is created, as >> does; its folder must already exist. No newline is added before or after the content, so a line that should end needs its own newline. An Array is joined with newlines, with none after its last item.",
+        doc: "Append content exactly as given, and return path, bytes appended and success. A file that does not exist is created, as >> does; its folder must already exist. No newline is added before or after the content, so a line that should end needs its own newline. An Array of Strings is joined with newlines, with none after its last item. Any other content (a Record, a number, a Bool) is refused with E_BAD_ARG and nothing is written; convert it first, e.g. to_json(value) or str(value).",
         examples: &[
             (r#"let d = fs_tempdir("ae_append"); let f = d + "/x"; let result = file_append(f, "hello"); rmdir(d, true); result.bytes_appended"#, "5"),
             (r#"let d = fs_tempdir("ae_append"); let f = d + "/x"; let result = "hi" | file_append(f); rmdir(d, true); result.bytes_appended"#, "2"),
@@ -863,33 +863,39 @@ pub static SIGNATURES: &[Signature] = &[
     Signature {
         name: "file_write", category: None, subject_required: false, aliases: &["write_file", "text_write"],
         subject: None, params: &[req("path", Ty::Str, "destination path"), opt("content", Ty::Any, "content; omitted uses pipeline input")], returns: "Record",
-        doc: "Atomically write content, returning path, bytes, lines and success. Arrays are joined as lines.",
+        doc: "Atomically write content, returning path, bytes, lines and success. Content must be a String, or an Array of Strings joined as lines; any other value (a Record, a number, a Bool) is refused with E_BAD_ARG and nothing is written, so convert it first, e.g. to_json(value) or str(value).",
         examples: &[
             (r#"let d = fs_tempdir("ae_write"); let f = d + "/x"; let result = file_write(f, "hello"); rmdir(d, true); result.bytes"#, "5"),
             (r#"let d = fs_tempdir("ae_write"); let f = d + "/x"; let result = "hi" | file_write(f); rmdir(d, true); result.bytes"#, "2"),
+            (r#"let d = fs_tempdir("ae_write"); let f = d + "/x"; let result = try { file_write(f, {a: 1}) } catch e { e.code }; rmdir(d, true); result"#, r#""E_BAD_ARG""#),
         ],
     },
     Signature {
         name: "file_patch", category: None, subject_required: false, aliases: &["patch_file"],
         subject: None, params: &[req("path", Ty::Str, "file to patch"), opt("patches", Ty::Any, "patch record or array; omitted uses pipeline input")], returns: "Record",
-        doc: "Apply find/replace patches in order, all or nothing. A patch whose find text is not in the file is an E_NOT_FOUND error and nothing is written; a success reports the applied patches.",
+        doc: "Apply find/replace patches in order, all or nothing. A patch whose find text is not in the file is an E_NOT_FOUND error and nothing is written; a success reports the applied patches. In a file whose line breaks are all CRLF, the LF in a find or replace text counts as CRLF: a multi-line find matches, and the replacement is written with CRLF line breaks; any other file is matched and written exactly as given.",
         examples: &[
             (r#"let d = fs_tempdir("ae_patch"); let f = d + "/x"; file_write(f, "hello"); let result = file_patch(f, {find: "hello", replace: "hi"}); rmdir(d, true); result.patches_applied"#, "1"),
             (r#"let d = fs_tempdir("ae_patch"); let f = d + "/x"; file_write(f, "hello"); let result = [{find: "hello", replace: "hi"}] | file_patch(f); rmdir(d, true); result.success"#, "true"),
+            (r#"let d = fs_tempdir("ae_patch_crlf"); let f = d + "/x"; file_write(f, "one\r\ntwo\r\n"); file_patch(f, {find: "one\ntwo", replace: "X"}); let t = read_text(f); rmdir(d, true); t == "X\r\n""#, "true"),
         ],
     },
     Signature {
         name: "file_replace", category: None, subject_required: false, aliases: &["str_replace_in_file", "text_replace"],
         subject: None, params: &[req("path", Ty::Str, "file to edit"), req("old_text", Ty::Str, "text to replace"), req("new_text", Ty::Str, "replacement text")], returns: "Record",
-        doc: "Replace all occurrences of text in a file and return the patch result. Text that is not in the file is an E_NOT_FOUND error and nothing is written. A file that does not exist is also E_NOT_FOUND, reported as a missing file before any text is looked for.",
-        examples: &[(r#"let d = fs_tempdir("ae_replace"); let f = d + "/x"; file_write(f, "hello"); let result = file_replace(f, "hello", "hi"); rmdir(d, true); result.success"#, "true")],
+        doc: "Replace all occurrences of text in a file and return the patch result. Text that is not in the file is an E_NOT_FOUND error and nothing is written. A file that does not exist is also E_NOT_FOUND, reported as a missing file before any text is looked for. In a file whose line breaks are all CRLF, the LF in old_text counts as CRLF, so a multi-line old_text matches, and new_text is written with CRLF line breaks; any other file is matched and written exactly as given.",
+        examples: &[
+            (r#"let d = fs_tempdir("ae_replace"); let f = d + "/x"; file_write(f, "hello"); let result = file_replace(f, "hello", "hi"); rmdir(d, true); result.success"#, "true"),
+            (r#"let d = fs_tempdir("ae_replace_crlf"); let f = d + "/x"; file_write(f, "one\r\ntwo\r\n"); file_replace(f, "two", "x\ny"); let t = read_text(f); rmdir(d, true); t == "one\r\nx\r\ny\r\n""#, "true"),
+        ],
     },
     Signature {
         name: "file_insert", category: None, subject_required: false, aliases: &["insert_lines"],
         subject: None, params: &[req("path", Ty::Str, "file to edit"), req("position", Ty::Any, "1-based line, named position, text pattern, or after/before/line record"), opt("content", Ty::Any, "lines to insert; omitted uses pipeline input")], returns: "Record",
-        doc: "Insert lines at a position or pattern, returning the insertion location. A line number is 1-based, and line count + 1 appends; a later line is E_BAD_ARG and nothing is written. A text anchor inserts AFTER the first line that contains it; the record {after: text} is the same anchor written out, and the record {before: text} inserts before that line instead. An anchor that no line contains is an E_NOT_FOUND error and nothing is written.",
+        doc: "Insert lines at a position or pattern, returning the insertion location. A line number is 1-based, and line count + 1 appends; a later line is E_BAD_ARG and nothing is written. A text anchor inserts AFTER the first line that contains it; the record {after: text} is the same anchor written out, and the record {before: text} inserts before that line instead. An anchor that no line contains is an E_NOT_FOUND error and nothing is written. The inserted lines take the file's line break: CRLF in a file whose line breaks are all CRLF, LF otherwise. The rest of the file is kept byte for byte; a file whose last line has no line break keeps that unless the insert goes after that line, and then the new text ends with a line break.",
         examples: &[
             (r#"let d = fs_tempdir("ae_insert"); let f = d + "/x"; file_write(f, "a"); let result = file_insert(f, 1, "b"); rmdir(d, true); result.at_line"#, "1"),
+            (r#"let d = fs_tempdir("ae_insert_crlf"); let f = d + "/x"; file_write(f, "a\r\nb\r\n"); file_insert(f, {after: "a"}, "c"); let t = read_text(f); rmdir(d, true); t == "a\r\nc\r\nb\r\n""#, "true"),
             (r#"let d = fs_tempdir("ae_insert"); let f = d + "/x"; file_write(f, "a"); let result = "b" | file_insert(f, "end"); rmdir(d, true); result.at_line"#, "2"),
             (r#"let d = fs_tempdir("ae_insert_after"); let f = d + "/x"; file_write(f, "a\nb"); let result = file_insert(f, {after: "a"}, "c"); rmdir(d, true); result.at_line"#, "2"),
         ],

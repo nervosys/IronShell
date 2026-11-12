@@ -50222,6 +50222,42 @@ fn sync_parent_directory(parent: &std::path::Path) {
 #[cfg(not(unix))]
 fn sync_parent_directory(_parent: &std::path::Path) {}
 
+/// The text a file_write or file_append writes for `value`: a String as is, an
+/// Array of Strings joined with newlines. Any other value is refused before a
+/// byte is written, with a hint for converting it; its Debug text is never written.
+fn text_to_write(builtin: &str, value: &Value) -> Result<String> {
+    match value {
+        Value::Str(s) => Ok(s.clone()),
+        Value::Array(items) => {
+            let mut lines = Vec::with_capacity(items.len());
+            for item in items {
+                match item {
+                    Value::Str(s) => lines.push(s.as_str()),
+                    other => return Err(not_text_to_write(builtin, other, true)),
+                }
+            }
+            Ok(lines.join("\n"))
+        }
+        other => Err(not_text_to_write(builtin, other, false)),
+    }
+}
+
+fn not_text_to_write(builtin: &str, value: &Value, in_array: bool) -> anyhow::Error {
+    let got = value.type_name();
+    let message = if in_array {
+        format!("{builtin}: an Array of content must hold Strings, got {got}")
+    } else {
+        format!("{builtin}: content must be a String or an Array of Strings, got {got}")
+    };
+    let hint = match value {
+        Value::Bool(_) | Value::Int(_) | Value::Float(_) => {
+            "convert it first, e.g. str(value) or to_json(value)"
+        }
+        _ => "convert it first, e.g. to_json(value) or to_toml(value)",
+    };
+    crate::safety::bad_arg_in(builtin, message, hint)
+}
+
 fn bi_file_write(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
     if args.is_empty() {
         return Err(crate::safety::arg_err("file_write requires a file path"));
@@ -50243,30 +50279,10 @@ fn bi_file_write(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
 
     // Get content from args or pipeline input
     let content = if args.len() > 1 {
-        match &args[1] {
-            Value::Str(s) => s.clone(),
-            Value::Array(arr) => arr
-                .iter()
-                .map(|v| match v {
-                    Value::Str(s) => s.clone(),
-                    other => format!("{:?}", other),
-                })
-                .collect::<Vec<_>>()
-                .join("\n"),
-            other => format!("{:?}", other),
-        }
+        text_to_write("file_write", &args[1])?
     } else {
         match input {
-            Some(Value::Str(s)) => s,
-            Some(Value::Array(arr)) => arr
-                .iter()
-                .map(|v| match v {
-                    Value::Str(s) => s.clone(),
-                    other => format!("{:?}", other),
-                })
-                .collect::<Vec<_>>()
-                .join("\n"),
-            Some(other) => format!("{:?}", other),
+            Some(value) => text_to_write("file_write", &value)?,
             None => {
                 return Err(crate::safety::arg_err(
                     "file_write requires content to write",
@@ -50341,30 +50357,10 @@ fn bi_file_append(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
 
     // Get content from args or pipeline input
     let content = if args.len() > 1 {
-        match &args[1] {
-            Value::Str(s) => s.clone(),
-            Value::Array(arr) => arr
-                .iter()
-                .map(|v| match v {
-                    Value::Str(s) => s.clone(),
-                    other => format!("{:?}", other),
-                })
-                .collect::<Vec<_>>()
-                .join("\n"),
-            other => format!("{:?}", other),
-        }
+        text_to_write("file_append", &args[1])?
     } else {
         match input {
-            Some(Value::Str(s)) => s,
-            Some(Value::Array(arr)) => arr
-                .iter()
-                .map(|v| match v {
-                    Value::Str(s) => s.clone(),
-                    other => format!("{:?}", other),
-                })
-                .collect::<Vec<_>>()
-                .join("\n"),
-            Some(other) => format!("{:?}", other),
+            Some(value) => text_to_write("file_append", &value)?,
             None => {
                 return Err(crate::safety::arg_err(
                     "file_append requires content to append",
@@ -50462,6 +50458,45 @@ fn file_insert_past_end(path: &str, line: usize, count: usize) -> anyhow::Error 
     )
 }
 
+/// The line break a file is written with: CRLF when every line break in the
+/// text is CRLF, LF otherwise (a file with no line break is LF).
+fn file_line_break(text: &str) -> &'static str {
+    let lf = text.matches('\n').count();
+    if lf > 0 && text.matches("\r\n").count() == lf {
+        "\r\n"
+    } else {
+        "\n"
+    }
+}
+
+/// `text` with each bare LF written as `eol`. A LF that already follows a CR is
+/// left alone, so a CRLF in `text` is not doubled. With `eol` = LF it is `text`.
+fn with_file_line_breaks(text: &str, eol: &str) -> String {
+    if eol == "\n" || !text.contains('\n') {
+        return text.to_string();
+    }
+    let mut out = String::with_capacity(text.len() + eol.len() * 4);
+    let mut previous = '\0';
+    for c in text.chars() {
+        if c == '\n' && previous != '\r' {
+            out.push_str(eol);
+        } else {
+            out.push(c);
+        }
+        previous = c;
+    }
+    out
+}
+
+/// A line of a file without its line break (LF or CRLF), read as `str::lines`
+/// reads it. The segment is one `split_inclusive('\n')` piece of the file.
+fn file_line_text(segment: &str) -> &str {
+    match segment.strip_suffix('\n') {
+        Some(line) => line.strip_suffix('\r').unwrap_or(line),
+        None => segment,
+    }
+}
+
 thread_local! {
     /// The builtin `bi_file_patch` reports its errors under; see bi_file_replace.
     static PATCH_CALLER: std::cell::Cell<&'static str> = const { std::cell::Cell::new("file_patch") };
@@ -50501,9 +50536,13 @@ fn bi_file_patch(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
             Value::Array(arr) => arr.clone(),
             Value::Record(r) => vec![Value::Record(r.clone())],
             _ => {
-                return Err(crate::safety::arg_err(format!(
-                    "{builtin}: patches must be an array of records"
-                )))
+                return Err(crate::safety::bad_arg_in(
+                    builtin,
+                    format!("{builtin}: patches must be an array of records"),
+                    &format!(
+                        "{builtin} takes [{{find, replace}}] records and does not read a unified diff; each record's find text is replaced with its replace text, in order"
+                    ),
+                ))
             }
         }
     } else {
@@ -50561,6 +50600,9 @@ fn bi_file_patch(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
 
     // Read current content
     let mut content = read_text_capped(builtin, &path)?;
+    // In a CRLF file the find and replace texts are written with CRLF line
+    // breaks, so a multi-line find matches and no bare LF is written into it.
+    let eol = file_line_break(&content);
 
     let mut applied = Vec::new();
     let mut failed = Vec::new();
@@ -50605,9 +50647,11 @@ fn bi_file_patch(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
             }
         };
 
-        if content.contains(&find_str) {
-            let count = content.matches(&find_str).count();
-            content = content.replace(&find_str, &replace_str);
+        let search = with_file_line_breaks(&find_str, eol);
+        let replacement = with_file_line_breaks(&replace_str, eol);
+        if content.contains(&search) {
+            let count = content.matches(&search).count();
+            content = content.replace(&search, &replacement);
 
             let mut patch_result = BTreeMap::new();
             patch_result.insert("find".to_string(), Value::Str(find_str));
@@ -50855,9 +50899,12 @@ fn bi_file_insert(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
         ));
     }
 
-    let mut file_content = read_text_capped("file_insert", &path)?;
+    let file_content = read_text_capped("file_insert", &path)?;
 
-    let mut lines: Vec<String> = file_content.lines().map(|s| s.to_string()).collect();
+    // Every file line keeps its own bytes, line break included; only the inserted
+    // lines are new. Positions count the lines `str::lines` counts.
+    let segments: Vec<&str> = file_content.split_inclusive('\n').collect();
+    let lines: Vec<&str> = segments.iter().map(|&s| file_line_text(s)).collect();
     let insert_lines: Vec<String> = content.lines().map(|s| s.to_string()).collect();
     let insert_pos: usize;
     let mut pattern_found = true;
@@ -50943,17 +50990,30 @@ fn bi_file_insert(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
         ));
     }
 
-    for (i, line) in insert_lines.iter().enumerate() {
-        lines.insert(insert_pos + i, line.clone());
+    // The inserted lines take the file's line break (CRLF in a CRLF file, else
+    // LF), and the rest of the file is written back byte for byte. The last line
+    // of a file may have no line break: an insert before it leaves it that way,
+    // while an insert after it ends that line first, so the new text ends with a
+    // line break.
+    let eol = file_line_break(&file_content);
+    let (before, after) = segments.split_at(insert_pos);
+    let mut out = String::with_capacity(file_content.len() + content.len() + 2 * eol.len());
+    for segment in before {
+        out.push_str(segment);
     }
-
-    file_content = lines.join("\n");
-    if !file_content.ends_with('\n') {
-        file_content.push('\n');
+    if insert_pos == segments.len() && !file_content.is_empty() && !file_content.ends_with('\n') {
+        out.push_str(eol);
+    }
+    for line in &insert_lines {
+        out.push_str(line);
+        out.push_str(eol);
+    }
+    for segment in after {
+        out.push_str(segment);
     }
 
     crate::tx::snapshot(&path); // record pre-insert state if a transaction is active
-    write_file_atomically("file_insert", &path, file_content.as_bytes())?;
+    write_file_atomically("file_insert", &path, out.as_bytes())?;
 
     let mut result = BTreeMap::new();
     result.insert("path".to_string(), Value::Str(path));
@@ -51275,10 +51335,16 @@ fn bi_file_edit(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
             result.insert("lines_inserted".into(), Value::Int(inserted as i64));
         } else {
             if edit.start >= lines.len() {
-                return Err(crate::safety::arg_err(format!(
-                    "file_edit edit {}: start line out of range",
-                    edit.index
-                )));
+                let hint = if count == 0 {
+                    format!("{path} is empty, so it has no line to edit; use file_insert or file_write to add lines")
+                } else {
+                    format!("{path} has {count} lines; line numbers count from 1 up to {count}")
+                };
+                return Err(crate::safety::bad_arg_in(
+                    "file_edit",
+                    format!("file_edit edit {}: start line out of range", edit.index),
+                    &hint,
+                ));
             }
             let end = edit.end.min(lines.len() - 1);
             result.insert("start_line".into(), Value::Int((edit.start + 1) as i64));
