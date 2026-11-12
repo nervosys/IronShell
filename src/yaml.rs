@@ -23,7 +23,9 @@
 //! Supported:
 //! - Nested block mappings (indentation-based) and block sequences (`- `)
 //! - Scalars: null/`~`, booleans, integers, floats, strings
-//! - Single- and double-quoted scalars, with `\n`/`\t`/`\"`/`\\` escapes
+//! - Single-quoted scalars (`''` is the one escape) and double-quoted scalars,
+//!   which decode every YAML 1.2 escape: `\0 \a \b \e \n \r \t \" \/ \\`,
+//!   `\xhh`, `\uhhhh` and `\Uhhhhhhhh`
 //! - `#` comments, blank lines, leading `---` and trailing `...`
 //! - Flow collections that are valid JSON (`[1, 2]`, `{"a": 1}`)
 //!
@@ -240,6 +242,7 @@ fn insert_entry(
     indent: usize,
     number: usize,
 ) -> Result<()> {
+    let key = key_name(&key, number)?;
     let parsed = if value.trim().is_empty() {
         parse_nested(lines, pos, indent)?
     } else {
@@ -291,7 +294,7 @@ fn split_key(line: &str) -> Option<(String, String)> {
                     if next.is_none() || next == Some(&' ') {
                         let key = line[..byte_index(line, i)].trim();
                         let value = line[byte_index(line, i + 1)..].trim();
-                        return Some((unquote(key), value.to_string()));
+                        return Some((key.to_string(), value.to_string()));
                     }
                 }
             }
@@ -306,15 +309,16 @@ fn byte_index(s: &str, n: usize) -> usize {
     s.char_indices().nth(n).map(|(b, _)| b).unwrap_or(s.len())
 }
 
-/// Strip surrounding quotes from a key, if present.
-fn unquote(s: &str) -> String {
-    let t = s.trim();
-    if t.len() >= 2
-        && ((t.starts_with('"') && t.ends_with('"')) || (t.starts_with('\'') && t.ends_with('\'')))
-    {
-        t[1..t.len() - 1].to_string()
+/// The name of a mapping key: quotes are stripped, and a double-quoted key
+/// decodes its escapes the same way a double-quoted value does.
+fn key_name(raw: &str, number: usize) -> Result<String> {
+    let t = raw.trim();
+    if t.len() >= 2 && t.starts_with('"') && t.ends_with('"') {
+        unescape_double(&t[1..t.len() - 1], number)
+    } else if t.len() >= 2 && t.starts_with('\'') && t.ends_with('\'') {
+        Ok(t[1..t.len() - 1].replace("''", "'"))
     } else {
-        t.to_string()
+        Ok(t.to_string())
     }
 }
 
@@ -325,7 +329,7 @@ fn parse_scalar(raw: &str, number: usize) -> Result<Value> {
     // Quoted strings keep everything inside verbatim (after escapes), so a `#`
     // or `:` inside quotes is data, not syntax.
     if s.len() >= 2 && s.starts_with('"') && s.ends_with('"') {
-        return Ok(Value::Str(unescape_double(&s[1..s.len() - 1])));
+        return Ok(Value::Str(unescape_double(&s[1..s.len() - 1], number)?));
     }
     if s.len() >= 2 && s.starts_with('\'') && s.ends_with('\'') {
         // Single quotes: only '' is an escape, for a literal quote.
@@ -382,7 +386,10 @@ fn plain_scalar(s: &str) -> Value {
     }
 }
 
-fn unescape_double(s: &str) -> String {
+/// Decode the escapes of a double-quoted scalar, per YAML 1.2. An unknown
+/// escape, a short hex escape, or a value that is not a Unicode code point is
+/// an error naming the line, not a guess.
+fn unescape_double(s: &str, number: usize) -> Result<String> {
     let mut out = String::with_capacity(s.len());
     let mut chars = s.chars();
     while let Some(c) = chars.next() {
@@ -390,21 +397,52 @@ fn unescape_double(s: &str) -> String {
             out.push(c);
             continue;
         }
-        match chars.next() {
-            Some('n') => out.push('\n'),
-            Some('t') => out.push('\t'),
-            Some('r') => out.push('\r'),
-            Some('0') => out.push('\0'),
-            Some('"') => out.push('"'),
-            Some('\\') => out.push('\\'),
-            Some(other) => {
-                out.push('\\');
-                out.push(other);
+        let Some(e) = chars.next() else {
+            return Err(anyhow!(
+                "line {number}: a double-quoted string ends in a lone backslash"
+            ));
+        };
+        match e {
+            '0' => out.push('\0'),
+            'a' => out.push('\u{7}'),
+            'b' => out.push('\u{8}'),
+            'e' => out.push('\u{1b}'),
+            'n' => out.push('\n'),
+            'r' => out.push('\r'),
+            't' => out.push('\t'),
+            '"' => out.push('"'),
+            '/' => out.push('/'),
+            '\\' => out.push('\\'),
+            'x' => out.push(hex_escape(&mut chars, 'x', 2, number)?),
+            'u' => out.push(hex_escape(&mut chars, 'u', 4, number)?),
+            'U' => out.push(hex_escape(&mut chars, 'U', 8, number)?),
+            other => {
+                return Err(anyhow!(
+                    "line {number}: unknown escape \\{other} in a double-quoted string"
+                ))
             }
-            None => out.push('\\'),
         }
     }
-    out
+    Ok(out)
+}
+
+/// The character named by the `digits` hex digits that follow `\x`, `\u` or `\U`.
+fn hex_escape(
+    chars: &mut std::str::Chars<'_>,
+    kind: char,
+    digits: usize,
+    number: usize,
+) -> Result<char> {
+    let hex: String = chars.by_ref().take(digits).collect();
+    if hex.len() != digits || !hex.chars().all(|c| c.is_ascii_hexdigit()) {
+        return Err(anyhow!(
+            "line {number}: \\{kind} needs {digits} hex digits, found {hex:?}"
+        ));
+    }
+    u32::from_str_radix(&hex, 16)
+        .ok()
+        .and_then(char::from_u32)
+        .ok_or_else(|| anyhow!("line {number}: \\{kind}{hex} is not a Unicode code point"))
 }
 
 fn json_to_value(j: serde_json::Value) -> Value {

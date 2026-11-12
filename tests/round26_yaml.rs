@@ -177,3 +177,75 @@ fn a_quoted_float_look_alike_stays_a_string() {
     ]);
     assert_eq!(yaml::parse(&yaml::emit(&v)).unwrap(), v);
 }
+
+// ── item 4: double-quoted escapes are decoded ───────────────────────────
+
+#[test]
+fn unicode_escapes_in_a_double_quoted_scalar_are_decoded() {
+    assert_eq!(
+        yaml::parse(r##"s: "\u00e9 \U0001F600""##).unwrap(),
+        rec(&[("s", Value::Str("é 😀".into()))])
+    );
+}
+
+#[test]
+fn every_yaml_1_2_escape_is_decoded() {
+    let text = r##"s: "\\ \" \/ \n \t \r \0 \b \a \e \x41 \u0042 \U00000043""##;
+    assert_eq!(
+        yaml::parse(text).unwrap(),
+        rec(&[(
+            "s",
+            Value::Str("\\ \" / \n \t \r \0 \u{8} \u{7} \u{1b} A B C".into())
+        )])
+    );
+}
+
+#[test]
+fn a_bad_escape_is_an_error_naming_the_line() {
+    for (text, expect) in [
+        ("a: 1\nb: \"\\q\"\n", "line 2: unknown escape"),
+        ("b: \"\\x4\"\n", "line 1: \\x needs 2 hex digits"),
+        ("b: \"\\uD800\"\n", "\\uD800 is not a Unicode code point"),
+        ("b: \"\\UFFFFFFFF\"\n", "is not a Unicode code point"),
+        ("b: \"ends\\\"\n", "lone backslash"),
+    ] {
+        let err = yaml::parse(text).unwrap_err().to_string();
+        assert!(err.contains(expect), "parsing {text:?}: {err}");
+    }
+}
+
+#[test]
+fn single_quoted_scalars_take_backslashes_literally() {
+    assert_eq!(
+        yaml::parse(r#"s: 'a\nb\\c''d'"#).unwrap(),
+        rec(&[("s", Value::Str("a\\nb\\\\c'd".into()))])
+    );
+}
+
+#[test]
+fn a_backslash_and_a_quote_are_written_as_escapes_and_read_back() {
+    let v = rec(&[("q", Value::Str("a\\b\"c".into()))]);
+    assert_eq!(yaml::emit(&v), "q: \"a\\\\b\\\"c\"\n");
+    assert_eq!(yaml::parse(&yaml::emit(&v)).unwrap(), v);
+}
+
+#[test]
+fn keys_with_quotes_backslashes_and_newlines_round_trip() {
+    let v = rec(&[("k\"e\\y\nx", Value::Int(1))]);
+    assert_eq!(yaml::parse(&yaml::emit(&v)).unwrap(), v);
+}
+
+#[test]
+fn the_whole_round_trip_survives_the_new_decoder() {
+    let v = rec(&[
+        ("a", Value::Null),
+        ("b", empty_record()),
+        ("c", Value::Array(vec![])),
+        ("f", Value::Float(1.0)),
+        ("z", Value::Float(-0.0)),
+        ("w", Value::Str("no".into())),
+        ("q", Value::Str("a\\b\"c".into())),
+        ("u", Value::Str("é😀".into())),
+    ]);
+    assert_eq!(yaml::parse(&yaml::emit(&v)).unwrap(), v);
+}
