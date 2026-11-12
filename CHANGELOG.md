@@ -87,6 +87,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - CSV columns of `true`/`false` in any case are Bool; `to_csv` writes a whole Float as `1.0`, so it reads back as a Float.
 - `sql(query, params)` and `sql_value(query, params)` with no rows and no source run over the empty database, as a lone query does: `sql("select ? + 1 as y", [41])` is `[{y: 42}]`. A source with params and no query, `sql("people.csv", ["Ann"])`, is named as missing its query.
 - An explicit did-you-mean mapping is the whole suggestion: `redo()` suggests `session_redo` alone.
+- `file_write` and `file_append` refuse a Record, a number, a Bool, or an Array holding one, with E_BAD_ARG naming the type and a conversion (`to_json(value)`, `str(value)`), instead of writing Rust debug text such as `Record({...})`.
+- In a file whose line breaks are all CRLF, `file_replace` and `file_patch` read the LF in a find text as CRLF, so a multi-line find matches, and write the replacement's line breaks as CRLF.
 
 ### Added
 
@@ -207,6 +209,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Clearer errors: grep's options and invalid patterns, sql's params and a JSON file holding a Record, `to_csv`'s input, `tee`'s options, `csv_columns` of a directory; `redo` suggests `session_redo` and `get` suggests `http_get`; the MCP `ironshell` tool's description matches its schema.
 - `ish -b` on Windows: a sed command outside the subset with no sed on PATH is refused with exit 2, naming the command, instead of asking for approval to run a program that is not installed.
 - The read jail at the dispatcher judges a glob by its literal directory, skips a URL or `host:path` only for the builtins that take a remote location (rsync, scp, wget, `git_remote`, `http_get`), lets `audit_verify` check the configured audit log wherever it is, and leaves a NUL-bearing name to the builtin's own E_BAD_ARG.
+- `file_insert` keeps a CRLF file's line endings: the inserted lines take the file's line break and every other byte is left as it was; it used to rewrite the whole file with LF.
+- A directory given to a file builtin is E_BAD_ARG `is a directory, not a file`, not an operating-system denial.
+- `file_patch` given a unified diff, and `file_edit` given a line past the end, say what they take (`[{find, replace}]` records; the file's line count) instead of `takes String`.
+- An agent call missing its subject says that `subject` (or `input`) is the value the builtin works on and lists the valid keys.
 
 
 ## [14.0.1] - 2026-11-08
