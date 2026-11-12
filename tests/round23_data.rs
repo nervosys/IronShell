@@ -38,3 +38,34 @@ fn grep_names_an_unknown_option_and_the_one_it_takes() {
         "{text}"
     );
 }
+
+// ── item 2: sql's params errors name the params, not the query ──────────
+
+#[test]
+fn sql_names_a_non_array_params_value_after_the_query() {
+    for src in [
+        r#"sql([{id: 1}], "select id from t where id = ?", 5)"#,
+        r#"sql([{id: 1}], "select id from t where id = ?", {a: 1})"#,
+        r#"[{id: 1}] | sql("select id from t where id = ?", 5)"#,
+    ] {
+        let text = eval(src).expect_err(src).to_string();
+        assert!(text.contains("E_BAD_ARG"), "{src}: {text}");
+        assert!(
+            text.contains("params must be an Array, e.g. [5], got "),
+            "{src}: {text}"
+        );
+        assert!(!text.contains("expected query"), "{src}: {text}");
+    }
+    let text = eval(r#"sql([{id: 1}], "select id from t where id = ?", {a: 1})"#)
+        .expect_err("a Record")
+        .to_string();
+    assert!(text.contains("got Record"), "{text}");
+}
+
+#[test]
+fn sql_with_an_array_of_params_still_binds_them() {
+    assert_eq!(
+        eval(r#"sql([{id: 1}, {id: 2}], "select id from t where id = ?", [2]) | len"#).unwrap(),
+        Value::Int(1)
+    );
+}

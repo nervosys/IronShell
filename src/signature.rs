@@ -14996,6 +14996,29 @@ pub fn validate(name: &str, args: &[Value], input: Option<&Value>) -> anyhow::Re
         ));
     }
 
+    // `sql(rows, "select ... ?", 5)`: the query is the String before the last
+    // argument, so the last argument is the params and must be an Array. Named
+    // as the mistake, rather than as a bad `query`.
+    if matches!(sig.name, "sql" | "sql_value") {
+        if let [.., Value::Str(_), last] = &args[params_start..] {
+            if !matches!(last, Value::Array(_)) {
+                let example = if matches!(last, Value::Str(_)) {
+                    "[\"Ann\"]"
+                } else {
+                    "[5]"
+                };
+                return Err(crate::safety::bad_arg_in(
+                    name,
+                    format!(
+                        "{name}: params must be an Array, e.g. {example}, got {}",
+                        last.type_name()
+                    ),
+                    &format!("pass the bind values as an Array: {name}(..., query, [value, ...])"),
+                ));
+            }
+        }
+    }
+
     let required = sig.params.iter().filter(|p| p.required).count();
     if supplied < required {
         // `in` is a pipe stage far more often than a call with two arguments,
