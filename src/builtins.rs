@@ -10383,7 +10383,7 @@ fn bi_to_json(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
         },
     };
 
-    let json_val = value_to_json(value);
+    let json_val = value_to_json_strict("to_json", &value, "value")?;
     // An Int is the indent in spaces, 0 to 8; 0 is compact.
     if let Some(Value::Int(indent)) = flags.first() {
         return Ok(Value::Str(json_indented("to_json", &json_val, *indent)?));
@@ -10472,6 +10472,47 @@ fn value_to_json(value: Value) -> serde_json::Value {
     }
 }
 
+/// `value_to_json` for a user-facing JSON write (to_json, json_stringify,
+/// save_json). A float JSON cannot hold, NaN or an infinity, is refused with
+/// the path to it, where `value_to_json` writes 0. `path` starts at "value".
+/// `value_to_json` itself stays for internal encodings.
+fn value_to_json_strict(builtin: &str, value: &Value, path: &str) -> Result<serde_json::Value> {
+    Ok(match value {
+        Value::Float(f) if !f.is_finite() => {
+            let what = if f.is_nan() {
+                "NaN"
+            } else if *f > 0.0 {
+                "infinity"
+            } else {
+                "negative infinity"
+            };
+            return Err(crate::safety::value_not_representable(
+                builtin,
+                format!("{builtin}: {path} is {what}, which JSON cannot hold"),
+                "JSON has no NaN or infinity: replace it with a number or null, or keep it as text",
+            ));
+        }
+        Value::Array(items) => serde_json::Value::Array(
+            items
+                .iter()
+                .enumerate()
+                .map(|(i, item)| value_to_json_strict(builtin, item, &format!("{path}[{i}]")))
+                .collect::<Result<Vec<_>>>()?,
+        ),
+        Value::Record(map) => {
+            let mut obj = serde_json::Map::new();
+            for (k, v) in map {
+                obj.insert(
+                    k.clone(),
+                    value_to_json_strict(builtin, v, &path_key(path, k))?,
+                );
+            }
+            serde_json::Value::Object(obj)
+        }
+        other => value_to_json(other.clone()),
+    })
+}
+
 /// from-csv: Parse CSV into structured data
 /// The refusal for a conversion called with no value: it takes its subject
 /// piped in or as the first argument, and the hint shows both forms.
@@ -10528,7 +10569,9 @@ fn is_number(field: &str) -> bool {
     if unsigned.len() > 1 && unsigned[0] == b'0' && unsigned[1].is_ascii_digit() {
         return false;
     }
-    field.parse::<i64>().is_ok() || field.parse::<f64>().is_ok()
+    // A word for a non-finite float ("NaN", "inf", "-Infinity") is a label in
+    // CSV, not a number: JSON cannot hold it, so the column is text.
+    field.parse::<i64>().is_ok() || matches!(field.parse::<f64>(), Ok(f) if f.is_finite())
 }
 
 /// One numeric cell as its column's type: an Int when every non-empty cell of
@@ -16362,7 +16405,7 @@ fn bi_json_stringify(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
         },
     };
 
-    let json_val = value_to_json(val);
+    let json_val = value_to_json_strict("json_stringify", &val, "value")?;
     let json_str = match rest.first() {
         Some(Value::Int(indent)) => json_indented("json_stringify", &json_val, *indent)?,
         _ => serde_json::to_string(&json_val).context("Failed to stringify to JSON")?,
@@ -25370,8 +25413,8 @@ fn bi_save_json(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
     // call nothing checked the path, so an agent could write any file.
     let path = guard_local_write("save_json", &path)?;
 
-    // Convert Value to JSON using existing function
-    let json = value_to_json(value);
+    // Convert Value to JSON: a NaN or an infinity is refused before the write.
+    let json = value_to_json_strict("save_json", &value, "value")?;
     let json_str = serde_json::to_string_pretty(&json).map_err(|e| {
         crate::safety::arg_err(format!(
             "save_json: the value cannot be written as JSON: {e}"

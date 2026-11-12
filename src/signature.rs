@@ -1751,13 +1751,14 @@ pub static SIGNATURES: &[Signature] = &[
     Signature {
         name: "from_csv", category: None, subject_required: false, aliases: &["from-csv"],
         subject: Some(Ty::Str), params: &[], returns: "Array",
-        doc: "Parse a CSV string with headers. Each column is typed as a whole: it is numeric only when every non-empty cell is a number, with no leading \"+\" and no leading zero before another digit (\"007\" is text, \"0.5\" is a number). A numeric column holds Ints when every non-empty cell is an integer, else Floats, and its empty cells are null. A column whose non-empty cells are all true or false, in any case (TRUE, False), holds Bools, its empty cells null. Any other column holds only Strings, and its empty cells are \"\". The text is piped in or passed as the argument: from_csv(text).",
+        doc: "Parse a CSV string with headers. Each column is typed as a whole: it is numeric only when every non-empty cell is a number, with no leading \"+\" and no leading zero before another digit (\"007\" is text, \"0.5\" is a number). A numeric column holds Ints when every non-empty cell is an integer, else Floats, and its empty cells are null. A column whose non-empty cells are all true or false, in any case (TRUE, False), holds Bools, its empty cells null. Any other column holds only Strings, and its empty cells are \"\". A cell that spells NaN or an infinity (inf, -Infinity) is text, so such a column is a String column: in CSV these are labels, and JSON cannot hold a non-finite float. The text is piped in or passed as the argument: from_csv(text).",
         examples: &[
             (r#"("n\n7\n" | from_csv | first).n"#, "7"),
             (r#"from_csv("n\n7\n") | len"#, "1"),
             (r#"from_csv("n,m\n7,\n8,2\n") | first | fn(r) => r.m"#, "null"),
             (r#"from_csv("n,s\n7,\n8,x\n") | first | fn(r) => r.s"#, r#""""#),
             (r#"from_csv("n\n007\nNA\n12\n") | first | fn(r) => r.n"#, r#""007""#),
+            (r#"from_csv("v\nNaN\n1\n") | first | fn(r) => r.v"#, r#""NaN""#),
         ],
     },
     Signature {
@@ -2765,8 +2766,8 @@ pub static SIGNATURES: &[Signature] = &[
         subject: Some(Ty::Any),
         params: &[opt_range("indent", Ty::Int, 0, 8, "spaces per nesting level, 0 to 8; 0 is compact")],
         returns: "String",
-        doc: "Render a value as JSON text, compact, or indented by 1 to 8 spaces per level with an indent argument (0 is compact). The value is piped in or passed as the argument: to_json(v) or to_json(v, indent).",
-        examples: &[(r#"[1, 2] | to_json"#, r#""[1,2]""#), (r#"to_json([1, 2])"#, r#""[1,2]""#), (r#"to_json([1, 2], 2) | lines | len"#, "4"), (r#"to_json([1, 2], 0)"#, r#""[1,2]""#)],
+        doc: "Render a value as JSON text, compact, or indented by 1 to 8 spaces per level with an indent argument (0 is compact). The value is piped in or passed as the argument: to_json(v) or to_json(v, indent). A NaN or an infinity has no JSON form, so it is E_BAD_VALUE and the refusal names its path, such as value[0].v; it is not written as 0 or null.",
+        examples: &[(r#"[1, 2] | to_json"#, r#""[1,2]""#), (r#"to_json([1, 2])"#, r#""[1,2]""#), (r#"to_json([1, 2], 2) | lines | len"#, "4"), (r#"to_json([1, 2], 0)"#, r#""[1,2]""#), (r#"(try { to_json(from_toml("a = nan")) } catch e { e.error.code })"#, "E_BAD_VALUE")],
     },
     Signature {
         name: "ls",
