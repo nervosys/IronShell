@@ -3029,6 +3029,14 @@ fn resolve_program(
     if let Some(p) = gnu_program(name) {
         return Ok(p.to_string_lossy().into_owned());
     }
+    // A sed command the subset does not run is named as that, not as a missing
+    // tool: the rest of the script has run, and this command is what is outside.
+    if let Some(part) = why.filter(|p| name == "sed" && p.starts_with("sed command")) {
+        return Err((
+            2,
+            format!("{SHELL_NAME}: sed: {part} is not in the in-process subset, which runs p, d, q and s///"),
+        ));
+    }
     let what = if !env.is_empty() {
         "a variable before the command".to_string()
     } else if let Some(part) = why {
@@ -5705,7 +5713,7 @@ fn sed(args: &[String], stdin: &mut Input, sink: &mut Sink) -> Util {
                     return Util::DeclineFor(if rest.is_empty() {
                         format!("the address `{s}` with no command")
                     } else {
-                        format!("the `{rest}` command")
+                        format!("sed command `{rest}`")
                     })
                 }
             };
