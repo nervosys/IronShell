@@ -10368,6 +10368,9 @@ fn bi_from_json(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
         }
         crate::safety::bad_arg("from_json", "valid JSON", &e.to_string())
     })?;
+    if let Some(refusal) = wide_integer_refusal("from_json", &json_str) {
+        return Err(refusal);
+    }
     Ok(json_to_value(parsed))
 }
 
@@ -10513,6 +10516,125 @@ fn value_to_json_strict(builtin: &str, value: &Value, path: &str) -> Result<serd
     })
 }
 
+/// Whether `token` is an integer literal (an optional sign, then digits only)
+/// that does not fit in a 64-bit Int. Such a number has no Int, and as a Float
+/// it would lose its digits.
+pub(crate) fn is_wide_integer(token: &str) -> bool {
+    let digits = token.strip_prefix(['-', '+']).unwrap_or(token);
+    !digits.is_empty()
+        && digits.bytes().all(|b| b.is_ascii_digit())
+        && token.parse::<i64>().is_err()
+}
+
+/// One open container while `wide_json_integer` reads JSON text.
+struct JsonFrame {
+    object: bool,
+    /// The index of the element being read, for an Array.
+    index: usize,
+    /// The key of the member being read, for an object.
+    key: String,
+    /// Whether the next string in an object is a key.
+    expect_key: bool,
+}
+
+/// The path a JSON scan is at, as a refusal names it: `value[0].id`.
+fn json_path(stack: &[JsonFrame]) -> String {
+    stack.iter().fold(String::from("value"), |path, frame| {
+        if frame.object {
+            path_key(&path, &frame.key)
+        } else {
+            format!("{path}[{}]", frame.index)
+        }
+    })
+}
+
+/// The first integer in JSON text that does not fit in a 64-bit Int, with its
+/// path and its literal. serde_json reads such a number as a Float, which keeps
+/// about 17 digits, so the text is scanned for it. Only text serde_json has
+/// already accepted is scanned.
+fn wide_json_integer(text: &str) -> Option<(String, String)> {
+    let bytes = text.as_bytes();
+    let mut stack: Vec<JsonFrame> = Vec::new();
+    let mut i = 0;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'"' => {
+                let start = i;
+                i += 1;
+                while i < bytes.len() && bytes[i] != b'"' {
+                    i += if bytes[i] == b'\\' { 2 } else { 1 };
+                }
+                // The quotes and backslashes are ASCII, so these are char boundaries.
+                let end = (i + 1).min(bytes.len());
+                if let Some(frame) = stack.last_mut() {
+                    if frame.object && frame.expect_key {
+                        frame.key =
+                            serde_json::from_str::<String>(&text[start..end]).unwrap_or_default();
+                        frame.expect_key = false;
+                    }
+                }
+                i = end;
+            }
+            b'{' | b'[' => {
+                let object = bytes[i] == b'{';
+                stack.push(JsonFrame {
+                    object,
+                    index: 0,
+                    key: String::new(),
+                    expect_key: object,
+                });
+                i += 1;
+            }
+            b'}' | b']' => {
+                stack.pop();
+                i += 1;
+            }
+            b',' => {
+                if let Some(frame) = stack.last_mut() {
+                    if frame.object {
+                        frame.expect_key = true;
+                    } else {
+                        frame.index += 1;
+                    }
+                }
+                i += 1;
+            }
+            b':' => {
+                if let Some(frame) = stack.last_mut() {
+                    frame.expect_key = false;
+                }
+                i += 1;
+            }
+            b'-' | b'0'..=b'9' => {
+                let start = i;
+                while i < bytes.len()
+                    && matches!(bytes[i], b'0'..=b'9' | b'-' | b'+' | b'.' | b'e' | b'E')
+                {
+                    i += 1;
+                }
+                let token = &text[start..i];
+                if is_wide_integer(token) {
+                    return Some((json_path(&stack), token.to_string()));
+                }
+            }
+            _ => i += 1,
+        }
+    }
+    None
+}
+
+/// The refusal for an integer in JSON text that does not fit in a 64-bit Int,
+/// or None when every integer fits. Call it only on text that parsed as JSON.
+/// `builtin` names the reader, which is what the error says it came from.
+pub(crate) fn wide_integer_refusal(builtin: &str, text: &str) -> Option<anyhow::Error> {
+    let (path, literal) = wide_json_integer(text)?;
+    Some(crate::safety::value_not_representable(
+        builtin,
+        format!("{builtin}: integer overflow at {path}: {literal} does not fit in a 64-bit Int"),
+        &format!("quote it as a string to keep the digits, such as \"{literal}\""),
+    ))
+}
+
 /// from-csv: Parse CSV into structured data
 /// The refusal for a conversion called with no value: it takes its subject
 /// piped in or as the first argument, and the hint shows both forms.
@@ -10571,6 +10693,10 @@ fn is_number(field: &str) -> bool {
     }
     // A word for a non-finite float ("NaN", "inf", "-Infinity") is a label in
     // CSV, not a number: JSON cannot hold it, so the column is text.
+    // An integer past the 64-bit range would become a Float and lose its digits.
+    if is_wide_integer(field) {
+        return false;
+    }
     field.parse::<i64>().is_ok() || matches!(field.parse::<f64>(), Ok(f) if f.is_finite())
 }
 
@@ -10602,7 +10728,8 @@ fn csv_bool(field: &str) -> Option<bool> {
 /// The rows of a parsed CSV table, each column typed as a whole.
 ///
 /// A column is numeric only when every non-empty cell is a number (see
-/// `is_number`). Its cells are then Int when all of them are integers, else
+/// `is_number`): a cell that is an integer past the 64-bit range makes its
+/// column text. Its cells are then Int when all of them are integers, else
 /// Float, and an empty cell is Null, so a sum or a count over it does not meet a
 /// blank String. Every other column is all Strings, a blank being `""`: one
 /// cell such as "007" or "NA" makes the whole column text. A column with no
@@ -10891,7 +11018,14 @@ fn bi_from_yaml(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
             None => return Err(crate::safety::arg_err("from-yaml: requires YAML input")),
         },
     };
-    crate::yaml::parse(&yaml_str).map_err(|e| crate::safety::arg_err(format!("from-yaml: {e}")))
+    crate::yaml::parse(&yaml_str).map_err(|e| {
+        // A refusal the parser coded (an integer past 64 bits) keeps its code.
+        if e.downcast_ref::<crate::safety::SafetyError>().is_some() {
+            e
+        } else {
+            crate::safety::arg_err(format!("from-yaml: {e}"))
+        }
+    })
 }
 
 /// to-yaml: Convert structured data to YAML.
@@ -16384,6 +16518,9 @@ fn bi_json_parse(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
         )
     })?;
 
+    if let Some(refusal) = wide_integer_refusal("json_parse", &json_str) {
+        return Err(refusal);
+    }
     Ok(json_to_value(json_val))
 }
 
@@ -30602,6 +30739,9 @@ fn bi_open(args: Vec<Value>, _input: Option<Value>) -> Result<Value> {
                 let (detail, hint) = json_failure(&e);
                 unparsed_data(&path, "JSON", &detail, hint)
             })?;
+            if let Some(refusal) = wide_integer_refusal("open", &text) {
+                return Err(refusal);
+            }
             Ok(Value::from_json(&j))
         }
         "jsonl" | "ndjson" => {
@@ -30615,6 +30755,9 @@ fn bi_open(args: Vec<Value>, _input: Option<Value>) -> Result<Value> {
                         format!("fix the line of JSON that fails: {}", json_message(&e)),
                     )
                 })?;
+                if let Some(refusal) = wide_integer_refusal("open", line) {
+                    return Err(refusal);
+                }
                 rows.push(Value::from_json(&j));
             }
             Ok(Value::Array(rows))

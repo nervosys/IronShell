@@ -1751,7 +1751,7 @@ pub static SIGNATURES: &[Signature] = &[
     Signature {
         name: "from_csv", category: None, subject_required: false, aliases: &["from-csv"],
         subject: Some(Ty::Str), params: &[], returns: "Array",
-        doc: "Parse a CSV string with headers. Each column is typed as a whole: it is numeric only when every non-empty cell is a number, with no leading \"+\" and no leading zero before another digit (\"007\" is text, \"0.5\" is a number). A numeric column holds Ints when every non-empty cell is an integer, else Floats, and its empty cells are null. A column whose non-empty cells are all true or false, in any case (TRUE, False), holds Bools, its empty cells null. Any other column holds only Strings, and its empty cells are \"\". A cell that spells NaN or an infinity (inf, -Infinity) is text, so such a column is a String column: in CSV these are labels, and JSON cannot hold a non-finite float. The text is piped in or passed as the argument: from_csv(text).",
+        doc: "Parse a CSV string with headers. Each column is typed as a whole: it is numeric only when every non-empty cell is a number, with no leading \"+\" and no leading zero before another digit (\"007\" is text, \"0.5\" is a number). A numeric column holds Ints when every non-empty cell is an integer, else Floats, and its empty cells are null. A column whose non-empty cells are all true or false, in any case (TRUE, False), holds Bools, its empty cells null. Any other column holds only Strings, and its empty cells are \"\". A cell that spells NaN or an infinity (inf, -Infinity), or an integer past the 64-bit Int range, is text, so such a column is a String column: in CSV these are labels, JSON cannot hold a non-finite float, and a Float would lose the digits of a large integer. The text is piped in or passed as the argument: from_csv(text).",
         examples: &[
             (r#"("n\n7\n" | from_csv | first).n"#, "7"),
             (r#"from_csv("n\n7\n") | len"#, "1"),
@@ -1791,7 +1791,7 @@ pub static SIGNATURES: &[Signature] = &[
         name: "from_yaml", category: None, subject_required: false, aliases: &["from-yaml"],
         subject: Some(Ty::Str), params: &[], returns: "Any",
         doc: "Parse the supported YAML subset into a typed value.",
-        examples: &[(r#"from_yaml("n: 7").n"#, "7"), (r#"("n: 7" | from_yaml).n"#, "7")],
+        examples: &[(r#"from_yaml("n: 7").n"#, "7"), (r#"("n: 7" | from_yaml).n"#, "7"), (r#"(try { from_yaml("n: 9223372036854775808") } catch e { e.error.code })"#, "E_BAD_VALUE")],
     },
     Signature {
         name: "to_yaml", category: None, subject_required: false, aliases: &["to-yaml"],
@@ -2216,6 +2216,7 @@ pub static SIGNATURES: &[Signature] = &[
             (r#"cat("issues.json") | from_json | len"#, "500"),
             (r#""[1, 2]" | from_json"#, "[1, 2]"),
             (r#"typeof("null" | from_json)"#, "Null"),
+            (r#"(try { from_json("9223372036854775808") } catch e { e.error.code })"#, "E_BAD_VALUE"),
         ],
     },
     Signature {
@@ -7596,6 +7597,7 @@ pub static SIGNATURES: &[Signature] = &[
         examples: &[
             (r#"from_toml("a = 1").a"#, "1"),
             (r#"(try { from_toml("a = ") } catch e { e.error.code })"#, "E_BAD_VALUE"),
+            (r#"(try { from_toml("n = 9223372036854775808") } catch e { e.error.code })"#, "E_BAD_VALUE"),
         ],
     },
     Signature {
