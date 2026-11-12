@@ -1161,10 +1161,21 @@ impl Parser {
                     redirs.push(r.clone());
                     self.i += 1;
                 }
+                // `greet() {`: the name is where the definition starts.
                 Some(Tok::LParen)
                     if words.len() == 1 && assigns.is_empty() && redirs.is_empty() =>
                 {
                     return unsupported("function definition");
+                }
+                // `name=(...)`: the assignment with an empty value is the word
+                // before the `(`. Arrays are not in the subset.
+                Some(Tok::LParen)
+                    if words.is_empty()
+                        && assigns.last().is_some_and(
+                            |(_, v)| matches!(v.as_slice(), [Part::Lit(s, _)] if s.is_empty()),
+                        ) =>
+                {
+                    return unsupported_at("array assignment", start);
                 }
                 Some(Tok::RParen) => return self.stray_paren(),
                 Some(t @ (Tok::LParen | Tok::DSemi)) => {
@@ -6348,6 +6359,7 @@ pub fn refusal_hint(construct: &str) -> String {
             "rewrite it as if/elif with [ \"$x\" = value ] tests".into()
         }
         "subshell" => "drop the parentheses, or group the commands with { ...; } when they need not run isolated".into(),
+        "array assignment" => "arrays are not in the subset: keep the words in a space-separated string and loop over it with `for w in $words; do ...; done`".into(),
         "background job" => "run it in the foreground: drop the trailing &".into(),
         "[[" | "[[ ... ]]" => "use [ ... ] (test) instead of [[ ... ]]".into(),
         "process substitution" => "write the output to a file first, then read the file".into(),

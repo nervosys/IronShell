@@ -114,3 +114,18 @@ fn sed_case_escapes_follow_gnu() {
         assert_eq!((out.as_str(), code), (want, 0), "{script}: {err}");
     }
 }
+
+// ── 3. an array assignment is named as one ───────────────────────────────
+
+#[test]
+fn an_array_assignment_is_named_as_an_array() {
+    let sb = Sandbox::new("array");
+    let (out, err, code) = sb.run("echo first\narr=(a b c)\necho $arr\n");
+    assert_eq!((out.as_str(), code), ("", 77), "{err}");
+    assert!(
+        err.contains("array assignment at line 2, column 1 is not in the in-process POSIX subset"),
+        "{err}"
+    );
+    assert!(!err.contains("subshell"), "{err}");
+    assert!(err.contains("space-separated string"), "{err}");
+}
