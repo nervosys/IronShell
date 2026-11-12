@@ -57,7 +57,7 @@ fn json_set_refuses_an_index_into_a_missing_array() {
     let text = format!("{out}{err}");
     assert_ne!(code, 0, "the index is refused: {text}");
     assert!(
-        text.contains("tags is missing; an array index needs an existing array"),
+        text.contains("'tags' is missing; an array index needs an existing array"),
         "{text}"
     );
     let after = std::fs::read_to_string(dir.join("config.json")).expect("read back");
