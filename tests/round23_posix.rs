@@ -86,3 +86,31 @@ fn a_refusal_inside_a_substitution_body_is_reported_up_front() {
         "{err}"
     );
 }
+
+// ── 2. sed's case escapes in the s replacement ───────────────────────────
+
+#[test]
+fn sed_case_escapes_follow_gnu() {
+    let sb = Sandbox::new("sed-case");
+    let cases = [
+        // `\U` on a group, the rest unchanged.
+        (r"echo hello | sed 's/\(.\)/\U\1/'", "Hello\n"),
+        // `\U` and `\L` hold to the end of the replacement or to `\E`.
+        (r"echo hello | sed 's/.*/\U&/'", "HELLO\n"),
+        (r"echo HELLO | sed 's/.*/\L&/'", "hello\n"),
+        (r"echo abc | sed 's/b/\U&x\Ey/'", "aBXyc\n"),
+        (r"echo hello | sed 's/\(h\)\(ello\)/\U\1\E\2/'", "Hello\n"),
+        // `\u` changes the next character only; `\u\L` gives a capital and the rest lower.
+        (r"echo 'foo bar' | sed 's/[a-z]*/\u&/g'", "Foo Bar\n"),
+        (r"echo HELLO | sed 's/HELLO/\l&/'", "hELLO\n"),
+        (r"echo hello | sed 's/hello/\u\L&/'", "Hello\n"),
+        // The same in ERE.
+        (r"echo hello | sed -E 's/(h)(e)/\U\1\2/'", "HEllo\n"),
+        // A `$` in the replacement is text, as in every other replacement.
+        (r"echo cost | sed 's/cost/$5/'", "$5\n"),
+    ];
+    for (script, want) in cases {
+        let (out, err, code) = sb.run(script);
+        assert_eq!((out.as_str(), code), (want, 0), "{script}: {err}");
+    }
+}

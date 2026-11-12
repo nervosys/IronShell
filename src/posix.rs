@@ -5387,7 +5387,52 @@ enum SedCmd {
     Print,
     Delete,
     Quit,
-    Subst(regex::bytes::Regex, Vec<u8>, bool, bool, usize),
+    Subst(regex::bytes::Regex, Vec<RepItem>, bool, bool, usize),
+}
+
+/// One piece of an `s` command's replacement, after its escapes are read.
+enum RepItem {
+    /// Literal text.
+    Text(Vec<u8>),
+    /// `&` (group 0) or `\N`.
+    Group(usize),
+    /// `\U`, `\L`, `\E` (`U`, `L`, `E`: the case held until `\E` or the other
+    /// of `\U`/`\L`), `\u` and `\l` (`u`, `l`: the next character only).
+    Case(char),
+}
+
+/// The text of one replacement: `items` with the match's groups filled in,
+/// and the case escapes applied as GNU sed applies them.
+fn expand_rep(items: &[RepItem], caps: &regex::bytes::Captures, out: &mut Vec<u8>) {
+    let mut hold: Option<char> = None;
+    let mut next: Option<char> = None;
+    for item in items {
+        let piece: &[u8] = match item {
+            RepItem::Text(t) => t.as_slice(),
+            RepItem::Group(n) => caps.get(*n).map_or(&b""[..], |m| m.as_bytes()),
+            RepItem::Case(c) => {
+                match *c {
+                    'U' | 'L' => hold = Some(*c),
+                    'E' => hold = None,
+                    _ => next = Some(*c),
+                }
+                continue;
+            }
+        };
+        if hold.is_none() && next.is_none() {
+            out.extend_from_slice(piece);
+            continue;
+        }
+        for ch in String::from_utf8_lossy(piece).chars() {
+            // The one-shot case applies to this character alone, then the held one.
+            let mapped: String = match (next.take(), hold) {
+                (Some('u'), _) | (None, Some('U')) => ch.to_uppercase().collect(),
+                (Some(_), _) | (None, Some(_)) => ch.to_lowercase().collect(),
+                (None, None) => ch.to_string(),
+            };
+            out.extend_from_slice(mapped.as_bytes());
+        }
+    }
 }
 
 struct SedLine {
@@ -5458,7 +5503,7 @@ fn unescape_delim(pat: &str, sep: char, ere: bool) -> String {
 fn subst_nth(
     re: &regex::bytes::Regex,
     text: &[u8],
-    rep: &[u8],
+    rep: &[RepItem],
     global: bool,
     nth: usize,
 ) -> Vec<u8> {
@@ -5474,7 +5519,7 @@ fn subst_nth(
         }
         let whole = caps.get(0).expect("group 0 always matches");
         out.extend_from_slice(&text[last..whole.start()]);
-        caps.expand(rep, &mut out);
+        expand_rep(rep, &caps, &mut out);
         last = whole.end();
     }
     out.extend_from_slice(&text[last..]);
@@ -5610,33 +5655,40 @@ fn sed(args: &[String], stdin: &mut Input, sink: &mut Sink) -> Util {
                     let Some(re) = to_re(pat.as_str()) else {
                         return Util::DeclineFor(format!("the regular expression `{pat}`"));
                     };
-                    // `&` is the match and `\N` a group: in regex's syntax
-                    // `${0}` and `${N}`; a literal `$` must be escaped for it.
-                    let mut r2 = Vec::new();
-                    let mut it = rep.chars().peekable();
+                    // `&` is the match and `\N` a group; the case escapes are
+                    // applied to the text they reach (see `expand_rep`).
+                    let mut items: Vec<RepItem> = Vec::new();
+                    let mut it = rep.chars();
                     while let Some(ch) = it.next() {
-                        match ch {
-                            '&' => r2.extend_from_slice(b"${0}"),
-                            '$' => r2.extend_from_slice(b"$$"),
+                        let text = match ch {
+                            '&' => {
+                                items.push(RepItem::Group(0));
+                                continue;
+                            }
                             '\\' => match it.next() {
                                 Some(d @ '1'..='9') => {
-                                    r2.extend_from_slice(format!("${{{d}}}").as_bytes())
+                                    items.push(RepItem::Group(d as usize - '0' as usize));
+                                    continue;
                                 }
-                                Some('n') => r2.push(b'\n'),
-                                Some('t') => r2.push(b'\t'),
-                                Some(o) => {
-                                    let mut b = [0; 4];
-                                    r2.extend_from_slice(o.encode_utf8(&mut b).as_bytes());
+                                Some(c @ ('U' | 'L' | 'u' | 'l' | 'E')) => {
+                                    items.push(RepItem::Case(c));
+                                    continue;
                                 }
-                                None => r2.push(b'\\'),
+                                Some('n') => '\n',
+                                Some('t') => '\t',
+                                Some(o) => o,
+                                None => '\\',
                             },
-                            o => {
-                                let mut b = [0; 4];
-                                r2.extend_from_slice(o.encode_utf8(&mut b).as_bytes());
-                            }
+                            o => o,
+                        };
+                        let mut b = [0; 4];
+                        let bytes = text.encode_utf8(&mut b).as_bytes();
+                        match items.last_mut() {
+                            Some(RepItem::Text(t)) => t.extend_from_slice(bytes),
+                            _ => items.push(RepItem::Text(bytes.to_vec())),
                         }
                     }
-                    SedCmd::Subst(re, r2, tail.contains('g'), tail.contains('p'), nth)
+                    SedCmd::Subst(re, items, tail.contains('g'), tail.contains('p'), nth)
                 }
                 _ => {
                     return Util::DeclineFor(if rest.is_empty() {
@@ -5719,12 +5771,17 @@ fn sed(args: &[String], stdin: &mut Input, sink: &mut Sink) -> Util {
                     break 'lines;
                 }
                 SedCmd::Subst(re, rep, global, print, nth) => {
+                    let fill = |caps: &regex::bytes::Captures| {
+                        let mut out = Vec::new();
+                        expand_rep(rep, caps, &mut out);
+                        out
+                    };
                     let replaced = if *nth > 1 {
                         subst_nth(re, &pattern, rep, *global, *nth)
                     } else if *global {
-                        re.replace_all(&pattern, rep.as_slice()).into_owned()
+                        re.replace_all(&pattern, fill).into_owned()
                     } else {
-                        re.replace(&pattern, rep.as_slice()).into_owned()
+                        re.replace(&pattern, fill).into_owned()
                     };
                     let changed = replaced != pattern;
                     pattern = replaced;
