@@ -30665,13 +30665,22 @@ fn bi_open(args: Vec<Value>, _input: Option<Value>) -> Result<Value> {
         }
         "jsonl" | "ndjson" => {
             let mut rows = Vec::new();
-            for line in text.lines().filter(|l| !l.trim().is_empty()) {
+            // The line is the file's, counting blank lines, and the column is within
+            // that line: serde_json's own position is of the record alone.
+            for (index, line) in text.lines().enumerate() {
+                if line.trim().is_empty() {
+                    continue;
+                }
                 let j: serde_json::Value = serde_json::from_str(line).map_err(|e| {
+                    let (number, column) = (index + 1, e.column());
                     unparsed_data(
                         &path,
                         "JSON lines",
-                        &e.to_string(),
-                        format!("fix the line of JSON that fails: {}", json_message(&e)),
+                        &format!("line {number}, column {column}: {}", json_message(&e)),
+                        format!(
+                            "fix the JSON at line {number}, column {column}: {}",
+                            json_message(&e)
+                        ),
                     )
                 })?;
                 rows.push(Value::from_json(&j));

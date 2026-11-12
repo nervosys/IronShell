@@ -85,6 +85,53 @@ fn sql_refuses_a_csv_file_with_a_duplicate_header() {
     );
 }
 
+// ── item 3: a JSON lines error names the file's line ────────────────────
+
+fn jsonl_refusal(tag: &str, text: &str) -> String {
+    let (dir, p) = temp_file(tag, "bad.jsonl", text);
+    let got = refusal(&format!(r#"open("{p}")"#));
+    let _ = std::fs::remove_dir_all(&dir);
+    got
+}
+
+#[test]
+fn a_bad_jsonl_record_reports_its_file_line_not_its_line_in_the_record() {
+    let got = jsonl_refusal("jl_line2", "{\"a\": 1}\n{\"a\" 2}\n");
+    assert!(got.contains("E_BAD_VALUE"), "{got}");
+    assert!(
+        got.contains("is not valid JSON lines: line 2, column "),
+        "{got}"
+    );
+    assert!(!got.contains("at line 1"), "{got}");
+}
+
+#[test]
+fn blank_lines_before_a_bad_jsonl_record_count_toward_its_line() {
+    let got = jsonl_refusal("jl_blank", "\n  \n{\"a\": 1}\n{\"a\" 2}\n");
+    assert!(
+        got.contains("is not valid JSON lines: line 4, column "),
+        "{got}"
+    );
+    assert!(!got.contains("line 1,"), "{got}");
+}
+
+#[test]
+fn a_leading_blank_line_moves_the_reported_line_by_one() {
+    let got = jsonl_refusal("jl_one_blank", "\n{\"a\": 1}\n{\"a\" 2}\n");
+    assert!(
+        got.contains("is not valid JSON lines: line 3, column "),
+        "{got}"
+    );
+}
+
+#[test]
+fn a_clean_jsonl_file_still_reads_every_record() {
+    let (dir, p) = temp_file("jl_clean", "ok.jsonl", "{\"a\": 1}\n\n{\"a\": 2}\n");
+    let got = eval(&format!(r#"open("{p}") | len"#));
+    let _ = std::fs::remove_dir_all(&dir);
+    assert_eq!(got.unwrap(), Value::Int(2));
+}
+
 // ── item 2: a replacement may only name a group the pattern has ─────────
 
 #[test]
