@@ -85,6 +85,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `sql(query)` and `sql_value(query)` with no source run against an empty in-memory database: `sql("select 1 as x")` is `[{x: 1}]`.
 - Date units are case-insensitive and take the singular (`day`, `MONTHS`).
 - CSV columns of `true`/`false` in any case are Bool; `to_csv` writes a whole Float as `1.0`, so it reads back as a Float.
+- `sql(query, params)` and `sql_value(query, params)` with no rows and no source run over the empty database, as a lone query does: `sql("select ? + 1 as y", [41])` is `[{y: 42}]`. A source with params and no query, `sql("people.csv", ["Ann"])`, is named as missing its query.
+- An explicit did-you-mean mapping is the whole suggestion: `redo()` suggests `session_redo` alone.
 
 ### Added
 
@@ -203,6 +205,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `json_set` edits are journaled, so `undo()` reverses them; an index into a missing array is refused instead of creating an object.
 - `audit_verify` of a missing log is E_NOT_FOUND naming the path, with a nonzero exit.
 - Clearer errors: grep's options and invalid patterns, sql's params and a JSON file holding a Record, `to_csv`'s input, `tee`'s options, `csv_columns` of a directory; `redo` suggests `session_redo` and `get` suggests `http_get`; the MCP `ironshell` tool's description matches its schema.
+- `ish -b` on Windows: a sed command outside the subset with no sed on PATH is refused with exit 2, naming the command, instead of asking for approval to run a program that is not installed.
+- The read jail at the dispatcher judges a glob by its literal directory, skips a URL or `host:path` only for the builtins that take a remote location (rsync, scp, wget, `git_remote`, `http_get`), lets `audit_verify` check the configured audit log wherever it is, and leaves a NUL-bearing name to the builtin's own E_BAD_ARG.
 
 
 ## [14.0.1] - 2026-11-08
