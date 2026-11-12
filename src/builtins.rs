@@ -9510,18 +9510,32 @@ fn bi_grep(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
     // substring search, so `grep("^version", "Cargo.toml")` answered [] --
     // an empty result for a pattern every grep user writes. The pattern is
     // now what grep takes: a POSIX basic regular expression.
-    let re = crate::posix::bre_to_regex(pattern)
-        .and_then(|r| {
-            regex::RegexBuilder::new(&r)
-                .case_insensitive(case_insensitive)
-                .build()
-                .ok()
-        })
-        .ok_or_else(|| {
-            crate::safety::bad_arg(
+    // A back-reference (\1 to \9) is the one BRE form the translation refuses.
+    // Any other failure is the regex compiler's, and its reason is what to fix.
+    let translated = crate::posix::bre_to_regex(pattern).ok_or_else(|| {
+        crate::safety::bad_arg_in(
+            "grep",
+            format!("grep: {pattern:?} has a back-reference, which grep does not support"),
+            "remove the \\1 to \\9 back-reference; to match an extended regex, use regex_match",
+        )
+    })?;
+    let re = regex::RegexBuilder::new(&translated)
+        .case_insensitive(case_insensitive)
+        .build()
+        .map_err(|e| {
+            // The compiler's last "error:" line is the reason; the lines above it
+            // only quote the pattern with a caret.
+            let text = e.to_string();
+            let reason = text
+                .lines()
+                .rev()
+                .find_map(|line| line.strip_prefix("error: "))
+                .unwrap_or(text.as_str())
+                .to_string();
+            crate::safety::bad_arg_in(
                 "grep",
-                "a basic regular expression (back-references are not supported)",
-                pattern,
+                format!("grep: {pattern:?} is not a valid regular expression: {reason}"),
+                "grep takes a basic regular expression: + ? | ( ) { } are literal unless backslashed, so write \\( and \\| for groups and alternatives; for an extended regex, use regex_match",
             )
         })?;
     let mut matching: Vec<Value> = Vec::new();

@@ -2943,9 +2943,9 @@ pub static SIGNATURES: &[Signature] = &[
         subject_required: false,
         aliases: &[],
         subject: None,
-        params: &[req("pattern", Ty::Str, "a basic regular expression, as grep takes it: ^ and $ anchor, . is any character"), opt("path", Ty::Str, "file to search; omit to search the piped text"), opt("options", Ty::Record, "{line_numbers: true} returns {file, line, text} records instead of lines; line counts from 1 in each file, and file is null for piped text")],
+        params: &[req("pattern", Ty::Str, "a basic regular expression: ^ and $ anchor, . is any character; + ? | ( ) { } are literal unless backslashed (\\+ \\? \\| \\( \\) \\{ \\}); there is no grep -E, so use regex_match for extended syntax"), opt("path", Ty::Str, "file to search; omit to search the piped text"), opt("options", Ty::Record, "{line_numbers: true} returns {file, line, text} records instead of lines; line counts from 1 in each file, and file is null for piped text")],
         returns: "Array",
-        doc: "Lines matching a basic regular expression. With {line_numbers: true} each match is a record {file, line, text} instead, the line numbered from 1 within its file (null for piped text).",
+        doc: "Lines matching a basic regular expression; a back-reference such as \\1 is refused, and a pattern that does not compile says why. With {line_numbers: true} each match is a record {file, line, text} instead, the line numbered from 1 within its file (null for piped text).",
         examples: &[(r#"grep("fn main", "src/main.rs") | len"#, "1"), (r#"(grep("fn", "src/main.rs") | len) > 0"#, "true"), (r#"grep("^version", "Cargo.toml") | len"#, "1"), (r#"grep("^version", "Cargo.toml", {line_numbers: true}) | first | fn(r) => r.file"#, r#""Cargo.toml""#), (r#""a\nb\na" | grep("a", {line_numbers: true}) | last | fn(r) => r.line"#, "3")],
     },
     Signature {

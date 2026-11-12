@@ -203,3 +203,35 @@ fn a_missing_unit_on_a_direct_call_is_named_without_the_subject_note() {
         "{text}"
     );
 }
+
+// ── item 9: grep reports the regex compiler's reason, and BRE literals ───
+
+#[test]
+fn grep_reports_the_regex_error_for_a_pattern_that_does_not_compile() {
+    let text = eval(r#""a" | grep("[")"#)
+        .expect_err("unclosed")
+        .to_string();
+    assert!(text.contains("E_BAD_ARG"), "{text}");
+    assert!(text.contains("unclosed character class"), "{text}");
+    assert!(!text.contains("back-reference"), "{text}");
+}
+
+#[test]
+fn grep_keeps_the_back_reference_note_for_a_back_reference() {
+    let text = eval(r#""aa" | grep("\\(a\\)\\1")"#)
+        .expect_err("back-reference")
+        .to_string();
+    assert!(text.contains("back-reference"), "{text}");
+}
+
+#[test]
+fn grep_reads_bare_plus_bar_and_braces_as_literals() {
+    assert_eq!(
+        eval(r#""a|b\nab" | grep("a|b") | len"#).unwrap(),
+        Value::Int(1)
+    );
+    assert_eq!(
+        eval(r#""a|b\nab" | grep("a\\|b") | len"#).unwrap(),
+        Value::Int(2)
+    );
+}
