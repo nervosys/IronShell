@@ -10578,7 +10578,7 @@ pub(crate) fn csv_rows(
         .collect()
 }
 
-/// to-csv: Convert structured data to CSV
+/// to_csv: Convert structured data to CSV
 ///
 /// The columns are the first record's keys, or the `columns` Array when one is
 /// given, in that order; a record without one of them writes an empty field.
@@ -10647,7 +10647,7 @@ fn bi_to_csv(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
                 }
                 (None, Some(_)) => {
                     return Err(crate::safety::arg_err(
-                        "to-csv: input must be array of records",
+                        "to_csv: input must be an array of records",
                     ))
                 }
             };
@@ -10695,7 +10695,7 @@ fn bi_to_csv(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
             Ok(Value::Str(csv_output))
         }
         _ => Err(crate::safety::arg_err(
-            "to-csv: input must be an array of records",
+            "to_csv: input must be an array of records",
         )),
     }
 }

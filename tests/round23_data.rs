@@ -120,3 +120,17 @@ fn a_lone_query_runs_over_an_empty_database() {
     );
     assert_eq!(eval(r#"sql_value("select 1 + 1")"#).unwrap(), Value::Int(2));
 }
+
+// ── item 5: to_csv is named with an underscore, and one wording ─────────
+
+#[test]
+fn to_csv_refusals_use_the_underscore_name_and_one_wording() {
+    for src in [r#"[1, 2] | to_csv"#, r#"to_csv(5)"#] {
+        let text = eval(src).expect_err(src).to_string();
+        assert!(
+            text.contains("to_csv: input must be an array of records"),
+            "{src}: {text}"
+        );
+        assert!(!text.contains("to-csv"), "{src}: {text}");
+    }
+}
