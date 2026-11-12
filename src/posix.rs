@@ -6326,6 +6326,8 @@ pub struct ExplainCommand {
     /// The output files its redirections name, as `(operator, target)`, for
     /// `>`, `>>`, `2>`, `2>>` and `&>`. `/dev/null` is not a file.
     pub writes: Vec<(String, String)>,
+    /// The input files its `<` redirections name (empty when computed).
+    pub reads: Vec<String>,
 }
 
 /// Every command in `src` in source order, including those inside `if`, loops
@@ -6438,11 +6440,19 @@ fn walk_pipeline(p: &Pipeline, out: &mut Vec<ExplainCommand>) {
         };
         let head = words.first().map(literal_text);
         let writes: Vec<(String, String)> = redirs.iter().filter_map(write_of).collect();
-        if head.is_some() || !writes.is_empty() {
+        let reads: Vec<String> = redirs
+            .iter()
+            .filter_map(|r| match r {
+                Redir::In(target) => Some(literal_text(target)),
+                _ => None,
+            })
+            .collect();
+        if head.is_some() || !writes.is_empty() || !reads.is_empty() {
             out.push(ExplainCommand {
                 head,
                 args: words.iter().skip(1).map(literal_text).collect(),
                 writes,
+                reads,
             });
         }
         match cmd {

@@ -30,6 +30,9 @@ struct Walk<'a> {
     /// Names bound by `let`, which shadow builtins of the same name.
     locals: HashSet<String>,
     calls: Vec<(String, Option<String>)>,
+    /// The literal String arguments of each call in `calls`, by index: the
+    /// paths the jail would judge, when they are written out.
+    literals: Vec<Vec<String>>,
 }
 
 impl Walk<'_> {
@@ -90,6 +93,15 @@ impl Walk<'_> {
             } => {
                 let r = self.resolve(callee);
                 self.calls.push(r);
+                self.literals.push(
+                    args.iter()
+                        .chain(named.iter().map(|(_, a)| a))
+                        .filter_map(|a| match a {
+                            Expr::LitStr(s) => Some(s.clone()),
+                            _ => None,
+                        })
+                        .collect(),
+                );
                 if !matches!(callee.as_ref(), Expr::Ident(_) | Expr::MemberAccess { .. }) {
                     self.expr(callee);
                 }
@@ -107,6 +119,7 @@ impl Walk<'_> {
                     Expr::Ident(_) | Expr::MemberAccess { .. } => {
                         let r = self.resolve(right);
                         self.calls.push(r);
+                        self.literals.push(Vec::new());
                     }
                     other => self.expr(other),
                 }
@@ -180,6 +193,27 @@ fn refused_outright(builtin: &str) -> Option<String> {
     )
 }
 
+/// The jail's refusal of a call that reads or writes files, when one of its
+/// literal String arguments names a path outside the workspace: the run refuses
+/// it with E_OUTSIDE_WORKSPACE before its effect is judged, so `allow` or
+/// `approve` would misstate it. Only paths written out are seen; an argument
+/// that is not a path but reads as one outside (`"../x"` as a search pattern)
+/// is judged as a path, which errs toward `deny`.
+fn jail_refusal(effect: Effect, literals: &[String]) -> Option<String> {
+    if !matches!(
+        effect,
+        Effect::ReadLocal | Effect::WriteLocal | Effect::Destructive
+    ) || !crate::safety::jail_enforced(crate::safety::current_mode())
+    {
+        return None;
+    }
+    literals
+        .iter()
+        .filter(|s| !s.is_empty() && !s.contains('\n'))
+        .find(|s| crate::security::outside_read_jail(s))
+        .map(|s| format!("'{s}' is outside the workspace root, so the run refuses it with E_OUTSIDE_WORKSPACE"))
+}
+
 fn rank(decision: &str) -> u8 {
     match decision {
         "allow" => 0,
@@ -204,6 +238,7 @@ pub fn explain(code: &str) -> Result<Value> {
         env: &env,
         locals: HashSet::new(),
         calls: Vec::new(),
+        literals: Vec::new(),
     };
     for s in &stmts {
         w.stmt(s);
@@ -213,13 +248,14 @@ pub fn explain(code: &str) -> Result<Value> {
     let mut effects: BTreeMap<u8, &'static str> = BTreeMap::new();
     let mut unresolved = Vec::new();
     let mut verdict = "allow";
-    for (shown, builtin) in &w.calls {
+    for (i, (shown, builtin)) in w.calls.iter().enumerate() {
         let mut r = BTreeMap::new();
         r.insert("call".to_string(), Value::Str(shown.clone()));
         match builtin {
             Some(b) => {
                 let effect = effect_of(b);
-                let refused = refused_outright(b);
+                let literals = w.literals.get(i).map(Vec::as_slice).unwrap_or(&[]);
+                let refused = refused_outright(b).or_else(|| jail_refusal(effect, literals));
                 let decision = if refused.is_some() {
                     "deny"
                 } else {
@@ -302,6 +338,47 @@ pub fn explain_posix(src: &str) -> Result<Value> {
         // file.write, so the decision here is the policy's.
         // `mkdir` and `touch` write their operands the same way.
         let head = cmd.head.clone().unwrap_or_default();
+        // Files the run opens for reading outside a utility's operands: a `<`
+        // redirection's file, and the directory `cd` enters. The run refuses
+        // each outside the workspace, so each is judged here as it is there.
+        let mut judged_reads: Vec<(String, String)> = cmd
+            .reads
+            .iter()
+            .map(|f| (format!("< {f}"), f.clone()))
+            .collect();
+        if head == "cd" {
+            if let Some(dir) = cmd.args.iter().find(|a| !a.starts_with('-')) {
+                judged_reads.push((format!("cd {dir}"), dir.clone()));
+            }
+        }
+        for (shown, f) in judged_reads {
+            if f.is_empty() {
+                if !unresolved.contains(&shown) {
+                    unresolved.push(shown);
+                }
+                if rank("unknown") > rank(verdict) {
+                    verdict = "unknown";
+                }
+                continue;
+            }
+            if crate::security::outside_read_jail(&f) {
+                let mut fr = BTreeMap::new();
+                fr.insert("call".to_string(), Value::Str(shown));
+                fr.insert(
+                    "effect".to_string(),
+                    Value::Str(Effect::ReadLocal.as_str().to_string()),
+                );
+                fr.insert("target".to_string(), Value::Str(f.clone()));
+                fr.insert("decision".to_string(), Value::Str("deny".to_string()));
+                fr.insert(
+                    "reason".to_string(),
+                    Value::Str(format!("'{f}' is outside the workspace root")),
+                );
+                effects.insert(Effect::ReadLocal as u8, Effect::ReadLocal.as_str());
+                verdict = "deny";
+                calls.push(Value::Record(fr));
+            }
+        }
         let tee_files = crate::posix::write_operands(&head, &cmd.args);
         let tee_in_subset = tee_files.is_some();
         let mut writes: Vec<(String, String)> = cmd.writes.clone();

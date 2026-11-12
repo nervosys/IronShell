@@ -122,3 +122,61 @@ fn reads_and_writes_resolve_a_relative_path_alike() {
     assert!(out.contains("E_OUTSIDE_WORKSPACE"), "{out}");
     assert!(!d.root.join("a.txt").exists());
 }
+
+impl Dirs {
+    /// `ish --agent --workspace . --explain [extra...] -c src` from the
+    /// workspace, as parsed JSON.
+    fn explain(&self, extra: &[&str], src: &str) -> serde_json::Value {
+        let mut args = vec!["--agent", "--workspace", ".", "--explain"];
+        args.extend_from_slice(extra);
+        args.extend_from_slice(&["-c", src]);
+        let out = Command::new(env!("CARGO_BIN_EXE_ish"))
+            .args(&args)
+            .current_dir(&self.ws)
+            .env("NO_COLOR", "1")
+            .env("IRONSHELL_SESSION_DIR", self.root.join("session"))
+            .output()
+            .expect("run ish");
+        serde_json::from_slice(&out.stdout).unwrap_or_else(|e| {
+            panic!(
+                "{src}: not JSON ({e}): {}{}",
+                String::from_utf8_lossy(&out.stdout),
+                String::from_utf8_lossy(&out.stderr)
+            )
+        })
+    }
+}
+
+#[test]
+fn explain_denies_a_builtin_whose_literal_path_is_outside() {
+    let d = Dirs::new("explain_e");
+    for src in [
+        r#"cat("../outside/secret.txt")"#,
+        r#"file_write("../outside/x.txt", "x")"#,
+        r#"json_set("../outside/x.json", "a", 1)"#,
+        r#"cp("../outside/secret.txt", "copy.txt")"#,
+        r#"sql_value("../outside/people.csv", "select 1")"#,
+    ] {
+        let report = d.explain(&[], src);
+        assert_eq!(report["decision"], "deny", "{src}: {report}");
+    }
+    std::fs::write(d.ws.join("a.txt"), "x").unwrap();
+    let report = d.explain(&[], r#"cat("a.txt")"#);
+    assert_eq!(report["decision"], "allow", "{report}");
+}
+
+#[test]
+fn explain_judges_an_input_redirection_and_cd_in_the_posix_subset() {
+    let d = Dirs::new("explain_b");
+    for src in [
+        "cat < ../outside/secret.txt",
+        "tr a-z A-Z < ../outside/secret.txt",
+        "cd ../outside",
+    ] {
+        let report = d.explain(&["-b"], src);
+        assert_eq!(report["decision"], "deny", "{src}: {report}");
+    }
+    std::fs::write(d.ws.join("a.txt"), "x").unwrap();
+    let report = d.explain(&["-b"], "cat < a.txt");
+    assert_ne!(report["decision"], "deny", "{report}");
+}
