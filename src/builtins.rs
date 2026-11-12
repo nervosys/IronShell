@@ -72886,6 +72886,10 @@ fn bi_pager(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
     ])))
 }
 
+/// The one option tee takes, in the two call forms, for the errors that refuse
+/// any other.
+const TEE_OPTIONS_HINT: &str = "tee takes one option, append (a Bool): tee(path, data, {append: true}), or piped: data | tee(path, {append: true})";
+
 /// tee — Write input to both a file and return it (cross-platform, native Rust).
 /// Usage: tee(file_path, text) or piped: text | tee(file_path)
 fn bi_tee_output(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
@@ -72913,11 +72917,19 @@ fn bi_tee_output(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
     let mut append = false;
     if let Some(options) = options {
         let Value::Record(record) = options else {
-            return Err(crate::safety::arg_err("tee options must be Record"));
+            return Err(crate::safety::bad_arg_in(
+                "tee",
+                "tee options must be Record",
+                TEE_OPTIONS_HINT,
+            ));
         };
         for (key, value) in record {
             if key != "append" {
-                return Err(crate::safety::arg_err(format!("tee unknown option {key}")));
+                return Err(crate::safety::bad_arg_in(
+                    "tee",
+                    format!("tee unknown option {key}"),
+                    TEE_OPTIONS_HINT,
+                ));
             }
             let Value::Bool(flag) = value else {
                 return Err(crate::safety::arg_err("tee append must be Bool"));

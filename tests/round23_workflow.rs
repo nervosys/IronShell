@@ -134,3 +134,22 @@ fn file_append_into_a_missing_folder_names_the_folder() {
     assert!(!dir.join("nodir").exists(), "nothing is created");
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn tee_names_its_one_option_when_given_another() {
+    let dir = scratch("tee_option");
+    let (out, err, code) = run_script(&dir, "tee(\"t.txt\", \"x\", {appnd: true})\n");
+    let text = format!("{out}{err}");
+    assert_ne!(code, 0, "{text}");
+    assert!(text.contains("tee unknown option appnd"), "{text}");
+    assert!(
+        text.contains("takes one option, append"),
+        "the hint lists the option tee takes: {text}"
+    );
+    assert!(
+        !text.contains("takes String or Record"),
+        "the old hint is gone: {text}"
+    );
+    assert!(!dir.join("t.txt").exists(), "nothing is written");
+    let _ = std::fs::remove_dir_all(&dir);
+}
