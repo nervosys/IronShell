@@ -132,6 +132,48 @@ fn a_clean_jsonl_file_still_reads_every_record() {
     assert_eq!(got.unwrap(), Value::Int(2));
 }
 
+// ── item 4: a CSV row's line is right under CRLF ────────────────────────
+
+#[test]
+fn a_short_or_long_csv_row_under_crlf_names_its_real_line() {
+    let got = refusal(r#"from_csv("a,b\r\n1,2,3\r\n")"#);
+    assert!(got.contains("E_BAD_ARG"), "{got}");
+    assert!(
+        got.contains("CSV line 2: found 3 fields where the header has 2"),
+        "{got}"
+    );
+    assert!(!got.contains("expected CSV text"), "{got}");
+}
+
+#[test]
+fn the_same_csv_row_under_lf_names_the_same_line() {
+    let got = refusal(r#"from_csv("a,b\n1,2,3\n")"#);
+    assert!(
+        got.contains("CSV line 2: found 3 fields where the header has 2"),
+        "{got}"
+    );
+}
+
+#[test]
+fn a_later_crlf_row_counts_every_line_before_it() {
+    let got = refusal(r#"from_csv("a,b\r\n1,2\r\n3,4,5\r\n")"#);
+    assert!(
+        got.contains("CSV line 3: found 3 fields where the header has 2"),
+        "{got}"
+    );
+}
+
+#[test]
+fn open_of_a_crlf_csv_file_names_the_real_line() {
+    let (dir, p) = temp_file("crlf_open", "rows.csv", "a,b\r\n1,2\r\n1,2,3\r\n");
+    let got = refusal(&format!(r#"open("{p}")"#));
+    let _ = std::fs::remove_dir_all(&dir);
+    assert!(
+        got.contains("CSV line 3: found 3 fields where the header has 2"),
+        "{got}"
+    );
+}
+
 // ── item 2: a replacement may only name a group the pattern has ─────────
 
 #[test]

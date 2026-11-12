@@ -10508,9 +10508,7 @@ fn bi_from_csv(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
     for record in reader.records() {
         // A malformed row (unequal field counts, bad quoting) is the caller's
         // text, so E_BAD_ARG; it was an uncoded csv::Error, E_UNKNOWN.
-        records.push(
-            record.map_err(|e| crate::safety::bad_arg("from-csv", "CSV text", &e.to_string()))?,
-        );
+        records.push(record.map_err(|e| csv_row_error("from-csv", &csv_str, &e))?);
     }
 
     let rows = csv_rows(&headers, &records);
@@ -10535,6 +10533,38 @@ pub(crate) fn check_csv_headers(builtin: &str, headers: &[String]) -> Result<()>
         }
     }
     Ok(())
+}
+
+/// The refusal for a CSV row the reader cannot take. csv counts a row's line
+/// itself, and under CRLF that count is one short, so the line is worked out
+/// from the byte the error names: the newlines up to and including that byte,
+/// plus one. A row with the wrong number of fields is named by its line and by
+/// the two counts.
+fn csv_row_error(builtin: &str, text: &str, e: &csv::Error) -> anyhow::Error {
+    if let csv::ErrorKind::UnequalLengths {
+        pos: Some(pos),
+        expected_len,
+        len,
+    } = e.kind()
+    {
+        let end = usize::try_from(pos.byte())
+            .unwrap_or(usize::MAX)
+            .saturating_add(1)
+            .min(text.len());
+        let line = text.as_bytes()[..end]
+            .iter()
+            .filter(|&&b| b == b'\n')
+            .count()
+            + 1;
+        return crate::safety::bad_arg_in(
+            builtin,
+            format!(
+                "{builtin}: CSV line {line}: found {len} fields where the header has {expected_len}"
+            ),
+            "fix the row so it has as many fields as the header, or quote a field that holds a comma",
+        );
+    }
+    crate::safety::bad_arg(builtin, "CSV text", &e.to_string())
 }
 
 /// Whether a cell is a number a numeric column can hold: it parses as an Int or
