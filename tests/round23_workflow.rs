@@ -47,3 +47,31 @@ fn undo_reverses_a_json_set() {
     assert_eq!(after, original, "undo restores the original bytes");
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn json_set_refuses_an_index_into_a_missing_array() {
+    let dir = scratch("json_index_missing");
+    let original = "{}\n";
+    std::fs::write(dir.join("config.json"), original).expect("seed file");
+    let (out, err, code) = run_script(&dir, "json_set(\"config.json\", \"tags.0\", \"x\")\n");
+    let text = format!("{out}{err}");
+    assert_ne!(code, 0, "the index is refused: {text}");
+    assert!(
+        text.contains("tags is missing; an array index needs an existing array"),
+        "{text}"
+    );
+    let after = std::fs::read_to_string(dir.join("config.json")).expect("read back");
+    assert_eq!(after, original, "a refused edit leaves the file alone");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_numeric_key_on_an_existing_object_is_an_object_key() {
+    let dir = scratch("json_numeric_key");
+    std::fs::write(dir.join("config.json"), "{\"a\": {}}\n").expect("seed file");
+    let (_, err, code) = run_script(&dir, "json_set(\"config.json\", \"a.0\", \"x\")\n");
+    assert_eq!(code, 0, "stderr: {err}");
+    let after = std::fs::read_to_string(dir.join("config.json")).expect("read back");
+    assert!(after.contains("\"0\""), "the key is created: {after}");
+    let _ = std::fs::remove_dir_all(&dir);
+}

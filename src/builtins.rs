@@ -16418,6 +16418,18 @@ fn set_json_path(
     };
     match node {
         serde_json::Value::Object(map) => {
+            // A missing key that the next segment indexes would be created as an
+            // object, and the index would then become a key of it: `tags.0` made
+            // {"tags": {"0": ...}}. An index needs an array that already exists.
+            if !map.contains_key(*segment)
+                && rest
+                    .first()
+                    .is_some_and(|next| next.parse::<usize>().is_ok())
+            {
+                return Err(format!(
+                    "'{segment}' is missing; an array index needs an existing array"
+                ));
+            }
             let child = map
                 .entry(segment.to_string())
                 .or_insert_with(|| serde_json::Value::Object(serde_json::Map::new()));
