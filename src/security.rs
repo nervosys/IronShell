@@ -617,8 +617,8 @@ fn names_a_path_param(name: &str) -> bool {
             | "manifest"
             | "makefile"
             | "cert"
+            | "local_path"
     ) || name.starts_with("file_")
-        || name.ends_with("_path")
         || name.ends_with("_file")
         || name.ends_with("_dir")
 }
@@ -657,7 +657,9 @@ pub fn read_jail_dispatch(builtin: &str, args: &[crate::value::Value], piped: bo
         if s.is_empty() || s.len() > 4096 || s.contains('\n') {
             return Ok(());
         }
-        check_read_jail(builtin, s)
+        // Judged where the builtin will open it: a relative path is the
+        // workspace's when the jail is on, as `resolve_path_str` places it.
+        check_read_jail(builtin, &crate::safety::resolve_path_str(s))
     };
     let Some(sig) = crate::signature::signature_of(builtin) else {
         for s in args.iter().filter_map(|a| match a {

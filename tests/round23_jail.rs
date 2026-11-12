@@ -222,3 +222,18 @@ fn a_pattern_that_reads_like_an_outside_path_is_not_judged() {
         "prefix=/opt\n"
     );
 }
+
+#[test]
+fn run_from_outside_the_workspace_reads_and_writes_name_the_same_file() {
+    // `ish --agent --workspace ws` from ws's parent: a write's relative path
+    // was the workspace's and a read's the working directory's.
+    let d = Dirs::new("from_parent");
+    let out = d.agent(
+        &d.root,
+        "ws",
+        r#"file_write("a.txt", "hello"); read_text("a.txt")"#,
+    );
+    assert!(out.contains("hello"), "{out}");
+    assert!(d.ws.join("a.txt").exists(), "{out}");
+    assert!(!d.root.join("a.txt").exists(), "{out}");
+}

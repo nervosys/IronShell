@@ -1204,14 +1204,16 @@ fn file_copy_refuses_invalid_calls_and_reports_missing_paths() {
     assert_eq!(std::fs::read_to_string(source).unwrap(), "source");
 }
 #[test]
-fn file_copy_imports_outside_sources_and_rolls_back_directory_merges() {
+fn file_copy_rolls_back_directory_merges_and_refuses_an_outside_source() {
     let _lock = LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let fixture = Fixture::new();
     let mut env = Env::default();
-    let source = fixture.path("source");
+    // The source is inside the workspace: under the jail a copy reads its
+    // source, so an outside one is refused (checked at the end).
     let workspace = fixture.root.join("workspace");
-    std::fs::create_dir(&source).unwrap();
     std::fs::create_dir(&workspace).unwrap();
+    let source = workspace.join("source").to_string_lossy().into_owned();
+    std::fs::create_dir(&source).unwrap();
     std::fs::create_dir(std::path::Path::new(&source).join("nested")).unwrap();
     std::fs::write(
         std::path::Path::new(&source).join("nested").join("new"),
@@ -1263,6 +1265,13 @@ fn file_copy_imports_outside_sources_and_rolls_back_directory_merges() {
         "E_OUTSIDE_WORKSPACE",
     );
     assert!(!fixture.root.join("outside_copy").exists());
+    let outside_source = fixture.path("outside_source");
+    std::fs::write(&outside_source, "outside").unwrap();
+    code(
+        call("cp", vec![s(&outside_source), s("imported")], &mut env),
+        "E_OUTSIDE_WORKSPACE",
+    );
+    assert!(!workspace.join("imported").exists());
 }
 #[cfg(unix)]
 #[test]

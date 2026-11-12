@@ -297,7 +297,7 @@ fn main() -> Result<()> {
     // Parsing argv here rather than inside the closure keeps `--help` and
     // argument errors on the real main thread, so their exit codes and output
     // are unchanged.
-    let cli = parse_cli();
+    let mut cli = parse_cli();
     iron_shell::safety::with_eval_stack(move || run(cli))
 }
 
@@ -454,7 +454,28 @@ fn run(cli: Cli) -> Result<()> {
         // and a child `ish` inherits the same root.
         let ws = given;
         let ws = std::path::absolute(ws).unwrap_or_else(|_| ws.to_path_buf());
-        std::env::set_var("IRONSHELL_WORKSPACE", ws);
+        std::env::set_var("IRONSHELL_WORKSPACE", &ws);
+        // Run from outside the workspace (`ish --workspace proj -c ...` from
+        // proj's parent), a write's relative path was the workspace's while a
+        // read's was the working directory's, so `file_write("x")` and
+        // `open("x")` named different files. Start in the workspace instead,
+        // with the script file, if any, made absolute first. Run from inside
+        // it, as with `--workspace .`, nothing changes.
+        let inside = match (std::env::current_dir(), ws.canonicalize()) {
+            (Ok(cwd), Ok(root)) => cwd.canonicalize().is_ok_and(|c| c.starts_with(&root)),
+            _ => true,
+        };
+        if !inside && cli.subcommand.is_none() {
+            if let Some(file) = cli.file_and_args.first_mut().filter(|f| f.as_str() != "-") {
+                if let Ok(abs) = std::path::absolute(&*file) {
+                    *file = abs.to_string_lossy().into_owned();
+                }
+            }
+            if let Err(e) = std::env::set_current_dir(&ws) {
+                eprintln!("ish: cannot enter the workspace {ws:?}: {e}");
+                std::process::exit(2);
+            }
+        }
     }
     // `ish agent serve` and `ish mcp serve` exist for one purpose: to let an AI
     // agent drive this shell. They ran with the *human* safety profile unless

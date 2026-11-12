@@ -322,14 +322,11 @@ fn the_number_of_writelocal_builtins_relying_on_call_sites_is_measured() {
 }
 
 #[test]
-fn copying_a_file_into_the_workspace_from_outside_still_works() {
-    // The false positive that sent the central fix back. Jailing every existing
-    // outside path named by a `WriteLocal` call refuses this — copying a file
-    // *in* — because the source exists outside. Reading from outside is allowed
-    // by policy and the write lands inside the jail, so refusing it is wrong,
-    // and it is indistinguishable from the dangerous case anywhere except the
-    // call site. That is why `file_copy` guards its second argument by name
-    // rather than `guard_dispatch` guarding all of them by shape.
+fn copying_a_file_into_the_workspace_from_outside_is_refused_as_a_read() {
+    // This was once allowed, and was the false positive that sent a central
+    // write jail back: reading from outside was unjailed by policy. Reads are
+    // jailed now, and a copy reads its source, so `cp(outside, inside)` then
+    // `cat(inside)` read what `cat(outside)` is refused (round 23 red team).
     let _g = lock();
     let jail = Jail::new("copyin");
     let dst = jail.workspace.join("brought_in.txt");
@@ -341,10 +338,10 @@ fn copying_a_file_into_the_workspace_from_outside_still_works() {
         ],
     );
     assert!(
-        !refused_by_the_jail(&r),
-        "copying a file into the workspace must not be refused: {r:?}"
+        refused_by_the_jail(&r),
+        "copying an outside file in must be refused: {r:?}"
     );
-    assert!(dst.exists(), "and must actually have copied");
+    assert!(!dst.exists(), "and must not have copied");
 }
 
 #[test]
