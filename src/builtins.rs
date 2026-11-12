@@ -15718,7 +15718,7 @@ fn check_replacement_groups(builtin: &str, re: &regex::Regex, replacement: &str)
         let known = if numeric {
             reference.parse::<usize>().is_ok_and(|n| n <= count)
         } else {
-            names.iter().any(|name| *name == Some(reference))
+            names.contains(&Some(reference))
         };
         if known {
             continue;

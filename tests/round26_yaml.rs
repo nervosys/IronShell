@@ -161,7 +161,8 @@ fn infinity_written_by_to_yaml_reads_back_as_a_float() {
         ("neg", Value::Float(f64::NEG_INFINITY)),
     ]);
     let text = yaml::emit(&v);
-    assert_eq!(text, "pos: .inf\nneg: -.inf\n");
+    // Record keys are written in sorted order.
+    assert_eq!(text, "neg: -.inf\npos: .inf\n");
     assert_eq!(yaml::parse(&text).unwrap(), v);
 }
 
