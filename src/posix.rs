@@ -2723,6 +2723,10 @@ impl Shell {
         sink: &mut Sink,
         why: Option<&str>,
     ) -> i32 {
+        if let Some(message) = sed_missing_refusal(argv, why) {
+            sink.eline(&message);
+            return 2;
+        }
         if let Err(e) = crate::safety::guard_exec("posix", argv.join(" ")) {
             sink.eline(&e.to_string());
             return e.code.exit_code();
@@ -3012,7 +3016,30 @@ const SUBSET_NAMES: &[&str] = &[
 /// Windows folder, never searches a relative PATH entry (such as `.`), and
 /// accepts a program only when its `--version` says GNU.
 fn gnu_program(name: &str) -> Option<std::path::PathBuf> {
-    let path = std::env::var_os("PATH")?;
+    path_candidates(name).find(|candidate| {
+        let probe = crate::safety::child_command(candidate)
+            .arg("--version")
+            .stdin(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .output();
+        match probe {
+            Ok(out) => {
+                let first = String::from_utf8_lossy(&out.stdout);
+                out.status.success() && first.lines().next().is_some_and(|l| l.contains("GNU"))
+            }
+            Err(_) => false,
+        }
+    })
+}
+
+/// The files on PATH that are called `name`, in PATH order, as far as a file
+/// test can tell: absolute PATH entries only, and on Windows never the Windows
+/// folder. Nothing is run here, so the exec gate can use it before it admits a
+/// program.
+fn path_candidates(name: &str) -> impl Iterator<Item = std::path::PathBuf> {
+    let dirs: Vec<std::path::PathBuf> = std::env::var_os("PATH")
+        .map(|path| std::env::split_paths(&path).collect::<Vec<_>>())
+        .unwrap_or_default();
     let windows_dir = if cfg!(windows) {
         std::env::var_os("SystemRoot").map(|r| r.to_string_lossy().to_lowercase())
     } else {
@@ -3023,36 +3050,17 @@ fn gnu_program(name: &str) -> Option<std::path::PathBuf> {
     } else {
         name.to_string()
     };
-    for dir in std::env::split_paths(&path) {
-        if !dir.is_absolute() {
-            continue;
-        }
-        if let Some(root) = &windows_dir {
-            if dir
+    dirs.into_iter()
+        .filter(|dir| dir.is_absolute())
+        .filter(move |dir| match &windows_dir {
+            Some(root) => !dir
                 .to_string_lossy()
                 .to_lowercase()
-                .starts_with(root.as_str())
-            {
-                continue;
-            }
-        }
-        let candidate = dir.join(&file);
-        if !candidate.is_file() {
-            continue;
-        }
-        let probe = crate::safety::child_command(&candidate)
-            .arg("--version")
-            .stdin(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .output();
-        if let Ok(out) = probe {
-            let first = String::from_utf8_lossy(&out.stdout);
-            if out.status.success() && first.lines().next().is_some_and(|l| l.contains("GNU")) {
-                return Some(candidate);
-            }
-        }
-    }
-    None
+                .starts_with(root.as_str()),
+            None => true,
+        })
+        .map(move |dir| dir.join(&file))
+        .filter(|candidate| candidate.is_file())
 }
 
 /// The first PATH program called `name`, from an absolute PATH entry only, so
@@ -3115,6 +3123,28 @@ fn resolve_program(
         msg.push_str(&hint);
     }
     Err((2, msg))
+}
+
+/// On Windows, the refusal for a sed command the subset declines when no sed is
+/// on PATH. `resolve_program` gives the same refusal, but only after the exec
+/// gate has asked for approval of a program that is not installed; this gives
+/// it first. `None` when this is not that case. A sed that is on PATH still goes
+/// through the gate, which then checks that it is GNU.
+fn sed_missing_refusal(argv: &[String], why: Option<&str>) -> Option<String> {
+    if !cfg!(windows) || argv[0] != "sed" {
+        return None;
+    }
+    let part = why?;
+    if path_candidates("sed").next().is_some() {
+        return None;
+    }
+    let mut msg =
+        format!("{SHELL_NAME}: sed: {part} is not in the in-process subset, and no sed is on PATH");
+    if let Some(hint) = windows_tools_hint() {
+        msg.push('\n');
+        msg.push_str(&hint);
+    }
+    Some(msg)
 }
 
 /// On Windows, where to find the GNU tools a script expects: Git for Windows
