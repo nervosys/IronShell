@@ -4225,7 +4225,7 @@ fn printf_int_arg(arg: &str) -> Option<(i64, Option<&'static str>)> {
         None
     } else if hex {
         Some("invalid hex number")
-    } else if body.as_bytes().get(1).is_some_and(u8::is_ascii_digit) {
+    } else if radix == 8 && body.as_bytes().get(1).is_some_and(u8::is_ascii_digit) {
         Some("invalid octal number")
     } else {
         Some("invalid number")

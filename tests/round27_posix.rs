@@ -128,6 +128,24 @@ fn printf_invalid_integer_prints_what_was_read_and_fails() {
     assert_eq!(out, "12\n");
     assert!(err.contains("printf: 12abc: invalid number"), "{err}");
     assert_eq!(code, 1);
+    // bash 5.2: only an octal number gets the octal complaint.
+    for (arg, value, why) in [
+        ("0abc", "0", "invalid number"),
+        ("019x", "1", "invalid octal number"),
+        ("8abc", "8", "invalid number"),
+        ("0x1g", "1", "invalid hex number"),
+    ] {
+        let (out, err, code) = run("pf8", &[], &format!("printf '%d\\n' {arg}"));
+        assert_eq!(
+            (out.as_str(), code),
+            (format!("{value}\n").as_str(), 1),
+            "{arg}"
+        );
+        assert!(
+            err.contains(&format!("printf: {arg}: {why}")),
+            "{arg}: {err}"
+        );
+    }
 }
 
 #[test]
