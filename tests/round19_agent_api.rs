@@ -104,8 +104,9 @@ fn item2_an_array_whose_first_element_is_the_subject_names_the_missing_parameter
         message.contains("missing required argument 'exponent'"),
         "{message}"
     );
+    // A direct call's arguments are not described as subject-and-parameters.
     assert!(
-        message.contains("the first argument is the subject"),
+        !message.contains("the first argument is the subject"),
         "{message}"
     );
     assert!(!message.contains("0 of 1"), "{message}");

@@ -571,7 +571,7 @@ fn take_seq(s: &mut State) -> usize {
 fn written_path_argument(builtin: &str) -> Option<usize> {
     let canonical = crate::signature::signature_of(builtin).map_or(builtin, |s| s.name);
     match canonical {
-        "file_write" | "file_append" | "save_json" | "file_patch" | "file_replace"
+        "file_write" | "file_append" | "json_set" | "save_json" | "file_patch" | "file_replace"
         | "file_insert" | "file_edit" | "touch" | "rm" => Some(0),
         "file_copy" => Some(1),
         _ => None,

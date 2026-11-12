@@ -113,7 +113,7 @@ file_write "data.json" (json_stringify data)
 ```
 
 ### `file_append` / `append_file`
-Append content to the end of a file.
+Append content to the end of a file. A file that does not exist is created, as `>>` does, so the first append starts it; its folder must already exist (`mkdir` makes one). The append is journaled like a write, so `undo()` removes a file it created.
 
 ```ironshell
 file_append "log.txt" "New log entry\n"

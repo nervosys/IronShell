@@ -48,7 +48,7 @@ fn a_function_is_told_to_inline_its_body() {
     refused_with(
         "function",
         "f() { echo hi; }\nf\n",
-        "function definition at line 1, column 2",
+        "function definition at line 1, column 1",
         "inline the body, or write the logic in ish.",
     );
 }
@@ -104,12 +104,12 @@ fn double_brackets_are_told_to_use_test() {
 }
 
 #[test]
-fn a_suffix_strip_names_its_operator_and_suggests_sed() {
+fn a_replacement_names_its_operator_and_suggests_sed() {
     refused_with(
-        "suffix",
-        "f=a.txt; echo ${f%.txt}\n",
-        "${...} operator `%` at line 1, column 15",
-        "strip a suffix with sed",
+        "replace",
+        "f=a.txt; echo ${f/.txt/}\n",
+        "${...} operator `/` at line 1, column 15",
+        "replace text with sed",
     );
 }
 

@@ -846,7 +846,7 @@ pub static SIGNATURES: &[Signature] = &[
     Signature {
         name: "file_append", category: None, subject_required: false, aliases: &["append_file"],
         subject: None, params: &[req("path", Ty::Str, "file to append or create"), opt("content", Ty::Any, "content; omitted uses pipeline input")], returns: "Record",
-        doc: "Append content exactly as given, and return path, bytes appended and success. No newline is added before or after the content, so a line that should end needs its own newline. An Array is joined with newlines, with none after its last item.",
+        doc: "Append content exactly as given, and return path, bytes appended and success. A file that does not exist is created, as >> does; its folder must already exist. No newline is added before or after the content, so a line that should end needs its own newline. An Array is joined with newlines, with none after its last item.",
         examples: &[
             (r#"let d = fs_tempdir("ae_append"); let f = d + "/x"; let result = file_append(f, "hello"); rmdir(d, true); result.bytes_appended"#, "5"),
             (r#"let d = fs_tempdir("ae_append"); let f = d + "/x"; let result = "hi" | file_append(f); rmdir(d, true); result.bytes_appended"#, "2"),
@@ -1745,7 +1745,7 @@ pub static SIGNATURES: &[Signature] = &[
     Signature {
         name: "from_csv", category: None, subject_required: false, aliases: &["from-csv"],
         subject: Some(Ty::Str), params: &[], returns: "Array",
-        doc: "Parse a CSV string with headers. Each column is typed as a whole: it is numeric only when every non-empty cell is a number, with no leading \"+\" and no leading zero before another digit (\"007\" is text, \"0.5\" is a number). A numeric column holds Ints when every non-empty cell is an integer, else Floats, and its empty cells are null. A column whose non-empty cells are all true or false holds Bools, its empty cells null. Any other column holds only Strings, and its empty cells are \"\". The text is piped in or passed as the argument: from_csv(text).",
+        doc: "Parse a CSV string with headers. Each column is typed as a whole: it is numeric only when every non-empty cell is a number, with no leading \"+\" and no leading zero before another digit (\"007\" is text, \"0.5\" is a number). A numeric column holds Ints when every non-empty cell is an integer, else Floats, and its empty cells are null. A column whose non-empty cells are all true or false, in any case (TRUE, False), holds Bools, its empty cells null. Any other column holds only Strings, and its empty cells are \"\". The text is piped in or passed as the argument: from_csv(text).",
         examples: &[
             (r#"("n\n7\n" | from_csv | first).n"#, "7"),
             (r#"from_csv("n\n7\n") | len"#, "1"),
@@ -2943,9 +2943,9 @@ pub static SIGNATURES: &[Signature] = &[
         subject_required: false,
         aliases: &[],
         subject: None,
-        params: &[req("pattern", Ty::Str, "a basic regular expression, as grep takes it: ^ and $ anchor, . is any character"), opt("path", Ty::Str, "file to search; omit to search the piped text"), opt("options", Ty::Record, "{line_numbers: true} returns {file, line, text} records instead of lines; line counts from 1 in each file, and file is null for piped text")],
+        params: &[req("pattern", Ty::Str, "a basic regular expression: ^ and $ anchor, . is any character; + ? | ( ) { } are literal unless backslashed (\\+ \\? \\| \\( \\) \\{ \\}); there is no grep -E, so use regex_match for extended syntax"), opt("path", Ty::Str, "file to search; omit to search the piped text"), opt("options", Ty::Record, "{line_numbers: true} returns {file, line, text} records instead of lines; line counts from 1 in each file, and file is null for piped text")],
         returns: "Array",
-        doc: "Lines matching a basic regular expression. With {line_numbers: true} each match is a record {file, line, text} instead, the line numbered from 1 within its file (null for piped text).",
+        doc: "Lines matching a basic regular expression; a back-reference such as \\1 is refused, and a pattern that does not compile says why. With {line_numbers: true} each match is a record {file, line, text} instead, the line numbered from 1 within its file (null for piped text).",
         examples: &[(r#"grep("fn main", "src/main.rs") | len"#, "1"), (r#"(grep("fn", "src/main.rs") | len) > 0"#, "true"), (r#"grep("^version", "Cargo.toml") | len"#, "1"), (r#"grep("^version", "Cargo.toml", {line_numbers: true}) | first | fn(r) => r.file"#, r#""Cargo.toml""#), (r#""a\nb\na" | grep("a", {line_numbers: true}) | last | fn(r) => r.line"#, "3")],
     },
     Signature {
@@ -2991,7 +2991,7 @@ pub static SIGNATURES: &[Signature] = &[
             req(
                 "source_or_query",
                 Ty::Str,
-                "with rows piped in, the query (they are table `t`); otherwise a source: a .json/.jsonl/.csv file (a table named after the file, also `t`), a SQLite file, or \":memory:\"",
+                "with rows piped in, the query (they are table `t`); alone, the query over an empty database; otherwise a source: a .json/.jsonl/.csv file (a table named after the file, also `t`), a SQLite file, or \":memory:\"",
             ),
             opt(
                 "query",
@@ -3005,8 +3005,12 @@ pub static SIGNATURES: &[Signature] = &[
             ),
         ],
         returns: "Array",
-        doc: "Run a read-only SQL query over piped rows, rows given as the first argument, a JSON/CSV file or a SQLite database, returning rows as records. A trailing params Array binds its values to the query's ? placeholders in order, so a value is never spliced into the query text. Without piped rows, name a source first: sql(source, query, params).",
+        doc: "Run a read-only SQL query over piped rows, rows given as the first argument, a JSON/CSV file or a SQLite database, returning rows as records. A query with no rows and no source runs over an empty database: sql(\"select 1 as x\") answers [{x: 1}]. A trailing params Array binds its values to the query's ? placeholders in order, so a value is never spliced into the query text. A query with params and no rows needs a source first: sql(source, query, params).",
         examples: &[
+            (
+                r#"sql("select 1 as x") | first | fn(r) => r.x"#,
+                "1",
+            ),
             (
                 r#"[{n: 1}, {n: 2}, {n: 3}] | sql("select sum(n) as total from t") | first | fn(r) => r.total"#,
                 "6",
@@ -3105,13 +3109,14 @@ pub static SIGNATURES: &[Signature] = &[
             ),
         ],
         returns: "Any",
-        doc: "Run a read-only SQL query that yields exactly one row of one column, returning that value. Rows may be piped in or given as the first argument, as for sql. A trailing params Array binds its values to the query's ? placeholders in order, as for sql.",
+        doc: "Run a read-only SQL query that yields exactly one row of one column, returning that value. Rows may be piped in or given as the first argument, as for sql; a query alone runs over an empty database, so sql_value(\"select 1 + 1\") is 2. A trailing params Array binds its values to the query's ? placeholders in order, as for sql.",
         examples: &[
             (r#"[{n: 1}, {n: 2}, {n: 3}] | sql_value("select max(n) from t")"#, "3"),
             (r#"sql_value([{n: 1}, {n: 2}, {n: 3}], "select count(*) from t where n > ?", [1])"#, "2"),
             (r#"sql_value(":memory:", "select 6 * 7")"#, "42"),
             (r#"sql_value(":memory:", "select ? * 6", [7])"#, "42"),
             (r#"[{n: 1}, {n: 2}, {n: 3}] | sql_value("select count(*) from t where n > ?", [1])"#, "2"),
+            (r#"sql_value("select 1 + 1")"#, "2"),
         ],
     },
     Signature {
@@ -7503,11 +7508,12 @@ pub static SIGNATURES: &[Signature] = &[
         subject_required: false,
         aliases: &[],
         subject: Some(Ty::Str),
-        params: &[req("b", Ty::Str, "the second ISO date or datetime; the answer is b minus a, so an earlier b is negative"), opt("unit", Ty::Str, "days (the default: whole 24-hour periods), weeks, months, years, hours, minutes or seconds")],
+        params: &[req("b", Ty::Str, "the second ISO date or datetime; the answer is b minus a, so an earlier b is negative"), opt("unit", Ty::Str, "days (the default: whole 24-hour periods), weeks, months, years, hours, minutes or seconds; any case, and the singular, is accepted")],
         returns: "Int",
-        doc: "The time from the first date a to the second date b: the answer is b minus a, as a count of whole units truncated toward zero, so the sign is kept. date_diff(a, b) with a before b is positive, and with b before a it is negative: date_diff(\"2026-11-09\", \"2024-02-29\") is -984. The default unit, days, counts whole 24-hour periods of elapsed time: a partial day is dropped, so 23:00 to 01:00 the next day is 0 days. Weeks, hours, minutes and seconds count whole elapsed units. Months and years are calendar units, the inverse of date_add: the most whole months n for which date_add(a, n, \"months\") does not pass b, so 2024-01-31 to 2024-02-29 is 1 month and 2024-02-29 to 2025-02-28 is 1 year. Dates are ISO strings as date_parse answers them; a date alone is midnight UTC, so two dates count calendar days. A bad unit is E_BAD_ARG. Direct date_diff(a, b, unit?) or text | date_diff(b, unit?).",
+        doc: "The time from the first date a to the second date b: the answer is b minus a, as a count of whole units truncated toward zero, so the sign is kept. date_diff(a, b) with a before b is positive, and with b before a it is negative: date_diff(\"2026-11-09\", \"2024-02-29\") is -984. The default unit, days, counts whole 24-hour periods of elapsed time: a partial day is dropped, so 23:00 to 01:00 the next day is 0 days. Weeks, hours, minutes and seconds count whole elapsed units. Months and years are calendar units, the inverse of date_add: the most whole months n for which date_add(a, n, \"months\") does not pass b, so 2024-01-31 to 2024-02-29 is 1 month and 2024-02-29 to 2025-02-28 is 1 year. Dates are ISO strings as date_parse answers them; a date alone is midnight UTC, so two dates count calendar days. A unit is read in any case and in the singular (\"DAY\", \"week\"); a bad unit is E_BAD_ARG. Direct date_diff(a, b, unit?) or text | date_diff(b, unit?).",
         examples: &[
             (r#"date_diff("2024-02-29", "2026-11-09")"#, "984"),
+            (r#"date_diff("2024-02-29", "2024-03-02", "DAY")"#, "2"),
             (r#"date_diff("2026-11-09", "2024-02-29")"#, "-984"),
             (r#"date_diff("2024-02-29", "2026-11-09", "hours")"#, "23616"),
             (r#"date_diff("2024-01-31", "2024-02-29", "months")"#, "1"),
@@ -7538,11 +7544,12 @@ pub static SIGNATURES: &[Signature] = &[
         subject_required: false,
         aliases: &[],
         subject: Some(Ty::Str),
-        params: &[req("amount", Ty::Int, "whole units; may be negative"), req("unit", Ty::Str, "weeks, days, months, years, hours, minutes or seconds")],
+        params: &[req("amount", Ty::Int, "whole units; may be negative"), req("unit", Ty::Str, "weeks, days, months, years, hours, minutes or seconds; any case, and the singular, is accepted")],
         returns: "String",
-        doc: "Move an ISO date or datetime by a whole amount of weeks, days, months, years, hours, minutes or seconds. Months and years are calendar units: the day of the month is kept, or clamped to the last day of the month it lands in, so 2024-01-31 plus one month is 2024-02-29 and 2024-02-29 plus one year is 2025-02-28. The time of day is kept. A date with the unit weeks, days, months or years is answered as a date; otherwise the answer is a UTC datetime ending in Z. A bad unit is E_BAD_ARG.",
+        doc: "Move an ISO date or datetime by a whole amount of weeks, days, months, years, hours, minutes or seconds. Months and years are calendar units: the day of the month is kept, or clamped to the last day of the month it lands in, so 2024-01-31 plus one month is 2024-02-29 and 2024-02-29 plus one year is 2025-02-28. The time of day is kept. A date with the unit weeks, days, months or years is answered as a date; otherwise the answer is a UTC datetime ending in Z. A unit is read in any case and in the singular, so \"Day\" and \"week\" are accepted; a bad unit is E_BAD_ARG.",
         examples: &[
             (r#"date_add("2024-02-28", 1, "days")"#, r#""2024-02-29""#),
+            (r#"date_add("2024-01-01", 1, "DAY")"#, r#""2024-01-02""#),
             (r#"date_add("2024-02-28", 1, "weeks")"#, r#""2024-03-06""#),
             (r#"date_add("2024-01-31", 1, "months")"#, r#""2024-02-29""#),
             (r#"date_add("2024-03-31", -1, "months")"#, r#""2024-02-29""#),
@@ -8183,7 +8190,7 @@ pub static SIGNATURES: &[Signature] = &[
         doc: "Verify a hash-chained audit log. Returns {valid, entries, path, keyed}: valid is true only for a log whose every entry chains to the one before. A missing, unreadable, empty or broken log is valid: false with the reason in error. keyed says whether the chain was keyed (IRONSHELL_AUDIT_KEY); an unkeyed chain shows corruption, not tampering, and the record then also carries a note on how to key it. A path that is not a string is E_BAD_ARG.",
         examples: &[
             (r#"try { audit_verify() } catch e { e.error.code }"#, r#"E_BAD_STATE"#),
-            (r#"audit_verify("no-such-audit-log-here.log").valid"#, r#"false"#),
+            (r#"(try { audit_verify("no-such-audit-log-here.log") } catch e { e.error.code })"#, "E_NOT_FOUND"),
         ],
     },
     Signature {
@@ -13772,7 +13779,7 @@ pub static SIGNATURES: &[Signature] = &[
         subject: None,
         params: &[],
         returns: "Record",
-        doc: "The recorded steps of this session and how many can be reversed.",
+        doc: "The recorded steps of this session and how many can be reversed. Each row's id is the value undo({id: N}) takes to undo that one step; seq is the same number.",
         examples: &[
             (r#"typeof(journal())"#, r#"Record"#),
         ],
@@ -14951,7 +14958,13 @@ pub fn validate(name: &str, args: &[Value], input: Option<&Value>) -> anyhow::Re
     // In a pipeline the subject is the input, so the arguments are the
     // parameters. Called directly, a subject-taking builtin may receive the
     // subject as its first argument instead, and the parameters shift by one.
-    let params_start = usize::from(input.is_none() && sig.subject.is_some() && !args.is_empty());
+    // `sql("select 1")` and `sql_value("select 1")` have no source: the one
+    // String is the query, not a subject.
+    let lone_query = matches!(sig.name, "sql" | "sql_value")
+        && input.is_none()
+        && matches!(args, [Value::Str(_)]);
+    let params_start =
+        usize::from(input.is_none() && sig.subject.is_some() && !args.is_empty() && !lone_query);
     let supplied = args.len().saturating_sub(params_start);
 
     // When the subject arrives as the first argument rather than through the
@@ -14996,6 +15009,29 @@ pub fn validate(name: &str, args: &[Value], input: Option<&Value>) -> anyhow::Re
         ));
     }
 
+    // `sql(rows, "select ... ?", 5)`: the query is the String before the last
+    // argument, so the last argument is the params and must be an Array. Named
+    // as the mistake, rather than as a bad `query`.
+    if matches!(sig.name, "sql" | "sql_value") {
+        if let [.., Value::Str(_), last] = &args[params_start..] {
+            if !matches!(last, Value::Array(_)) {
+                let example = if matches!(last, Value::Str(_)) {
+                    "[\"Ann\"]"
+                } else {
+                    "[5]"
+                };
+                return Err(crate::safety::bad_arg_in(
+                    name,
+                    format!(
+                        "{name}: params must be an Array, e.g. {example}, got {}",
+                        last.type_name()
+                    ),
+                    &format!("pass the bind values as an Array: {name}(..., query, [value, ...])"),
+                ));
+            }
+        }
+    }
+
     let required = sig.params.iter().filter(|p| p.required).count();
     if supplied < required {
         // `in` is a pipe stage far more often than a call with two arguments,
@@ -15024,10 +15060,7 @@ pub fn validate(name: &str, args: &[Value], input: Option<&Value>) -> anyhow::Re
             if let Some(missing) = sig.params.iter().skip(supplied).find(|p| p.required) {
                 return Err(crate::safety::bad_arg_in(
                     name,
-                    format!(
-                        "{name}: missing required argument '{}' (the first argument is the subject)",
-                        missing.name
-                    ),
+                    format!("{name}: missing required argument '{}'", missing.name),
                     &format!(
                         "pass '{}' as the argument after the subject: {}",
                         missing.name,

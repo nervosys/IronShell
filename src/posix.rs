@@ -169,11 +169,20 @@ fn unterminated<T>(what: &str, open: usize, closing: &str) -> PResult<T> {
     })
 }
 
-/// `e`, placed at `at`. An error found while lexing the operand of a `${...}`
-/// reports the expansion's own position, not an offset into the operand.
-fn at_outer(mut e: Unsupported, at: usize) -> Unsupported {
-    e.at = Some(at);
+/// `e` moved from the text it was found in (an operand or a substitution's
+/// body, whose offsets count from `base`) to the outer source. An error with a
+/// position of its own is at `base + offset`; one without is placed at
+/// `fallback`, the expansion's own `$`.
+fn relocate(mut e: Unsupported, base: usize, fallback: usize) -> Unsupported {
+    e.at = Some(e.at.map_or(fallback, |off| base + off));
     e
+}
+
+/// Parses the body of a command substitution, which runs later as a script of
+/// its own. A construct the subset refuses inside it is refused with the whole
+/// script, before anything runs: its error is returned for the caller to place.
+fn check_body(body: &str) -> PResult<()> {
+    parse(body).map(|_| ())
 }
 
 // ── lexer ────────────────────────────────────────────────────────────────
@@ -528,19 +537,32 @@ impl<'a> Lexer<'a> {
         let open = self.i;
         self.i += 1;
         let mut body = String::new();
+        // The source offset of each character of `body`: its escapes are
+        // gone, so a refusal inside it is mapped back through this.
+        let mut from: Vec<usize> = Vec::new();
         loop {
             match self.peek() {
                 None => return unterminated("unterminated backquote", open, "a closing backquote"),
                 Some('`') => {
+                    let close = self.i;
                     self.i += 1;
+                    check_body(&body).map_err(|mut e| {
+                        e.at = Some(match e.at {
+                            Some(off) => from.get(off).copied().unwrap_or(close),
+                            None => open,
+                        });
+                        e
+                    })?;
                     return Ok(body);
                 }
                 Some('\\') if matches!(self.peek_at(1), Some('`') | Some('\\') | Some('$')) => {
                     body.push(self.peek_at(1).unwrap_or('\\'));
+                    from.push(self.i + 1);
                     self.i += 2;
                 }
                 Some(c) => {
                     body.push(c);
+                    from.push(self.i);
                     self.i += 1;
                 }
             }
@@ -581,6 +603,8 @@ impl<'a> Lexer<'a> {
                     return unterminated("unterminated $(", dollar_at, "a `)`");
                 }
                 let body: String = self.s[start..self.i].iter().collect();
+                // The body's offsets count from `start`.
+                check_body(&body).map_err(|e| relocate(e, start, dollar_at))?;
                 self.i += 1;
                 parts.push(Part::Cmd(body, quoted));
             }
@@ -629,6 +653,15 @@ impl<'a> Lexer<'a> {
                         op.push(c);
                         self.i += 1;
                     }
+                    // `%`, `%%`, `#`, `##`: the word is a glob pattern.
+                    Some(c @ ('%' | '#')) if op.is_empty() => {
+                        op.push(c);
+                        self.i += 1;
+                        if self.peek() == Some(c) {
+                            op.push(c);
+                            self.i += 1;
+                        }
+                    }
                     _ => {
                         let named = param_operator(op.starts_with(':'), &self.s[self.i..]);
                         return unsupported_at(&format!("${{...}} operator `{named}`"), dollar_at);
@@ -667,12 +700,12 @@ impl<'a> Lexer<'a> {
                         chars.push('"');
                         let mut q = Lexer { s: &chars, i: 0 };
                         q.double_quoted(&mut w)
-                            .map_err(|e| at_outer(e, dollar_at))?;
+                            .map_err(|e| relocate(e, start, dollar_at))?;
                     } else {
                         // The operand runs to the closing brace, blanks
                         // included (`${1:?usage: f COLUMN}`), as in bash; its
                         // words are kept apart by the blanks between them.
-                        w = sub.word().map_err(|e| at_outer(e, dollar_at))?;
+                        w = sub.word().map_err(|e| relocate(e, start, dollar_at))?;
                         while sub.i < inner.len() {
                             let blanks: String = inner[sub.i..]
                                 .iter()
@@ -684,7 +717,7 @@ impl<'a> Lexer<'a> {
                             sub.i += blanks.chars().count();
                             w.push(Part::Lit(blanks, false));
                             let before = sub.i;
-                            w.extend(sub.word().map_err(|e| at_outer(e, dollar_at))?);
+                            w.extend(sub.word().map_err(|e| relocate(e, start, dollar_at))?);
                             if sub.i == before && sub.i < inner.len() {
                                 return unsupported_at("${...} operand", dollar_at);
                             }
@@ -1123,7 +1156,7 @@ impl Parser {
                         }
                         if let Some(Part::Lit(s, false)) = w.first() {
                             if s.ends_with("()") || s == "function" {
-                                return unsupported("function definition");
+                                return unsupported_at("function definition", start);
                             }
                             if s == "[[" {
                                 return unsupported("[[");
@@ -1137,10 +1170,21 @@ impl Parser {
                     redirs.push(r.clone());
                     self.i += 1;
                 }
+                // `greet() {`: the name is where the definition starts.
                 Some(Tok::LParen)
                     if words.len() == 1 && assigns.is_empty() && redirs.is_empty() =>
                 {
-                    return unsupported("function definition");
+                    return unsupported_at("function definition", start);
+                }
+                // `name=(...)`: the assignment with an empty value is the word
+                // before the `(`. Arrays are not in the subset.
+                Some(Tok::LParen)
+                    if words.is_empty()
+                        && assigns.last().is_some_and(
+                            |(_, v)| matches!(v.as_slice(), [Part::Lit(s, _)] if s.is_empty()),
+                        ) =>
+                {
+                    return unsupported_at("array assignment", start);
                 }
                 Some(Tok::RParen) => return self.stray_paren(),
                 Some(t @ (Tok::LParen | Tok::DSemi)) => {
@@ -1734,7 +1778,7 @@ impl Shell {
                     }
                 }
                 Part::Var(name, op, quoted) => {
-                    let value = self.param(name, op, stdin);
+                    let value = self.param(name, op, *quoted, stdin);
                     self.splice(&value, *quoted, &mut fields, &mut cur, &mut mask, &mut have);
                 }
                 Part::Cmd(body, quoted) => {
@@ -1821,7 +1865,16 @@ impl Shell {
         }
     }
 
-    fn param(&mut self, name: &str, op: &Option<(String, Word)>, stdin: &mut Input) -> String {
+    /// The value of `${name...}` (or `$name`). `quoted` is whether the
+    /// expansion is inside double quotes, which is how its operand's
+    /// quoting is read (see [`Shell::pattern`]).
+    fn param(
+        &mut self,
+        name: &str,
+        op: &Option<(String, Word)>,
+        quoted: bool,
+        stdin: &mut Input,
+    ) -> String {
         let value = self.var(name);
         // Unset is an error under `set -u`, except for `$@` and `$*`, and for
         // the forms that supply their own value: `${x:-d}`, `${x-d}`, `${x:=d}`
@@ -1866,6 +1919,15 @@ impl Shell {
                     operand(self, stdin)
                 }
             }
+            // `${x%pat}`, `${x%%pat}`, `${x#pat}`, `${x##pat}`: the value less
+            // the part the pattern matches. An unset name is empty (and an
+            // error under `set -u`, noted above).
+            "%" | "%%" | "#" | "##" => {
+                let pat = self.pattern(word, quoted, stdin);
+                value
+                    .as_deref()
+                    .map_or(String::new(), |v| trim_affix(v, &pat, op))
+            }
             // `${x:?msg}` / `${x?msg}`: an error whatever `set -u` says, with
             // the message given, or bash's own when there is none. The command
             // that made the expansion does not run, and the script ends with 1.
@@ -1889,6 +1951,39 @@ impl Shell {
             }
             _ => value.unwrap_or_default(),
         }
+    }
+
+    /// The glob pattern of a `${name%pat}`-style operand. Literal text quoted
+    /// in the operand is literal, so its glob characters are escaped; unquoted
+    /// text, and the unquoted results of expansions, keep theirs. Inside double
+    /// quotes (`quoted`) the operand's text is still read as a pattern, since
+    /// its quoting is not told apart here.
+    fn pattern(&mut self, word: &Word, quoted: bool, stdin: &mut Input) -> String {
+        let mut out = String::new();
+        for part in word {
+            match part {
+                Part::Lit(s, lit_quoted) => {
+                    if *lit_quoted && !quoted {
+                        out.push_str(&escape_glob(s));
+                    } else {
+                        out.push_str(s);
+                    }
+                }
+                Part::Var(_, _, part_quoted) | Part::Cmd(_, part_quoted) => {
+                    let text = self.expand_assign(&vec![part.clone()], stdin);
+                    if *part_quoted {
+                        out.push_str(&escape_glob(&text));
+                    } else {
+                        out.push_str(&text);
+                    }
+                }
+                Part::Len(_) => {
+                    let text = self.expand_assign(&vec![part.clone()], stdin);
+                    out.push_str(&text);
+                }
+            }
+        }
+        out
     }
 
     /// `$(…)`: run the body and take its stdout, less trailing newlines.
@@ -1957,8 +2052,8 @@ impl Shell {
                 Part::Var(name, None, _) if name == "@" || name == "*" => {
                     out.push_str(&self.positional.join(" "));
                 }
-                Part::Var(name, op, _) => {
-                    let value = self.param(name, op, stdin);
+                Part::Var(name, op, quoted) => {
+                    let value = self.param(name, op, *quoted, stdin);
                     out.push_str(&value);
                 }
                 Part::Cmd(body, _) => {
@@ -2994,6 +3089,14 @@ fn resolve_program(
     if let Some(p) = gnu_program(name) {
         return Ok(p.to_string_lossy().into_owned());
     }
+    // A sed command the subset does not run is named as that, not as a missing
+    // tool: the rest of the script has run, and this command is what is outside.
+    if let Some(part) = why.filter(|p| name == "sed" && p.starts_with("sed command")) {
+        return Err((
+            2,
+            format!("{SHELL_NAME}: sed: {part} is not in the in-process subset, which runs p, d, q and s///"),
+        ));
+    }
     let what = if !env.is_empty() {
         "a variable before the command".to_string()
     } else if let Some(part) = why {
@@ -3254,6 +3357,42 @@ fn glob_match(pat: &str, s: &str) -> bool {
     let p: Vec<char> = pat.chars().collect();
     let s: Vec<char> = s.chars().collect();
     go(&p, &s)
+}
+
+/// `s` with its glob characters escaped, so a pattern matches them literally.
+fn escape_glob(s: &str) -> String {
+    let mut out = String::new();
+    for c in s.chars() {
+        if matches!(c, '*' | '?' | '[' | '\\') {
+            out.push('\\');
+        }
+        out.push(c);
+    }
+    out
+}
+
+/// `value` less what `op` removes: `%` and `%%` take the shortest and the
+/// longest suffix that matches `pat`, `#` and `##` the shortest and the longest
+/// prefix, as bash does. `value` itself when nothing matches.
+fn trim_affix(value: &str, pat: &str, op: &str) -> String {
+    let chars: Vec<char> = value.chars().collect();
+    let n = chars.len();
+    let prefix = op.starts_with('#');
+    let longest = op.len() == 2;
+    // How many characters to remove, the shortest removal first.
+    let counts: Vec<usize> = if longest {
+        (0..=n).rev().collect()
+    } else {
+        (0..=n).collect()
+    };
+    for k in counts {
+        let (head, tail) = chars.split_at(if prefix { k } else { n - k });
+        let (removed, kept) = if prefix { (head, tail) } else { (tail, head) };
+        if glob_match(pat, &removed.iter().collect::<String>()) {
+            return kept.iter().collect();
+        }
+    }
+    value.to_string()
 }
 
 /// Pathname expansion, component by component, sorted as `ls` would sort.
@@ -5363,7 +5502,52 @@ enum SedCmd {
     Print,
     Delete,
     Quit,
-    Subst(regex::bytes::Regex, Vec<u8>, bool, bool, usize),
+    Subst(regex::bytes::Regex, Vec<RepItem>, bool, bool, usize),
+}
+
+/// One piece of an `s` command's replacement, after its escapes are read.
+enum RepItem {
+    /// Literal text.
+    Text(Vec<u8>),
+    /// `&` (group 0) or `\N`.
+    Group(usize),
+    /// `\U`, `\L`, `\E` (`U`, `L`, `E`: the case held until `\E` or the other
+    /// of `\U`/`\L`), `\u` and `\l` (`u`, `l`: the next character only).
+    Case(char),
+}
+
+/// The text of one replacement: `items` with the match's groups filled in,
+/// and the case escapes applied as GNU sed applies them.
+fn expand_rep(items: &[RepItem], caps: &regex::bytes::Captures, out: &mut Vec<u8>) {
+    let mut hold: Option<char> = None;
+    let mut next: Option<char> = None;
+    for item in items {
+        let piece: &[u8] = match item {
+            RepItem::Text(t) => t.as_slice(),
+            RepItem::Group(n) => caps.get(*n).map_or(&b""[..], |m| m.as_bytes()),
+            RepItem::Case(c) => {
+                match *c {
+                    'U' | 'L' => hold = Some(*c),
+                    'E' => hold = None,
+                    _ => next = Some(*c),
+                }
+                continue;
+            }
+        };
+        if hold.is_none() && next.is_none() {
+            out.extend_from_slice(piece);
+            continue;
+        }
+        for ch in String::from_utf8_lossy(piece).chars() {
+            // The one-shot case applies to this character alone, then the held one.
+            let mapped: String = match (next.take(), hold) {
+                (Some('u'), _) | (None, Some('U')) => ch.to_uppercase().collect(),
+                (Some(_), _) | (None, Some(_)) => ch.to_lowercase().collect(),
+                (None, None) => ch.to_string(),
+            };
+            out.extend_from_slice(mapped.as_bytes());
+        }
+    }
 }
 
 struct SedLine {
@@ -5434,7 +5618,7 @@ fn unescape_delim(pat: &str, sep: char, ere: bool) -> String {
 fn subst_nth(
     re: &regex::bytes::Regex,
     text: &[u8],
-    rep: &[u8],
+    rep: &[RepItem],
     global: bool,
     nth: usize,
 ) -> Vec<u8> {
@@ -5450,7 +5634,7 @@ fn subst_nth(
         }
         let whole = caps.get(0).expect("group 0 always matches");
         out.extend_from_slice(&text[last..whole.start()]);
-        caps.expand(rep, &mut out);
+        expand_rep(rep, &caps, &mut out);
         last = whole.end();
     }
     out.extend_from_slice(&text[last..]);
@@ -5586,39 +5770,46 @@ fn sed(args: &[String], stdin: &mut Input, sink: &mut Sink) -> Util {
                     let Some(re) = to_re(pat.as_str()) else {
                         return Util::DeclineFor(format!("the regular expression `{pat}`"));
                     };
-                    // `&` is the match and `\N` a group: in regex's syntax
-                    // `${0}` and `${N}`; a literal `$` must be escaped for it.
-                    let mut r2 = Vec::new();
-                    let mut it = rep.chars().peekable();
+                    // `&` is the match and `\N` a group; the case escapes are
+                    // applied to the text they reach (see `expand_rep`).
+                    let mut items: Vec<RepItem> = Vec::new();
+                    let mut it = rep.chars();
                     while let Some(ch) = it.next() {
-                        match ch {
-                            '&' => r2.extend_from_slice(b"${0}"),
-                            '$' => r2.extend_from_slice(b"$$"),
+                        let text = match ch {
+                            '&' => {
+                                items.push(RepItem::Group(0));
+                                continue;
+                            }
                             '\\' => match it.next() {
                                 Some(d @ '1'..='9') => {
-                                    r2.extend_from_slice(format!("${{{d}}}").as_bytes())
+                                    items.push(RepItem::Group(d as usize - '0' as usize));
+                                    continue;
                                 }
-                                Some('n') => r2.push(b'\n'),
-                                Some('t') => r2.push(b'\t'),
-                                Some(o) => {
-                                    let mut b = [0; 4];
-                                    r2.extend_from_slice(o.encode_utf8(&mut b).as_bytes());
+                                Some(c @ ('U' | 'L' | 'u' | 'l' | 'E')) => {
+                                    items.push(RepItem::Case(c));
+                                    continue;
                                 }
-                                None => r2.push(b'\\'),
+                                Some('n') => '\n',
+                                Some('t') => '\t',
+                                Some(o) => o,
+                                None => '\\',
                             },
-                            o => {
-                                let mut b = [0; 4];
-                                r2.extend_from_slice(o.encode_utf8(&mut b).as_bytes());
-                            }
+                            o => o,
+                        };
+                        let mut b = [0; 4];
+                        let bytes = text.encode_utf8(&mut b).as_bytes();
+                        match items.last_mut() {
+                            Some(RepItem::Text(t)) => t.extend_from_slice(bytes),
+                            _ => items.push(RepItem::Text(bytes.to_vec())),
                         }
                     }
-                    SedCmd::Subst(re, r2, tail.contains('g'), tail.contains('p'), nth)
+                    SedCmd::Subst(re, items, tail.contains('g'), tail.contains('p'), nth)
                 }
                 _ => {
                     return Util::DeclineFor(if rest.is_empty() {
                         format!("the address `{s}` with no command")
                     } else {
-                        format!("the `{rest}` command")
+                        format!("sed command `{rest}`")
                     })
                 }
             };
@@ -5695,12 +5886,17 @@ fn sed(args: &[String], stdin: &mut Input, sink: &mut Sink) -> Util {
                     break 'lines;
                 }
                 SedCmd::Subst(re, rep, global, print, nth) => {
+                    let fill = |caps: &regex::bytes::Captures| {
+                        let mut out = Vec::new();
+                        expand_rep(rep, caps, &mut out);
+                        out
+                    };
                     let replaced = if *nth > 1 {
                         subst_nth(re, &pattern, rep, *global, *nth)
                     } else if *global {
-                        re.replace_all(&pattern, rep.as_slice()).into_owned()
+                        re.replace_all(&pattern, fill).into_owned()
                     } else {
-                        re.replace(&pattern, rep.as_slice()).into_owned()
+                        re.replace(&pattern, fill).into_owned()
                     };
                     let changed = replaced != pattern;
                     pattern = replaced;
@@ -6267,6 +6463,7 @@ pub fn refusal_hint(construct: &str) -> String {
             "rewrite it as if/elif with [ \"$x\" = value ] tests".into()
         }
         "subshell" => "drop the parentheses, or group the commands with { ...; } when they need not run isolated".into(),
+        "array assignment" => "arrays are not in the subset: keep the words in a space-separated string and loop over it with `for w in $words; do ...; done`".into(),
         "background job" => "run it in the foreground: drop the trailing &".into(),
         "[[" | "[[ ... ]]" => "use [ ... ] (test) instead of [[ ... ]]".into(),
         "process substitution" => "write the output to a file first, then read the file".into(),
@@ -6277,8 +6474,6 @@ pub fn refusal_hint(construct: &str) -> String {
             "pipe it instead: printf '%s\\n' \"abc\" | grep -c b, or write the text to a file first".into()
         }
         c if c.starts_with("${...} operator") => match op {
-            "%" | "%%" => "strip a suffix with sed, e.g. sed 's/PATTERN$//'".into(),
-            "#" | "##" => "strip a prefix with sed, e.g. sed 's/^PATTERN//', or cut -d/ -f2-".into(),
             "/" | "//" => "replace text with sed, e.g. sed 's/OLD/NEW/g'".into(),
             ":offset" => "take a substring with cut -c, e.g. cut -c4-, or sed".into(),
             _ => "change the text with tr or sed".into(),

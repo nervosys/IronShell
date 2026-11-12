@@ -2158,6 +2158,9 @@ pub fn journal_step_not_found(builtin: &str, id: usize) -> anyhow::Error {
 /// pattern is looked for, so a missing file is not reported as a missing
 /// pattern.
 pub fn no_file_at(builtin: &str, path: &str) -> anyhow::Error {
+    if let Some(parent) = missing_parent_of(path) {
+        return parent_missing(builtin, path, &parent);
+    }
     let here = std::env::current_dir()
         .map(|d| d.display().to_string())
         .unwrap_or_else(|_| "the current directory".to_string());
@@ -2177,6 +2180,46 @@ pub fn no_file_at(builtin: &str, path: &str) -> anyhow::Error {
         did_you_mean: Vec::new(),
         expected: "an existing file".to_string(),
         got: path.to_string(),
+        extra: serde_json::Map::new(),
+    })
+}
+
+/// The directory `path` would be created in, when that directory does not exist.
+/// `None` when the path has no directory part, when the directory is there, when
+/// it cannot be told (only a missing directory is an answer), and for a remote
+/// share, which is not probed: asking Windows about one opens a session.
+pub fn missing_parent_of(path: &str) -> Option<String> {
+    if names_a_remote_share(path) {
+        return None;
+    }
+    let parent = std::path::Path::new(path).parent()?;
+    if parent.as_os_str().is_empty() {
+        return None;
+    }
+    match std::fs::metadata(parent) {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            Some(strip_verbatim_prefix(parent).display().to_string())
+        }
+        _ => None,
+    }
+}
+
+/// A write to a file whose directory does not exist. Writing the file cannot
+/// create its directory, so the hint names the directory and says to create it.
+pub fn parent_missing(builtin: &str, path: &str, parent: &str) -> anyhow::Error {
+    anyhow::Error::new(SafetyError {
+        code: ErrorCode::NotFound,
+        message: format!(
+            "{builtin}: the folder '{parent}' does not exist; create it with mkdir(\"{parent}\")"
+        ),
+        builtin: builtin.to_string(),
+        hint: format!(
+            "mkdir creates the folder and mkdirp also creates missing parents; then run the call again for '{path}'"
+        ),
+        approval: None,
+        did_you_mean: Vec::new(),
+        expected: "an existing directory".to_string(),
+        got: parent.to_string(),
         extra: serde_json::Map::new(),
     })
 }
@@ -2578,7 +2621,10 @@ fn fs_error_as(
     let path = strip_verbatim_prefix(path.as_ref()).display().to_string();
     let path = path.as_str();
     match e.kind() {
-        std::io::ErrorKind::NotFound => not_found(builtin, "file", path),
+        std::io::ErrorKind::NotFound => match writing.then(|| missing_parent_of(path)).flatten() {
+            Some(parent) => parent_missing(builtin, path, &parent),
+            None => not_found(builtin, "file", path),
+        },
         // The OS refused, not our policy.
         std::io::ErrorKind::PermissionDenied => os_denied(
             builtin,

@@ -3950,6 +3950,12 @@ fn mapped_spelling(name: &str) -> Vec<String> {
         // No repeat builtin. For one character, pad_left repeats it:
         // "-" | pad_left(10, "-") is ten dashes.
         "repeat" | "str_repeat" => vec!["pad_left".to_string()],
+        // Redo re-applies the step undo took back: session_redo. Without this a
+        // nearby name (sed) was offered instead.
+        "redo" => vec!["session_redo".to_string()],
+        // A bare `get` is an HTTP GET: http_get, which http.get calls. Its
+        // nearest name is wget, a program, not a builtin.
+        "get" => vec!["http_get".to_string()],
         _ => Vec::new(),
     }
 }
@@ -9512,18 +9518,32 @@ fn bi_grep(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
     // substring search, so `grep("^version", "Cargo.toml")` answered [] --
     // an empty result for a pattern every grep user writes. The pattern is
     // now what grep takes: a POSIX basic regular expression.
-    let re = crate::posix::bre_to_regex(pattern)
-        .and_then(|r| {
-            regex::RegexBuilder::new(&r)
-                .case_insensitive(case_insensitive)
-                .build()
-                .ok()
-        })
-        .ok_or_else(|| {
-            crate::safety::bad_arg(
+    // A back-reference (\1 to \9) is the one BRE form the translation refuses.
+    // Any other failure is the regex compiler's, and its reason is what to fix.
+    let translated = crate::posix::bre_to_regex(pattern).ok_or_else(|| {
+        crate::safety::bad_arg_in(
+            "grep",
+            format!("grep: {pattern:?} has a back-reference, which grep does not support"),
+            "remove the \\1 to \\9 back-reference; to match an extended regex, use regex_match",
+        )
+    })?;
+    let re = regex::RegexBuilder::new(&translated)
+        .case_insensitive(case_insensitive)
+        .build()
+        .map_err(|e| {
+            // The compiler's last "error:" line is the reason; the lines above it
+            // only quote the pattern with a caret.
+            let text = e.to_string();
+            let reason = text
+                .lines()
+                .rev()
+                .find_map(|line| line.strip_prefix("error: "))
+                .unwrap_or(text.as_str())
+                .to_string();
+            crate::safety::bad_arg_in(
                 "grep",
-                "a basic regular expression (back-references are not supported)",
-                pattern,
+                format!("grep: {pattern:?} is not a valid regular expression: {reason}"),
+                "grep takes a basic regular expression: + ? | ( ) { } are literal unless backslashed, so write \\( and \\| for groups and alternatives; for an extended regex, use regex_match",
             )
         })?;
     let mut matching: Vec<Value> = Vec::new();
@@ -9559,11 +9579,21 @@ fn grep_line_numbers(args: &[Value]) -> Result<bool> {
             for (key, value) in options {
                 match (key.as_str(), value) {
                     ("line_numbers", Value::Bool(on)) => line_numbers = *on,
-                    _ => {
-                        return Err(crate::safety::bad_arg(
+                    ("line_numbers", other) => {
+                        return Err(crate::safety::bad_arg_in(
                             "grep",
-                            "options: a Record with line_numbers: Bool",
-                            key,
+                            format!(
+                                "grep: line_numbers must be a Bool, got {}",
+                                other.type_name()
+                            ),
+                            "pass {line_numbers: true} or {line_numbers: false}",
+                        ))
+                    }
+                    _ => {
+                        return Err(crate::safety::bad_arg_in(
+                            "grep",
+                            format!("grep: unknown option {key}; grep takes line_numbers"),
+                            "the options Record takes one key: {line_numbers: true}",
                         ))
                     }
                 }
@@ -10511,6 +10541,17 @@ fn numeric_cell(field: &str, all_int: bool) -> Value {
     }
 }
 
+/// The Bool a CSV cell spells: true or false in any case, else None.
+fn csv_bool(field: &str) -> Option<bool> {
+    if field.eq_ignore_ascii_case("true") {
+        Some(true)
+    } else if field.eq_ignore_ascii_case("false") {
+        Some(false)
+    } else {
+        None
+    }
+}
+
 /// The rows of a parsed CSV table, each column typed as a whole.
 ///
 /// A column is numeric only when every non-empty cell is a number (see
@@ -10524,7 +10565,7 @@ pub(crate) fn csv_rows(
     records: &[csv::StringRecord],
 ) -> Vec<BTreeMap<String, Value>> {
     // Per column: None for text, Some(Some(all_int)) for a numeric column,
-    // Some(None) for a column of true and false.
+    // Some(None) for a column of true and false in any case.
     let kinds: Vec<Option<Option<bool>>> = (0..headers.len())
         .map(|column| {
             let mut numbers = 0usize;
@@ -10533,7 +10574,7 @@ pub(crate) fn csv_rows(
             for record in records {
                 match record.get(column) {
                     Some("") | None => {}
-                    Some("true" | "false") => flags += 1,
+                    Some(field) if csv_bool(field).is_some() => flags += 1,
                     Some(field) if is_number(field) => {
                         numbers += 1;
                         all_int &= field.parse::<i64>().is_ok();
@@ -10559,7 +10600,7 @@ pub(crate) fn csv_rows(
                     let value = match kinds[i] {
                         Some(_) if field.is_empty() => Value::Null,
                         Some(Some(all_int)) => numeric_cell(field, all_int),
-                        Some(None) => Value::Bool(field == "true"),
+                        Some(None) => Value::Bool(csv_bool(field).unwrap_or(false)),
                         None => Value::Str(field.to_string()),
                     };
                     row.insert(header.clone(), value);
@@ -10570,7 +10611,7 @@ pub(crate) fn csv_rows(
         .collect()
 }
 
-/// to-csv: Convert structured data to CSV
+/// to_csv: Convert structured data to CSV
 ///
 /// The columns are the first record's keys, or the `columns` Array when one is
 /// given, in that order; a record without one of them writes an empty field.
@@ -10639,7 +10680,7 @@ fn bi_to_csv(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
                 }
                 (None, Some(_)) => {
                     return Err(crate::safety::arg_err(
-                        "to-csv: input must be array of records",
+                        "to_csv: input must be an array of records",
                     ))
                 }
             };
@@ -10674,6 +10715,11 @@ fn bi_to_csv(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
                                     Value::Record(_) | Value::Array(_) => {
                                         csv_escape(&value_to_json(v.clone()).to_string())
                                     }
+                                    // A whole Float keeps its point, so it reads back as a
+                                    // Float and not as an Int column.
+                                    Value::Float(f) if f.is_finite() && f.fract() == 0.0 => {
+                                        csv_escape(&format!("{f:.1}"))
+                                    }
                                     v => csv_escape(&value_to_string(v)),
                                 })
                                 .unwrap_or_default()
@@ -10687,7 +10733,7 @@ fn bi_to_csv(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
             Ok(Value::Str(csv_output))
         }
         _ => Err(crate::safety::arg_err(
-            "to-csv: input must be an array of records",
+            "to_csv: input must be an array of records",
         )),
     }
 }
@@ -10721,8 +10767,17 @@ fn bi_csv_columns(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
     };
 
     // A remote-share string is never probed: exists() on it opens a connection.
-    let is_file =
-        !crate::safety::names_a_remote_share(&subject) && std::path::Path::new(&subject).is_file();
+    let probed = !crate::safety::names_a_remote_share(&subject);
+    // A directory is not a CSV file, and its name is not CSV text either.
+    if probed && std::path::Path::new(&subject).is_dir() {
+        validate_read_path(&subject)?;
+        return Err(crate::safety::bad_arg_in(
+            "csv_columns",
+            format!("csv_columns: '{subject}' names a directory, not a CSV file"),
+            "pass the path of a CSV file, or CSV text with a newline",
+        ));
+    }
+    let is_file = probed && std::path::Path::new(&subject).is_file();
     if is_file {
         let validated = validate_read_path(&subject)?;
         let file = std::fs::File::open(&validated)
@@ -15370,6 +15425,21 @@ fn bi_regex_replace(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
     Ok(Value::Str(re.replace_all(&text, replacement).into_owned()))
 }
 
+/// The plural name of a unit the date builtins take. The case is ignored and
+/// the singular is accepted, so "DAY", "Week" and "months" all name a unit.
+fn canonical_unit(unit: &str) -> Option<&'static str> {
+    Some(match unit.to_ascii_lowercase().as_str() {
+        "day" | "days" => "days",
+        "week" | "weeks" => "weeks",
+        "month" | "months" => "months",
+        "year" | "years" => "years",
+        "hour" | "hours" => "hours",
+        "minute" | "minutes" => "minutes",
+        "second" | "seconds" => "seconds",
+        _ => return None,
+    })
+}
+
 /// The seconds in one of the units the date builtins take.
 fn unit_seconds(builtin: &str, unit: &str) -> Result<i64> {
     match unit {
@@ -15497,7 +15567,7 @@ fn bi_date_parse(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
 /// Args:
 ///   - a: String (or the piped text) - an ISO date or datetime, as date_parse answers
 ///   - b: String - the later date, in the same form
-///   - unit: String (optional) - "days" (the default: whole 24-hour periods of elapsed time), "weeks", "months", "years", "hours", "minutes" or "seconds"
+///   - unit: String (optional) - "days" (the default: whole 24-hour periods of elapsed time), "weeks", "months", "years", "hours", "minutes" or "seconds"; any case, and the singular, is accepted
 /// Returns: Int - b minus a, in whole units, truncated toward zero
 ///
 /// Months and years are calendar units, the inverse of date_add: the count is
@@ -15532,6 +15602,13 @@ fn bi_date_diff(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
     };
     let (a, _) = parse_iso(B, &first)?;
     let (b, _) = parse_iso(B, second)?;
+    let unit = canonical_unit(unit).ok_or_else(|| {
+        crate::safety::bad_arg(
+            B,
+            "a unit: days, weeks, months, years, hours, minutes or seconds",
+            unit,
+        )
+    })?;
     match unit {
         "weeks" => Ok(Value::Int((b - a).num_seconds() / (7 * 86_400))),
         "months" => Ok(Value::Int(whole_calendar_months(a, b))),
@@ -15623,7 +15700,7 @@ fn add_calendar_months(
 /// Args:
 ///   - iso: String (or the piped text) - an ISO date or datetime
 ///   - amount: Int - may be negative
-///   - unit: String - "weeks", "days", "months", "years", "hours", "minutes" or "seconds"
+///   - unit: String - "weeks", "days", "months", "years", "hours", "minutes" or "seconds"; any case, and the singular, is accepted
 /// Returns: String - a date when the input is a date and the unit is weeks, days, months or years; otherwise a UTC datetime ending in Z
 ///
 /// Months and years are calendar units: 2024-01-31 plus one month is
@@ -15648,6 +15725,7 @@ fn bi_date_add(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
         ));
     };
     let unit = string_arg(B, UNITS, unit)?;
+    let unit = canonical_unit(unit).ok_or_else(|| crate::safety::bad_arg(B, UNITS, unit))?;
     // Months and years are calendar steps; the other units are fixed lengths.
     let (months, per): (Option<i64>, i64) = match unit {
         "months" => (Some(1), 0),
@@ -16420,6 +16498,18 @@ fn set_json_path(
     };
     match node {
         serde_json::Value::Object(map) => {
+            // A missing key that the next segment indexes would be created as an
+            // object, and the index would then become a key of it: `tags.0` made
+            // {"tags": {"0": ...}}. An index needs an array that already exists.
+            if !map.contains_key(*segment)
+                && rest
+                    .first()
+                    .is_some_and(|next| next.parse::<usize>().is_ok())
+            {
+                return Err(format!(
+                    "'{segment}' is missing; an array index needs an existing array"
+                ));
+            }
             let child = map
                 .entry(segment.to_string())
                 .or_insert_with(|| serde_json::Value::Object(serde_json::Map::new()));
@@ -22957,6 +23047,8 @@ fn journal_rows(entries: &[crate::journal::Entry]) -> Vec<Value> {
         .iter()
         .map(|e| {
             let mut m = std::collections::BTreeMap::new();
+            // `id` is the value undo({id: N}) takes; `seq` is the same number.
+            m.insert("id".to_string(), Value::Int(e.seq as i64));
             m.insert("seq".to_string(), Value::Int(e.seq as i64));
             m.insert("builtin".to_string(), Value::Str(e.builtin.clone()));
             m.insert("effect".to_string(), Value::Str(e.effect.clone()));
@@ -25044,7 +25136,8 @@ const UNKEYED_AUDIT_NOTE: &str = "the chain is not keyed: set IRONSHELL_AUDIT_KE
 /// audit_verify(path?) - Verify the tamper-evident, hash-chained audit log
 /// (§7.5). With no argument, verifies the currently active log. Returns a
 /// record {valid, entries, path, keyed} or {valid: false, error, path, keyed}.
-/// An unkeyed chain also carries a note.
+/// An unkeyed chain also carries a note. A log that does not exist is an
+/// E_NOT_FOUND error naming the path, not a record.
 fn bi_audit_verify(args: Vec<Value>, _input: Option<Value>) -> Result<Value> {
     let path = match args.first() {
         Some(Value::Str(s)) if !s.is_empty() => std::path::PathBuf::from(s),
@@ -25068,11 +25161,17 @@ fn bi_audit_verify(args: Vec<Value>, _input: Option<Value>) -> Result<Value> {
             }
         },
     };
+    // A log that is not there is an error, not a verdict: `valid: false` for a
+    // file that does not exist reads like a broken chain. A remote share is not
+    // probed, since asking Windows about one opens a session to its host.
+    let shown = path.to_string_lossy().to_string();
+    if !crate::safety::names_a_remote_share(&shown)
+        && matches!(std::fs::metadata(&path), Err(ref e) if e.kind() == std::io::ErrorKind::NotFound)
+    {
+        return Err(crate::safety::not_found("audit_verify", "file", &shown));
+    }
     let mut rec = BTreeMap::new();
-    rec.insert(
-        "path".to_string(),
-        Value::Str(path.to_string_lossy().to_string()),
-    );
+    rec.insert("path".to_string(), Value::Str(shown));
     // Whether the chain is keyed says how much a `valid` answer proves: an
     // unkeyed chain can be rewritten end to end by anyone who can write the
     // file, so it shows corruption, not tampering.
@@ -72873,6 +72972,10 @@ fn bi_pager(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
     ])))
 }
 
+/// The one option tee takes, in the two call forms, for the errors that refuse
+/// any other.
+const TEE_OPTIONS_HINT: &str = "tee takes one option, append (a Bool): tee(path, data, {append: true}), or piped: data | tee(path, {append: true})";
+
 /// tee — Write input to both a file and return it (cross-platform, native Rust).
 /// Usage: tee(file_path, text) or piped: text | tee(file_path)
 fn bi_tee_output(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
@@ -72900,11 +73003,19 @@ fn bi_tee_output(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
     let mut append = false;
     if let Some(options) = options {
         let Value::Record(record) = options else {
-            return Err(crate::safety::arg_err("tee options must be Record"));
+            return Err(crate::safety::bad_arg_in(
+                "tee",
+                "tee options must be Record",
+                TEE_OPTIONS_HINT,
+            ));
         };
         for (key, value) in record {
             if key != "append" {
-                return Err(crate::safety::arg_err(format!("tee unknown option {key}")));
+                return Err(crate::safety::bad_arg_in(
+                    "tee",
+                    format!("tee unknown option {key}"),
+                    TEE_OPTIONS_HINT,
+                ));
             }
             let Value::Bool(flag) = value else {
                 return Err(crate::safety::arg_err("tee append must be Bool"));

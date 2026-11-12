@@ -53,7 +53,7 @@ fn a_function_is_named_with_its_line() {
     refused(
         "fn",
         "echo before\nf() { echo hi; }\nf\n",
-        "function definition at line 2, column 2",
+        "function definition at line 2, column 1",
     );
 }
 
