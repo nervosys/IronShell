@@ -201,7 +201,9 @@ pub mod os_tools;
 /// Package management — import resolution and ironshell.toml manifests.
 #[cfg(feature = "native")]
 pub mod packages;
-/// Path builtins — text-only `path_*` functions and the `path` module.
+/// Path builtins — text-only `path_*` functions. Their refusals are
+/// `safety` errors, so like `builtins` they are native-only.
+#[cfg(feature = "native")]
 pub mod path_builtins;
 /// Persistence — session state and data persistence.
 #[cfg(feature = "native")]
