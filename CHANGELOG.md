@@ -97,6 +97,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `--zsh` runs source inside the POSIX subset through the in-process engine `ish -b` uses, after rewriting zsh-only words (`setopt`, `print -l/-n/-r`); the rest is refused before anything runs, naming the construct and line. The PowerShell and zsh transpilers print each statement as it runs, split `;`, and refuse a flag of a mapped command, `$env:X`, `${x:-d}`, `$?` and here-strings instead of passing them as data.
 - `min` and `max` take an Array of Strings (code-point order); a mix of Strings and numbers is refused. `ls` of a plain file lists that file. `cp` of a file onto a directory writes it inside, as `cp` does. `env` of an unset variable is Null. On Windows, globs match letters in either case.
 - The shipped stdlib drops `lines`, `find` and `mean`, which shadowed the builtins of those names on import.
+- Provider schemas (`/api/v1/schema/openai`, `claude`, `bedrock`, `azure_openai`, `groq`, ...) use JSON Schema types: `string`, `integer`, `number`, `boolean`, `array` (with `items`), `object`; a union is a type list, Any has no `type`, and a Lambda is a string of IronShell source. They carried IronShell names (`String`, `Int`, `Any`) that OpenAI and Anthropic reject. Gemini gets its own upper-case subset. OpenAI descriptions are cut at 1,024 characters on a word boundary. The `ontology` format keeps IronShell's names.
+- `ontology_describe` and `/builtins/:name` give each example its code and result, and no longer repeat the whole builtin description in every example (date_diff's record was ~13 KB).
+- `zip_extract`, `zip_create` and `zip_add` read and write archives in-process; no `unzip` or `Compress-Archive` runs. Empty folders are kept, a member is stored under its last path component, and `zip_add` replaces an entry of the same name.
+- `assert` raises a catchable E_ASSERT error, so `e.code` and `e.message` work; it raised a bare String. Its declaration names the condition and the optional message.
+- `unique` takes only an Array in both forms (a String is refused with a hint toward `lines` or `split(s, "")`); `uniq` takes an Array or a String split into lines, in either form, dropping adjacent duplicates.
+- `base64_decode` accepts unpadded and URL-safe (`-_`) input.
 
 ### Added
 
@@ -149,6 +155,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `journal()` rows carry `id`, the value `undo({id})` takes.
 - `ish -b` runs `sed -i` (and `-iSUFFIX` for a backup) in-process, through the workspace jail and the undo journal as a `>` redirection is; it used to need approval to run the real sed.
 - Eight pure `path_*` builtins that never read the disk: `path_join`, `path_basename`, `path_dirname`, `path_extension`, `path_stem`, `path_normalize`, `path_is_absolute`, `path_split`. Both `/` and `\` separate components, results use `/`, and a drive is a root (`C:/`). There is no `path` module, so `path = "./src"` still binds; `path.join` and the other module spellings, and `basename`, `dirname`, `splitext`, `normpath`, are told the builtin's name.
+- `chunk(array, size)` splits an Array into pieces (the last may be shorter); `arr.chunk` now exists, as the module's description promised.
+- `url_encode` and `url_decode` (RFC 3986 percent-encoding of UTF-8, also `str.url_encode`/`str.url_decode`); `url_decode` refuses a malformed `%` sequence and does not turn `+` into a space.
+- `crypto.hash_file`, `crypto.checksum` and `crypto.random_string` are module members; they existed only as flat names.
 
 ### Fixed
 
@@ -254,6 +263,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `\U` followed by four to seven hex digits is E_PARSE; `C:\Users` is still kept. A stray backslash outside a string hints at an earlier `\"` that ended the string.
 - `printf %d` of an integer past 64 bits clamps and prints `Result too large`, as bash does. `sed --in-place[=SUFFIX]` is `-i[SUFFIX]`.
 - stdlib: `factorial`, `fib`, `drop` and `repeat` refuse negative input; `union`, `intersect` and `difference` dedupe with `==`; `words` splits on any whitespace; `is_upper`/`is_lower` need a cased letter; the path helpers work on the last component; `to_json_pretty` is pretty.
+- `zip_extract` and `unzip` wrote nothing and returned true for every valid zip. Every zip-slip refusal still runs before anything is written, and an archive of links only is refused instead of reported as extracted.
+- `zip_create` of a lone empty folder returned true and wrote no archive; a missing member is E_NOT_FOUND and a duplicate name E_BAD_ARG instead of PowerShell's text; a corrupt zip is E_BAD_ARG `not a zip archive`. The E_TOOL_FAILED hint blames a service only for daemon clients (docker, kubectl, systemctl, ...) and names a crash status as a crash.
+- `pow` of two Ints refuses an overflow with E_BAD_VALUE, as `*` does; `pow(2, 100)` returned 9223372036854775807.
+- `pick` refuses a subject that is not a Record or an Array of Records; `pick("a", "b")` returned `"a"`.
+- `crypto.hex_decode` refuses bytes that are not UTF-8 text, as `base64_decode` does; it replaced them with U+FFFD. `crypto.hash("sha256")` alone is refused instead of hashing the text `sha256`.
+- Agent API: `/eval` without a string `code` is a 400 naming the field (it returned success with Null); `/call` of an unknown builtin is 404 E_UNKNOWN_BUILTIN with a did-you-mean, and a body of `{"args": {...}}` is unwrapped; `/builtins/file.read` and `/call/file.read` resolve module-qualified names; `sql` and `sql_value` accept a lone query by name.
+- `lines`' examples no longer depend on the working directory.
 
 
 ## [14.0.1] - 2026-11-08
