@@ -32028,6 +32028,20 @@ fn bi_fs_realpath(args: Vec<Value>, _input: Option<Value>) -> Result<Value> {
     }
 }
 
+/// Where fs_tempfile and fs_tempdir create things: the system temp directory,
+/// except in agent mode, where it is `<workspace>/.ironshell/tmp/` so that
+/// nothing is created outside the workspace.
+fn temp_parent(builtin: &str) -> Result<std::path::PathBuf> {
+    if crate::safety::current_mode() != crate::safety::Mode::Agent {
+        return Ok(std::env::temp_dir());
+    }
+    let dir = crate::safety::workspace_root()
+        .join(".ironshell")
+        .join("tmp");
+    std::fs::create_dir_all(&dir).map_err(|e| crate::safety::fs_error(builtin, &dir, &e))?;
+    Ok(dir)
+}
+
 fn bi_fs_tempfile(args: Vec<Value>, _input: Option<Value>) -> Result<Value> {
     let prefix = args
         .first()
@@ -32041,7 +32055,7 @@ fn bi_fs_tempfile(args: Vec<Value>, _input: Option<Value>) -> Result<Value> {
         ));
     }
 
-    let temp_dir = std::env::temp_dir();
+    let temp_dir = temp_parent("fs_tempfile")?;
     let filename = format!("{}_{}", prefix, uuid::Uuid::new_v4());
     let path = temp_dir.join(&filename);
 
@@ -32066,7 +32080,7 @@ fn bi_fs_tempdir(args: Vec<Value>, _input: Option<Value>) -> Result<Value> {
         ));
     }
 
-    let temp_dir = std::env::temp_dir();
+    let temp_dir = temp_parent("fs_tempdir")?;
     let dirname = format!("{}_{}", prefix, uuid::Uuid::new_v4());
     let path = temp_dir.join(&dirname);
 
@@ -38197,6 +38211,15 @@ fn check_archive_entries(
         }
         if archive_entry_escapes(&name) {
             return Err(refuse_archive_entry(builtin, &name));
+        }
+        // A member named like a Windows device would be written as a file
+        // that cannot be deleted.
+        if cfg!(windows) {
+            if let Some(device) = crate::safety::reserved_device_name(&name) {
+                return Err(anyhow::Error::new(crate::safety::reserved_device_error(
+                    builtin, &device,
+                )));
+            }
         }
         if let Some(t) = target {
             if archive_entry_escapes(&t) {

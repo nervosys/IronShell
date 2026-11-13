@@ -2220,15 +2220,17 @@ pub fn not_found(builtin: &str, kind: &str, name: &str) -> anyhow::Error {
     // A path is not an identifier. For a file or directory the useful facts are
     // where a relative path was resolved and how to look, not a list to choose
     // an identifier from.
-    let hint = if matches!(kind, "file" | "directory" | "path" | "archive") {
+    let is_path = matches!(kind, "source" | "destination" | "path");
+    let hint = if is_path || matches!(kind, "file" | "directory" | "archive") {
         let here = std::env::current_dir()
             .map(|d| d.display().to_string())
             .unwrap_or_else(|_| "the current directory".to_string());
         control_char_path_hint(name)
             .map(str::to_string)
             .unwrap_or_else(|| {
+                let what = if is_path { "file or directory" } else { kind };
                 format!(
-                    "no {kind} at this path; a relative path is resolved against {here}, so \
+                    "no {what} at this path; a relative path is resolved against {here}, so \
                      check the spelling and that directory, or list it with ls() first"
                 )
             })
@@ -2245,12 +2247,20 @@ pub fn not_found(builtin: &str, kind: &str, name: &str) -> anyhow::Error {
     };
     anyhow::Error::new(SafetyError {
         code: ErrorCode::NotFound,
-        message: format!("{builtin}: no {kind} named '{name}'"),
+        message: if is_path {
+            format!("{builtin}: no file or directory at `{name}`")
+        } else {
+            format!("{builtin}: no {kind} named '{name}'")
+        },
         builtin: builtin.to_string(),
         hint,
         approval: None,
         did_you_mean: Vec::new(),
-        expected: format!("an existing {kind}"),
+        expected: if is_path {
+            "an existing file or directory".to_string()
+        } else {
+            format!("an existing {kind}")
+        },
         got: name.to_string(),
         extra: serde_json::Map::new(),
     })
@@ -3598,6 +3608,18 @@ pub struct SafetyError {
 }
 
 impl SafetyError {
+    /// Whether `try` must let this refusal through. In agent mode the policy
+    /// refusals (`E_NEEDS_APPROVAL`, `E_OUTSIDE_WORKSPACE`, `E_POLICY_DENY`) are
+    /// not catchable: a script that swallowed one would report success for work
+    /// the policy stopped. Human mode keeps them catchable.
+    pub fn is_uncatchable_in_agent_mode(&self) -> bool {
+        current_mode() == Mode::Agent
+            && matches!(
+                self.code,
+                ErrorCode::NeedsApproval | ErrorCode::OutsideWorkspace | ErrorCode::PolicyDeny
+            )
+    }
+
     /// Whether this failure, as reported, is worth re-running with a correction.
     ///
     /// The class answers for most codes. An unknown builtin is the exception
@@ -7811,9 +7833,57 @@ pub fn guard_redirect(
     }
 }
 
+/// The first component of `path` whose stem (the text before its first `.`,
+/// trailing spaces ignored) is a Windows reserved device name: `CON`, `PRN`,
+/// `AUX`, `NUL`, `COM1`-`COM9`, `LPT1`-`LPT9`, in any case, with or without an
+/// extension. Returns the stem as written. `/` and `\` both separate
+/// components. Platform-independent; callers decide whether it applies.
+pub fn reserved_device_name(path: &str) -> Option<String> {
+    for part in path.split(['/', '\\']) {
+        let stem = part.split('.').next().unwrap_or("").trim_end_matches(' ');
+        let up = stem.to_ascii_uppercase();
+        let device = matches!(
+            up.as_str(),
+            "CON" | "PRN" | "AUX" | "NUL" | "CONIN$" | "CONOUT$"
+        ) || (up.len() == 4
+            && (up.starts_with("COM") || up.starts_with("LPT"))
+            && up.as_bytes()[3].is_ascii_digit()
+            && up.as_bytes()[3] != b'0');
+        if device {
+            return Some(stem.to_string());
+        }
+    }
+    None
+}
+
+/// `E_BAD_ARG` for a path with a reserved device-name component (Windows).
+pub fn reserved_device_error(builtin: &str, name: &str) -> SafetyError {
+    SafetyError {
+        code: ErrorCode::BadArg,
+        message: format!("{builtin}: `{name}` is a reserved device name on Windows"),
+        builtin: builtin.to_string(),
+        hint: "Windows treats CON, PRN, AUX, NUL, COM1-COM9 and LPT1-LPT9 (with or without an extension) as devices, and a file with such a name cannot be removed; choose another name".to_string(),
+        approval: None,
+        did_you_mean: Vec::new(),
+        expected: "a name that is not a Windows device name".to_string(),
+        got: name.to_string(),
+        extra: serde_json::Map::new(),
+    }
+}
+
 pub fn guard(ctx: GuardCtx) -> Result<(), SafetyError> {
     let mode = current_mode();
     let resource = ctx.targets.join(", ");
+
+    // Windows device names: a file made under one cannot be deleted. Refused
+    // for every write, in either mode, before the jail is consulted.
+    if cfg!(windows) && ctx.effect.is_filesystem() && ctx.fs_paths {
+        for t in &ctx.targets {
+            if let Some(name) = reserved_device_name(t) {
+                return Err(reserved_device_error(ctx.builtin, &name));
+            }
+        }
+    }
 
     // 0. Resource governors (§7.6): bound the per-run blast radius before any
     //    other check, so a runaway loop is stopped even if every op is allowed.

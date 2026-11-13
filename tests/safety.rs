@@ -264,24 +264,17 @@ fn try_catch_binds_structured_safety_error() {
     let dir = fresh_workspace("trycatch");
 
     // A guarded destructive builtin reached through the evaluator: in agent mode
-    // it refuses, and try/catch should bind `e` to a structured Record, not a
-    // string — so an agent can branch on `e.error.code`.
+    // it refuses, and in agent mode `try` does not catch a policy refusal: it
+    // re-raises it, so the script stops with the refusal's own error.
     let src = r#"try { db_sqlite_delete("x.db", "t", "1=1") } catch e { e }"#;
     let stmts = iron_shell::parser::parse_program(src).expect("parse");
     let mut env = iron_shell::env::Env::new();
-    let result = iron_shell::eval::eval_program(&stmts, &mut env).expect("eval");
-
-    match result {
-        Value::Record(m) => match m.get("error") {
-            Some(Value::Record(e)) => assert_eq!(
-                e.get("code"),
-                Some(&Value::Str("E_NEEDS_APPROVAL".to_string())),
-                "caught error should carry the stable code"
-            ),
-            other => panic!("error should be a nested record, got {other:?}"),
-        },
-        other => panic!("catch should bind a structured record, got {other:?}"),
-    }
+    let err = iron_shell::eval::eval_program(&stmts, &mut env)
+        .expect_err("agent mode must not let try swallow a policy refusal");
+    assert!(
+        err.to_string().contains("E_NEEDS_APPROVAL"),
+        "the refusal should carry the stable code, got {err}"
+    );
 
     let _ = std::fs::remove_dir_all(&dir);
     clear();

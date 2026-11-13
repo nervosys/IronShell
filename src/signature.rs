@@ -9795,7 +9795,7 @@ pub static SIGNATURES: &[Signature] = &[
         subject: None,
         params: &[opt("prefix", Ty::Str, "name prefix; default ironshell_")],
         returns: "String",
-        doc: "Create a new directory under the system temp directory and return its path.",
+        doc: "Create a new directory under the system temp directory and return its path. In agent mode it is created under <workspace>/.ironshell/tmp/ instead.",
         examples: &[
             (r#"typeof(fs_tempdir())"#, r#"String"#),
             (r#"typeof(fs_tempdir("ae_example"))"#, r#"String"#),
@@ -9809,7 +9809,7 @@ pub static SIGNATURES: &[Signature] = &[
         subject: None,
         params: &[opt("prefix", Ty::Str, "name prefix; default ironshell_")],
         returns: "String",
-        doc: "Create a new empty file under the system temp directory and return its path.",
+        doc: "Create a new empty file under the system temp directory and return its path. In agent mode it is created under <workspace>/.ironshell/tmp/ instead.",
         examples: &[
             (r#"typeof(fs_tempfile())"#, r#"String"#),
             (r#"typeof(fs_tempfile("ae_example"))"#, r#"String"#),
