@@ -10954,13 +10954,7 @@ fn bi_to_csv(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
 
             // Write headers, quoted as a value is, so a column name with a comma
             // reads back as one column.
-            csv_output.push_str(
-                &headers
-                    .iter()
-                    .map(|h| csv_escape(h))
-                    .collect::<Vec<_>>()
-                    .join(","),
-            );
+            csv_output.push_str(&csv_line(headers.iter().map(|h| csv_escape(h)).collect()));
             csv_output.push('\n');
 
             // Write data rows
@@ -11017,7 +11011,7 @@ fn bi_to_csv(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
                                 .unwrap_or_default())
                         })
                         .collect::<Result<Vec<_>>>()?;
-                    csv_output.push_str(&row.join(","));
+                    csv_output.push_str(&csv_line(row));
                     csv_output.push('\n');
                 }
             }
@@ -11027,6 +11021,18 @@ fn bi_to_csv(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
         _ => Err(crate::safety::arg_err(
             "to_csv: input must be an array of records",
         )),
+    }
+}
+
+/// One CSV line from its escaped fields. A line of one empty field would be
+/// an empty line, which the reader skips and so drops the row; it is written
+/// as `""`, which reads back as one empty field.
+fn csv_line(fields: Vec<String>) -> String {
+    let line = fields.join(",");
+    if line.is_empty() {
+        "\"\"".to_string()
+    } else {
+        line
     }
 }
 

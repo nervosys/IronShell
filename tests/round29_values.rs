@@ -115,3 +115,13 @@ fn cmp_int_float_covers_infinities_nan_and_range_edges() {
     assert_eq!(cmp_int_float(-1, -0.5), Some(Ordering::Less));
     assert_eq!(cmp_int_float(-1, -1.5), Some(Ordering::Greater));
 }
+
+// ---- to_csv keeps a row whose only field is empty ----
+
+#[test]
+fn to_csv_keeps_an_empty_single_field_row_through_from_csv() {
+    let v = run(r#"[{a: "x"}, {a: ""}, {a: "y"}] | to_csv | from_csv | len"#);
+    assert_eq!(v, Value::Int(3));
+    let v = run(r#"[{a: "x"}, {a: ""}, {a: "y"}] | to_csv"#);
+    assert_eq!(v, text("a\nx\n\"\"\ny\n"));
+}
