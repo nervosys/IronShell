@@ -855,7 +855,15 @@ pad_left	Pure
 pad_right	Pure
 pager	ReadLocal
 patch_file	WriteLocal
+path_basename	Pure
+path_dirname	Pure
 path_exists	ReadLocal
+path_extension	Pure
+path_is_absolute	Pure
+path_join	Pure
+path_normalize	Pure
+path_split	Pure
+path_stem	Pure
 perm_check	ReadLocal
 perm_get	ReadLocal
 perm_set	WriteLocal

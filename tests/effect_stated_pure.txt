@@ -182,6 +182,14 @@ ontology_shacl
 os_tools
 pad_left
 pad_right
+path_basename
+path_dirname
+path_extension
+path_is_absolute
+path_join
+path_normalize
+path_split
+path_stem
 pick
 plan
 platform
