@@ -1923,9 +1923,12 @@ impl Shell {
             *have = true;
             return;
         }
-        let starts_ws = value.starts_with(|c: char| c.is_ascii_whitespace());
-        let ends_ws = value.ends_with(|c: char| c.is_ascii_whitespace());
-        let pieces: Vec<&str> = value.split_ascii_whitespace().collect();
+        let ifs = self
+            .vars
+            .get("IFS")
+            .cloned()
+            .unwrap_or_else(|| " \t\n".to_string());
+        let (pieces, starts_ws, ends_ws) = ifs_split(value, &ifs);
         if pieces.is_empty() {
             if starts_ws && *have {
                 fields.push((std::mem::take(cur), std::mem::take(mask)));
@@ -4192,6 +4195,49 @@ fn unescape_echo(s: &str) -> (Vec<u8>, bool) {
         }
     }
     (out, false)
+}
+
+/// Field splitting of an unquoted expansion by `ifs`, as POSIX gives it: IFS
+/// white space collapses and trims, each other IFS character delimits on its
+/// own (`a,,b` is a, "", b), and an empty IFS splits nothing. Returns the
+/// fields, whether the value began with a delimiter and whether it ended with
+/// one.
+fn ifs_split(value: &str, ifs: &str) -> (Vec<String>, bool, bool) {
+    if ifs.is_empty() {
+        let v = if value.is_empty() {
+            vec![]
+        } else {
+            vec![value.to_string()]
+        };
+        return (v, false, false);
+    }
+    let is_ws = |c: char| matches!(c, ' ' | '\t' | '\n') && ifs.contains(c);
+    let is_sep = |c: char| ifs.contains(c);
+    let mut out = Vec::new();
+    let mut rest = value.trim_start_matches(|c: char| is_ws(c));
+    let mut starts = rest.len() != value.len();
+    if rest.starts_with(|c: char| is_sep(c)) {
+        starts = true;
+    }
+    let mut trailing = false;
+    while !rest.is_empty() {
+        let end = rest.find(|c: char| is_sep(c)).unwrap_or(rest.len());
+        out.push(rest[..end].to_string());
+        rest = &rest[end..];
+        trailing = false;
+        if rest.is_empty() {
+            break;
+        }
+        let t = rest.trim_start_matches(|c: char| is_ws(c));
+        trailing = true;
+        rest = t;
+        if let Some(c) = rest.chars().next() {
+            if is_sep(c) {
+                rest = rest[c.len_utf8()..].trim_start_matches(|c: char| is_ws(c));
+            }
+        }
+    }
+    (out, starts, trailing)
 }
 
 /// `read`'s field splitting, as POSIX gives it: the line as `count` values.
