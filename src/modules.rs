@@ -528,20 +528,6 @@ pub fn str_module() -> Value {
     ])
 }
 
-/// Path module: path.join(), path.basename(), etc. Text only; no disk access.
-pub fn path_module() -> Value {
-    module(&[
-        ("join", "path_join"),
-        ("basename", "path_basename"),
-        ("dirname", "path_dirname"),
-        ("extension", "path_extension"),
-        ("stem", "path_stem"),
-        ("normalize", "path_normalize"),
-        ("is_absolute", "path_is_absolute"),
-        ("split", "path_split"),
-    ])
-}
-
 /// Array module: arr.map(), arr.filter(), arr.reduce(), etc.
 pub fn arr_module() -> Value {
     module(&[
@@ -1635,7 +1621,6 @@ pub fn all_modules() -> Vec<(&'static str, Value)> {
         ("agent", agent_module()),
         ("math", math_module()),
         ("str", str_module()),
-        ("path", path_module()),
         ("arr", arr_module()),
         ("json", json_module()),
         ("mcp", mcp_module()),

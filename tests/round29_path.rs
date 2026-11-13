@@ -174,42 +174,29 @@ fn a_non_string_is_refused_with_bad_arg() {
 }
 
 #[test]
-fn the_module_names_the_same_builtins() {
-    assert_eq!(text(r#"path.join("a", "b")"#), "a/b");
-    assert_eq!(text(r#"path.join(["a", "b", "c.txt"])"#), "a/b/c.txt");
-    assert_eq!(text(r#"path.basename("C:\\a\\b.txt")"#), "b.txt");
-    assert_eq!(text(r#"path.dirname("a/b/c.txt")"#), "a/b");
-    assert_eq!(text(r#"path.extension("archive.tar.gz")"#), ".gz");
-    assert_eq!(text(r#"path.stem("c.txt")"#), "c");
-    assert_eq!(text(r#"path.normalize("a/./b/../c")"#), "a/c");
-    assert_eq!(run(r#"path.is_absolute("/etc")"#), Value::Bool(true));
-    assert_eq!(run(r#"path.split("a/b")"#), strs(&["a", "b"]));
+fn path_is_not_a_module_so_a_script_may_bind_it() {
+    // `path` is one of the commonest variable names an agent writes.
+    assert!(!iron_shell::modules::is_module_name("path"));
+    assert_eq!(text(r#"path = "a/b.txt"; path_basename(path)"#), "b.txt");
 }
 
 #[test]
-fn the_module_and_the_builtin_agree_on_a_piped_path() {
-    assert_eq!(
-        text(r#""a/b/c.txt" | path.basename()"#),
-        text(r#"path_basename("a/b/c.txt")"#)
-    );
-}
-
-#[test]
-fn path_is_a_module_name_and_a_member_list() {
-    assert!(iron_shell::modules::is_module_name("path"));
-    for member in [
-        "join",
-        "basename",
-        "dirname",
-        "extension",
-        "stem",
-        "normalize",
-        "is_absolute",
-        "split",
+fn the_path_member_spellings_name_the_builtins() {
+    use iron_shell::builtins::mapped_module_spelling;
+    for (member, builtin) in [
+        ("join", "path_join"),
+        ("basename", "path_basename"),
+        ("dirname", "path_dirname"),
+        ("extension", "path_extension"),
+        ("stem", "path_stem"),
+        ("normalize", "path_normalize"),
+        ("is_absolute", "path_is_absolute"),
+        ("split", "path_split"),
     ] {
-        assert!(
-            iron_shell::modules::is_module_member("path", member),
-            "path.{member} is missing"
+        assert_eq!(
+            mapped_module_spelling("path", member),
+            vec![builtin.to_string()],
+            "path.{member}"
         );
     }
 }
@@ -246,6 +233,6 @@ fn the_pathlib_and_os_path_names_point_at_the_new_builtins() {
     assert!(did_you_mean("abspath").contains(&"path_is_absolute".to_string()));
     assert_eq!(
         iron_shell::builtins::mapped_module_spelling("path", "normpath"),
-        vec!["path.normalize".to_string()]
+        vec!["path_normalize".to_string()]
     );
 }

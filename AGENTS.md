@@ -189,6 +189,7 @@ to_csv(rows, ["id", "customer"])       # column order (Records sort their keys);
 date_add("2024-01-31", 1, "months")    # "2024-02-29": weeks, months and years clamp to the month's end
 undo({id: 3})                          # undo one journal step out of order; refused if a later step changed the same file
 format_number(1234567.891, 2, ",")    # "1,234,567.89": exactly `decimals` digits, optional thousands separator
+path_join("src", "main.rs")            # "src/main.rs"; path_basename, path_dirname, path_extension, path_stem, path_normalize: text only, always "/"
 
 # String interpolation
 msg = "Hello ${name}, you have ${count} items"
@@ -212,7 +213,6 @@ crypto.uuid()         math.sqrt(16)      arr.range(10)
 | `db`         | Database       | `db.sqlite_open("db")`, `db.sqlite_query(c, sql)`     |
 | `math`       | Mathematics    | `math.sqrt(x)`, `math.pow(a, b)`                      |
 | `str`        | Strings        | `str.upper(s)`, `str.split(s, ",")`                   |
-| `path`       | Paths          | `path.join("a", "b")`, `path.basename(p)`             |
 | `arr`        | Arrays         | `arr.range(n)`, `arr.flatten(a)`, `arr.unique(a)`     |
 | `json`       | JSON           | `json.parse(s)`, `json.stringify(v)`                  |
 | `platform`   | Platform       | `platform.arch()`, `platform.cpu()`, `platform.gpus()` |

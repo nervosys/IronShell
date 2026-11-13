@@ -4035,11 +4035,17 @@ pub fn mapped_module_spelling(module: &str, member: &str) -> Vec<String> {
         ("regex" | "re", "sub") => &["regex_replace"],
         ("path", "exists" | "isfile" | "isdir") => &["path_exists"],
         ("path", "realpath" | "abspath" | "resolve" | "canonicalize") => &["fs_realpath"],
-        ("path", "normpath") => &["path.normalize"],
-        // The `path` module is pure text (path.join, path.basename); its other
-        // members are Python or Node spellings. These name what does exist,
-        // rather than `math`, one edit from `path`.
-        ("path", _) => &["path_exists", "fs_realpath", "path.normalize"],
+        ("path", "normpath" | "normalize") => &["path_normalize"],
+        // `path` is not a module, so a script may bind a variable named `path`;
+        // the pathlib / os.path spellings name the path_* builtins instead.
+        ("path", "join") => &["path_join"],
+        ("path", "basename" | "name") => &["path_basename"],
+        ("path", "dirname" | "parent") => &["path_dirname"],
+        ("path", "extension" | "suffix" | "extname" | "splitext") => &["path_extension"],
+        ("path", "stem") => &["path_stem"],
+        ("path", "isabs" | "is_absolute") => &["path_is_absolute"],
+        ("path", "split" | "parts") => &["path_split"],
+        ("path", _) => &["path_join", "path_basename", "path_exists"],
         _ => &[],
     };
     names.iter().map(|name| name.to_string()).collect()
