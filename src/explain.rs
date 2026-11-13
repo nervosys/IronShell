@@ -23,7 +23,11 @@ use crate::ast::{Expr, Stmt};
 use crate::safety::{effect_of, effective_decision, Decision, Effect, Mode};
 use crate::value::Value;
 use anyhow::Result;
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
+use std::path::PathBuf;
+
+/// Most modules one explanation will fold in; past it the verdict is `unknown`.
+const MAX_MODULES: usize = 256;
 
 struct Walk<'a> {
     env: &'a crate::env::Env,
@@ -33,9 +37,199 @@ struct Walk<'a> {
     /// The literal String arguments of each call in `calls`, by index: the
     /// paths the jail would judge, when they are written out.
     literals: Vec<Vec<String>>,
+    /// Names bound once, immutably, to a string literal: `name = "rm"`, so that
+    /// `call(name, ...)` can be read as a call to that builtin.
+    consts: HashMap<String, String>,
+    /// Modules already folded in, by canonical path (cycles end here).
+    visited: HashSet<PathBuf>,
+}
+
+/// The value of a string literal that has no interpolation hole.
+fn plain_literal(s: &str) -> Option<String> {
+    if s.contains("${") {
+        None
+    } else {
+        Some(s.replace(crate::parser::ESCAPED_DOLLAR, "$"))
+    }
+}
+
+/// The names a match pattern binds.
+fn pattern_names(p: &crate::ast::Pattern, out: &mut Vec<String>) {
+    use crate::ast::Pattern;
+    match p {
+        Pattern::Ident(n) => out.push(n.clone()),
+        Pattern::Constructor { args, .. } => args.iter().for_each(|a| pattern_names(a, out)),
+        Pattern::Array(xs) => xs.iter().for_each(|a| pattern_names(a, out)),
+        Pattern::Record(fs) => fs.iter().for_each(|(k, a)| {
+            out.push(k.clone());
+            pattern_names(a, out);
+        }),
+        _ => {}
+    }
 }
 
 impl Walk<'_> {
+    /// A call the analysis cannot see into: listed as unresolved, so the
+    /// verdict is at least `unknown`.
+    fn unknown(&mut self, what: String) {
+        self.calls.push((what, None));
+        self.literals.push(Vec::new());
+    }
+
+    /// Run `f` with `names` bound as parameters: they shadow builtins and
+    /// literal bindings of the same name for its duration.
+    fn scoped(&mut self, names: &[String], f: impl FnOnce(&mut Self)) {
+        let mut added = Vec::new();
+        let mut shadowed = Vec::new();
+        for n in names {
+            if self.locals.insert(n.clone()) {
+                added.push(n.clone());
+            }
+            if let Some(v) = self.consts.remove(n) {
+                shadowed.push((n.clone(), v));
+            }
+        }
+        f(self);
+        for n in added {
+            self.locals.remove(&n);
+        }
+        for (n, v) in shadowed {
+            self.consts.insert(n, v);
+        }
+    }
+
+    /// Analyse IronShell source that a builtin would run: each statement is
+    /// walked like any other code, and source that does not parse is unknown.
+    fn walk_source(&mut self, src: &str) {
+        match crate::parser::parse_program(src) {
+            Ok(stmts) => {
+                for s in &stmts {
+                    self.stmt(s);
+                }
+            }
+            Err(_) => self.unknown("<code that does not parse>".to_string()),
+        }
+    }
+
+    /// A builtin that evaluates a String as code: the code argument is analysed
+    /// when it is a literal and is unknown otherwise.
+    fn code_arg(&mut self, builtin: &str, args: &[Expr]) {
+        let idx = match builtin {
+            "try_repair" => 0,
+            "sess_eval" => 1,
+            _ => return,
+        };
+        match args.get(idx) {
+            Some(Expr::LitStr(s)) if plain_literal(s).is_some() => {
+                let code = s.clone();
+                self.walk_source(&code);
+            }
+            _ => self.unknown(format!("{builtin}(<computed code>)")),
+        }
+    }
+
+    /// `call(name, args...)` runs the builtin `name`: a literal name (or a
+    /// name bound to one) is analysed as a call to that builtin, anything else
+    /// is unknown.
+    fn call_by_name(&mut self, args: &[Expr]) {
+        let name = match args.first() {
+            Some(Expr::LitStr(s)) => plain_literal(s),
+            Some(Expr::Ident(n)) => self.consts.get(n).cloned(),
+            _ => None,
+        };
+        let rest = args.get(1..).unwrap_or(&[]);
+        match name {
+            Some(n)
+                if crate::builtins::is_dispatched(&n)
+                    || crate::plugins::is_manifest_builtin(&n) =>
+            {
+                self.calls.push((n.clone(), Some(n.clone())));
+                self.literals.push(
+                    rest.iter()
+                        .filter_map(|a| match a {
+                            Expr::LitStr(s) => Some(s.clone()),
+                            _ => None,
+                        })
+                        .collect(),
+                );
+                if n == "call" {
+                    self.call_by_name(rest);
+                } else {
+                    self.code_arg(&n, rest);
+                }
+            }
+            Some(n) => self.unknown(format!("call(\"{n}\")")),
+            None => self.unknown("call(<computed name>)".to_string()),
+        }
+    }
+
+    /// The `${...}` holes of a string literal are code: each is walked.
+    fn string_holes(&mut self, s: &str) {
+        if !s.contains("${") {
+            return;
+        }
+        let chars: Vec<char> = s.chars().collect();
+        let mut i = 0;
+        while i < chars.len() {
+            if chars[i] == '$' && chars.get(i + 1) == Some(&'{') {
+                let body = i + 2;
+                let Some(end) = crate::parser::interp_hole_end(&chars, body) else {
+                    self.unknown("<unclosed interpolation>".to_string());
+                    return;
+                };
+                let src: String = chars[body..end - 1].iter().collect();
+                i = end;
+                match crate::parser::parse_program(&src) {
+                    Ok(stmts) => match stmts.as_slice() {
+                        [Stmt::Expr(e)] => self.expr(e),
+                        _ => self.unknown(format!("<interpolation \"{src}\">")),
+                    },
+                    Err(_) => self.unknown(format!("<interpolation \"{src}\">")),
+                }
+            } else {
+                i += 1;
+            }
+        }
+    }
+
+    /// An import runs the module's top-level statements, so they are folded
+    /// into the verdict (the module is read and parsed, never run). A module
+    /// that cannot be read or parsed is unknown, by name.
+    fn import(&mut self, source: &str) {
+        let (path, text) = match crate::module_loader::read_for_explain(source) {
+            Ok(r) => r,
+            Err(why) => {
+                self.unknown(format!("import \"{source}\" ({why})"));
+                return;
+            }
+        };
+        if self.visited.contains(&path) {
+            return;
+        }
+        if self.visited.len() >= MAX_MODULES {
+            self.unknown(format!("import \"{source}\" (too many modules)"));
+            return;
+        }
+        self.visited.insert(path.clone());
+        let stmts = match crate::parser::parse_program(&text) {
+            Ok(s) => s,
+            Err(_) => {
+                self.unknown(format!("import \"{source}\" (does not parse)"));
+                return;
+            }
+        };
+        // The module's own imports resolve against its folder, and its names
+        // are its own.
+        let _entry = crate::module_loader::enter_entry_file(&path);
+        let locals = std::mem::take(&mut self.locals);
+        let consts = std::mem::take(&mut self.consts);
+        for s in &stmts {
+            self.stmt(s);
+        }
+        self.locals = locals;
+        self.consts = consts;
+    }
+
     /// The builtin a callee names, if it names one.
     fn resolve(&self, callee: &Expr) -> (String, Option<String>) {
         match callee {
@@ -73,14 +267,36 @@ impl Walk<'_> {
 
     fn stmt(&mut self, s: &Stmt) {
         match s {
-            Stmt::Let { name, value, .. } => {
+            Stmt::Let {
+                name,
+                value,
+                is_mut,
+                ..
+            } => {
                 self.expr(value);
+                let literal = match value {
+                    Expr::LitStr(s) if !*is_mut && !self.locals.contains(name) => plain_literal(s),
+                    _ => None,
+                };
+                match literal {
+                    Some(s) => {
+                        self.consts.insert(name.clone(), s);
+                    }
+                    None => {
+                        self.consts.remove(name);
+                    }
+                }
                 self.locals.insert(name.clone());
             }
             Stmt::Expr(e) => self.expr(e),
             Stmt::SetField { value, .. } => self.expr(value),
             Stmt::Cfg { body, .. } => self.stmt(body),
-            Stmt::Import { .. } | Stmt::Export { .. } => {}
+            Stmt::Import { source, .. } => self.import(source),
+            Stmt::Export { from_source, .. } => {
+                if let Some(source) = from_source {
+                    self.import(source);
+                }
+            }
         }
     }
 
@@ -92,6 +308,7 @@ impl Walk<'_> {
                 named,
             } => {
                 let r = self.resolve(callee);
+                let target = r.1.clone();
                 self.calls.push(r);
                 self.literals.push(
                     args.iter()
@@ -111,6 +328,12 @@ impl Walk<'_> {
                 for (_, a) in named {
                     self.expr(a);
                 }
+                // A builtin that runs another builtin, or code, by name.
+                match target.as_deref() {
+                    Some("call") => self.call_by_name(args),
+                    Some(b) => self.code_arg(b, args),
+                    None => {}
+                }
             }
             Expr::Pipe { left, right } => {
                 self.expr(left);
@@ -118,30 +341,46 @@ impl Walk<'_> {
                 match right.as_ref() {
                     Expr::Ident(_) | Expr::MemberAccess { .. } => {
                         let r = self.resolve(right);
+                        let target = r.1.clone();
                         self.calls.push(r);
                         self.literals.push(Vec::new());
+                        if let Some(b) = target.as_deref() {
+                            self.code_arg(b, &[]);
+                        }
                     }
                     other => self.expr(other),
                 }
             }
             Expr::Array(xs) => xs.iter().for_each(|x| self.expr(x)),
             Expr::Record(fs) => fs.iter().for_each(|(_, x)| self.expr(x)),
-            Expr::Lambda { body, .. } | Expr::AsyncLambda { body, .. } => self.expr(body),
+            Expr::Lambda { params, body } | Expr::AsyncLambda { params, body } => {
+                self.scoped(params, |w| w.expr(body))
+            }
             Expr::Await(x) | Expr::Throw(x) => self.expr(x),
             Expr::TryCatch {
                 try_expr,
+                catch_var,
                 catch_expr,
-                ..
             } => {
                 self.expr(try_expr);
-                self.expr(catch_expr);
+                let bound: Vec<String> = catch_var.iter().cloned().collect();
+                self.scoped(&bound, |w| w.expr(catch_expr));
             }
             Expr::Binary { left, right, .. } => {
                 self.expr(left);
                 self.expr(right);
             }
             Expr::Unary { expr, .. } => self.expr(expr),
-            Expr::MemberAccess { object, .. } => self.expr(object),
+            Expr::MemberAccess { object, .. } => {
+                // `m.f` used as a value (not called) is a reference to the
+                // builtin: it may be called later, so it counts as a call.
+                let r = self.resolve(e);
+                if r.1.is_some() {
+                    self.calls.push(r);
+                    self.literals.push(Vec::new());
+                }
+                self.expr(object)
+            }
             Expr::Index { object, index } => {
                 self.expr(object);
                 self.expr(index);
@@ -149,18 +388,27 @@ impl Walk<'_> {
             Expr::Match { scrutinee, arms } => {
                 self.expr(scrutinee);
                 for arm in arms {
-                    if let Some(g) = &arm.guard {
-                        self.expr(g);
-                    }
-                    self.expr(&arm.body);
+                    let mut bound = Vec::new();
+                    pattern_names(&arm.pattern, &mut bound);
+                    self.scoped(&bound, |w| {
+                        if let Some(g) = &arm.guard {
+                            w.expr(g);
+                        }
+                        w.expr(&arm.body);
+                    });
                 }
             }
-            Expr::LitInt(_)
-            | Expr::LitFloat(_)
-            | Expr::LitStr(_)
-            | Expr::LitBool(_)
-            | Expr::Null
-            | Expr::Ident(_) => {}
+            Expr::LitStr(s) => self.string_holes(s),
+            // A builtin named as a value (`map(rm)`, `{f: rm}`, `g = rm`) may be
+            // called later, so it counts as a call.
+            Expr::Ident(_) => {
+                let r = self.resolve(e);
+                if r.1.is_some() {
+                    self.calls.push(r);
+                    self.literals.push(Vec::new());
+                }
+            }
+            Expr::LitInt(_) | Expr::LitFloat(_) | Expr::LitBool(_) | Expr::Null => {}
         }
     }
 }
@@ -239,6 +487,8 @@ pub fn explain(code: &str) -> Result<Value> {
         locals: HashSet::new(),
         calls: Vec::new(),
         literals: Vec::new(),
+        consts: HashMap::new(),
+        visited: HashSet::new(),
     };
     for s in &stmts {
         w.stmt(s);

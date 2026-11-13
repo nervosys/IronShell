@@ -447,6 +447,38 @@ fn resolve(source: &str) -> Result<PathBuf> {
     Ok(target)
 }
 
+/// For `--explain`: the file an import names, resolved as the loader resolves
+/// it, and its source text. The module is read, never run, and no guard fires.
+/// A module that cannot be found or read, or lies outside the workspace when
+/// the jail is on, comes back as the reason, so the caller reports `unknown`.
+pub(crate) fn read_for_explain(source: &str) -> std::result::Result<(PathBuf, String), String> {
+    if source.is_empty()
+        || source.contains('\0')
+        || source.contains("://")
+        || source.starts_with("pkg:")
+    {
+        return Err("not a local module path".to_string());
+    }
+    let mut candidate = module_path(source);
+    if !candidate.exists() && candidate.extension().is_none() {
+        candidate = PathBuf::from(format!("{}.ish", candidate.display()));
+    }
+    let target = candidate
+        .canonicalize()
+        .map_err(|_| "no such module".to_string())?;
+    let shown = display(&target);
+    let jailed = safety::current_mode() == safety::Mode::Agent
+        || std::env::var_os("IRONSHELL_WORKSPACE").is_some();
+    if jailed && !safety::within_workspace(&shown) {
+        return Err("outside the workspace".to_string());
+    }
+    if !target.is_file() {
+        return Err("not a file".to_string());
+    }
+    let text = read_module(&target).map_err(|e| e.to_string())?;
+    Ok((target, text))
+}
+
 /// Read a module's source, refusing anything over `MAX_MODULE_BYTES`.
 fn read_module(path: &Path) -> Result<String> {
     let shown = display(path);
