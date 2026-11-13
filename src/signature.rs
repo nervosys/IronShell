@@ -863,7 +863,7 @@ pub static SIGNATURES: &[Signature] = &[
     Signature {
         name: "file_write", category: None, subject_required: false, aliases: &["write_file", "text_write"],
         subject: None, params: &[req("path", Ty::Str, "destination path"), opt("content", Ty::Any, "content; omitted uses pipeline input")], returns: "Record",
-        doc: "Atomically write content, returning path, bytes, lines and success. Content must be a String, or an Array of Strings joined as lines; any other value (a Record, a number, a Bool) is refused with E_BAD_ARG and nothing is written, so convert it first, e.g. to_json(value) or str(value).",
+        doc: "Atomically write content, returning path, bytes, lines and success. Content must be a String, or an Array of Strings: the elements are joined with \\n, one per line, and no line break is added after the last one; an Array with a non-String element is refused with E_BAD_ARG naming its index. Any other value (a Record, a number, a Bool) is refused with E_BAD_ARG and nothing is written, so convert it first, e.g. to_json(value) or str(value).",
         examples: &[
             (r#"let d = fs_tempdir("ae_write"); let f = d + "/x"; let result = file_write(f, "hello"); rmdir(d, true); result.bytes"#, "5"),
             (r#"let d = fs_tempdir("ae_write"); let f = d + "/x"; let result = "hi" | file_write(f); rmdir(d, true); result.bytes"#, "2"),

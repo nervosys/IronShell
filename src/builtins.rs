@@ -50642,24 +50642,28 @@ fn text_to_write(builtin: &str, value: &Value) -> Result<String> {
         Value::Str(s) => Ok(s.clone()),
         Value::Array(items) => {
             let mut lines = Vec::with_capacity(items.len());
-            for item in items {
+            for (index, item) in items.iter().enumerate() {
                 match item {
                     Value::Str(s) => lines.push(s.as_str()),
-                    other => return Err(not_text_to_write(builtin, other, true)),
+                    other => return Err(not_text_to_write(builtin, other, Some(index))),
                 }
             }
+            // Each element is a line: joined with "\n", with no line break after the last.
             Ok(lines.join("\n"))
         }
-        other => Err(not_text_to_write(builtin, other, false)),
+        other => Err(not_text_to_write(builtin, other, None)),
     }
 }
 
-fn not_text_to_write(builtin: &str, value: &Value, in_array: bool) -> anyhow::Error {
+/// The refusal for content that is not text. `element` is the index of the
+/// Array element that is not a String, counted from 0 as the batch messages are.
+fn not_text_to_write(builtin: &str, value: &Value, element: Option<usize>) -> anyhow::Error {
     let got = value.type_name();
-    let message = if in_array {
-        format!("{builtin}: an Array of content must hold Strings, got {got}")
-    } else {
-        format!("{builtin}: content must be a String or an Array of Strings, got {got}")
+    let message = match element {
+        Some(index) => format!(
+            "{builtin}: content: an Array must hold only Strings (lines), element {index} is {got}"
+        ),
+        None => format!("{builtin}: content must be a String or an Array of Strings, got {got}"),
     };
     let hint = match value {
         Value::Bool(_) | Value::Int(_) | Value::Float(_) => {

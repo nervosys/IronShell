@@ -135,3 +135,28 @@ fn open_names_a_directory_as_a_directory_not_as_missing() {
     );
 }
 
+#[test]
+fn file_write_names_the_element_that_is_not_a_string() {
+    let _guard = LOCK.lock().unwrap_or_else(|p| p.into_inner());
+    let ses = Session::new("write_mixed");
+    let path = ses.path("w.txt");
+    let se = refusal(
+        "file_write",
+        vec![s(&path), Value::Array(vec![s("a"), Value::Int(2)])],
+    );
+    assert_eq!(se.code.as_str(), "E_BAD_ARG", "{}", se.message);
+    assert!(
+        se.message
+            .contains("content: an Array must hold only Strings (lines), element 1 is Int"),
+        "{}",
+        se.message
+    );
+    assert!(!std::path::Path::new(&path).exists());
+    // The Array is joined with a newline between elements, and none after the last.
+    call(
+        "file_write",
+        vec![s(&path), Value::Array(vec![s("a"), s("b")])],
+    )
+    .unwrap();
+    assert_eq!(std::fs::read(&path).unwrap(), b"a\nb");
+}
