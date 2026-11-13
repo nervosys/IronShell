@@ -10959,9 +10959,27 @@ fn bi_to_csv(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
                                             )?
                                             .to_string(),
                                         ),
+                                        // A NaN or infinity cell is refused, as to_json refuses
+                                        // it: written it would read back as the text "NaN".
+                                        Value::Float(f) if !f.is_finite() => {
+                                            let what = if f.is_nan() {
+                                                "NaN"
+                                            } else if *f > 0.0 {
+                                                "infinity"
+                                            } else {
+                                                "negative infinity"
+                                            };
+                                            return Err(crate::safety::value_not_representable(
+                                                "to_csv",
+                                                format!(
+                                                    "to_csv: rows[{index}].{header} is {what}, which CSV cannot hold as a number"
+                                                ),
+                                                "CSV has no NaN or infinity number: replace it with a number or null, or keep it as text",
+                                            ));
+                                        }
                                         // A whole Float keeps its point, so it reads back as a
                                         // Float and not as an Int column.
-                                        Value::Float(f) if f.is_finite() && f.fract() == 0.0 => {
+                                        Value::Float(f) if f.fract() == 0.0 => {
                                             csv_escape(&format!("{f:.1}"))
                                         }
                                         v => csv_escape(&value_to_string(v)),

@@ -96,3 +96,27 @@ fn to_csv_refuses_a_repeated_column_name() {
     );
 }
 
+#[test]
+fn to_csv_refuses_a_nan_or_infinite_float_cell_with_its_path() {
+    let _guard = LOCK.lock().unwrap_or_else(|p| p.into_inner());
+    let nan = Value::Array(vec![record(&[
+        ("a", Value::Float(1.5)),
+        ("b", Value::Float(f64::NAN)),
+    ])]);
+    let se = refusal("to_csv", vec![nan]);
+    assert_eq!(se.code.as_str(), "E_BAD_VALUE", "{}", se.message);
+    assert!(se.message.contains("rows[0].b is NaN"), "{}", se.message);
+
+    let inf = Value::Array(vec![
+        record(&[("a", Value::Float(1.0))]),
+        record(&[("a", Value::Float(f64::NEG_INFINITY))]),
+    ]);
+    let se = refusal("to_csv", vec![inf]);
+    assert_eq!(se.code.as_str(), "E_BAD_VALUE", "{}", se.message);
+    assert!(
+        se.message.contains("rows[1].a is negative infinity"),
+        "{}",
+        se.message
+    );
+}
+
