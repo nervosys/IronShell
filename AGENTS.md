@@ -53,6 +53,8 @@ curl -X POST http://localhost:3002/api/v1/execute \
 curl http://localhost:3002/api/v1/schema/openai
 ```
 
+The body of `POST /api/v1/call/:builtin` is the arguments object itself (e.g. `{"path": "."}`), not `{"args": ...}`: that wrapper is the `/execute` request shape (a lone `args` key is unwrapped for you). `/builtins/:name` and `/call/:builtin` also take a module-qualified name (`file.read`).
+
 ### Option 3: Python SDK + LangChain
 
 ```python

@@ -52,7 +52,7 @@ fn item1_a_subject_with_no_parameters_is_advertised_first_and_required() {
     // the subject as its argument (round 20).
     let schema = claude_tool_schema("ironshell_upper");
     assert_eq!(
-        schema["properties"]["subject"]["type"], "String",
+        schema["properties"]["subject"]["type"], "string",
         "{schema}"
     );
     assert!(
