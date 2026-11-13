@@ -943,6 +943,7 @@ fn a_self_contained_example_produces_the_result_it_claims_body() {
     let strip = |s: &str| plain(s).trim().trim_matches('"').to_string();
 
     let mut checked = 0;
+    let mut wrong: Vec<String> = Vec::new();
     for sig in SIGNATURES {
         if NEEDS_THE_WORLD.contains(&sig.name) || machine_dependent(sig.name) {
             continue;
@@ -963,17 +964,25 @@ fn a_self_contained_example_produces_the_result_it_claims_body() {
             // A String result displays quoted and escaped (`"{\"a\":1}"`); an
             // example may give either that form or the raw text it holds.
             let raw_matches = matches!(&got, Value::Str(s) if plain(s).trim() == strip(want));
-            if !raw_matches {
-                assert_eq!(
-                    strip(&format!("{got}")),
+            if !raw_matches && strip(&format!("{got}")) != strip(want) {
+                // Collected, not asserted at once, so one run names every
+                // example that claims the wrong result.
+                wrong.push(format!(
+                    "{}: {code}\n    claims {:?}, gives {:?}",
+                    sig.name,
                     strip(want),
-                    "{}'s example claims the wrong result: {code}",
-                    sig.name
-                );
+                    strip(&format!("{got}"))
+                ));
             }
             checked += 1;
         }
     }
+    assert!(
+        wrong.is_empty(),
+        "{} examples claim the wrong result:\n  {}",
+        wrong.len(),
+        wrong.join("\n  ")
+    );
     // Non-vacuity: a skip list that swallowed everything would pass silently.
     assert!(
         checked >= 25,

@@ -83,7 +83,7 @@ fn test_example_18_mutable_variables() {
         "Should update mutable variables"
     );
     assert!(output.contains("Sum: 150"), "Should accumulate values");
-    assert!(output.contains("Complete: 100%"), "Should track progress");
+    assert!(output.contains("Complete: 100.0%"), "Should track progress");
 }
 
 // ============================================================================

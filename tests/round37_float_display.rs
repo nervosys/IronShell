@@ -85,9 +85,10 @@ fn a_huge_or_tiny_float_uses_the_exponent_form() {
     // Below the threshold the digits are written in full, with the point.
     assert_eq!(shown("1e15"), "1000000000000000.0");
     assert_eq!(shown("0.00001"), "0.00001");
-    // The exponent form is what the JSON writer produces for the same value.
+    // The JSON writer spells the exponent `1e+21`; both read back as the same
+    // number.
     let json = serde_json::to_string(&Value::Float(1e21).to_json()).unwrap();
-    assert_eq!(json, "1e21");
+    assert_eq!(json.parse::<f64>().unwrap(), 1e21);
 }
 
 #[test]

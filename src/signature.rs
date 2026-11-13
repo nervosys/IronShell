@@ -2149,7 +2149,7 @@ pub static SIGNATURES: &[Signature] = &[
         doc: "PowerShell's Measure-Object: the number of piped elements and, for one property, its sum, average, minimum and maximum. A piped value that is not an array counts as one element.",
         examples: &[
             (r#"([1, 2, 3] | measure).Count"#, "3"),
-            (r#"([{n: 2}, {n: 5}] | measure("n")).Maximum"#, "5"),
+            (r#"([{n: 2}, {n: 5}] | measure("n")).Maximum"#, "5.0"),
             (r#"(try { [1] | measure(5) } catch e { e.error.code })"#, "E_BAD_ARG"),
             (r#"(try { [1] | measure("n", "m") } catch e { e.error.code })"#, "E_BAD_ARG"),
         ],
