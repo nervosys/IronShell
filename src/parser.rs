@@ -134,6 +134,9 @@ const LOOP_HINT: &str =
 const PIPE_ARG_HINT: &str =
     "`|` binds loosest: parenthesize the pipeline, e.g. (\"Hello\" | upper) == \"HELLO\"";
 
+/// The hint for `x in list`: membership is a builtin, not an operator.
+const IN_OPERATOR_HINT: &str = "`in` is not an operator; use contains(list, x) or x | in(list)";
+
 /// The hint for `def f(...)`, which IronShell does not have.
 const FUNCTION_HINT: &str = "functions are values: f = fn(x) => x + 1";
 
@@ -427,6 +430,19 @@ pub fn parse_program_with_lines(src: &str) -> Result<(Vec<Stmt>, Vec<usize>)> {
                 ONE_EXPR_HINT,
             )));
         }
+    }
+
+    // `x in list` fails inside a call and the statements after it fail in turn:
+    // report the one fault.
+    if let Some(first) = errors
+        .iter()
+        .find_map(|e| e.downcast_ref::<HintedSyntax>())
+        .filter(|h| h.hint == IN_OPERATOR_HINT)
+    {
+        return Err(anyhow::Error::new(ParseError::with_hint(
+            first.msg.clone(),
+            IN_OPERATOR_HINT,
+        )));
     }
 
     // If we had errors, return them combined
@@ -1998,6 +2014,16 @@ impl Parser {
     /// `arg_start`. A `|` in that argument with no `)` after it is the pipe
     /// binding loosest, so the error says how to parenthesize it.
     fn need_call_close(&mut self, arg_start: usize) -> Result<()> {
+        if self.check(Tok::Ident) && self.peek().text == "in" {
+            let tok = self.peek();
+            return Err(anyhow::Error::new(HintedSyntax {
+                msg: format!(
+                    "`in` is not an operator at line {}, column {}",
+                    tok.line, tok.col
+                ),
+                hint: IN_OPERATOR_HINT.to_string(),
+            }));
+        }
         if !self.check(Tok::RParen) && self.pipe_in_span(arg_start) {
             let tok = self.peek();
             return Err(anyhow::Error::new(HintedSyntax {
