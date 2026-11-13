@@ -3481,7 +3481,7 @@ pub static SIGNATURES: &[Signature] = &[
         name: "fitness", category: None, subject_required: false, aliases: &[], subject: Some(Ty::Record),
         params: &[req("fitness_fn", Ty::Lambda, "one genome parameter; return a finite Int or Float")], returns: "Record",
         doc: "Evaluate only individuals without cached fitness, update statistics once and return a population copy. Propagate the first callback failure or invalid score immediately. Validate encoded populations before callbacks: nonempty compatible genomes, finite parameters and fitness, matching configured size, unique IDs, valid counters and numeric configuration. Limits: 64 MiB encoding, 10000 individuals/history entries and one million total genome parameters. Preserve history and next_id; legacy states without next_id derive it from the largest existing ID. Numeric overflow produces a coded refusal.",
-        examples: &[(r#"fitness(population(3, "vec"), fn(g) => 7).stats.best_fitness"#, "7"), (r#"let result = population(3, "nn") | fitness(fn(g) => g.param_count); result.stats.avg_fitness"#, "76")],
+        examples: &[(r#"fitness(population(3, "vec"), fn(g) => 7).stats.best_fitness"#, "7.0"), (r#"let result = population(3, "nn") | fitness(fn(g) => g.param_count); result.stats.avg_fitness"#, "76.0")],
     },
     Signature {
         name: "evolve", category: None, subject_required: false, aliases: &[], subject: Some(Ty::Record),
@@ -3498,7 +3498,7 @@ pub static SIGNATURES: &[Signature] = &[
     Signature {
         name: "best_individual", category: None, subject_required: false, aliases: &[], subject: Some(Ty::Record), params: &[], returns: "Record",
         doc: "Return genome, finite fitness, generation and id for the highest-scoring individual in a validated, fully evaluated population. Refuse missing fitness with E_BAD_STATE; call fitness to evaluate fresh populations and offspring. Equal scores select the last matching individual. Encoded population limits match fitness.",
-        examples: &[(r#"best_individual(fitness(population(3, "vec"), fn(g) => 7)).fitness"#, "7"), (r#"let result = population(3, "nn") | fitness(fn(g) => 1) | best_individual; result.fitness"#, "1")],
+        examples: &[(r#"best_individual(fitness(population(3, "vec"), fn(g) => 7)).fitness"#, "7.0"), (r#"let result = population(3, "nn") | fitness(fn(g) => 1) | best_individual; result.fitness"#, "1.0")],
     },
     Signature {
         name: "black_format",
@@ -3530,7 +3530,7 @@ pub static SIGNATURES: &[Signature] = &[
         name: "rl_agent", category: None, subject_required: false, aliases: &[], subject: None,
         params: &[req("name", Ty::Str, "agent name"), req("state_size", Ty::Int, "positive state count"), req("action_size", Ty::Int, "positive action count; at most 10000"), opt("config", Ty::Record, "learning_rate, discount, epsilon: finite numbers in 0..=1")], returns: "Record",
         doc: "Create an empty tabular Q-learning agent. Refuse invalid dimensions or more than one million possible state-action cells. Defaults: learning_rate 0.1, discount 0.99, epsilon 0.1. Unknown or wrong-typed options are refused. Encoded Q-table rows are sorted [state,action,value] triples; legacy empty-object tables remain readable.",
-        examples: &[(r#"rl_agent("example", 2, 3).action_size"#, "3"), (r#"rl_agent("example", 2, 3, {learning_rate: 1, discount: 0, epsilon: 0}).epsilon"#, "0")],
+        examples: &[(r#"rl_agent("example", 2, 3).action_size"#, "3"), (r#"rl_agent("example", 2, 3, {learning_rate: 1, discount: 0, epsilon: 0}).epsilon"#, "0.0")],
     },
     Signature {
         name: "rl_action", category: None, subject_required: false, aliases: &[], subject: Some(Ty::Record),
@@ -3632,7 +3632,7 @@ pub static SIGNATURES: &[Signature] = &[
         name: "nn_set_params", category: None, subject_required: false, aliases: &[], subject: Some(Ty::Record),
         params: &[req("params", Ty::Array, "finite numbers; exactly the network parameter count")], returns: "Record",
         doc: "Return a copy with all weights and biases replaced in nn_params order. Never accept partial or surplus parameters. Encoded networks are limited to one million parameters and 64 MiB.",
-        examples: &[(r#"nn_set_params(nn_create("example", [2, 1], "relu", "linear"), [2, 3, 4]) | nn_forward([1, 2]) | first"#, "12"), (r#"nn_create("example", [2, 1], "relu", "linear") | nn_set_params([2, 3, 4]) | nn_forward([1, 2]) | first"#, "12")],
+        examples: &[(r#"nn_set_params(nn_create("example", [2, 1], "relu", "linear"), [2, 3, 4]) | nn_forward([1, 2]) | first"#, "12.0"), (r#"nn_create("example", [2, 1], "relu", "linear") | nn_set_params([2, 3, 4]) | nn_forward([1, 2]) | first"#, "12.0")],
     },
     Signature {
         name: "nn_layers", category: None, subject_required: false, aliases: &[], subject: Some(Ty::Record), params: &[], returns: "Array",
@@ -9318,7 +9318,7 @@ pub static SIGNATURES: &[Signature] = &[
         name: "rl_env_step", category: None, subject_required: false, aliases: &[], subject: Some(Ty::Record),
         params: &[req("action", Ty::Int, "0=up, 1=down, 2=left, 3=right")], returns: "Record",
         doc: "Return {state,reward,done,env} after moving a gridworld copy one clamped cardinal step. State is y*width+x. Reward is 1 at the goal, otherwise -0.5 on an obstacle, otherwise -0.01; done means the current position equals the goal and does not prevent subsequent movement. Preserve goals and obstacles. Require positive dimensions with at most one million cells, in-range positions and at most 10000 obstacle pairs. Missing agent coordinates default to zero, missing goal coordinates to the bottom-right corner, and missing obstacles to empty. Refuse wrong types, invalid actions and inconsistent type/state_size/action_size metadata when present.",
-        examples: &[(r#"rl_env_step(rl_gridworld(2, 1), 3).reward"#, "1"), (r#"let result = rl_gridworld(2, 2) | rl_env_step(1); result.state"#, "2")],
+        examples: &[(r#"rl_env_step(rl_gridworld(2, 1), 3).reward"#, "1.0"), (r#"let result = rl_gridworld(2, 2) | rl_env_step(1); result.state"#, "2")],
     },
     Signature {
         name: "rlm_agent",
