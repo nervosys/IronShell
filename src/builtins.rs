@@ -30919,6 +30919,16 @@ fn bi_open(args: Vec<Value>, _input: Option<Value>) -> Result<Value> {
         }
     };
     if !std::path::Path::new(&path).is_file() {
+        // A directory exists but is not a file: named as one, not as missing.
+        if !crate::safety::names_a_remote_share(&path) && std::path::Path::new(&path).is_dir() {
+            return Err(crate::safety::bad_arg_in(
+                "open",
+                format!("open: `{path}` is a directory, not a file"),
+                &format!(
+                    "pass a file; to read a directory's files, name them with a glob such as '{path}/**/*'"
+                ),
+            ));
+        }
         return Err(crate::safety::not_found("open", "file", &path));
     }
     let validated = validate_read_path(&path)?;

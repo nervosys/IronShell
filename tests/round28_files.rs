@@ -120,3 +120,18 @@ fn to_csv_refuses_a_nan_or_infinite_float_cell_with_its_path() {
     );
 }
 
+#[test]
+fn open_names_a_directory_as_a_directory_not_as_missing() {
+    let _guard = LOCK.lock().unwrap_or_else(|p| p.into_inner());
+    let ses = Session::new("open_dir");
+    let dir = ses.path("adir");
+    std::fs::create_dir_all(&dir).unwrap();
+    let se = refusal("open", vec![s(&dir)]);
+    assert_eq!(se.code.as_str(), "E_BAD_ARG", "{}", se.message);
+    assert!(
+        se.message.contains("is a directory, not a file"),
+        "{}",
+        se.message
+    );
+}
+
