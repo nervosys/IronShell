@@ -2454,8 +2454,12 @@ fn value_eq(a: &Value, b: &Value) -> bool {
         (Bool(x), Bool(y)) => x == y,
         (Int(x), Int(y)) => x == y,
         (Float(x), Float(y)) => x == y,
-        (Int(x), Float(y)) => (*x as f64) == *y,
-        (Float(x), Int(y)) => *x == (*y as f64),
+        (Int(x), Float(y)) => {
+            crate::value::cmp_int_float(*x, *y) == Some(std::cmp::Ordering::Equal)
+        }
+        (Float(x), Int(y)) => {
+            crate::value::cmp_int_float(*y, *x) == Some(std::cmp::Ordering::Equal)
+        }
         (Str(x), Str(y)) => x == y,
         (Uri(x), Uri(y)) => x == y,
         (Array(ax), Array(ay)) => {
@@ -2544,14 +2548,34 @@ fn binop(op: &BinOp, a: Value, b: Value) -> Result<Value> {
 
         // Int and Float order together as f64, so `1.5 < 2` works as
         // `1.5 == 2` already did. `1.5 < 0` was refused before this.
-        (Lt, Value::Int(x), Value::Float(y)) => Value::Bool((x as f64) < y),
-        (Lt, Value::Float(x), Value::Int(y)) => Value::Bool(x < (y as f64)),
-        (Lte, Value::Int(x), Value::Float(y)) => Value::Bool((x as f64) <= y),
-        (Lte, Value::Float(x), Value::Int(y)) => Value::Bool(x <= (y as f64)),
-        (Gt, Value::Int(x), Value::Float(y)) => Value::Bool((x as f64) > y),
-        (Gt, Value::Float(x), Value::Int(y)) => Value::Bool(x > (y as f64)),
-        (Gte, Value::Int(x), Value::Float(y)) => Value::Bool((x as f64) >= y),
-        (Gte, Value::Float(x), Value::Int(y)) => Value::Bool(x >= (y as f64)),
+        (Lt, Value::Int(x), Value::Float(y)) => {
+            Value::Bool(crate::value::cmp_int_float(x, y) == Some(std::cmp::Ordering::Less))
+        }
+        (Lt, Value::Float(x), Value::Int(y)) => {
+            Value::Bool(crate::value::cmp_int_float(y, x) == Some(std::cmp::Ordering::Greater))
+        }
+        (Lte, Value::Int(x), Value::Float(y)) => Value::Bool(matches!(
+            crate::value::cmp_int_float(x, y),
+            Some(std::cmp::Ordering::Less | std::cmp::Ordering::Equal)
+        )),
+        (Lte, Value::Float(x), Value::Int(y)) => Value::Bool(matches!(
+            crate::value::cmp_int_float(y, x),
+            Some(std::cmp::Ordering::Greater | std::cmp::Ordering::Equal)
+        )),
+        (Gt, Value::Int(x), Value::Float(y)) => {
+            Value::Bool(crate::value::cmp_int_float(x, y) == Some(std::cmp::Ordering::Greater))
+        }
+        (Gt, Value::Float(x), Value::Int(y)) => {
+            Value::Bool(crate::value::cmp_int_float(y, x) == Some(std::cmp::Ordering::Less))
+        }
+        (Gte, Value::Int(x), Value::Float(y)) => Value::Bool(matches!(
+            crate::value::cmp_int_float(x, y),
+            Some(std::cmp::Ordering::Greater | std::cmp::Ordering::Equal)
+        )),
+        (Gte, Value::Float(x), Value::Int(y)) => Value::Bool(matches!(
+            crate::value::cmp_int_float(y, x),
+            Some(std::cmp::Ordering::Less | std::cmp::Ordering::Equal)
+        )),
 
         // Two Strings order by byte, as Rust's `str` Ord does: "a" < "b", and
         // "B" < "a" because 'B' is 0x42. Mixed String and number pairs are not

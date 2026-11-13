@@ -134,6 +134,35 @@ pub enum Value {
     Builtin(BuiltinRef),
 }
 
+/// Exact comparison of an Int with a Float, without rounding the Int to f64
+/// (which made 2^53 + 1 equal to 2^53 as a Float). `None` when the Float is NaN.
+pub fn cmp_int_float(i: i64, f: f64) -> Option<std::cmp::Ordering> {
+    use std::cmp::Ordering;
+    if f.is_nan() {
+        return None;
+    }
+    if f == f64::INFINITY {
+        return Some(Ordering::Less);
+    }
+    if f == f64::NEG_INFINITY {
+        return Some(Ordering::Greater);
+    }
+    let floor = f.floor();
+    // 2^63 as f64 is exact; every i64 is below it and at or above -2^63.
+    if floor < -9_223_372_036_854_775_808.0 {
+        return Some(Ordering::Greater);
+    }
+    if floor >= 9_223_372_036_854_775_808.0 {
+        return Some(Ordering::Less);
+    }
+    // floor now fits in i64 exactly.
+    match i.cmp(&(floor as i64)) {
+        // i == floor(f): f is at or above i, and strictly above when it has a fraction.
+        Ordering::Equal if f > floor => Some(Ordering::Less),
+        ord => Some(ord),
+    }
+}
+
 impl Value {
     pub fn type_name(&self) -> &'static str {
         match self {

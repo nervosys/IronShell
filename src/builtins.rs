@@ -10106,8 +10106,10 @@ fn compare_values(a: &Value, b: &Value, expected: std::cmp::Ordering) -> bool {
     match (a, b) {
         (Value::Int(x), Value::Int(y)) => x.cmp(y) == expected,
         (Value::Float(x), Value::Float(y)) => x.partial_cmp(y) == Some(expected),
-        (Value::Int(x), Value::Float(y)) => (*x as f64).partial_cmp(y) == Some(expected),
-        (Value::Float(x), Value::Int(y)) => x.partial_cmp(&(*y as f64)) == Some(expected),
+        (Value::Int(x), Value::Float(y)) => crate::value::cmp_int_float(*x, *y) == Some(expected),
+        (Value::Float(x), Value::Int(y)) => {
+            crate::value::cmp_int_float(*y, *x).map(|o| o.reverse()) == Some(expected)
+        }
         (Value::Str(x), Value::Str(y)) => x.cmp(y) == expected,
         _ => false,
     }
@@ -26308,7 +26310,9 @@ fn values_equal(a: &Value, b: &Value) -> bool {
         // Exact comparison. An absolute epsilon made 1e-300 and 2e-300 equal and
         // missed large values that differ in the last bit.
         (Value::Float(x), Value::Float(y)) => x == y,
-        (Value::Int(x), Value::Float(y)) | (Value::Float(y), Value::Int(x)) => *x as f64 == *y,
+        (Value::Int(x), Value::Float(y)) | (Value::Float(y), Value::Int(x)) => {
+            crate::value::cmp_int_float(*x, *y) == Some(std::cmp::Ordering::Equal)
+        }
         (Value::Str(x), Value::Str(y)) => x == y,
         (Value::Array(x), Value::Array(y)) => {
             x.len() == y.len() && x.iter().zip(y.iter()).all(|(a, b)| values_equal(a, b))
