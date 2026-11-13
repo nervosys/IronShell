@@ -275,6 +275,9 @@ pub fn crypto_module() -> Value {
         ("cert_verify", "crypto_cert_verify"),
         ("jwt_encode", "crypto_jwt_encode"),
         ("jwt_decode", "crypto_jwt_decode"),
+        ("hash_file", "crypto_hash_file"),
+        ("checksum", "crypto_checksum"),
+        ("random_string", "crypto_random_string"),
     ])
 }
 
@@ -525,6 +528,8 @@ pub fn str_module() -> Value {
         ("pad_left", "pad_left"),
         ("pad_right", "pad_right"),
         ("len", "len"),
+        ("url_encode", "url_encode"),
+        ("url_decode", "url_decode"),
     ])
 }
 

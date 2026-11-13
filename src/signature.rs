@@ -7013,9 +7013,10 @@ pub static SIGNATURES: &[Signature] = &[
         subject: Some(Ty::Str),
         params: &[],
         returns: "String",
-        doc: "Decode hex digit pairs to a string. Odd length or a non-hex digit is refused.",
+        doc: "Decode hex digit pairs to a string. Odd length or a non-hex digit is refused, and so are bytes that are not UTF-8 text (E_BAD_ARG: these bytes are binary).",
         examples: &[
             (r#"crypto_hex_decode("6869")"#, r#"hi"#),
+            (r#"(try { crypto_hex_decode("ff00fe") } catch e { e.error.code })"#, "E_BAD_ARG"),
         ],
     },
     Signature {
@@ -7779,6 +7780,35 @@ pub static SIGNATURES: &[Signature] = &[
         examples: &[
             (r#"path_split("a/b/c.txt")"#, r#"["a", "b", "c.txt"]"#),
             (r#"path_split("/a/b")"#, r#"["/", "a", "b"]"#),
+        ],
+    },
+    Signature {
+        name: "url_encode",
+        category: Some("String"),
+        subject_required: false,
+        aliases: &[],
+        subject: Some(Ty::Str),
+        params: &[],
+        returns: "String",
+        doc: "Percent-encode text as RFC 3986 does: the UTF-8 bytes of every character except A-Z a-z 0-9 - . _ ~ become %XX (upper-case hex), so a space is %20 and / is %2F. Pure; the subject may be piped in.",
+        examples: &[
+            (r#"url_encode("a b/c")"#, r#"a%20b%2Fc"#),
+            (r#"("a&b=c" | url_encode)"#, r#"a%26b%3Dc"#),
+        ],
+    },
+    Signature {
+        name: "url_decode",
+        category: Some("String"),
+        subject_required: false,
+        aliases: &[],
+        subject: Some(Ty::Str),
+        params: &[],
+        returns: "String",
+        doc: "Undo url_encode: each %XX becomes its byte, and the bytes are read as UTF-8. A % without two hex digits after it, or a result that is not UTF-8, is E_BAD_ARG. A + stays a + (it is not turned into a space; that is form encoding, not RFC 3986). Pure; the subject may be piped in.",
+        examples: &[
+            (r#"url_decode("a%20b%2Fc")"#, r#"a b/c"#),
+            (r#"("100%25" | url_decode)"#, r#"100%"#),
+            (r#"(try { url_decode("%zz") } catch e { e.error.code })"#, "E_BAD_ARG"),
         ],
     },
     Signature {
@@ -9126,8 +9156,10 @@ pub static SIGNATURES: &[Signature] = &[
         subject: Some(Ty::Str),
         params: &[opt("data", Ty::Str, "text to hash; omit when piping it in"), opt("algorithm", Ty::Str, "md5, sha1, sha256 (default), sha384 or sha512")],
         returns: "String",
-        doc: "Hex digest of a string. An unknown algorithm is refused, never substituted. Called with two arguments, `crypto.hash(\"sha256\", data)` names the algorithm first.",
+        doc: "Hex digest of a string. An unknown algorithm is refused, never substituted. Called with two arguments, `crypto.hash(\"sha256\", data)` names the algorithm first. A lone algorithm name with nothing piped in (`crypto.hash(\"sha256\")`) is E_BAD_ARG, not the hash of that word.",
         examples: &[
+            (r#"(try { crypto_hash("sha256") } catch e { e.error.code })"#, "E_BAD_ARG"),
+            (r#"("hello" | crypto_hash("md5"))"#, r#"5d41402abc4b2a76b9719d911017c592"#),
             (r#"crypto_hash("hello")"#, r#"2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"#),
             (r#"crypto_hash("hello", "md5")"#, r#"5d41402abc4b2a76b9719d911017c592"#),
             (r#"crypto_hash("sha256", "hello")"#, r#"2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"#),
@@ -9209,9 +9241,11 @@ pub static SIGNATURES: &[Signature] = &[
         subject: Some(Ty::Str),
         params: &[],
         returns: "String",
-        doc: "Decode base64 to text. Whitespace is ignored; invalid base64 or binary output is refused.",
+        doc: "Decode base64 to text. Whitespace is ignored, padding is optional, and the URL-safe alphabet (- and _ for + and /) is accepted. Invalid base64 or binary output is refused.",
         examples: &[
             (r#"base64_decode("aGVsbG8=")"#, r#"hello"#),
+            (r#"base64_decode("aGVsbG8")"#, r#"hello"#),
+            (r#"base64_decode("Pz8_")"#, r#"???"#),
         ],
     },
     Signature {
@@ -11669,8 +11703,9 @@ pub static SIGNATURES: &[Signature] = &[
             rest("files", Ty::Str, "one or more files to add"),
         ],
         returns: "Bool",
-        doc: "Create a zip archive from files. An existing archive is refused (use zip_add). A failure is E_TOOL_FAILED with the reason, and the archive that the run started is removed. Windows uses PowerShell Compress-Archive.",
+        doc: "Create a zip archive from files and folders, in-process on every platform. A folder is stored with everything in it, empty folders included; each member is stored under its last path component. An existing archive is refused (use zip_add); a missing member is E_NOT_FOUND; two members with one stored name are E_BAD_ARG. A failed run removes the archive it started.",
         examples: &[
+            (r#"(try { zip_create("out.zip", "no-such-file.txt") } catch e { e.error.code })"#, "E_NOT_FOUND"),
             (r#"(try { zip_create("out.zip") } catch e { e.error.code })"#, "E_BAD_ARG"),
             (r#"(try { zip_create("out.zip", "-TT") } catch e { e.error.code })"#, "E_BAD_ARG"),
         ],
@@ -11686,7 +11721,7 @@ pub static SIGNATURES: &[Signature] = &[
             rest("files", Ty::Str, "one or more files to add or refresh"),
         ],
         returns: "Bool",
-        doc: "Add or refresh files in an existing zip archive (zip -u, or Compress-Archive -Update on Windows). A missing archive is E_NOT_FOUND; it is not created. A failure is E_TOOL_FAILED with the reason.",
+        doc: "Add or refresh files and folders in an existing zip archive, in-process: a member whose stored name the archive already holds replaces that entry, and the rest are kept. A missing archive is E_NOT_FOUND; it is not created. A missing member is E_NOT_FOUND. A file that is not a zip is E_BAD_ARG.",
         examples: &[
             (r#"(try { zip_add("-TT", "a.txt") } catch e { e.error.code })"#, "E_BAD_ARG"),
             (r#"(try { zip_add("out.zip") } catch e { e.error.code })"#, "E_BAD_ARG"),
@@ -11700,7 +11735,7 @@ pub static SIGNATURES: &[Signature] = &[
         subject: None,
         params: &[req("archive", Ty::Str, "a .zip file"), opt("dest", Ty::Str, "directory to extract into; default the current one")],
         returns: "Bool",
-        doc: "Extract a zip archive. Entries that would land outside the destination (absolute names, drive or UNC paths, `..` components) are refused with E_POLICY_DENY before anything is written. A failure is E_TOOL_FAILED with the reason.",
+        doc: "Extract a zip archive. Entries that would land outside the destination (absolute names, drive or UNC paths, `..` components) are refused with E_POLICY_DENY before anything is written. Extracted in-process: files and empty folders are written under the destination (created if missing), symbolic-link entries are not created, and true is returned only after the entries were written. A file that is not a zip is E_BAD_ARG; a missing one is E_NOT_FOUND.",
         examples: &[
             (r#"unzip("tests/fixtures/archives/sample.zip", fs_tempdir("ae_zip"))"#, r#"true"#),
             (r#"unzip("no-such.zip")"#, r#"error: E_TOOL_FAILED"#),

@@ -303,6 +303,8 @@ typeof
 uniq
 unique
 upper
+url_decode
+url_encode
 values
 where
 where-object
