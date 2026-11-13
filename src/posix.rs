@@ -1923,9 +1923,12 @@ impl Shell {
             *have = true;
             return;
         }
-        let starts_ws = value.starts_with(|c: char| c.is_ascii_whitespace());
-        let ends_ws = value.ends_with(|c: char| c.is_ascii_whitespace());
-        let pieces: Vec<&str> = value.split_ascii_whitespace().collect();
+        let ifs = self
+            .vars
+            .get("IFS")
+            .cloned()
+            .unwrap_or_else(|| " \t\n".to_string());
+        let (pieces, starts_ws, ends_ws) = ifs_split(value, &ifs);
         if pieces.is_empty() {
             if starts_ws && *have {
                 fields.push((std::mem::take(cur), std::mem::take(mask)));
@@ -4194,6 +4197,49 @@ fn unescape_echo(s: &str) -> (Vec<u8>, bool) {
     (out, false)
 }
 
+/// Field splitting of an unquoted expansion by `ifs`, as POSIX gives it: IFS
+/// white space collapses and trims, each other IFS character delimits on its
+/// own (`a,,b` is a, "", b), and an empty IFS splits nothing. Returns the
+/// fields, whether the value began with a delimiter and whether it ended with
+/// one.
+fn ifs_split(value: &str, ifs: &str) -> (Vec<String>, bool, bool) {
+    if ifs.is_empty() {
+        let v = if value.is_empty() {
+            vec![]
+        } else {
+            vec![value.to_string()]
+        };
+        return (v, false, false);
+    }
+    let is_ws = |c: char| matches!(c, ' ' | '\t' | '\n') && ifs.contains(c);
+    let is_sep = |c: char| ifs.contains(c);
+    let mut out = Vec::new();
+    let mut rest = value.trim_start_matches(|c: char| is_ws(c));
+    let mut starts = rest.len() != value.len();
+    if rest.starts_with(|c: char| is_sep(c)) {
+        starts = true;
+    }
+    let mut trailing = false;
+    while !rest.is_empty() {
+        let end = rest.find(|c: char| is_sep(c)).unwrap_or(rest.len());
+        out.push(rest[..end].to_string());
+        rest = &rest[end..];
+        trailing = false;
+        if rest.is_empty() {
+            break;
+        }
+        let t = rest.trim_start_matches(|c: char| is_ws(c));
+        trailing = true;
+        rest = t;
+        if let Some(c) = rest.chars().next() {
+            if is_sep(c) {
+                rest = rest[c.len_utf8()..].trim_start_matches(|c: char| is_ws(c));
+            }
+        }
+    }
+    (out, starts, trailing)
+}
+
 /// `read`'s field splitting, as POSIX gives it: the line as `count` values.
 /// Leading and trailing IFS white space is dropped; each run of IFS white space
 /// delimits, and each non-white IFS character delimits on its own, so two in a
@@ -4805,7 +4851,7 @@ fn mkdir(args: &[String], sink: &mut Sink) -> Util {
         return Util::Decline;
     };
     if dirs.is_empty() {
-        sink.eline("mkdir: missing operand");
+        sink.eline("mkdir: missing operand\nTry 'mkdir --help' for more information.");
         return Util::Done(1);
     }
     let parents = flags.contains(&'p');
@@ -4849,7 +4895,7 @@ fn touch(args: &[String], sink: &mut Sink) -> Util {
         return Util::Decline;
     };
     if files.is_empty() {
-        sink.eline("touch: missing file operand");
+        sink.eline("touch: missing file operand\nTry 'touch --help' for more information.");
         return Util::Done(1);
     }
     let mut status = 0;
@@ -4970,6 +5016,10 @@ fn tr(args: &[String], stdin: &mut Input, sink: &mut Sink) -> Util {
     };
     let delete = flags.contains(&'d');
     let squeeze = flags.contains(&'s');
+    if sets.is_empty() {
+        sink.eline("tr: missing operand\nTry 'tr --help' for more information.");
+        return Util::Done(1);
+    }
     let parsed: Option<Vec<Vec<char>>> = sets.iter().map(|s| tr_set(s)).collect();
     let Some(parsed) = parsed else {
         return Util::Decline;
@@ -4980,7 +5030,7 @@ fn tr(args: &[String], stdin: &mut Input, sink: &mut Sink) -> Util {
         (false, _, [a, b]) if !b.is_empty() => (a.clone(), b.clone()),
         (false, false, [_]) => {
             sink.eline(&format!(
-                "tr: missing operand after '{}'\nTry 'tr --help' for more information.",
+                "tr: missing operand after '{}'\nTwo strings must be given when translating.\nTry 'tr --help' for more information.",
                 sets[0]
             ));
             return Util::Done(1);
@@ -5207,10 +5257,15 @@ fn wc(args: &[String], stdin: &mut Input, sink: &mut Sink) -> Util {
     };
     let ncols = usize::from(l) + usize::from(w) + usize::from(c) + usize::from(m);
     // GNU pads to the width of the total byte count when every input is a
-    // file, to 7 when one is a pipe, and not at all for a single number.
+    // regular file, to 7 when one is not (a pipe, /dev/null, a directory),
+    // and not at all for a single number.
     let width = if ncols == 1 && rows.len() <= 1 {
         0
-    } else if from_stdin || files.iter().any(|f| f == "-") {
+    } else if from_stdin
+        || files.iter().any(|f| {
+            f == "-" || f == "/dev/null" || std::fs::metadata(f).is_ok_and(|m| !m.is_file())
+        })
+    {
         7
     } else {
         let sizes: u64 = files
@@ -5518,7 +5573,9 @@ fn grep(args: &[String], stdin: &mut Input, sink: &mut Sink) -> Util {
     }
     if patterns.is_empty() {
         if ops.is_empty() {
-            sink.eline("Usage: grep [OPTION]... PATTERNS [FILE]...");
+            sink.eline(
+                "Usage: grep [OPTION]... PATTERNS [FILE]...\nTry 'grep --help' for more information.",
+            );
             return Util::Done(2);
         }
         patterns.push(ops.remove(0));
@@ -6201,7 +6258,7 @@ fn cut(args: &[String], stdin: &mut Input, sink: &mut Sink) -> Util {
         i += 1;
     }
     if fields.is_none() && chars.is_none() {
-        sink.eline("cut: you must specify a list of bytes, characters, or fields");
+        sink.eline("cut: you must specify a list of bytes, characters, or fields\nTry 'cut --help' for more information.");
         return Util::Done(1);
     }
     let within =
