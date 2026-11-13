@@ -576,14 +576,15 @@ fn run(mut cli: Cli) -> Result<()> {
     if cli.zsh && file.is_none() && cli.command.is_none() {
         let mut buf = String::new();
         io::stdin().read_to_string(&mut buf)?;
-        let code = transpile::zsh::transpile_zsh_to_ae(&buf)?;
+        run_zsh_or_fall_back(&buf, None, &[]);
+        let code = transpile_zsh_checked(&buf)?;
         return run_code(&code);
     }
     // Handle pwsh mode with stdin
     if cli.pwsh && file.is_none() && cli.command.is_none() {
         let mut buf = String::new();
         io::stdin().read_to_string(&mut buf)?;
-        let code = transpile::powershell::transpile_powershell_to_ae(&buf)?;
+        let code = transpile_pwsh_checked(&buf)?;
         return run_code(&code);
     }
     // Handle agentic mode with stdin
@@ -634,9 +635,10 @@ fn run(mut cli: Cli) -> Result<()> {
             run_posix_or_fall_back(&cmd, None, &c_args);
             transpile::bash::transpile_bash_to_ae(&cmd)?
         } else if cli.zsh {
-            transpile::zsh::transpile_zsh_to_ae(&cmd)?
+            run_zsh_or_fall_back(&cmd, None, &c_args);
+            transpile_zsh_checked(&cmd)?
         } else if cli.pwsh {
-            transpile::powershell::transpile_powershell_to_ae(&cmd)?
+            transpile_pwsh_checked(&cmd)?
         } else if cli.agentic {
             transpile::agentic::transpile_agentic_to_ae(&cmd)?
         } else {
@@ -1360,10 +1362,13 @@ fn run_file(path: &str, explicit_mode: Option<TranspileMode>) -> Result<()> {
                     format!("bash\u{2192}ironshell transpile failed for {}", path)
                 })?
             }
-            TranspileMode::Zsh => transpile::zsh::transpile_zsh_to_ae(&code)
-                .with_context(|| format!("zsh\u{2192}ironshell transpile failed for {}", path))?,
-            TranspileMode::PowerShell => transpile::powershell::transpile_powershell_to_ae(&code)
-                .with_context(|| {
+            TranspileMode::Zsh => {
+                run_zsh_or_fall_back(&code, Some(path), iron_shell::builtins::script_args());
+                transpile_zsh_checked(&code).with_context(|| {
+                    format!("zsh\u{2192}ironshell transpile failed for {}", path)
+                })?
+            }
+            TranspileMode::PowerShell => transpile_pwsh_checked(&code).with_context(|| {
                 format!("powershell\u{2192}ironshell transpile failed for {}", path)
             })?,
             TranspileMode::Agentic => transpile::agentic::transpile_agentic_to_ae(&code)
@@ -1448,4 +1453,68 @@ fn run_code_as(code: &str, surface: iron_shell::record::Surface) -> Result<()> {
         std::process::exit(exit_code);
     }
     Ok(())
+}
+
+/// Run zsh source natively when it is plain POSIX once zsh's own words are
+/// rewritten (`src/transpile/zsh.rs`), exiting with its status. Returns only
+/// for source that is not run that way (a lone `**` command, or source outside
+/// the POSIX subset when `IRONSHELL_ALLOW_SH` lets the transpiler take it);
+/// otherwise a refusal names the construct and line, and nothing has run.
+fn run_zsh_or_fall_back(src: &str, script: Option<&str>, args: &[String]) {
+    match transpile::zsh::route(src) {
+        Ok(transpile::zsh::Route::Posix(posix)) => run_posix_or_fall_back(&posix, script, args),
+        Ok(transpile::zsh::Route::Transpile) => {}
+        Err(r) => {
+            let e = iron_shell::safety::policy_deny(
+                "zsh",
+                format!(
+                    "{} at line {} is not translated, so nothing in this script was run",
+                    r.construct, r.line
+                ),
+                r.hint,
+            );
+            iron_shell::repl::report_error(&e);
+            std::process::exit(iron_shell::repl::exit_status_for(&e));
+        }
+    }
+}
+
+/// Transpile zsh for the evaluator. A construct handed to `sh(...)` is refused
+/// here, by name and line and before anything runs, unless `sh` is allowed.
+fn transpile_zsh_checked(src: &str) -> Result<String> {
+    let (code, fallbacks) = transpile::zsh::transpile_zsh_with_report(src)?;
+    refuse_sh_fallbacks("zsh", &fallbacks);
+    Ok(code)
+}
+
+/// [`transpile_zsh_checked`] for PowerShell.
+fn transpile_pwsh_checked(src: &str) -> Result<String> {
+    let (code, fallbacks) = transpile::powershell::transpile_powershell_with_report(src)?;
+    refuse_sh_fallbacks("powershell", &fallbacks);
+    Ok(code)
+}
+
+fn refuse_sh_fallbacks(shell: &str, fallbacks: &[transpile::Fallback]) {
+    let Some(f) = fallbacks.first() else {
+        return;
+    };
+    if iron_shell::security::validate_sh_allowed().is_ok() {
+        return;
+    }
+    let agent = iron_shell::safety::current_mode() == iron_shell::safety::Mode::Agent;
+    let hint = if agent {
+        format!("rewrite it with commands this {shell} transpiler maps, or write it in ish")
+    } else {
+        format!("rewrite it with commands this {shell} transpiler maps, write it in ish, or set IRONSHELL_ALLOW_SH=true to run the untranslated parts through {shell}, outside the effect gate")
+    };
+    let e = iron_shell::safety::policy_deny(
+        shell,
+        format!(
+            "{} at line {} is not translated to IronShell, so nothing in this script was run",
+            f.construct, f.line
+        ),
+        hint,
+    );
+    iron_shell::repl::report_error(&e);
+    std::process::exit(iron_shell::repl::exit_status_for(&e));
 }

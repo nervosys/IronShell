@@ -59,14 +59,18 @@ fn cmdlet_get_childitem() {
 fn cmdlet_get_content() {
     let ps = "Get-Content 'file.txt'";
     let ae = transpile_powershell_to_ae(ps).expect("transpile ok");
-    assert!(ae.contains("file.read"), "got:\n{}", ae);
+    assert!(
+        ae.contains("sh(") && ae.contains("Get-Content"),
+        "got:\n{}",
+        ae
+    );
 }
 
 #[test]
 fn cmdlet_write_host() {
     let ps = "Write-Host 'Hello'";
     let ae = transpile_powershell_to_ae(ps).expect("transpile ok");
-    assert!(ae.contains("echo("), "got:\n{}", ae);
+    assert!(ae.contains("print("), "got:\n{}", ae);
 }
 
 #[test]

@@ -1,54 +1,70 @@
 //! PowerShell → IronShell Shell transpiler (compat mode).
 //!
 //! This is a pragmatic, line-oriented transpiler for a *useful subset* of PowerShell:
-//!   - simple commands (cmdlets), args, and pipelines (`|`)
+//!   - simple commands (cmdlets), args, and pipelines (`|`), split on `;`
 //!   - single quotes:  'literal string'
 //!   - double quotes:  expand $V and ${V} as IronShell string interpolations `${V}`
 //!   - $VAR as a standalone arg becomes an identifier `VAR`
 //!   - simple assignments: $NAME = value  →  let NAME = <expr>
-//!   - common cmdlets mapped to IronShell builtins
+//!   - arithmetic expression statements (`$x + 2`)
+//!   - a small table of cmdlets whose IronShell target takes the same arguments
 //!
-//! Fallback: if a line contains constructs we don't yet handle,
-//! we emit:  sh(["pwsh","-c", "<original line>"])
+//! Output is written as each statement runs: `Write-Host`, `Write-Output` and
+//! every value-producing statement become `print(...)`, so a multi-statement
+//! script prints each result, in order.
+//!
+//! What it cannot translate faithfully it does not guess at. A `-Parameter` of
+//! a mapped cmdlet, a `$env:X` or `$(...)` expression, a here-string and the
+//! like make the transpile fail before anything runs. Constructs that are
+//! handed to `sh(["pwsh","-c", ...])` (blocks, operators, unmapped commands)
+//! are reported through [`transpile_powershell_with_report`], so the caller
+//! can refuse them by name and line when `sh` is not allowed.
+//!
+//! Variables whose names are IronShell module names (`$file`, `$user`) are
+//! renamed with an `sh_` prefix in the translation.
 //!
 //! Output: IronShell source as a String.
 
-use anyhow::Result;
+use super::{Fallback, Kind};
+use anyhow::{anyhow, Result};
 
 /// Transpile a whole PowerShell script (multi-line) to IronShell code.
 /// Multi-line blocks (if/foreach/for/while/switch/try/function/class) are
 /// accumulated and emitted as a single `sh(["pwsh","-c","..."])` call rather
 /// than falling back line-by-line.
 pub fn transpile_powershell_to_ae(src: &str) -> Result<String> {
+    transpile_powershell_with_report(src).map(|(code, _)| code)
+}
+
+/// [`transpile_powershell_to_ae`], plus every construct that was handed to
+/// `sh(...)` rather than translated, with its line.
+pub fn transpile_powershell_with_report(src: &str) -> Result<(String, Vec<Fallback>)> {
     let mut out = String::new();
     out.push_str("// Transpiled from PowerShell \u{2192} IronShell (compat mode)\n");
 
-    let mut in_multiline_string = false;
-    let mut multiline_buffer = String::new();
+    let mut fb: Vec<Fallback> = Vec::new();
+    let mut in_block_comment = false;
     let mut brace_depth: i32 = 0;
     let mut block_lines: Vec<String> = Vec::new();
+    let mut block_start: usize = 0;
 
-    for raw_line in src.lines() {
+    for (idx, raw_line) in src.lines().enumerate() {
+        let line_no = idx + 1;
         let line = raw_line.trim();
 
-        // Handle here-strings @" ... "@
-        if in_multiline_string {
-            if line == "\"@" || line == "'@" {
-                in_multiline_string = false;
-                out.push_str(&format!("\"{}\"", escape_string(&multiline_buffer)));
-                out.push('\n');
-                multiline_buffer.clear();
-            } else {
-                multiline_buffer.push_str(raw_line);
-                multiline_buffer.push('\n');
+        if in_block_comment {
+            if line.contains("#>") {
+                in_block_comment = false;
             }
             continue;
         }
 
+        // Here-strings change what the lines after them mean; not translated.
         if line.contains("@\"") || line.contains("@'") {
-            in_multiline_string = true;
-            multiline_buffer.clear();
-            continue;
+            return Err(anyhow!(
+                "powershell line {}: here-strings are not translated; nothing was run",
+                line_no
+            ));
         }
 
         if line.is_empty() {
@@ -78,6 +94,9 @@ pub fn transpile_powershell_to_ae(src: &str) -> Result<String> {
                     line.trim_start_matches("<#").trim_end_matches("#>").trim()
                 ));
             }
+            if !line.contains("#>") {
+                in_block_comment = true;
+            }
             continue;
         }
 
@@ -92,6 +111,10 @@ pub fn transpile_powershell_to_ae(src: &str) -> Result<String> {
                 let full_block = block_lines.join("\n");
                 out.push_str(&render_fallback_pwsh(&full_block));
                 out.push('\n');
+                fb.push(Fallback {
+                    line: block_start,
+                    construct: describe_ps_block(&block_lines[0]),
+                });
                 block_lines.clear();
                 brace_depth = 0;
             }
@@ -101,35 +124,13 @@ pub fn transpile_powershell_to_ae(src: &str) -> Result<String> {
         // New block starting (more open braces than close)
         if openers > closers {
             brace_depth = openers - closers;
+            block_start = line_no;
             block_lines.push(raw_line.to_string());
             continue;
         }
 
-        // Skip if contains complex constructs that need fallback
-        if contains_complex_construct(line) {
-            out.push_str(&render_fallback_pwsh(line));
-            out.push('\n');
-            continue;
-        }
-
-        // Try simple assignment: $VAR = value
-        if let Some(assign) = parse_ps_assignment(line) {
-            out.push_str(&assign);
-            out.push('\n');
-            continue;
-        }
-
-        // Try to parse as a pipeline of commands
-        match parse_ps_pipeline(line) {
-            Ok(cmds) if !cmds.is_empty() => {
-                let ironshell_line = render_ps_pipeline(&cmds);
-                out.push_str(&ironshell_line);
-                out.push('\n');
-            }
-            _ => {
-                out.push_str(&render_fallback_pwsh(line));
-                out.push('\n');
-            }
+        for stmt in split_ps_statements(line) {
+            emit_ps_statement(&stmt, line_no, &mut out, &mut fb)?;
         }
     }
 
@@ -138,9 +139,223 @@ pub fn transpile_powershell_to_ae(src: &str) -> Result<String> {
         let full_block = block_lines.join("\n");
         out.push_str(&render_fallback_pwsh(&full_block));
         out.push('\n');
+        fb.push(Fallback {
+            line: block_start,
+            construct: describe_ps_block(&block_lines[0]),
+        });
     }
 
-    Ok(out)
+    Ok((out, fb))
+}
+
+fn describe_ps_block(first_line: &str) -> String {
+    let t = first_line.trim();
+    let w = t
+        .split(|c: char| c.is_whitespace() || c == '(' || c == '{')
+        .next()
+        .unwrap_or("");
+    match w.to_lowercase().as_str() {
+        "if" | "foreach" | "for" | "while" | "do" | "switch" | "try" | "class" | "enum" => {
+            format!("`{}` block", w.to_lowercase())
+        }
+        "function" | "filter" => "function definition".to_string(),
+        _ => "script block".to_string(),
+    }
+}
+
+fn describe_ps_complex(s: &str) -> String {
+    let w = s
+        .split(|c: char| c.is_whitespace() || c == '(' || c == '{')
+        .next()
+        .unwrap_or("")
+        .to_lowercase();
+    match w.as_str() {
+        "if" | "foreach" | "for" | "while" | "do" | "switch" | "try" | "class" | "enum" => {
+            format!("`{}` statement", w)
+        }
+        "function" => "function definition".to_string(),
+        _ => {
+            if s.contains("$(") {
+                "subexpression `$(...)`".to_string()
+            } else if s.contains(">>") || s.contains("2>&1") || s.contains("*>") {
+                "redirection".to_string()
+            } else {
+                "expression or operator".to_string()
+            }
+        }
+    }
+}
+
+/// Split a line at top-level `;`, outside quotes, parentheses, braces and
+/// brackets; a trailing `# comment` is dropped.
+fn split_ps_statements(line: &str) -> Vec<String> {
+    let chars: Vec<char> = line.chars().collect();
+    let mut out: Vec<String> = Vec::new();
+    let mut cur = String::new();
+    let mut sq = false;
+    let mut dq = false;
+    let mut depth: i32 = 0;
+    let mut i = 0;
+    while i < chars.len() {
+        let ch = chars[i];
+        if ch == '`' && i + 1 < chars.len() {
+            cur.push(ch);
+            cur.push(chars[i + 1]);
+            i += 2;
+            continue;
+        }
+        if ch == '\'' && !dq {
+            sq = !sq;
+        } else if ch == '"' && !sq {
+            dq = !dq;
+        } else if !sq && !dq {
+            match ch {
+                '(' | '{' | '[' => depth += 1,
+                ')' | '}' | ']' => depth -= 1,
+                ';' if depth <= 0 => {
+                    out.push(std::mem::take(&mut cur));
+                    i += 1;
+                    continue;
+                }
+                '#' if cur.is_empty() || cur.ends_with(char::is_whitespace) => break,
+                _ => {}
+            }
+        }
+        cur.push(ch);
+        i += 1;
+    }
+    out.push(cur);
+    out.into_iter()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect()
+}
+
+fn emit_ps_statement(
+    line: &str,
+    line_no: usize,
+    out: &mut String,
+    fb: &mut Vec<Fallback>,
+) -> Result<()> {
+    // Skip if contains complex constructs that need fallback
+    if contains_complex_construct(line) {
+        out.push_str(&render_fallback_pwsh(line));
+        out.push('\n');
+        fb.push(Fallback {
+            line: line_no,
+            construct: describe_ps_complex(line),
+        });
+        return Ok(());
+    }
+
+    // Try simple assignment: $VAR = value
+    if let Some(assign) = parse_ps_assignment(line) {
+        out.push_str(&assign);
+        out.push('\n');
+        return Ok(());
+    }
+
+    // `$x = <command or expression>`: not a literal, so not translated.
+    if line.starts_with('$') && line.contains('=') && is_assignment_target(line) {
+        out.push_str(&render_fallback_pwsh(line));
+        out.push('\n');
+        fb.push(Fallback {
+            line: line_no,
+            construct: "assignment of a command's output or an expression".to_string(),
+        });
+        return Ok(());
+    }
+
+    let toks = split_ps_words(line).map_err(|e| anyhow!("powershell line {}: {}", line_no, e))?;
+
+    // Expression statement: `$x + 2`, `$x`, `"text"`, `5`.
+    let piped = split_ps_pipes(line).map(|p| p.len() > 1).unwrap_or(false);
+    if starts_like_expression(line) && !piped {
+        return match parse_ps_expression(&toks) {
+            Some(expr) => {
+                out.push_str(&format!("print({});\n", expr));
+                Ok(())
+            }
+            None => Err(anyhow!(
+                "powershell line {}: the expression `{}` is not translated (only `+ - * %` between variables, numbers and strings are); nothing was run",
+                line_no,
+                line
+            )),
+        };
+    }
+
+    // Try to parse as a pipeline of commands
+    let cmds =
+        parse_ps_pipeline(line).map_err(|e| anyhow!("powershell line {}: {}", line_no, e))?;
+    if cmds.is_empty() {
+        return Ok(());
+    }
+    let code = render_ps_pipeline(&cmds, line_no, fb)?;
+    out.push_str(&code);
+    out.push('\n');
+    Ok(())
+}
+
+/// `$name =` (and not `==`): the left side of an assignment.
+fn is_assignment_target(line: &str) -> bool {
+    match line.find('=') {
+        Some(eq) => {
+            let lhs = line[..eq]
+                .trim_end_matches(|c: char| "+-*/%".contains(c))
+                .trim();
+            lhs.starts_with('$') && is_ps_ident(&lhs[1..])
+        }
+        None => false,
+    }
+}
+
+fn starts_like_expression(line: &str) -> bool {
+    match line.chars().next() {
+        Some(c) => c == '$' || c == '"' || c == '\'' || c.is_ascii_digit(),
+        None => false,
+    }
+}
+
+/// `operand (op operand)*` with `+ - * %` between variables, numbers and
+/// quoted text, as an IronShell expression. Division is not translated:
+/// PowerShell's `/` yields a double and IronShell's does not always.
+fn parse_ps_expression(toks: &[Token]) -> Option<String> {
+    if toks.is_empty() || toks.len() % 2 == 0 {
+        return None;
+    }
+    let mut out: Vec<String> = Vec::new();
+    for (i, t) in toks.iter().enumerate() {
+        if i % 2 == 1 {
+            match t {
+                Token::Interp(pcs) if pcs.len() == 1 => match &pcs[0] {
+                    Piece::Text(op) if matches!(op.as_str(), "+" | "-" | "*" | "%") => {
+                        out.push(op.clone())
+                    }
+                    _ => return None,
+                },
+                _ => return None,
+            }
+        } else {
+            match t {
+                Token::Single(_) => out.push(render_token_expr(t).ok()?),
+                Token::Interp(pcs) => {
+                    let ok = match pcs.as_slice() {
+                        [Piece::Var(_)] => true,
+                        [Piece::Text(n)] => is_ps_number(n),
+                        _ => pcs
+                            .iter()
+                            .all(|p| matches!(p, Piece::Text(_) | Piece::Var(_))),
+                    };
+                    if !ok {
+                        return None;
+                    }
+                    out.push(render_token_expr(t).ok()?);
+                }
+                _ => return None,
+            }
+        }
+    }
+    Some(out.join(" "))
 }
 
 /* =============================================================================
@@ -259,6 +474,17 @@ fn contains_complex_construct(s: &str) -> bool {
         || s.contains(" -contains ")
         || s.contains(" -in ")
         || s.contains(" -notin ")
+        || s.contains(" -eq ")
+        || s.contains(" -ne ")
+        || s.contains(" -gt ")
+        || s.contains(" -ge ")
+        || s.contains(" -lt ")
+        || s.contains(" -le ")
+        || s.contains(" -and ")
+        || s.contains(" -or ")
+        || s.contains("&&")
+        || s.contains("||")
+        || s.contains(" > ")
         || s.contains("[")     // Type casts/attributes
         || s.contains("::")    // Static method calls
         || s.contains("..") // Range operator
@@ -294,6 +520,10 @@ fn parse_ps_assignment(line: &str) -> Option<String> {
     {
         return None; // +=, -=, etc. - fallback
     }
+    // `==` is not an assignment.
+    if trimmed[eq_pos + 1..].starts_with('=') {
+        return None;
+    }
 
     let var_part = trimmed[1..eq_pos].trim();
     let val_part = trimmed[eq_pos + 1..].trim();
@@ -302,29 +532,26 @@ fn parse_ps_assignment(line: &str) -> Option<String> {
     if !is_ps_ident(var_part) {
         return None;
     }
+    let name = vname(var_part);
 
     // Parse the value
     if val_part.is_empty() {
-        return Some(format!("let {} = null;", var_part));
+        return Some(format!("let {} = null;", name));
     }
 
     // Handle different value types
-    if val_part.starts_with('"') {
-        // Double-quoted string with potential interpolation
-        if let Ok(tok) = parse_ps_token(val_part) {
-            let expr = render_token_expr(&tok);
-            return Some(format!("let {} = {};", var_part, expr));
+    if val_part.starts_with('"') || val_part.starts_with('\'') {
+        // A single quoted token only: `"a" + "b"` is an expression.
+        let toks = split_ps_words(val_part).ok()?;
+        if toks.len() != 1 {
+            return None;
         }
-    } else if val_part.starts_with('\'') {
-        // Single-quoted literal string
-        if let Ok(tok) = parse_ps_token(val_part) {
-            let expr = render_token_expr(&tok);
-            return Some(format!("let {} = {};", var_part, expr));
-        }
+        let expr = render_token_expr(&toks[0]).ok()?;
+        return Some(format!("let {} = {};", name, expr));
     } else if val_part.starts_with('$') {
         // Variable reference
         if let Some(var) = parse_ps_var_ref(val_part) {
-            return Some(format!("let {} = {};", var_part, var));
+            return Some(format!("let {} = {};", name, var));
         }
     } else if val_part.starts_with("@(") {
         // Array literal - simplified handling
@@ -332,26 +559,13 @@ fn parse_ps_assignment(line: &str) -> Option<String> {
             let inner = &val_part[2..end];
             let elements: Vec<&str> = inner.split(',').map(|s| s.trim()).collect();
             let ae_elements: Vec<String> = elements.iter().map(|e| parse_simple_value(e)).collect();
-            return Some(format!("let {} = [{}];", var_part, ae_elements.join(", ")));
+            return Some(format!("let {} = [{}];", name, ae_elements.join(", ")));
         }
     } else if val_part.starts_with("@{") {
         // Hashtable - simplified handling
         return None; // Complex, use fallback
     } else if is_ps_number(val_part) {
-        return Some(format!("let {} = {};", var_part, val_part));
-    } else if val_part == "$true" || val_part.eq_ignore_ascii_case("$true") {
-        return Some(format!("let {} = true;", var_part));
-    } else if val_part == "$false" || val_part.eq_ignore_ascii_case("$false") {
-        return Some(format!("let {} = false;", var_part));
-    } else if val_part == "$null" || val_part.eq_ignore_ascii_case("$null") {
-        return Some(format!("let {} = null;", var_part));
-    } else {
-        // Treat as bare string
-        return Some(format!(
-            "let {} = \"{}\";",
-            var_part,
-            escape_string(val_part)
-        ));
+        return Some(format!("let {} = {};", name, val_part));
     }
 
     None
@@ -364,7 +578,7 @@ fn parse_simple_value(s: &str) -> String {
     } else if s.starts_with('\'') && s.ends_with('\'') {
         format!("\"{}\"", &s[1..s.len() - 1])
     } else if s.starts_with('$') {
-        s[1..].to_string()
+        vname(&s[1..])
     } else if is_ps_number(s) {
         s.to_string()
     } else {
@@ -542,6 +756,17 @@ fn parse_ps_token(s: &str) -> Result<Token> {
     if s.starts_with('"') && s.ends_with('"') && s.len() >= 2 {
         let inner = &s[1..s.len() - 1];
         let pieces = parse_ps_interpolation(inner)?;
+        // Text only: a string, which is not a bare word (`"5"` is not `5`).
+        if pieces.iter().all(|p| matches!(p, Piece::Text(_))) {
+            let text: String = pieces
+                .iter()
+                .map(|p| match p {
+                    Piece::Text(t) => t.as_str(),
+                    Piece::Var(_) => "",
+                })
+                .collect();
+            return Ok(Token::Single(text));
+        }
         return Ok(Token::Interp(pieces));
     }
 
@@ -550,6 +775,15 @@ fn parse_ps_token(s: &str) -> Result<Token> {
         if is_ps_ident(var_name) {
             return Ok(Token::Interp(vec![Piece::Var(var_name.to_string())]));
         }
+    }
+
+    // A `$` left in a bare word is a variable expression we do not read
+    // (`$env:PATH`, `$x.Length`, `$x[0]`): never pass it on as text.
+    if s.contains('$') {
+        return Err(anyhow!(
+            "the variable expression `{}` is not translated (only a plain `$name` is)",
+            s
+        ));
     }
 
     // Plain text
@@ -583,12 +817,12 @@ fn parse_ps_interpolation(s: &str) -> Result<Vec<Piece>> {
             // Parse variable name
             if i + 1 < chars.len() && chars[i + 1] == '{' {
                 // ${variable} form
-                let start = i + 2;
-                if let Some(end) = s[start..].find('}') {
-                    let var_name = &s[start..start + end];
+                let rest: String = chars[i + 2..].iter().collect();
+                if let Some(end) = rest.find('}') {
+                    let var_name = &rest[..end];
                     if is_ps_ident(var_name) {
                         pieces.push(Piece::Var(var_name.to_string()));
-                        i = start + end + 1;
+                        i += 2 + var_name.chars().count() + 1;
                         continue;
                     }
                 }
@@ -601,12 +835,27 @@ fn parse_ps_interpolation(s: &str) -> Result<Vec<Piece>> {
                     j += 1;
                 }
                 if !var_name.is_empty() && is_ps_ident(&var_name) {
+                    // `$env:PATH` is the variable `env:PATH`, not `$env` and text.
+                    if j < chars.len() && chars[j] == ':' {
+                        return Err(anyhow!(
+                            "the variable `${}:...` in a string is not translated",
+                            var_name
+                        ));
+                    }
                     pieces.push(Piece::Var(var_name));
                     i = j;
                     continue;
                 }
             }
 
+            // A `$` that starts an expression we do not read, in a string:
+            // `$(...)`, `$_`, `$?`, `${a b}`. A lone `$` (or `$ `) is text.
+            let next = chars.get(i + 1).copied();
+            if matches!(next, Some(c) if c.is_alphanumeric() || "_{($?^".contains(c)) {
+                return Err(anyhow!(
+                    "the expression after `$` in a double-quoted string is not translated (only `$name` and `${{name}}` are)"
+                ));
+            }
             cur_text.push(ch);
         } else {
             cur_text.push(ch);
@@ -626,109 +875,268 @@ fn parse_ps_interpolation(s: &str) -> Result<Vec<Piece>> {
 Rendering
 ============================================================================= */
 
-fn render_ps_pipeline(cmds: &[PsCommand]) -> String {
-    if cmds.len() == 1 {
-        return render_ps_command(&cmds[0]) + ";";
+fn cmdlet_name_of(tok: &Token) -> Option<String> {
+    match tok {
+        Token::Interp(pieces) if pieces.len() == 1 => match &pieces[0] {
+            Piece::Text(t) => Some(t.clone()),
+            _ => None,
+        },
+        _ => None,
     }
-
-    let parts: Vec<String> = cmds.iter().map(render_ps_command).collect();
-    parts.join(" | ") + ";"
 }
 
-fn render_ps_command(cmd: &PsCommand) -> String {
-    let cmdlet_name = match &cmd.cmdlet {
-        Token::Interp(pieces) => {
-            if pieces.len() == 1 {
-                if let Piece::Text(t) = &pieces[0] {
-                    t.clone()
-                } else {
-                    render_token_expr(&cmd.cmdlet)
-                }
-            } else {
-                render_token_expr(&cmd.cmdlet)
-            }
-        }
-        Token::Single(s) => s.clone(),
-        Token::Parameter(p) => format!("-{}", p),
-        Token::Splat(s) => format!("@{}", s),
-    };
+fn render_ps_pipeline(
+    cmds: &[PsCommand],
+    line_no: usize,
+    fb: &mut Vec<Fallback>,
+) -> Result<String> {
+    let last = cmds.len() - 1;
+    let mut stages: Vec<String> = Vec::new();
+    // Whether the last stage already writes its output, or is run for effect.
+    let mut settled = false;
+    let mut quiet = false;
 
-    // Map common PowerShell cmdlets to IronShell builtins
-    if let Some(mapped) = map_ps_cmdlet(&cmdlet_name) {
-        let args_str = render_ps_args(&cmd.args);
-        if args_str.is_empty() {
-            return mapped.to_string();
-        } else {
-            return format!("{}({})", mapped, args_str);
+    for (i, c) in cmds.iter().enumerate() {
+        let name = match cmdlet_name_of(&c.cmdlet) {
+            Some(n) => n,
+            None => {
+                // A variable as the first stage is a value to pipe on.
+                if i == 0 && cmds.len() > 1 && c.args.is_empty() {
+                    if let Token::Interp(p) = &c.cmdlet {
+                        if let [Piece::Var(_)] = p.as_slice() {
+                            stages.push(
+                                render_token_expr(&c.cmdlet)
+                                    .map_err(|e| anyhow!("powershell line {}: {}", line_no, e))?,
+                            );
+                            continue;
+                        }
+                    }
+                }
+                return Err(anyhow!(
+                    "powershell line {}: a command name that is a variable, string or expression is not translated; nothing was run",
+                    line_no
+                ));
+            }
+        };
+        let lower = name.to_lowercase();
+
+        // Output cmdlets
+        if matches!(lower.as_str(), "write-host" | "write-output" | "echo") {
+            check_ps_params(&name, &c.args, line_no)?;
+            if cmds.len() == 1 {
+                if lower == "write-host" {
+                    stages.push(format!("print({})", ps_joined(&c.args, line_no)?));
+                } else if c.args.is_empty() {
+                    stages.push("null".to_string());
+                } else {
+                    let mut prints = Vec::new();
+                    for a in &c.args {
+                        prints.push(format!(
+                            "print({})",
+                            render_token_expr(a).map_err(|e| anyhow!(
+                                "powershell line {}: {}",
+                                line_no,
+                                e
+                            ))?
+                        ));
+                    }
+                    stages.push(prints.join("; "));
+                }
+                settled = true;
+                continue;
+            }
+            if i == 0 && lower != "write-host" {
+                let exprs: Vec<String> = c
+                    .args
+                    .iter()
+                    .map(|a| {
+                        render_token_expr(a)
+                            .map_err(|e| anyhow!("powershell line {}: {}", line_no, e))
+                    })
+                    .collect::<Result<Vec<_>>>()?;
+                stages.push(match exprs.len() {
+                    0 => "null".to_string(),
+                    1 => exprs[0].clone(),
+                    _ => format!("[{}]", exprs.join(", ")),
+                });
+                continue;
+            }
+            fb.push(Fallback {
+                line: line_no,
+                construct: format!("`{}` inside a pipeline", name),
+            });
+            stages.push(render_generic_call(&name, &c.args));
+            if i == last {
+                settled = true;
+            }
+            continue;
+        }
+
+        if let Some((target, kind)) = map_ps_cmdlet(&lower) {
+            let args = normalize_ps_args(&lower, &c.args);
+            check_ps_params(&name, &args, line_no)?;
+            let rendered: Vec<String> = args
+                .iter()
+                .map(|a| {
+                    render_token_expr(a).map_err(|e| anyhow!("powershell line {}: {}", line_no, e))
+                })
+                .collect::<Result<Vec<_>>>()?;
+            stages.push(format!("{}({})", target, rendered.join(", ")));
+            if i == last {
+                quiet = kind == Kind::Quiet;
+            }
+            continue;
+        }
+
+        // No faithful mapping: hand it to sh(), and say so.
+        fb.push(Fallback {
+            line: line_no,
+            construct: format!("command `{}`", name),
+        });
+        stages.push(render_generic_call(&name, &c.args));
+        if i == last {
+            settled = true;
         }
     }
 
-    // Generic command - use sh() wrapper
-    let mut all_args = vec![json_string_literal(&cmdlet_name)];
-    for arg in &cmd.args {
+    let mut code = stages.join(" | ");
+    if !settled && !quiet {
+        code.push_str(" | print()");
+    }
+    code.push(';');
+    if quiet && !settled {
+        code.push_str("\nnull;");
+    }
+    Ok(code)
+}
+
+fn render_generic_call(name: &str, args: &[Token]) -> String {
+    let mut all_args = vec![json_string_literal(name)];
+    for arg in args {
         all_args.push(render_token_as_sh_arg(arg));
     }
     format!("sh([{}])", all_args.join(", "))
 }
 
-fn render_ps_args(args: &[Token]) -> String {
-    // Convert PowerShell args to IronShell function args
-    let mut result = Vec::new();
-    let mut i = 0;
-
-    while i < args.len() {
-        match &args[i] {
-            Token::Parameter(param) => {
-                // Check if next arg is a value
-                if i + 1 < args.len() {
-                    match &args[i + 1] {
-                        Token::Parameter(_) => {
-                            // Switch parameter (no value)
-                            result.push(format!("{}: true", param));
-                        }
-                        _ => {
-                            // Parameter with value
-                            let value = render_token_expr(&args[i + 1]);
-                            result.push(format!("{}: {}", param, value));
-                            i += 1;
-                        }
-                    }
-                } else {
-                    // Last arg is a switch
-                    result.push(format!("{}: true", param));
-                }
-            }
-            _ => {
-                result.push(render_token_expr(&args[i]));
+/// `Start-Sleep -Seconds 5` is `sleep(5)`; every other parameter is left as it
+/// is, and refused by [`check_ps_params`].
+fn normalize_ps_args(lower: &str, args: &[Token]) -> Vec<Token> {
+    if matches!(lower, "start-sleep" | "sleep") && args.len() == 2 {
+        if let Token::Parameter(p) = &args[0] {
+            if p.eq_ignore_ascii_case("seconds") && !matches!(args[1], Token::Parameter(_)) {
+                return vec![args[1].clone()];
             }
         }
-        i += 1;
     }
-
-    result.join(", ")
+    args.to_vec()
 }
 
-fn render_token_expr(tok: &Token) -> String {
+/// A `-Parameter` is a named argument the IronShell target does not take:
+/// refuse it by name rather than pass it as data.
+fn check_ps_params(name: &str, args: &[Token], line_no: usize) -> Result<()> {
+    for a in args {
+        match a {
+            Token::Parameter(p) => {
+                return Err(anyhow!(
+                    "powershell line {}: the parameter `-{}` of `{}` is not translated; nothing was run",
+                    line_no,
+                    p,
+                    name
+                ));
+            }
+            Token::Splat(s) => {
+                return Err(anyhow!(
+                    "powershell line {}: the splatted `@{}` in `{}` is not translated; nothing was run",
+                    line_no,
+                    s,
+                    name
+                ));
+            }
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
+/// The words of a `Write-Host`, joined by single spaces, as one expression.
+fn ps_joined(args: &[Token], line_no: usize) -> Result<String> {
+    if args.is_empty() {
+        return Ok("\"\"".to_string());
+    }
+    if args.len() == 1 {
+        return render_token_expr(&args[0])
+            .map_err(|e| anyhow!("powershell line {}: {}", line_no, e));
+    }
+    let mut s = String::from("\"");
+    for (i, a) in args.iter().enumerate() {
+        if i > 0 {
+            s.push(' ');
+        }
+        match a {
+            Token::Single(t) => {
+                if t.contains("${") {
+                    return Err(anyhow!(
+                        "powershell line {}: single-quoted text containing `${{` would be interpolated by IronShell; nothing was run",
+                        line_no
+                    ));
+                }
+                s.push_str(&escape_string(t));
+            }
+            Token::Interp(pieces) => {
+                for p in pieces {
+                    match p {
+                        Piece::Text(t) => s.push_str(&escape_string(t)),
+                        Piece::Var(v) => {
+                            s.push_str("${");
+                            s.push_str(&vname(v));
+                            s.push('}');
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    s.push('"');
+    Ok(s)
+}
+
+fn render_token_expr(tok: &Token) -> Result<String> {
     match tok {
-        Token::Single(s) => format!("\"{}\"", escape_string(s)),
-        Token::Parameter(p) => format!("\"-{}\"", p),
-        Token::Splat(s) => s.clone(), // Pass as variable
+        Token::Single(s) => {
+            // IronShell interpolates `${...}` in single quotes too.
+            if s.contains("${") {
+                return Err(anyhow!(
+                    "single-quoted text containing `${{` would be interpolated by IronShell"
+                ));
+            }
+            Ok(format!("\"{}\"", escape_string(s)))
+        }
+        Token::Parameter(p) => Ok(format!("\"-{}\"", p)),
+        Token::Splat(s) => Ok(vname(s)), // Pass as variable
         Token::Interp(pieces) => {
             if pieces.len() == 1 {
                 match &pieces[0] {
-                    Piece::Text(t) => format!("\"{}\"", escape_string(t)),
-                    Piece::Var(v) => v.clone(),
+                    // A bare number is a number; any other bare word is text.
+                    Piece::Text(t) if is_ps_number(t) => Ok(t.clone()),
+                    Piece::Text(t) => Ok(format!("\"{}\"", escape_string(t))),
+                    Piece::Var(v) => Ok(vname(v)),
                 }
             } else {
-                // Build interpolated string
-                let mut parts = Vec::new();
+                // Build an interpolated string
+                let mut s = String::from("\"");
                 for piece in pieces {
                     match piece {
-                        Piece::Text(t) => parts.push(format!("\"{}\"", escape_string(t))),
-                        Piece::Var(v) => parts.push(format!("str({})", v)),
+                        Piece::Text(t) => s.push_str(&escape_string(t)),
+                        Piece::Var(v) => {
+                            s.push_str("${");
+                            s.push_str(&vname(v));
+                            s.push('}');
+                        }
                     }
                 }
-                format!("({})", parts.join(" + "))
+                s.push('"');
+                Ok(s)
             }
         }
     }
@@ -743,11 +1151,11 @@ fn render_token_as_sh_arg(tok: &Token) -> String {
             if pieces.len() == 1 {
                 match &pieces[0] {
                     Piece::Text(t) => json_string_literal(t),
-                    Piece::Var(v) => v.clone(), // Variable reference
+                    Piece::Var(v) => vname(v), // Variable reference
                 }
             } else {
                 // Complex interpolation - render as expression
-                render_token_expr(tok)
+                render_token_expr(tok).unwrap_or_else(|_| "\"\"".to_string())
             }
         }
     }
@@ -757,175 +1165,127 @@ fn render_token_as_sh_arg(tok: &Token) -> String {
 Cmdlet mapping
 ============================================================================= */
 
-fn map_ps_cmdlet(name: &str) -> Option<&'static str> {
-    // Map common PowerShell cmdlets to IronShell builtins
-    // Case-insensitive matching — uses module.func dot notation for consistency
-    match name.to_lowercase().as_str() {
-        // Output
-        "write-host" | "write-output" | "echo" => Some("echo"),
+/// Cmdlet (lower case) → (IronShell target, kind). Only cmdlets whose target
+/// takes the same positional arguments are listed; `-Parameters` are refused
+/// rather than passed on, and everything else is handed to `sh(...)` and
+/// refused by name when `sh` is not allowed. Every target is checked to
+/// resolve by `tests/round30_transpile.rs`. (`Write-Host`, `Write-Output` and
+/// `echo` are handled separately: they print.)
+pub const PS_MAP: &[(&str, &str, Kind)] = &[
+    // Navigation
+    ("get-location", "pwd", Kind::Value),
+    ("pwd", "pwd", Kind::Value),
+    ("gl", "pwd", Kind::Value),
+    ("set-location", "cd", Kind::Quiet),
+    ("cd", "cd", Kind::Quiet),
+    ("sl", "cd", Kind::Quiet),
+    ("chdir", "cd", Kind::Quiet),
+    // Files
+    ("get-childitem", "ls", Kind::Value),
+    ("dir", "ls", Kind::Value),
+    ("ls", "ls", Kind::Value),
+    ("gci", "ls", Kind::Value),
+    ("get-item", "stat", Kind::Value),
+    ("gi", "stat", Kind::Value),
+    ("set-content", "file.write", Kind::Quiet),
+    ("sc", "file.write", Kind::Quiet),
+    ("add-content", "file.append", Kind::Quiet),
+    ("ac", "file.append", Kind::Quiet),
+    ("copy-item", "cp", Kind::Quiet),
+    ("copy", "cp", Kind::Quiet),
+    ("cp", "cp", Kind::Quiet),
+    ("cpi", "cp", Kind::Quiet),
+    ("move-item", "mv", Kind::Quiet),
+    ("move", "mv", Kind::Quiet),
+    ("mv", "mv", Kind::Quiet),
+    ("mi", "mv", Kind::Quiet),
+    ("remove-item", "rm", Kind::Quiet),
+    ("del", "rm", Kind::Quiet),
+    ("rm", "rm", Kind::Quiet),
+    ("ri", "rm", Kind::Quiet),
+    ("erase", "rm", Kind::Quiet),
+    // Processes
+    ("get-process", "proc.list", Kind::Value),
+    ("ps", "proc.list", Kind::Value),
+    ("gps", "proc.list", Kind::Value),
+    ("stop-process", "proc.kill", Kind::Quiet),
+    ("spps", "proc.kill", Kind::Quiet),
+    // Date/time
+    ("get-date", "now_iso", Kind::Value),
+    // Pipeline operations
+    ("measure-object", "len", Kind::Value),
+    ("sort-object", "sort", Kind::Value),
+    ("get-unique", "arr.unique", Kind::Value),
+    // JSON
+    ("convertto-json", "json.stringify", Kind::Value),
+    ("convertfrom-json", "json.parse", Kind::Value),
+    // Web
+    ("invoke-webrequest", "http.get", Kind::Value),
+    ("iwr", "http.get", Kind::Value),
+    ("invoke-restmethod", "http.json_get", Kind::Value),
+    ("irm", "http.json_get", Kind::Value),
+    // Clipboard
+    ("get-clipboard", "clip.get", Kind::Value),
+    ("set-clipboard", "clip.set", Kind::Quiet),
+    // Services
+    ("get-service", "svc.list", Kind::Value),
+    ("start-service", "svc.start", Kind::Quiet),
+    ("stop-service", "svc.stop", Kind::Quiet),
+    ("restart-service", "svc.restart", Kind::Quiet),
+    // System info
+    ("hostname", "hostname", Kind::Value),
+    ("get-computerinfo", "sys.info", Kind::Value),
+    ("get-culture", "sys.locale", Kind::Value),
+    // Network
+    ("test-connection", "net.ping", Kind::Value),
+    ("resolve-dnsname", "net.dns_lookup", Kind::Value),
+    ("get-netadapter", "net.interfaces", Kind::Value),
+    ("get-netipaddress", "net.ip", Kind::Value),
+    ("get-nettcpconnection", "net.connections", Kind::Value),
+    // Help
+    ("get-help", "help", Kind::Value),
+    // Misc
+    ("clear-host", "clear", Kind::Quiet),
+    ("cls", "clear", Kind::Quiet),
+    ("clear", "clear", Kind::Quiet),
+    ("exit", "exit", Kind::Quiet),
+    ("start-sleep", "sleep", Kind::Quiet),
+    ("sleep", "sleep", Kind::Quiet),
+];
 
-        // Navigation
-        "get-location" | "pwd" => Some("pwd"),
-        "set-location" | "cd" | "sl" | "chdir" => Some("cd"),
-        "push-location" | "pushd" => Some("cd"),
-        "pop-location" | "popd" => Some("cd"),
-
-        // File operations
-        "get-childitem" | "dir" | "ls" | "gci" => Some("ls"),
-        "get-content" | "cat" | "type" | "gc" => Some("file.read"),
-        "set-content" | "sc" => Some("file.write"),
-        "add-content" | "ac" => Some("file.append"),
-        "copy-item" | "copy" | "cp" | "cpi" => Some("file.copy"),
-        "move-item" | "move" | "mv" | "mi" => Some("file.move"),
-        "remove-item" | "del" | "rm" | "ri" | "erase" | "rd" | "rmdir" => Some("file.remove"),
-        "new-item" | "ni" => Some("file.touch"),
-        "test-path" => Some("file.exists"),
-        "rename-item" | "ren" | "rni" => Some("file.move"),
-        "resolve-path" | "rvpa" => Some("file.realpath"),
-        "get-item" | "gi" => Some("file.stat"),
-        "get-itempropertyvalue" => Some("file.stat"),
-        "get-filehash" => Some("crypto.hash"),
-        "select-string" | "sls" => Some("str.grep"),
-        "get-acl" => Some("perm.get"),
-        "set-acl" => Some("perm.set"),
-
-        // Process management
-        "get-process" | "ps" | "gps" => Some("proc.list"),
-        "stop-process" | "kill" | "spps" => Some("proc.kill"),
-        "start-process" | "saps" | "start" => Some("proc.spawn"),
-        "wait-process" | "wp" => Some("proc.wait"),
-        "debug-process" => Some("proc.debug"),
-
-        // Date/time
-        "get-date" => Some("sys.now"),
-        "new-timespan" => Some("sys.timespan"),
-
-        // Math/random
-        "get-random" => Some("math.random"),
-
-        // Pipeline operations
-        "measure-object" => Some("len"),
-        "select-object" | "select" => Some("select"),
-        "where-object" | "where" | "?" => Some("where"),
-        "foreach-object" | "foreach" | "%" => Some("map"),
-        "sort-object" | "sort" => Some("sort"),
-        "group-object" | "group" => Some("group"),
-        "tee-object" | "tee" => Some("file.tee"),
-        "out-file" => Some("file.write"),
-        "out-null" => Some("noop"),
-        "out-string" => Some("str.join"),
-        "format-list" | "fl" => Some("table"),
-        "format-table" | "ft" => Some("table"),
-
-        // JSON
-        "convertto-json" => Some("json.stringify"),
-        "convertfrom-json" => Some("json.parse"),
-
-        // CSV
-        "import-csv" => Some("file.read_csv"),
-        "export-csv" | "convertto-csv" => Some("file.write_csv"),
-
-        // XML
-        "convertto-xml" => Some("str.to_xml"),
-        "select-xml" => Some("str.xpath"),
-
-        // Web/HTTP
-        "invoke-webrequest" | "curl" | "wget" | "iwr" => Some("http.get"),
-        "invoke-restmethod" | "irm" => Some("http.request"),
-
-        // Clipboard
-        "get-clipboard" | "gcb" => Some("clip.get"),
-        "set-clipboard" | "scb" => Some("clip.set"),
-
-        // Services
-        "get-service" | "gsv" => Some("svc.list"),
-        "start-service" | "sasv" => Some("svc.start"),
-        "stop-service" | "spsv" => Some("svc.stop"),
-        "restart-service" => Some("svc.restart"),
-        "set-service" => Some("svc.set"),
-        "new-service" => Some("svc.create"),
-
-        // System info
-        "get-host" => Some("sys.info"),
-        "hostname" => Some("sys.hostname"),
-        "get-computerinfo" => Some("sys.info"),
-        "get-ciminstance" => Some("sys.wmi"),
-        "get-wmiobject" | "gwmi" => Some("sys.wmi"),
-        "get-culture" => Some("sys.locale"),
-        "get-uiculture" => Some("sys.locale"),
-        "get-uptime" => Some("sys.uptime"),
-
-        // Network
-        "test-connection" | "ping" => Some("net.ping"),
-        "test-netconnection" | "tnc" => Some("net.test_port"),
-        "resolve-dnsname" => Some("net.dns_lookup"),
-        "get-netadapter" => Some("net.interfaces"),
-        "get-netipaddress" => Some("net.ip"),
-        "get-netipinterface" => Some("net.interfaces"),
-        "get-nettcpconnection" => Some("net.connections"),
-
-        // Disk/storage
-        "get-disk" => Some("sys.disk_usage"),
-        "get-volume" => Some("sys.disk_usage"),
-        "get-psdrive" | "gdr" => Some("sys.disk_usage"),
-
-        // Archive operations
-        "compress-archive" => Some("archive.compress"),
-        "expand-archive" => Some("archive.extract"),
-
-        // Environment
-        "get-variable" | "gv" => Some("sys.env"),
-        "set-variable" | "sv" | "set" => Some("set_env"),
-        "remove-variable" | "rv" => Some("set_env"),
-
-        // Help & discovery
-        "get-command" | "gcm" => Some("sys.which"),
-        "get-help" | "help" | "man" => Some("help"),
-        "get-alias" | "gal" => Some("alias"),
-        "set-alias" | "sal" | "nal" => Some("alias"),
-        "get-history" | "ghy" | "h" | "history" => Some("history"),
-        "get-member" | "gm" => Some("typeof"),
-
-        // User input
-        "read-host" => Some("input.readline"),
-
-        // Module management
-        "get-module" | "gmo" => Some("echo"),
-        "import-module" | "ipmo" => Some("echo"),
-
-        // Error handling
-        "write-error" => Some("echo"),
-        "write-warning" => Some("echo"),
-        "write-verbose" => Some("echo"),
-        "write-debug" => Some("echo"),
-        "write-information" => Some("echo"),
-
-        // Misc
-        "clear-host" | "cls" | "clear" => Some("clear"),
-        "exit" => Some("exit"),
-        "start-sleep" | "sleep" => Some("sleep"),
-        "get-unique" | "gu" => Some("arr.unique"),
-
-        _ => None,
-    }
+fn map_ps_cmdlet(lower: &str) -> Option<(&'static str, Kind)> {
+    PS_MAP
+        .iter()
+        .find(|(n, _, _)| *n == lower)
+        .map(|(_, t, k)| (*t, *k))
 }
 
 /* =============================================================================
 Helper functions
 ============================================================================= */
 
+/// The IronShell name of a PowerShell variable: a module name (`file`, `user`)
+/// cannot be bound, so it gets an `sh_` prefix, everywhere it appears.
+fn vname(n: &str) -> String {
+    if crate::modules::is_module_name(n) {
+        format!("sh_{}", n)
+    } else {
+        n.to_string()
+    }
+}
+
 fn parse_ps_var_ref(s: &str) -> Option<String> {
     if s.starts_with("${") {
         if let Some(end) = s.find('}') {
             let name = &s[2..end];
-            if is_ps_ident(name) {
-                return Some(name.to_string());
+            if is_ps_ident(name) && s[end + 1..].trim().is_empty() {
+                return Some(vname(name));
             }
         }
     } else if let Some(name) = s.strip_prefix('$') {
         let name = name.trim();
         if is_ps_ident(name) {
-            return Some(name.to_string());
+            return Some(vname(name));
         }
     }
     None
@@ -957,6 +1317,9 @@ fn is_ps_number(s: &str) -> bool {
 
     // Handle negative numbers
     let s = if s.starts_with('-') { &s[1..] } else { s };
+    if s.is_empty() {
+        return false;
+    }
 
     // Integer
     if s.chars().all(|c| c.is_ascii_digit()) {
@@ -967,7 +1330,9 @@ fn is_ps_number(s: &str) -> bool {
     if s.contains('.') {
         let parts: Vec<&str> = s.split('.').collect();
         if parts.len() == 2 {
-            return parts[0].chars().all(|c| c.is_ascii_digit())
+            return !parts[0].is_empty()
+                && parts[0].chars().all(|c| c.is_ascii_digit())
+                && !parts[1].is_empty()
                 && parts[1].chars().all(|c| c.is_ascii_digit());
         }
     }
@@ -1033,10 +1398,10 @@ mod tests {
     fn test_pipeline() {
         let result =
             transpile_powershell_to_ae("Get-Process | Where-Object { $_.CPU -gt 10 }").unwrap();
-        // Should transpile to IronShell pipeline or fall back if script blocks not supported
+        // Script blocks are not translated: the line falls back to sh().
         assert!(
-            result.contains("where") || result.contains("sh(") || result.contains("pwsh"),
-            "Expected pipeline transpilation or fallback, got: {}",
+            result.contains("sh(") || result.contains("pwsh"),
+            "Expected fallback, got: {}",
             result
         );
     }
@@ -1044,13 +1409,15 @@ mod tests {
     #[test]
     fn test_simple_cmdlet() {
         let result = transpile_powershell_to_ae("Get-ChildItem").unwrap();
-        assert!(result.contains("ls"));
+        assert!(result.contains("ls()"));
     }
 
     #[test]
-    fn test_cmdlet_with_path() {
-        let result = transpile_powershell_to_ae("Get-Content 'file.txt'").unwrap();
-        assert!(result.contains("file.read"));
+    fn test_get_content_is_reported_not_guessed() {
+        let (code, fb) = transpile_powershell_with_report("Get-Content 'file.txt'").unwrap();
+        assert!(code.contains("sh("), "got: {}", code);
+        assert_eq!(fb.len(), 1);
+        assert!(fb[0].construct.contains("Get-Content"), "got {:?}", fb);
     }
 
     #[test]
@@ -1072,9 +1439,9 @@ mod tests {
     }
 
     #[test]
-    fn test_hostname_maps_to_sys_hostname() {
+    fn test_hostname_maps_to_hostname() {
         let result = transpile_powershell_to_ae("hostname").unwrap();
-        assert!(result.contains("sys.hostname"));
+        assert!(result.contains("hostname()"));
     }
 
     #[test]
@@ -1090,17 +1457,44 @@ mod tests {
     }
 
     #[test]
-    fn test_compress_archive_maps() {
-        let result = transpile_powershell_to_ae(
-            "Compress-Archive -Path 'folder' -DestinationPath 'out.zip'",
-        )
-        .unwrap();
-        assert!(result.contains("archive.compress"));
+    fn test_parameters_are_refused_by_name() {
+        let e = transpile_powershell_to_ae("Get-ChildItem -Recurse")
+            .unwrap_err()
+            .to_string();
+        assert!(e.contains("-Recurse"), "got: {}", e);
     }
 
     #[test]
     fn test_sleep_maps() {
         let result = transpile_powershell_to_ae("Start-Sleep -Seconds 5").unwrap();
-        assert!(result.contains("sleep"));
+        assert!(result.contains("sleep(5)"), "got: {}", result);
+    }
+
+    #[test]
+    fn test_semicolons_split() {
+        assert_eq!(
+            split_ps_statements("$x = 5; $x + 2"),
+            vec!["$x = 5", "$x + 2"]
+        );
+        assert_eq!(
+            split_ps_statements("Write-Output 'a;b'"),
+            vec!["Write-Output 'a;b'"]
+        );
+    }
+
+    #[test]
+    fn test_write_output_prints_each_statement() {
+        let r = transpile_powershell_to_ae("Write-Output one\nWrite-Output two").unwrap();
+        assert!(
+            r.contains("print(\"one\");") && r.contains("print(\"two\");"),
+            "got: {}",
+            r
+        );
+    }
+
+    #[test]
+    fn test_expression_statement() {
+        let r = transpile_powershell_to_ae("$x = 5; $x + 2").unwrap();
+        assert!(r.contains("print(x + 2);"), "got: {}", r);
     }
 }
