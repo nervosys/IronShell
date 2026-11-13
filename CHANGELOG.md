@@ -106,6 +106,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - A quoted record key containing `${...}` is interpolated: `{"${r.customer}": r.region}` kept the literal text as the key.
 - `ish agent execute` exits with the status the command line gives the response's error code (75 for an approval, 127 for an unknown builtin, 64 for a bad argument) instead of 1; a file name given as the request is told the argument is JSON text.
 - MCP `ontology_describe` returns JSON text, as the other tools do. `base64_encode` and `base64_decode` are classed pure (they read no file). `pick` is declared `Array | Record`.
+- `%` works on Floats (and mixed Int and Float), with the sign of the dividend as for Ints (`-7.5 % 2` is `-1.5`; Python gives `0.5`).
+- `round(x, digits)` rounds half away from zero on the exact binary value, as `format_number` does: `round(2.675, 2)` is `2.67` (it gave `2.68`), `round(2.5)` is `3`.
+- Dates are limited to years 0001 to 9999 in every date builtin: `date_add("9999-12-31", 1, "days")` is refused (it gave `+10000-01-01`). `date_parse` and the other date inputs require zero-padded fields (`2024-2-9` is refused) and refuse leap seconds.
 
 ### Added
 
@@ -163,6 +166,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `crypto.hash_file`, `crypto.checksum` and `crypto.random_string` are module members; they existed only as flat names.
 - `get(r, path, default?)` reads an optional field or dotted path (`"u.n"`, or an Array of keys and indices), giving the default (Null) when a step is missing or Null; `has(r, key)`; `to_entries` and `from_entries` (`[{key, value}]` or `[[k, v]]`). A missing-field error now points to `get`.
 - `open` parses `.tsv` like `.csv`, with a tab delimiter. `hex_encode` and `hex_decode` resolve as bare names.
+- `log(x, base?)`, `ln`, `log10`, `log2` and `exp` (also under `math.`); they return Floats and refuse a non-positive input or an overflowing result with E_BAD_VALUE.
+- `title`, `capitalize`, `repeat` (refuses a result over 100 MB) and `words` as builtins (also under `str.`); `trim(text, chars)` strips a set of characters from both ends.
+- `from_epoch(seconds)` and `to_epoch(date)` convert between epoch seconds and ISO 8601 UTC, for years 0001 to 9999.
 
 ### Fixed
 
@@ -281,6 +287,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Did-you-mean no longer offers an unrelated one-letter name (`a` suggested `b`).
 - `from_yaml` names the unsupported construct (anchor, tag, block scalar, flow collection, ...) and suggests JSON; its hint was the generic `from_yaml takes String`. sql's `no such table` hint says to pass a Record of tables for a join.
 - `ish agent schema --help` and the unknown-format error list the same formats.
+- Float arithmetic that overflows (`1e308 * 10`) is refused with E_BAD_VALUE; it gave `inf`, though IronShell numbers are finite. `abs` of the smallest Int is refused like unary minus; it wrapped.
+- The smallest Int `% -1` is 0; it was called an overflow. `pow(0, -1)` and `0 ^ -1` say division by zero, not Float overflow. `format_number(1e300, 0)` names the 1e38 cap instead of suggesting fewer decimals.
 
 
 ## [14.0.1] - 2026-11-08
