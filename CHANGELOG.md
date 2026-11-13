@@ -93,6 +93,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `from_json`, `json_parse`, `open` and `from_yaml` refuse an integer past the 64-bit range with E_BAD_VALUE and its path, with a hint to quote it; they read it as a lossy Float. A CSV column of such integers stays text.
 - `from_csv`, `open`, `sql` and `db_csv_query` refuse a CSV header that names a column twice, naming its columns; the later column used to replace the earlier one.
 - `regex_replace` refuses a replacement that names a group the pattern does not have, listing the groups it has (`$1x` hints `${1}x`); it inserted nothing.
+- Strings inside an Array or Record print as IronShell string literals (escaped `\`, `"`, `${` and control characters), and nested collections render in full up to 100 elements; the `[len=N]` and `{fields=N}` summaries are gone. Agent mode JSON-quotes strings inside a list or record, so `["1", 1]` no longer reads as `[1, 1]`.
+- `--zsh` runs source inside the POSIX subset through the in-process engine `ish -b` uses, after rewriting zsh-only words (`setopt`, `print -l/-n/-r`); the rest is refused before anything runs, naming the construct and line. The PowerShell and zsh transpilers print each statement as it runs, split `;`, and refuse a flag of a mapped command, `$env:X`, `${x:-d}`, `$?` and here-strings instead of passing them as data.
+- `min` and `max` take an Array of Strings (code-point order); a mix of Strings and numbers is refused. `ls` of a plain file lists that file. `cp` of a file onto a directory writes it inside, as `cp` does. `env` of an unset variable is Null. On Windows, globs match letters in either case.
+- The shipped stdlib drops `lines`, `find` and `mean`, which shadowed the builtins of those names on import.
 
 ### Added
 
@@ -144,6 +148,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `ish -b` runs `${name%pat}`, `${name%%pat}`, `${name#pat}` and `${name##pat}`, and sed's `\U`, `\L`, `\u`, `\l` and `\E` in a replacement, as GNU sed does.
 - `journal()` rows carry `id`, the value `undo({id})` takes.
 - `ish -b` runs `sed -i` (and `-iSUFFIX` for a backup) in-process, through the workspace jail and the undo journal as a `>` redirection is; it used to need approval to run the real sed.
+- Eight pure `path_*` builtins that never read the disk: `path_join`, `path_basename`, `path_dirname`, `path_extension`, `path_stem`, `path_normalize`, `path_is_absolute`, `path_split`. Both `/` and `\` separate components, results use `/`, and a drive is a root (`C:/`). There is no `path` module, so `path = "./src"` still binds; `path.join` and the other module spellings, and `basename`, `dirname`, `splitext`, `normpath`, are told the builtin's name.
 
 ### Fixed
 
@@ -238,6 +243,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `to_yaml` double-quotes and escapes control characters, DEL, U+0085, U+2028 and U+2029, which it wrote raw; `from_yaml` decodes `\f` and `\v`, and reads `0o17` and `0x1F` as Int (YAML 1.2 core), with `to_yaml` quoting strings that look like them.
 - `file_write` names the element of a mixed Array that is not a String; its doc says lines are joined with `\n` and no line break follows the last.
 - Tests find `ish` by `CARGO_BIN_EXE_ish`; newer Cargo builds test binaries outside `target/debug/deps`, so the old guess named a missing file. The declared-example loops take a shared lock, so `session_undo`'s examples undo only their own steps.
+- `mkdir` and `rmdir` record undo steps: undo removes the directories `mkdir` created (innermost first, only while empty) and recreates a directory `rmdir` removed when it was empty; a removed tree is reported, and undo never reaches past it to an earlier step. Journal paths are normalized, so `sub/../m2` is `m2`.
+- `mkdir("")`, moving a directory into itself, `rmdir` of a non-empty directory and `mkdir` over a file are refused by name instead of with an OS error. `fs_realpath` through a missing component is Null.
+- `explain`, `--explain` and `explain_effects` no longer report pure for `call("rm", ...)`, a `${...}` hole that calls a builtin, an import whose module writes at top level, or a builtin passed as a value.
+- A syntax error inside an imported module is E_PARSE naming the module's file, line and column, and exits 2. Importing a name the module defines without `pub` says to mark it `pub`. `import "m.ish" as a` binds `a` immutably.
+- Int and Float compare exactly: `9007199254740993 == 9007199254740992.0` was true.
+- `sort_by` refuses a Null, Bool or mixed-kind key and a row missing the field, which it left in input order; its order must be `asc` or `desc`. `avg` of an empty Array is E_BAD_ARG, not NaN. `first` and `last` refuse a negative count.
+- `sql` refuses two result columns of one name (it kept the last), names ATTACH only for an ATTACH, and refuses parameters that are not an Array.
+- `to_csv` writes a row whose only field is empty as `""`, so reading it back keeps the row. `to_yaml` quotes strings YAML 1.1 readers take as numbers or dates (`1_000`, `2026-01-02`, `+12`, `.5`).
+- `\U` followed by four to seven hex digits is E_PARSE; `C:\Users` is still kept. A stray backslash outside a string hints at an earlier `\"` that ended the string.
+- `printf %d` of an integer past 64 bits clamps and prints `Result too large`, as bash does. `sed --in-place[=SUFFIX]` is `-i[SUFFIX]`.
+- stdlib: `factorial`, `fib`, `drop` and `repeat` refuse negative input; `union`, `intersect` and `difference` dedupe with `==`; `words` splits on any whitespace; `is_upper`/`is_lower` need a cased letter; the path helpers work on the last component; `to_json_pretty` is pretty.
 
 
 ## [14.0.1] - 2026-11-08
