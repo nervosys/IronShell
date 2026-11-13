@@ -7871,16 +7871,85 @@ pub fn reserved_device_error(builtin: &str, name: &str) -> SafetyError {
     }
 }
 
+/// The first reason Windows would not keep the path a write names as written,
+/// as `E_BAD_ARG`: a reserved device name (`CON`, `NUL`, ...), a component that
+/// ends in a dot or a space (the OS strips it, so `a.txt.` is `a.txt`), or a `:`
+/// in a component after the drive prefix (`f.txt:stream` is an alternate data
+/// stream, not a file of that name). Platform-independent; callers decide
+/// whether it applies. `/` and `\` both separate components, and a `\\?\`,
+/// `\\.\` or drive prefix is skipped.
+pub fn windows_name_refusal(builtin: &str, path: &str) -> Option<SafetyError> {
+    if let Some(name) = reserved_device_name(path) {
+        return Some(reserved_device_error(builtin, &name));
+    }
+    let mut rest = path;
+    for prefix in ["\\\\?\\", "\\\\.\\", "//?/", "//./"] {
+        if let Some(r) = rest.strip_prefix(prefix) {
+            rest = r;
+            break;
+        }
+    }
+    let bytes = rest.as_bytes();
+    if bytes.len() >= 2 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':' {
+        rest = &rest[2..];
+    }
+    for part in rest.split(['/', '\\']) {
+        if part.is_empty() || part == "." || part == ".." {
+            continue;
+        }
+        if part.contains(':') {
+            return Some(SafetyError {
+                code: ErrorCode::BadArg,
+                message: format!(
+                    "{builtin}: `{part}` names an alternate data stream on Windows (a `:` after the drive)"
+                ),
+                builtin: builtin.to_string(),
+                hint: "Windows reads `name:stream` as a hidden stream of the file `name`, not as a file called that; choose a name without a colon".to_string(),
+                approval: None,
+                did_you_mean: Vec::new(),
+                expected: "a name without a `:`".to_string(),
+                got: part.to_string(),
+                extra: serde_json::Map::new(),
+            });
+        }
+        if part.ends_with('.') || part.ends_with(' ') {
+            return Some(SafetyError {
+                code: ErrorCode::BadArg,
+                message: format!(
+                    "{builtin}: `{part}` ends in a dot or a space, which Windows would strip, so the write would land on a different name"
+                ),
+                builtin: builtin.to_string(),
+                hint: "Windows silently drops a trailing dot or space from a name, so `a.txt.` writes `a.txt`; remove it from the name".to_string(),
+                approval: None,
+                did_you_mean: Vec::new(),
+                expected: "a name that does not end in a dot or a space".to_string(),
+                got: part.to_string(),
+                extra: serde_json::Map::new(),
+            });
+        }
+    }
+    None
+}
+
 pub fn guard(ctx: GuardCtx) -> Result<(), SafetyError> {
     let mode = current_mode();
     let resource = ctx.targets.join(", ");
 
-    // Windows device names: a file made under one cannot be deleted. Refused
-    // for every write, in either mode, before the jail is consulted.
+    // Windows names that are not what they say: a device name (a file made under
+    // one cannot be deleted), a trailing dot or space the OS strips, and an
+    // alternate data stream. Refused for every write, in either mode, before the
+    // jail is consulted.
     if cfg!(windows) && ctx.effect.is_filesystem() && ctx.fs_paths {
         for t in &ctx.targets {
-            if let Some(name) = reserved_device_name(t) {
-                return Err(reserved_device_error(ctx.builtin, &name));
+            // A read keeps `name:stream` and a trailing dot as they are; only a
+            // write or a delete is refused for them.
+            let refusal = if matches!(ctx.effect, Effect::WriteLocal | Effect::Destructive) {
+                windows_name_refusal(ctx.builtin, t)
+            } else {
+                reserved_device_name(t).map(|name| reserved_device_error(ctx.builtin, &name))
+            };
+            if let Some(e) = refusal {
+                return Err(e);
             }
         }
     }
