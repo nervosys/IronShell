@@ -409,6 +409,29 @@ fn parse_scalar(raw: &str, number: usize) -> Result<Value> {
     if crate::builtins::is_wide_integer(s) {
         return Err(overflow());
     }
+    // IronShell numbers are finite (`float("inf")` is refused), so the YAML
+    // spellings of infinity and not-a-number are refused here, not read as Floats.
+    if matches!(
+        s,
+        ".inf"
+            | ".Inf"
+            | ".INF"
+            | "+.inf"
+            | "+.Inf"
+            | "+.INF"
+            | "-.inf"
+            | "-.Inf"
+            | "-.INF"
+            | ".nan"
+            | ".NaN"
+            | ".NAN"
+    ) {
+        return Err(crate::safety::value_not_representable(
+            "from_yaml",
+            format!("from_yaml: line {number}: {s} is not a finite number; IronShell numbers are finite"),
+            &format!("quote it as a string to keep the text, such as \"{s}\""),
+        ));
+    }
     Ok(plain_scalar(s))
 }
 

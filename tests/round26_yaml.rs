@@ -130,42 +130,29 @@ fn exponent_form_floats_keep_a_point() {
 }
 
 #[test]
-fn special_floats_read_as_floats_in_every_yaml_1_2_spelling() {
-    for (text, expect) in [
-        (".inf", f64::INFINITY),
-        (".Inf", f64::INFINITY),
-        (".INF", f64::INFINITY),
-        ("+.inf", f64::INFINITY),
-        ("-.inf", f64::NEG_INFINITY),
-        ("-.Inf", f64::NEG_INFINITY),
-        ("-.INF", f64::NEG_INFINITY),
+fn special_floats_are_refused_in_every_yaml_1_2_spelling() {
+    // IronShell numbers are finite, so `.inf` and `.nan` are not read as Floats.
+    for text in [
+        ".inf", ".Inf", ".INF", "+.inf", "-.inf", "-.Inf", "-.INF", ".nan", ".NaN", ".NAN",
     ] {
-        let v = yaml::parse(&format!("x: {text}\n")).unwrap();
-        assert_eq!(v, rec(&[("x", Value::Float(expect))]), "reading {text}");
-    }
-    for text in [".nan", ".NaN", ".NAN"] {
-        let Value::Record(r) = yaml::parse(&format!("x: {text}\n")).unwrap() else {
-            panic!("expected a record")
-        };
-        let Some(Value::Float(x)) = r.get("x") else {
-            panic!("{text} should read as a Float")
-        };
-        assert!(x.is_nan(), "{text}");
+        let e = yaml::parse(&format!("x: {text}\n")).expect_err(text);
+        let message = e.to_string();
+        assert!(message.contains("line 1"), "{text}: {message}");
+        assert!(message.contains("not a finite number"), "{text}: {message}");
+        assert!(
+            message.contains("quote it as a string"),
+            "{text}: {message}"
+        );
     }
 }
 
 #[test]
-fn infinity_written_by_to_yaml_reads_back_as_a_float() {
-    let v = rec(&[
-        ("pos", Value::Float(f64::INFINITY)),
-        ("neg", Value::Float(f64::NEG_INFINITY)),
-    ]);
-    let text = yaml::emit(&v);
-    // Record keys are written in sorted order.
-    assert_eq!(text, "neg: -.inf\npos: .inf\n");
-    assert_eq!(yaml::parse(&text).unwrap(), v);
+fn a_quoted_special_float_stays_a_string() {
+    assert_eq!(
+        yaml::parse("x: \".inf\"\n").unwrap(),
+        rec(&[("x", Value::Str(".inf".into()))])
+    );
 }
-
 #[test]
 fn a_quoted_float_look_alike_stays_a_string() {
     assert_eq!(

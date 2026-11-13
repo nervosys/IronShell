@@ -795,6 +795,11 @@ lazy_static::lazy_static! {
         map.insert("exp", 1202);
         map.insert("from_epoch", 1203);
         map.insert("to_epoch", 1204);
+        // Statistics (1205-1208), beside avg
+        map.insert("median", 1205);
+        map.insert("variance", 1206);
+        map.insert("stddev", 1207);
+        map.insert("percentile", 1208);
         // 500-519: Database
         map.insert("db_sqlite_open", 500);
         map.insert("db_sqlite_query", 501);
@@ -3877,6 +3882,11 @@ static BUILTIN_DISPATCH: &[fn(Vec<Value>, Option<Value>, &mut Env) -> Result<Val
     // Epoch seconds (1203-1204), in the date section
     |args, input, _| bi_from_epoch(args, input), // 1203
     |args, input, _| bi_to_epoch(args, input),   // 1204
+    // Statistics (1205-1208), beside avg
+    |args, input, _| bi_median(args, input),     // 1205
+    |args, input, _| bi_variance(args, input),   // 1206
+    |args, input, _| bi_stddev(args, input),     // 1207
+    |args, input, _| bi_percentile(args, input), // 1208
 ];
 
 /// The dispatch row that serves `name`, if the fast table has one.
@@ -4193,7 +4203,10 @@ pub fn module_member_candidates(module: &str, field: &str, members: &[&str]) -> 
         .copied()
         .filter_map(|g| {
             let lower = g.to_lowercase();
-            let related = lower.contains(&typed) || typed.contains(&lower);
+            // A short global inside a long typed name is chance, not kinship:
+            // `math.variance` contains `nc`. Substrings count from 4 characters.
+            let related = (lower.contains(&typed) || typed.contains(&lower))
+                && typed.chars().count().min(lower.chars().count()) >= 4;
             let distance = edit_distance_within(
                 &typed,
                 &lower,
@@ -5827,6 +5840,166 @@ fn bi_avg(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
             arr
         ))),
     }
+}
+
+/// The numbers of an array argument or piped array, and the arguments after
+/// it, for the statistics builtins (`median`, `variance`, `stddev`,
+/// `percentile`). An Int is promoted to a Float.
+fn stats_subject(
+    name: &str,
+    args: Vec<Value>,
+    input: Option<Value>,
+) -> Result<(Vec<f64>, Vec<Value>)> {
+    let first_is_array = matches!(args.first(), Some(Value::Array(_)));
+    let (items, rest) = if first_is_array {
+        let mut args = args;
+        let first = args.remove(0);
+        match first {
+            Value::Array(items) => (items, args),
+            _ => unreachable!("checked above"),
+        }
+    } else if let Some(Value::Array(items)) = input {
+        (items, args)
+    } else {
+        return Err(crate::safety::bad_arg_in(
+            name,
+            format!("{name}: requires an Array of numbers as input or first argument"),
+            "pass an array such as [1, 2, 3]",
+        ));
+    };
+    let mut numbers = Vec::with_capacity(items.len());
+    for item in &items {
+        match item {
+            Value::Int(n) => numbers.push(*n as f64),
+            Value::Float(f) => numbers.push(*f),
+            other => {
+                return Err(crate::safety::bad_arg_in(
+                    name,
+                    format!(
+                        "{name}: array must contain only numbers, found {}",
+                        other.type_name()
+                    ),
+                    "pass an array of Ints and Floats",
+                ))
+            }
+        }
+    }
+    Ok((numbers, rest))
+}
+
+/// A statistic's result as a Float, refused when it overflowed.
+fn stats_result(name: &str, x: f64) -> Result<Value> {
+    if x.is_finite() {
+        Ok(Value::Float(x))
+    } else {
+        Err(crate::safety::value_not_representable(
+            name,
+            format!("{name}: float overflow"),
+            "the values are too large for their statistic to be a finite number",
+        ))
+    }
+}
+
+/// median(numbers) - the middle value; the mean of the two middle values of
+/// an even-length array. Always a Float.
+fn bi_median(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
+    let (mut v, rest) = stats_subject("median", args, input)?;
+    if !rest.is_empty() {
+        return Err(arity_error("median", "one array", rest.len() + 1));
+    }
+    if v.is_empty() {
+        return Err(crate::safety::bad_arg_in(
+            "median",
+            "median of an empty array is undefined",
+            "check the array is not empty first, such as with len",
+        ));
+    }
+    v.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let n = v.len();
+    let m = if n % 2 == 1 {
+        v[n / 2]
+    } else {
+        v[n / 2 - 1] + (v[n / 2] - v[n / 2 - 1]) / 2.0
+    };
+    stats_result("median", m)
+}
+
+/// The sample variance (n - 1 divisor) of a number array.
+fn sample_variance(name: &str, args: Vec<Value>, input: Option<Value>) -> Result<f64> {
+    let (v, rest) = stats_subject(name, args, input)?;
+    if !rest.is_empty() {
+        return Err(arity_error(name, "one array", rest.len() + 1));
+    }
+    if v.len() < 2 {
+        return Err(crate::safety::bad_arg_in(
+            name,
+            format!("{name} needs at least 2 values, got {}", v.len()),
+            "the sample variance divides by n - 1, so one value has none",
+        ));
+    }
+    let n = v.len() as f64;
+    let mean = v.iter().sum::<f64>() / n;
+    let ss: f64 = v.iter().map(|x| (x - mean) * (x - mean)).sum();
+    Ok(ss / (n - 1.0))
+}
+
+/// variance(numbers) - the sample variance (n - 1), as Python's
+/// `statistics.variance`.
+fn bi_variance(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
+    stats_result("variance", sample_variance("variance", args, input)?)
+}
+
+/// stddev(numbers) - the sample standard deviation (n - 1), as Python's
+/// `statistics.stdev`.
+fn bi_stddev(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
+    stats_result("stddev", sample_variance("stddev", args, input)?.sqrt())
+}
+
+/// percentile(numbers, p) - the p-th percentile, p in 0..=100, by linear
+/// interpolation between closest ranks (numpy's default).
+fn bi_percentile(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
+    let (mut v, rest) = stats_subject("percentile", args, input)?;
+    if rest.len() != 1 {
+        return Err(arity_error(
+            "percentile",
+            "an array and a percentage",
+            rest.len() + 1,
+        ));
+    }
+    let p = match &rest[0] {
+        Value::Int(n) => *n as f64,
+        Value::Float(f) => *f,
+        other => {
+            return Err(crate::safety::bad_arg(
+                "percentile",
+                "a number from 0 to 100",
+                other.type_name(),
+            ))
+        }
+    };
+    if !(0.0..=100.0).contains(&p) {
+        return Err(crate::safety::bad_arg_in(
+            "percentile",
+            format!(
+                "percentile: {} is not between 0 and 100",
+                float_for_message(p)
+            ),
+            "pass p as a percentage from 0 to 100",
+        ));
+    }
+    if v.is_empty() {
+        return Err(crate::safety::bad_arg_in(
+            "percentile",
+            "percentile of an empty array is undefined",
+            "check the array is not empty first, such as with len",
+        ));
+    }
+    v.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let rank = p / 100.0 * (v.len() - 1) as f64;
+    let lo = rank.floor() as usize;
+    let hi = rank.ceil() as usize;
+    let result = v[lo] + (v[hi] - v[lo]) * (rank - lo as f64);
+    stats_result("percentile", result)
 }
 
 fn bi_product(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
@@ -10860,7 +11033,64 @@ fn bi_from_json(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
     if let Some(refusal) = wide_integer_refusal("from_json", &json_str) {
         return Err(refusal);
     }
-    Ok(json_to_value(parsed))
+    Ok(json_to_value(with_integer_negative_zeros(
+        parsed, &json_str,
+    )))
+}
+
+/// `parsed` again, with every JSON `-0` that has no fraction or exponent read
+/// as the integer 0. serde_json reads such a `-0` as the Float -0.0, but JSON's
+/// grammar writes an integer there, and the Int has no sign of zero.
+pub(crate) fn with_integer_negative_zeros(
+    parsed: serde_json::Value,
+    text: &str,
+) -> serde_json::Value {
+    if !text.contains("-0") {
+        return parsed;
+    }
+    let bytes = text.as_bytes();
+    let mut out: Vec<u8> = Vec::with_capacity(bytes.len());
+    let mut changed = false;
+    let mut i = 0;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'"' => {
+                let start = i;
+                i += 1;
+                while i < bytes.len() && bytes[i] != b'"' {
+                    i += if bytes[i] == b'\\' { 2 } else { 1 };
+                }
+                let end = (i + 1).min(bytes.len());
+                out.extend_from_slice(&bytes[start..end]);
+                i = end;
+            }
+            b'-' | b'0'..=b'9' => {
+                let start = i;
+                while i < bytes.len()
+                    && matches!(bytes[i], b'0'..=b'9' | b'-' | b'+' | b'.' | b'e' | b'E')
+                {
+                    i += 1;
+                }
+                if &bytes[start..i] == b"-0" {
+                    out.push(b'0');
+                    changed = true;
+                } else {
+                    out.extend_from_slice(&bytes[start..i]);
+                }
+            }
+            other => {
+                out.push(other);
+                i += 1;
+            }
+        }
+    }
+    if !changed {
+        return parsed;
+    }
+    match String::from_utf8(out) {
+        Ok(fixed) => serde_json::from_str(&fixed).unwrap_or(parsed),
+        Err(_) => parsed,
+    }
 }
 
 /// to-json: Convert structured data to JSON
@@ -15669,8 +15899,9 @@ fn fold_extremum(items: &[Value], want_max: bool) -> Result<Value> {
     // Stay in Int while every element is one, so `[1, 5, 3] | max` is `5` and
     // not `5.0`: an agent comparing the answer to a literal should not have to
     // know whether the aggregate silently promoted.
-    let all_int = items.iter().all(|v| matches!(v, Value::Int(_)));
-    let mut best: Option<f64> = None;
+    // The winning element is returned unchanged (an Int stays an Int in a mix
+    // of Ints and Floats), as `sort` keeps its elements.
+    let mut best: Option<(f64, &Value)> = None;
     for v in items {
         let n =
             match v {
@@ -15686,17 +15917,14 @@ fn fold_extremum(items: &[Value], want_max: bool) -> Result<Value> {
                 )),
             };
         best = Some(match best {
-            None => n,
-            Some(b) if want_max => b.max(n),
-            Some(b) => b.min(n),
+            None => (n, v),
+            Some((b, _)) if want_max && n > b => (n, v),
+            Some((b, _)) if !want_max && n < b => (n, v),
+            Some(keep) => keep,
         });
     }
-    let b = best.expect("non-empty array yields a value");
-    Ok(if all_int {
-        Value::Int(b as i64)
-    } else {
-        Value::Float(b)
-    })
+    let (_, winner) = best.expect("non-empty array yields a value");
+    Ok(winner.clone())
 }
 
 fn bi_min(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
@@ -15709,11 +15937,26 @@ fn bi_min(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
         ));
     }
 
+    if args.len() > 2
+        && args
+            .iter()
+            .all(|a| matches!(a, Value::Int(_) | Value::Float(_)))
+    {
+        return fold_extremum(&args, false);
+    }
     match (&args[0], &args[1]) {
         (Value::Int(a), Value::Int(b)) => Ok(Value::Int(*a.min(b))),
         (Value::Float(a), Value::Float(b)) => Ok(Value::Float(a.min(*b))),
-        (Value::Int(a), Value::Float(b)) => Ok(Value::Float((*a as f64).min(*b))),
-        (Value::Float(a), Value::Int(b)) => Ok(Value::Float(a.min(*b as f64))),
+        (Value::Int(a), Value::Float(b)) => Ok(if (*a as f64) <= *b {
+            Value::Int(*a)
+        } else {
+            Value::Float(*b)
+        }),
+        (Value::Float(a), Value::Int(b)) => Ok(if *a <= (*b as f64) {
+            Value::Float(*a)
+        } else {
+            Value::Int(*b)
+        }),
         _ => Err(crate::safety::arg_err("min requires numeric arguments")),
     }
 }
@@ -15736,13 +15979,44 @@ fn bi_max(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
         ));
     }
 
+    if args.len() > 2
+        && args
+            .iter()
+            .all(|a| matches!(a, Value::Int(_) | Value::Float(_)))
+    {
+        return fold_extremum(&args, true);
+    }
     match (&args[0], &args[1]) {
         (Value::Int(a), Value::Int(b)) => Ok(Value::Int(*a.max(b))),
         (Value::Float(a), Value::Float(b)) => Ok(Value::Float(a.max(*b))),
-        (Value::Int(a), Value::Float(b)) => Ok(Value::Float((*a as f64).max(*b))),
-        (Value::Float(a), Value::Int(b)) => Ok(Value::Float(a.max(*b as f64))),
+        (Value::Int(a), Value::Float(b)) => Ok(if (*a as f64) >= *b {
+            Value::Int(*a)
+        } else {
+            Value::Float(*b)
+        }),
+        (Value::Float(a), Value::Int(b)) => Ok(if *a >= (*b as f64) {
+            Value::Float(*a)
+        } else {
+            Value::Int(*b)
+        }),
         _ => Err(crate::safety::arg_err("max requires numeric arguments")),
     }
+}
+
+/// A whole-valued Float as an Int, refused (as `int` refuses it) when it lies
+/// outside the Int range rather than saturating at i64::MIN / i64::MAX.
+fn float_to_int_checked(name: &str, whole: f64) -> Result<Value> {
+    if !whole.is_finite()
+        || whole < -9_223_372_036_854_775_808.0
+        || whole >= 9_223_372_036_854_775_808.0
+    {
+        return Err(crate::safety::value_not_representable(
+            name,
+            format!("{name}: {whole} has no Int value"),
+            "an Int holds whole numbers from -9223372036854775808 to 9223372036854775807",
+        ));
+    }
+    Ok(Value::Int(whole as i64))
 }
 
 /// floor(number) - Round down to nearest integer
@@ -15761,7 +16035,7 @@ fn bi_floor(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
 
     match val {
         Value::Int(n) => Ok(Value::Int(n)),
-        Value::Float(f) => Ok(Value::Int(f.floor() as i64)),
+        Value::Float(f) => float_to_int_checked("floor", f.floor()),
         _ => Err(crate::safety::arg_err("floor requires numeric input")),
     }
 }
@@ -15782,7 +16056,7 @@ fn bi_ceil(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
 
     match val {
         Value::Int(n) => Ok(Value::Int(n)),
-        Value::Float(f) => Ok(Value::Int(f.ceil() as i64)),
+        Value::Float(f) => float_to_int_checked("ceil", f.ceil()),
         _ => Err(crate::safety::arg_err("ceil requires numeric input")),
     }
 }
@@ -15830,7 +16104,9 @@ fn bi_round(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
 
     match (val, digits) {
         (Value::Int(n), _) => Ok(Value::Int(n)),
-        (Value::Float(f), None) | (Value::Float(f), Some(0)) => Ok(Value::Int(f.round() as i64)),
+        (Value::Float(f), None) | (Value::Float(f), Some(0)) => {
+            float_to_int_checked("round", f.round())
+        }
         (Value::Float(f), Some(d)) => {
             // The same rule as format_number: round the exact binary value, half
             // away from zero, so round(2.675, 2) is 2.67 (2.675 is stored as
@@ -17348,7 +17624,52 @@ fn bi_from_toml(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
         };
         crate::safety::value_not_representable(B, message, &toml_failure_hint(&text, &e))
     })?;
+    if let Some(refusal) = toml_nonfinite_refusal(B, &parsed) {
+        return Err(refusal);
+    }
     Ok(crate::plugins::toml_to_value(parsed))
+}
+
+/// The first `inf` or `nan` in a parsed TOML document, as a refusal naming its
+/// key path. IronShell numbers are finite (`float("inf")` is refused), so
+/// TOML's `inf` and `nan` are not read as Floats.
+pub(crate) fn toml_nonfinite_refusal(builtin: &str, value: &toml::Value) -> Option<anyhow::Error> {
+    fn walk(value: &toml::Value, path: &str) -> Option<(String, f64)> {
+        match value {
+            toml::Value::Float(f) if !f.is_finite() => Some((path.to_string(), *f)),
+            toml::Value::Array(items) => items
+                .iter()
+                .enumerate()
+                .find_map(|(i, v)| walk(v, &format!("{path}[{i}]"))),
+            toml::Value::Table(table) => table.iter().find_map(|(k, v)| {
+                let child = if path.is_empty() {
+                    k.to_string()
+                } else {
+                    format!("{path}.{k}")
+                };
+                walk(v, &child)
+            }),
+            _ => None,
+        }
+    }
+    let (path, number) = walk(value, "")?;
+    let word = if number.is_nan() {
+        "nan"
+    } else if number < 0.0 {
+        "-inf"
+    } else {
+        "inf"
+    };
+    let at = if path.is_empty() {
+        "the document".to_string()
+    } else {
+        path.clone()
+    };
+    Some(crate::safety::value_not_representable(
+        builtin,
+        format!("{builtin}: {word} at {at} is not a finite number; IronShell numbers are finite"),
+        &format!("quote it as a string to keep the text, such as {path} = \"{word}\""),
+    ))
 }
 
 /// merge(a, b) - Shallow-merge two Records; b's fields win.
@@ -17845,7 +18166,9 @@ fn bi_json_parse(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
     if let Some(refusal) = wide_integer_refusal("json_parse", &json_str) {
         return Err(refusal);
     }
-    Ok(json_to_value(json_val))
+    Ok(json_to_value(with_integer_negative_zeros(
+        json_val, &json_str,
+    )))
 }
 
 /// json_stringify(value?) - Convert value to JSON string
@@ -32450,7 +32773,7 @@ fn bi_open(args: Vec<Value>, _input: Option<Value>) -> Result<Value> {
             if let Some(refusal) = wide_integer_refusal("open", &text) {
                 return Err(refusal);
             }
-            Ok(Value::from_json(&j))
+            Ok(Value::from_json(&with_integer_negative_zeros(j, &text)))
         }
         "jsonl" | "ndjson" => {
             let mut rows = Vec::new();
@@ -32475,7 +32798,7 @@ fn bi_open(args: Vec<Value>, _input: Option<Value>) -> Result<Value> {
                 if let Some(refusal) = wide_integer_refusal("open", line) {
                     return Err(refusal);
                 }
-                rows.push(Value::from_json(&j));
+                rows.push(Value::from_json(&with_integer_negative_zeros(j, line)));
             }
             Ok(Value::Array(rows))
         }
@@ -32488,9 +32811,26 @@ fn bi_open(args: Vec<Value>, _input: Option<Value>) -> Result<Value> {
                     toml_failure_hint(&text, &e),
                 )
             })?;
+            if let Some(refusal) = toml_nonfinite_refusal("open", &t) {
+                return Err(refusal);
+            }
             Ok(crate::plugins::toml_to_value(t))
         }
         "yaml" | "yml" => crate::yaml::parse(&text).map_err(|e| {
+            // A refusal the parser coded (an integer past 64 bits, a non-finite
+            // number) is already structured: re-raise it under `open` with its
+            // own hint, not stringified into another error's message.
+            if let Some(se) = e.downcast_ref::<crate::safety::SafetyError>() {
+                let detail = se
+                    .message
+                    .strip_prefix("from_yaml: ")
+                    .unwrap_or(&se.message);
+                return crate::safety::value_not_representable(
+                    "open",
+                    format!("open: {path}: {detail}"),
+                    &se.hint,
+                );
+            }
             // The YAML parser's messages already start with `line N:`.
             unparsed_data(
                 &path,

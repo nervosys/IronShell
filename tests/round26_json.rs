@@ -13,12 +13,25 @@ fn refusal(src: &str) -> String {
     eval(src).expect_err(src).to_string()
 }
 
+/// Evaluate `src` with `v` bound to a record `{a: x}`, `{v: [1.0, x]}`-style
+/// values built in Rust: no ish source can make a non-finite Float, since
+/// every reader refuses one, so the writers' own refusal is reached this way.
+fn refusal_with(name: &str, value: Value, src: &str) -> String {
+    let mut env = Env::new();
+    env.set_var(name, value).expect("binds");
+    let stmts = parse_program(src).expect("parse");
+    eval_program(&stmts, &mut env).expect_err(src).to_string()
+}
+
+fn record_a(x: f64) -> Value {
+    Value::Record([("a".to_string(), Value::Float(x))].into_iter().collect())
+}
+
 // ── item 1: a NaN or an infinity is refused by a JSON write, not written as 0 ──
 
 #[test]
 fn to_json_refuses_a_nan_and_names_its_path() {
-    // TOML spells NaN as `nan`; from_toml reads it as a Float.
-    let text = refusal(r#"from_toml("a = nan") | to_json"#);
+    let text = refusal_with("r", record_a(f64::NAN), "r | to_json");
     assert!(text.contains("E_BAD_VALUE"), "{text}");
     assert!(
         text.contains("value.a is NaN, which JSON cannot hold"),
@@ -28,25 +41,47 @@ fn to_json_refuses_a_nan_and_names_its_path() {
 
 #[test]
 fn to_json_names_an_infinity_and_a_negative_one() {
-    let text = refusal(r#"from_toml("a = inf") | to_json"#);
+    let text = refusal_with("r", record_a(f64::INFINITY), "r | to_json");
     assert!(text.contains("value.a is infinity"), "{text}");
-    let text = refusal(r#"from_toml("a = -inf") | to_json"#);
+    let text = refusal_with("r", record_a(f64::NEG_INFINITY), "r | to_json");
     assert!(text.contains("value.a is negative infinity"), "{text}");
 }
 
 #[test]
 fn to_json_names_the_path_inside_an_array() {
-    let text = refusal(r#"from_toml("v = [1.0, nan]") | to_json"#);
+    let v = Value::Record(
+        [(
+            "v".to_string(),
+            Value::Array(vec![Value::Float(1.0), Value::Float(f64::NAN)]),
+        )]
+        .into_iter()
+        .collect(),
+    );
+    let text = refusal_with("r", v, "r | to_json");
     assert!(text.contains("value.v[1] is NaN"), "{text}");
 }
 
 #[test]
 fn json_stringify_refuses_a_nan_the_same_way() {
-    let text = refusal(r#"json_stringify(from_toml("a = nan"))"#);
+    let text = refusal_with("r", record_a(f64::NAN), "json_stringify(r)");
     assert!(text.contains("E_BAD_VALUE"), "{text}");
     assert!(text.contains("json_stringify: value.a is NaN"), "{text}");
 }
 
+#[test]
+fn from_toml_refuses_inf_and_nan_naming_the_key() {
+    for (src, key) in [
+        ("a = nan", "a"),
+        ("a = inf", "a"),
+        ("a = -inf", "a"),
+        ("[t]\nv = [1.0, nan]", "t.v[1]"),
+    ] {
+        let text = refusal(&format!("from_toml({src:?})"));
+        assert!(text.contains("not a finite number"), "{src}: {text}");
+        assert!(text.contains(key), "{src}: {text}");
+        assert!(text.contains("quote it as a string"), "{src}: {text}");
+    }
+}
 #[test]
 fn to_json_still_writes_finite_floats_and_ints() {
     assert_eq!(

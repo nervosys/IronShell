@@ -192,6 +192,7 @@ mut r = {a: 1}
 r.a = 2                                # set a field of a `mut` record; r.a.b = v needs r.a to exist already; other copies keep theirs
 rows | sql("select * from t where amount > ?", [100])   # a trailing Array binds the ? placeholders
 to_csv(rows, ["id", "customer"])       # column order (Records sort their keys); csv_columns("orders.csv") is the header in file order
+from_csv("v\n1\n2.5\n")          # a CSV column's type is inferred from ALL its cells: any decimal makes the column Float in every row ([1.0, 2.5]), and a "1.0" written by to_csv reads back as the Float 1.0
 date_add("2024-01-31", 1, "months")    # "2024-02-29": weeks, months and years clamp to the month's end
 undo({id: 3})                          # undo one journal step out of order; refused if a later step changed the same file
 format_number(1234567.891, 2, ",")    # "1,234,567.89": exactly `decimals` digits, optional thousands separator

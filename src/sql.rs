@@ -570,6 +570,19 @@ fn run(
             cells.push(match row.get_ref(i).map_err(query_err)? {
                 ValueRef::Null => Value::Null,
                 ValueRef::Integer(n) => Value::Int(n),
+                // IronShell numbers are finite: `select 1e999` and an
+                // overflowing product are refused, as the language's own
+                // `float overflow` is, naming the column.
+                ValueRef::Real(f) if !f.is_finite() => {
+                    return Err(crate::safety::value_not_representable(
+                        builtin,
+                        format!(
+                            "{builtin}: float overflow in column {}: the result is not a finite number",
+                            columns[i]
+                        ),
+                        "SQL's REAL has an infinity that IronShell numbers do not; keep the values smaller, or cast the column to text",
+                    ));
+                }
                 ValueRef::Real(f) => Value::Float(f),
                 ValueRef::Text(t) => Value::Str(String::from_utf8_lossy(t).into_owned()),
                 ValueRef::Blob(b) => Value::Str(b.iter().map(|x| format!("{x:02x}")).collect()),

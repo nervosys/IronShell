@@ -752,6 +752,7 @@ md5	ReadLocal
 mean	Pure
 measure	Pure
 measure-object	Pure
+median	Pure
 merge	Pure
 min	Pure
 mise	ReadLocal
@@ -877,6 +878,7 @@ path_join	Pure
 path_normalize	Pure
 path_split	Pure
 path_stem	Pure
+percentile	Pure
 perm_check	ReadLocal
 perm_get	ReadLocal
 perm_set	WriteLocal
@@ -1243,6 +1245,7 @@ starts_with	Pure
 startup_list	ReadLocal
 stat	ReadLocal
 status_bar	WriteLocal
+stddev	Pure
 str	Pure
 str_replace_in_file	WriteLocal
 strace	Exec
@@ -1411,6 +1414,7 @@ valgrind_memcheck	Exec
 valgrind_run	Exec
 validate_sso	ReadLocal
 values	Pure
+variance	Pure
 vault-conversions	Exec
 vault-convert	Exec
 vault-models	Exec
