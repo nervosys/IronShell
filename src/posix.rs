@@ -4851,7 +4851,7 @@ fn mkdir(args: &[String], sink: &mut Sink) -> Util {
         return Util::Decline;
     };
     if dirs.is_empty() {
-        sink.eline("mkdir: missing operand");
+        sink.eline("mkdir: missing operand\nTry 'mkdir --help' for more information.");
         return Util::Done(1);
     }
     let parents = flags.contains(&'p');
@@ -4895,7 +4895,7 @@ fn touch(args: &[String], sink: &mut Sink) -> Util {
         return Util::Decline;
     };
     if files.is_empty() {
-        sink.eline("touch: missing file operand");
+        sink.eline("touch: missing file operand\nTry 'touch --help' for more information.");
         return Util::Done(1);
     }
     let mut status = 0;
@@ -5016,6 +5016,10 @@ fn tr(args: &[String], stdin: &mut Input, sink: &mut Sink) -> Util {
     };
     let delete = flags.contains(&'d');
     let squeeze = flags.contains(&'s');
+    if sets.is_empty() {
+        sink.eline("tr: missing operand\nTry 'tr --help' for more information.");
+        return Util::Done(1);
+    }
     let parsed: Option<Vec<Vec<char>>> = sets.iter().map(|s| tr_set(s)).collect();
     let Some(parsed) = parsed else {
         return Util::Decline;
@@ -5026,7 +5030,7 @@ fn tr(args: &[String], stdin: &mut Input, sink: &mut Sink) -> Util {
         (false, _, [a, b]) if !b.is_empty() => (a.clone(), b.clone()),
         (false, false, [_]) => {
             sink.eline(&format!(
-                "tr: missing operand after '{}'\nTry 'tr --help' for more information.",
+                "tr: missing operand after '{}'\nTwo strings must be given when translating.\nTry 'tr --help' for more information.",
                 sets[0]
             ));
             return Util::Done(1);
@@ -5253,10 +5257,15 @@ fn wc(args: &[String], stdin: &mut Input, sink: &mut Sink) -> Util {
     };
     let ncols = usize::from(l) + usize::from(w) + usize::from(c) + usize::from(m);
     // GNU pads to the width of the total byte count when every input is a
-    // file, to 7 when one is a pipe, and not at all for a single number.
+    // regular file, to 7 when one is not (a pipe, /dev/null, a directory),
+    // and not at all for a single number.
     let width = if ncols == 1 && rows.len() <= 1 {
         0
-    } else if from_stdin || files.iter().any(|f| f == "-") {
+    } else if from_stdin
+        || files.iter().any(|f| {
+            f == "-" || f == "/dev/null" || std::fs::metadata(f).is_ok_and(|m| !m.is_file())
+        })
+    {
         7
     } else {
         let sizes: u64 = files
@@ -5564,7 +5573,9 @@ fn grep(args: &[String], stdin: &mut Input, sink: &mut Sink) -> Util {
     }
     if patterns.is_empty() {
         if ops.is_empty() {
-            sink.eline("Usage: grep [OPTION]... PATTERNS [FILE]...");
+            sink.eline(
+                "Usage: grep [OPTION]... PATTERNS [FILE]...\nTry 'grep --help' for more information.",
+            );
             return Util::Done(2);
         }
         patterns.push(ops.remove(0));
@@ -6247,7 +6258,7 @@ fn cut(args: &[String], stdin: &mut Input, sink: &mut Sink) -> Util {
         i += 1;
     }
     if fields.is_none() && chars.is_none() {
-        sink.eline("cut: you must specify a list of bytes, characters, or fields");
+        sink.eline("cut: you must specify a list of bytes, characters, or fields\nTry 'cut --help' for more information.");
         return Util::Done(1);
     }
     let within =
