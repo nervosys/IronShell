@@ -229,7 +229,11 @@ fn dev_null_is_an_empty_file_to_read() {
         ("sort /dev/null; echo rc=$?", "rc=0\n"),
         ("cat < /dev/null | wc -c", "0\n"),
         ("echo abc > f1; cat f1 /dev/null f1", "abc\nabc\n"),
-        ("grep -c x /dev/null f1", "/dev/null:0\nf1:0\n"),
+        // No line matches, so grep's status is 1, as in bash.
+        (
+            "grep -c x /dev/null f1; echo rc=$?",
+            "/dev/null:0\nf1:0\nrc=1\n",
+        ),
         (
             "head -n1 /dev/null f1",
             "==> /dev/null <==\n\n==> f1 <==\nabc\n",
