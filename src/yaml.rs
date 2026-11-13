@@ -393,14 +393,34 @@ fn parse_scalar(raw: &str, number: usize) -> Result<Value> {
     };
 
     // An integer past the 64-bit range would read as a Float and lose its digits.
-    if crate::builtins::is_wide_integer(s) {
-        return Err(crate::safety::value_not_representable(
+    // A 0o or 0x integer past it is refused the same way.
+    let overflow = || {
+        crate::safety::value_not_representable(
             "from_yaml",
             format!("from_yaml: line {number}: integer overflow at {s}: it does not fit in a 64-bit Int"),
             &format!("quote it as a string to keep the digits, such as \"{s}\""),
-        ));
+        )
+    };
+    if let Some((radix, digits)) = radix_integer(s) {
+        return i64::from_str_radix(digits, radix)
+            .map(Value::Int)
+            .map_err(|_| overflow());
+    }
+    if crate::builtins::is_wide_integer(s) {
+        return Err(overflow());
     }
     Ok(plain_scalar(s))
+}
+
+/// The digits and radix of a YAML 1.2 core octal (`0o17`) or hex (`0x1F`)
+/// integer: no sign, a lowercase prefix, and at least one digit.
+fn radix_integer(s: &str) -> Option<(u32, &str)> {
+    if let Some(digits) = s.strip_prefix("0o") {
+        return (!digits.is_empty() && digits.bytes().all(|b| (b'0'..=b'7').contains(&b)))
+            .then_some((8, digits));
+    }
+    let digits = s.strip_prefix("0x")?;
+    (!digits.is_empty() && digits.bytes().all(|b| b.is_ascii_hexdigit())).then_some((16, digits))
 }
 
 /// Type a plain (unquoted) scalar the way YAML 1.2 core schema does.
@@ -661,8 +681,8 @@ fn needs_quoting(s: &str) -> bool {
     ) {
         return true;
     }
-    // Control characters and line separators are written escaped, so the string is quoted.
-    if s.chars().any(needs_escape) {
+    // A 0o or 0x integer reads back as an Int, so a String that looks like one is quoted.
+    if radix_integer(s).is_some() || s.chars().any(needs_escape) {
         return true;
     }
     s.contains(':')

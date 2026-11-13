@@ -250,6 +250,28 @@ fn to_yaml_double_quotes_control_characters_and_round_trips() {
 }
 
 #[test]
+fn from_yaml_reads_octal_and_hex_integers_and_to_yaml_quotes_them() {
+    let _guard = LOCK.lock().unwrap_or_else(|p| p.into_inner());
+    let read = call("from_yaml", vec![s("k: 0o17\nh: 0x1F\nn: 1_000\n")]).unwrap();
+    assert_eq!(
+        read,
+        record(&[
+            ("k", Value::Int(15)),
+            ("h", Value::Int(31)),
+            ("n", s("1_000")),
+        ])
+    );
+    let se = refusal("from_yaml", vec![s("k: 0xFFFFFFFFFFFFFFFFF\n")]);
+    assert_eq!(se.code.as_str(), "E_BAD_VALUE", "{}", se.message);
+
+    let strings = record(&[("k", s("0o17")), ("h", s("0x1F"))]);
+    let out = text(call("to_yaml", vec![strings.clone()]).unwrap());
+    assert!(out.contains(r#"k: "0o17""#), "{out}");
+    assert!(out.contains(r#"h: "0x1F""#), "{out}");
+    assert_eq!(call("from_yaml", vec![s(&out)]).unwrap(), strings);
+}
+
+#[test]
 fn file_write_names_the_element_that_is_not_a_string() {
     let _guard = LOCK.lock().unwrap_or_else(|p| p.into_inner());
     let ses = Session::new("write_mixed");
