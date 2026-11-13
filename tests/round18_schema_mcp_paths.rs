@@ -394,15 +394,17 @@ fn item4_guessed_read_names_point_at_read_text_first() {
 }
 
 #[test]
-fn item4_exists_file_points_at_exists_and_repeat_at_pad_left() {
-    use iron_shell::builtins::did_you_mean;
+fn item4_exists_file_points_at_exists_and_repeat_is_a_builtin() {
+    use iron_shell::builtins::{did_you_mean, is_served};
     assert_eq!(
         did_you_mean("exists_file").first().map(String::as_str),
         Some("exists")
     );
+    // `repeat` is a builtin of its own now (round 34), not a pad_left guess.
+    assert!(is_served("repeat"));
     assert_eq!(
-        did_you_mean("repeat").first().map(String::as_str),
-        Some("pad_left")
+        did_you_mean("str_repeat").first().map(String::as_str),
+        Some("repeat")
     );
 }
 

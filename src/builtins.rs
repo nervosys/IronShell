@@ -783,6 +783,18 @@ lazy_static::lazy_static! {
         map.insert("has", 1191);
         map.insert("to_entries", 1192);
         map.insert("from_entries", 1193);
+        // Text (1194-1197), logarithms and exp (1198-1202), epoch seconds (1203-1204)
+        map.insert("title", 1194);
+        map.insert("capitalize", 1195);
+        map.insert("repeat", 1196);
+        map.insert("words", 1197);
+        map.insert("log", 1198);
+        map.insert("ln", 1199);
+        map.insert("log10", 1200);
+        map.insert("log2", 1201);
+        map.insert("exp", 1202);
+        map.insert("from_epoch", 1203);
+        map.insert("to_epoch", 1204);
         // 500-519: Database
         map.insert("db_sqlite_open", 500);
         map.insert("db_sqlite_query", 501);
@@ -3851,6 +3863,20 @@ static BUILTIN_DISPATCH: &[fn(Vec<Value>, Option<Value>, &mut Env) -> Result<Val
     |args, input, _| bi_has(args, input),           // 1191
     |args, input, _| bi_to_entries(args, input),    // 1192
     |args, input, _| bi_from_entries(args, input),  // 1193
+    // Text (1194-1197), in the string section
+    |args, input, _| bi_title(args, input),      // 1194
+    |args, input, _| bi_capitalize(args, input), // 1195
+    |args, input, _| bi_repeat(args, input),     // 1196
+    |args, input, _| bi_words(args, input),      // 1197
+    // Logarithms and exp (1198-1202), beside sqrt
+    |args, input, _| bi_log(args, input),   // 1198
+    |args, input, _| bi_ln(args, input),    // 1199
+    |args, input, _| bi_log10(args, input), // 1200
+    |args, input, _| bi_log2(args, input),  // 1201
+    |args, input, _| bi_exp(args, input),   // 1202
+    // Epoch seconds (1203-1204), in the date section
+    |args, input, _| bi_from_epoch(args, input), // 1203
+    |args, input, _| bi_to_epoch(args, input),   // 1204
 ];
 
 /// The dispatch row that serves `name`, if the fast table has one.
@@ -4007,9 +4033,9 @@ fn mapped_spelling(name: &str) -> Vec<String> {
         // Deleting a file is rm, which takes the path. No builtin is named delete.
         "delete" | "remove" | "unlink" | "file_delete" | "file_remove" | "remove_file"
         | "delete_file" => vec!["rm".to_string()],
-        // No repeat builtin. For one character, pad_left repeats it:
-        // "-" | pad_left(10, "-") is ten dashes.
-        "repeat" | "str_repeat" => vec!["pad_left".to_string()],
+        // Repetition is repeat(text, count); a Python or JavaScript spelling is
+        // named for it.
+        "str_repeat" => vec!["repeat".to_string()],
         // Redo re-applies the step undo took back: session_redo. Without this a
         // nearby name (sed) was offered instead.
         "redo" => vec!["session_redo".to_string()],
@@ -14891,17 +14917,198 @@ fn bi_join(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
     Ok(Value::Str(strings?.join(delimiter)))
 }
 
-/// trim() - Remove leading and trailing whitespace from string
-/// Returns: String - Trimmed string
+/// trim(text, chars?) - Remove leading and trailing characters from a string.
+/// Args:
+///   - text: String (or the piped text)
+///   - chars: String (optional) - every character in it is stripped from both
+///     ends, as Python's str.strip(chars) does; "" strips nothing
+/// Returns: String
+///
+/// Without `chars` the ends lose Unicode whitespace.
 ///
 /// Example:
-///   "  hello  " | trim()     # Returns "hello"
+///   "  hello  " | trim()          # "hello"
+///   trim("xxhixx", "x")           # "hi"
 fn bi_trim(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
-    let input_val = input
-        .or_else(|| args.first().cloned())
-        .ok_or_else(|| crate::safety::arg_err("trim requires input string"))?;
-    let text = expect_string("trim", &input_val)?;
-    Ok(Value::Str(text.trim().to_string()))
+    let (text, rest) = text_subject("trim", args, input)?;
+    let strip: Option<String> = match rest.as_slice() {
+        [] => None,
+        [Value::Str(chars)] => Some(chars.clone()),
+        [other] => {
+            return Err(crate::safety::bad_arg(
+                "trim",
+                "a String of characters to strip",
+                other.type_name(),
+            ))
+        }
+        _ => {
+            return Err(arity_error(
+                "trim",
+                "a text and an optional String of characters",
+                rest.len(),
+            ))
+        }
+    };
+    Ok(Value::Str(match strip {
+        None => text.trim().to_string(),
+        Some(chars) => text.trim_matches(|c: char| chars.contains(c)).to_string(),
+    }))
+}
+
+/// Whether a character belongs to a word for `title`: a letter, a digit, or an
+/// apostrophe. Every other character separates words.
+fn is_title_word_char(c: char) -> bool {
+    c.is_alphanumeric() || c == '\''
+}
+
+/// title(text) - Title-case a string: in each word, the first letter is upper
+/// case and every other letter is lower case.
+/// Args:
+///   - text: String (or the piped text)
+/// Returns: String
+///
+/// A word is a maximal run of letters, digits and apostrophes. Any other
+/// character (a space, a hyphen, punctuation) ends a word and is kept as it is.
+/// Digits and apostrophes are kept too, and a word's first letter is the first
+/// letter in it, so "3rd" becomes "3Rd" and "they're" becomes "They're".
+/// Letters use Unicode case mapping one character at a time: "élan vital" is
+/// "Élan Vital", and a letter whose upper case is two characters, such as ß,
+/// becomes both.
+///
+/// Example:
+///   title("hello WORLD")        # "Hello World"
+///   "well-known fact" | title() # "Well-Known Fact"
+fn bi_title(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
+    let (text, rest) = text_subject("title", args, input)?;
+    if !rest.is_empty() {
+        return Err(arity_error("title", "a text only", rest.len()));
+    }
+    let mut out = String::with_capacity(text.len());
+    let mut at_word_start = true;
+    for c in text.chars() {
+        if is_title_word_char(c) {
+            if c.is_alphabetic() {
+                if at_word_start {
+                    out.extend(c.to_uppercase());
+                } else {
+                    out.extend(c.to_lowercase());
+                }
+                at_word_start = false;
+            } else {
+                out.push(c);
+            }
+        } else {
+            out.push(c);
+            at_word_start = true;
+        }
+    }
+    Ok(Value::Str(out))
+}
+
+/// capitalize(text) - The first character upper case, every other character
+/// lower case. Unlike `title`, a space or a hyphen does not start a new word.
+/// Args:
+///   - text: String (or the piped text)
+/// Returns: String
+///
+/// Example:
+///   capitalize("hELLO wORLD")   # "Hello world"
+///   "élan" | capitalize()       # "Élan"
+fn bi_capitalize(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
+    let (text, rest) = text_subject("capitalize", args, input)?;
+    if !rest.is_empty() {
+        return Err(arity_error("capitalize", "a text only", rest.len()));
+    }
+    let mut out = String::with_capacity(text.len());
+    let mut chars = text.chars();
+    if let Some(first) = chars.next() {
+        out.extend(first.to_uppercase());
+    }
+    for c in chars {
+        out.extend(c.to_lowercase());
+    }
+    Ok(Value::Str(out))
+}
+
+/// The most bytes `repeat` will build: 100 MB (100,000,000 bytes). A larger
+/// result is refused with E_BAD_VALUE rather than allocated.
+const REPEAT_BYTES_MAX: usize = 100_000_000;
+
+/// repeat(text, count) - The text, `count` times in a row.
+/// Args:
+///   - text: String (or the piped text)
+///   - count: Int - 0 or more; a negative count is E_BAD_ARG
+/// Returns: String
+///
+/// A result over 100 MB is E_BAD_VALUE. An empty text repeats to "" whatever
+/// the count.
+///
+/// Example:
+///   repeat("ab", 3)     # "ababab"
+///   "-" | repeat(5)     # "-----"
+fn bi_repeat(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
+    let (text, rest) = text_subject("repeat", args, input)?;
+    let count = match rest.as_slice() {
+        [] => return Err(crate::safety::bad_arg("repeat", "a count Int", "nothing")),
+        [Value::Int(n)] => *n,
+        [other] => {
+            return Err(crate::safety::bad_arg(
+                "repeat",
+                "a count Int",
+                other.type_name(),
+            ))
+        }
+        _ => return Err(arity_error("repeat", "a text and a count", rest.len())),
+    };
+    if count < 0 {
+        return Err(crate::safety::bad_arg(
+            "repeat",
+            "a count of 0 or more",
+            &count.to_string(),
+        ));
+    }
+    if text.is_empty() {
+        return Ok(Value::Str(String::new()));
+    }
+    let bytes = usize::try_from(count)
+        .ok()
+        .and_then(|n| n.checked_mul(text.len()));
+    match bytes {
+        Some(total) if total <= REPEAT_BYTES_MAX => Ok(Value::Str(text.repeat(count as usize))),
+        _ => Err(crate::safety::value_not_representable(
+            "repeat",
+            format!(
+                "repeat: {} copies of {} bytes is more than {} bytes",
+                count,
+                text.len(),
+                REPEAT_BYTES_MAX
+            ),
+            "repeat fewer times, or build the text in pieces",
+        )),
+    }
+}
+
+/// words(text) - The words of a string: the text split on any run of
+/// whitespace, with the empty pieces dropped.
+/// Args:
+///   - text: String (or the piped text)
+/// Returns: Array<String>
+///
+/// Whitespace is Unicode whitespace: spaces, tabs, newlines and CRs alike.
+///
+/// Example:
+///   words("  the  quick\tfox\n")   # ["the", "quick", "fox"]
+///   "a b" | words() | len          # 2
+fn bi_words(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
+    let (text, rest) = text_subject("words", args, input)?;
+    if !rest.is_empty() {
+        return Err(arity_error("words", "a text only", rest.len()));
+    }
+    Ok(Value::Array(
+        text.split_whitespace()
+            .map(|w| Value::Str(w.to_string()))
+            .collect(),
+    ))
 }
 
 /// upper() - Convert string to uppercase
@@ -15626,6 +15833,168 @@ fn bi_round(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
         }
         _ => Err(crate::safety::arg_err("round requires numeric input")),
     }
+}
+
+/// A number argument of a math builtin, as a Float. An Int is promoted; a value
+/// that is not finite is refused, since IronShell numbers are finite.
+fn math_number(builtin: &str, value: &Value) -> Result<f64> {
+    let x = match value {
+        Value::Int(n) => *n as f64,
+        Value::Float(f) => *f,
+        other => {
+            return Err(crate::safety::bad_arg(
+                builtin,
+                "a number",
+                other.type_name(),
+            ))
+        }
+    };
+    if x.is_finite() {
+        Ok(x)
+    } else {
+        Err(crate::safety::value_not_representable(
+            builtin,
+            format!("{builtin}: {} is not a finite number", float_for_message(x)),
+            "IronShell numbers are finite; pass a number such as 2.5",
+        ))
+    }
+}
+
+/// The subject of a math builtin as a Float, and the arguments after it.
+fn math_subject(
+    builtin: &str,
+    args: Vec<Value>,
+    input: Option<Value>,
+) -> Result<(f64, Vec<Value>)> {
+    let (subject, rest) = subject_and_rest(builtin, args, input)?;
+    Ok((math_number(builtin, &subject)?, rest))
+}
+
+/// A Float result, refused when it is not finite (an overflow, never an inf).
+fn math_result(builtin: &str, value: f64) -> Result<Value> {
+    if value.is_finite() {
+        Ok(Value::Float(value))
+    } else {
+        Err(crate::safety::value_not_representable(
+            builtin,
+            format!("{builtin}: the result is not a finite Float"),
+            "use a number whose result fits in a Float",
+        ))
+    }
+}
+
+/// The refusal for a logarithm of zero or less.
+fn log_domain(builtin: &str, x: f64) -> anyhow::Error {
+    crate::safety::value_not_representable(
+        builtin,
+        format!(
+            "{builtin}: log of a non-positive number, got {}",
+            float_for_message(x)
+        ),
+        "a logarithm is defined for numbers above 0",
+    )
+}
+
+/// The shared body of log10, log2 and ln: one number, its logarithm in `f`.
+fn math_logarithm(
+    builtin: &str,
+    args: Vec<Value>,
+    input: Option<Value>,
+    f: fn(f64) -> f64,
+) -> Result<Value> {
+    let (x, rest) = math_subject(builtin, args, input)?;
+    if !rest.is_empty() {
+        return Err(arity_error(builtin, "one number", rest.len()));
+    }
+    if x <= 0.0 {
+        return Err(log_domain(builtin, x));
+    }
+    math_result(builtin, f(x))
+}
+
+/// ln(x) - The natural logarithm of a number above 0.
+/// Args:
+///   - x: Number (or the piped number)
+/// Returns: Float
+///
+/// Example:
+///   ln(1)          # 0
+///   0 | ln()        # E_BAD_VALUE: log of a non-positive number
+fn bi_ln(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
+    math_logarithm("ln", args, input, f64::ln)
+}
+
+/// log(x, base?) - The logarithm of a number above 0: natural by default, or in
+/// the base given (above 0, and not 1).
+/// Args:
+///   - x: Number (or the piped number)
+///   - base: Number (optional) - above 0 and not 1; e by default
+/// Returns: Float
+///
+/// Example:
+///   log(1)          # 0
+///   log(1, 2)       # 0
+///   8 | log2()      # 3
+///   log(0)          # E_BAD_VALUE: log of a non-positive number
+fn bi_log(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
+    let (x, rest) = math_subject("log", args, input)?;
+    let base = match rest.as_slice() {
+        [] => None,
+        [b] => Some(math_number("log", b)?),
+        _ => {
+            return Err(arity_error(
+                "log",
+                "a number and an optional base",
+                rest.len(),
+            ))
+        }
+    };
+    if x <= 0.0 {
+        return Err(log_domain("log", x));
+    }
+    match base {
+        None => math_result("log", x.ln()),
+        Some(b) if b <= 0.0 || b == 1.0 => Err(crate::safety::value_not_representable(
+            "log",
+            format!(
+                "log: the base must be above 0 and not 1, got {}",
+                float_for_message(b)
+            ),
+            "a logarithm base is a number such as 2, 10 or e",
+        )),
+        Some(b) => math_result("log", x.ln() / b.ln()),
+    }
+}
+
+/// log10(x) - The base-10 logarithm of a number above 0.
+/// Example:
+///   log10(1)        # 0
+fn bi_log10(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
+    math_logarithm("log10", args, input, f64::log10)
+}
+
+/// log2(x) - The base-2 logarithm of a number above 0.
+/// Example:
+///   log2(8)         # 3
+fn bi_log2(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
+    math_logarithm("log2", args, input, f64::log2)
+}
+
+/// exp(x) - e raised to x. A result too large for a Float is E_BAD_VALUE, never
+/// an inf.
+/// Args:
+///   - x: Number (or the piped number)
+/// Returns: Float
+///
+/// Example:
+///   exp(0)          # 1
+///   exp(1000)       # E_BAD_VALUE: the result is not a finite Float
+fn bi_exp(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
+    let (x, rest) = math_subject("exp", args, input)?;
+    if !rest.is_empty() {
+        return Err(arity_error("exp", "one number", rest.len()));
+    }
+    math_result("exp", x.exp())
 }
 
 /// sqrt(number) - Calculate square root
@@ -30474,6 +30843,104 @@ fn bi_proc_cmdline(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
     proc_require("proc_cmdline", pid)?;
     let argv = proc_cmdline_of(pid)?;
     Ok(Value::Array(argv.into_iter().map(Value::Str).collect()))
+}
+
+/// The earliest epoch second `from_epoch` and `to_epoch` take: 0001-01-01T00:00:00Z.
+const EPOCH_MIN: i64 = -62_135_596_800;
+/// The latest: 9999-12-31T23:59:59Z. Years 0001 to 9999 only.
+const EPOCH_MAX: i64 = 253_402_300_799;
+
+/// The refusal for an epoch second outside the years 0001 to 9999.
+fn epoch_range(builtin: &str, shown: &str) -> anyhow::Error {
+    crate::safety::value_not_representable(
+        builtin,
+        format!("{builtin}: {shown} is outside the years 0001 to 9999"),
+        "epoch seconds run from -62135596800 (0001-01-01T00:00:00Z) to 253402300799 (9999-12-31T23:59:59Z)",
+    )
+}
+
+/// from_epoch(seconds) - The UTC ISO 8601 text of an instant, given as seconds
+/// since 1970-01-01T00:00:00Z.
+/// Args:
+///   - seconds: Int, or Float for a fractional second (the fraction is dropped:
+///     -0.5 is 1969-12-31T23:59:59Z, the second that contains the instant)
+/// Returns: String, to the second, ending in Z
+///
+/// Years 0001 to 9999 only; outside them is E_BAD_VALUE.
+///
+/// Example:
+///   from_epoch(0)              # "1970-01-01T00:00:00Z"
+///   from_epoch(86400.5)        # "1970-01-02T00:00:00Z"
+fn bi_from_epoch(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
+    let (subject, rest) = subject_and_rest("from_epoch", args, input)?;
+    if !rest.is_empty() {
+        return Err(arity_error(
+            "from_epoch",
+            "one number of seconds",
+            rest.len(),
+        ));
+    }
+    let secs: i64 = match subject {
+        Value::Int(n) => n,
+        Value::Float(f) => {
+            // The bounds are checked before the cast, so the cast cannot saturate.
+            if !f.is_finite() || f < EPOCH_MIN as f64 || f >= (EPOCH_MAX + 1) as f64 {
+                return Err(epoch_range("from_epoch", &float_for_message(f)));
+            }
+            f.floor() as i64
+        }
+        other => {
+            return Err(crate::safety::bad_arg(
+                "from_epoch",
+                "a number of seconds",
+                other.type_name(),
+            ))
+        }
+    };
+    if !(EPOCH_MIN..=EPOCH_MAX).contains(&secs) {
+        return Err(epoch_range("from_epoch", &secs.to_string()));
+    }
+    let at = chrono::DateTime::<chrono::Utc>::from_timestamp(secs, 0)
+        .ok_or_else(|| epoch_range("from_epoch", &secs.to_string()))?;
+    Ok(Value::Str(at.format("%Y-%m-%dT%H:%M:%SZ").to_string()))
+}
+
+/// to_epoch(date) - The whole seconds since 1970-01-01T00:00:00Z of an ISO 8601
+/// UTC date or datetime.
+/// Args:
+///   - date: String (or the piped text): a datetime with a Z or an offset, such
+///     as 1970-01-02T00:00:00Z, or a date such as 1970-01-02 (midnight UTC)
+/// Returns: Int
+///
+/// A datetime's offset is applied, and a fraction of a second is dropped. Years
+/// 0001 to 9999 only; text that is not such a date is E_BAD_VALUE.
+///
+/// Example:
+///   to_epoch("1970-01-02T00:00:00Z")   # 86400
+///   "1970-01-01" | to_epoch()          # 0
+fn bi_to_epoch(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
+    let (text, rest) = text_subject("to_epoch", args, input)?;
+    if !rest.is_empty() {
+        return Err(arity_error("to_epoch", "one date", rest.len()));
+    }
+    let at = if let Ok(datetime) = chrono::DateTime::parse_from_rfc3339(&text) {
+        datetime.timestamp()
+    } else if let Some(midnight) = chrono::NaiveDate::parse_from_str(&text, "%Y-%m-%d")
+        .ok()
+        .and_then(|date| date.and_hms_opt(0, 0, 0))
+    {
+        midnight.and_utc().timestamp()
+    } else {
+        return Err(crate::safety::value_not_representable(
+            "to_epoch",
+            format!("to_epoch: {text:?} is not an ISO 8601 UTC date or datetime"),
+            "write 1970-01-02T00:00:00Z, or a date such as 1970-01-02 for midnight UTC",
+        ));
+    };
+    if !(EPOCH_MIN..=EPOCH_MAX).contains(&at) {
+        return Err(epoch_range("to_epoch", &format!("{text:?}")));
+    }
+    Ok(Value::Int(at))
 }
 
 /// Seconds since the Unix epoch, as UTC ISO 8601 to the second, or None when

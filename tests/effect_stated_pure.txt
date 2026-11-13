@@ -41,6 +41,7 @@ best_individual
 budget
 call
 canonical
+capitalize
 ceil
 chunk
 clear
@@ -93,6 +94,7 @@ evolution_config
 evolution_stats
 evolve
 evolve_step
+exp
 explain
 explain_effects
 finetune_start
@@ -109,6 +111,7 @@ from-csv
 from-yaml
 from_csv
 from_entries
+from_epoch
 from_toml
 from_yaml
 get
@@ -153,6 +156,10 @@ last
 len
 length
 lines
+ln
+log
+log10
+log2
 lower
 map
 max
@@ -231,6 +238,7 @@ regex_find
 regex_find_all
 regex_match
 regex_replace
+repeat
 repl_broadcast
 replace
 reverse
@@ -282,11 +290,13 @@ test_snapshot
 themes
 time
 timestamp
+title
 to-csv
 to-json
 to-yaml
 to_csv
 to_entries
+to_epoch
 to_json
 to_string
 to_toml
@@ -314,4 +324,5 @@ url_encode
 values
 where
 where-object
+words
 zip
