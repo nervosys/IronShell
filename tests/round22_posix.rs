@@ -91,7 +91,7 @@ fn a_refused_sed_form_names_the_part_it_does_not_support() {
     assert_eq!(code, 2, "{err}");
     assert!(
         err.starts_with(
-            "ish: sed: the s command's flag `w` is not supported by the in-process subset, and no GNU-compatible sed is installed\n"
+            "ish: sed: the in-process sed does not support the s command's flag `w`; a GNU-compatible sed on PATH would run it, and none was found\n"
         ),
         "{err}"
     );

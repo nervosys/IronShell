@@ -228,18 +228,19 @@ fn a_child_script_in_agent_mode_stays_inside_the_workspace() {
 }
 
 #[test]
-fn a_here_string_is_named_and_refused_before_anything_runs() {
-    let dir = scratch("here_string");
-    let s = script(&dir, "h.sh", "echo before\ngrep -c b <<< \"abc\"\n");
+fn a_here_document_is_named_and_refused_before_anything_runs() {
+    // Here-strings (`<<<`) run in-process since round 36; here-documents do not.
+    let dir = scratch("here_doc");
+    let s = script(&dir, "h.sh", "echo before\ngrep -c b <<EOF\nabc\nEOF\n");
     let (code, out, err) = ish(&dir, &["-b", &s]);
     assert_eq!(code, 77, "{err}");
     assert!(out.is_empty(), "ran something: {out:?}");
     assert!(
-        err.contains("here-string (<<<) at line 2, column 11"),
+        err.contains("here-document (<<) at line 2, column 11"),
         "{err}"
     );
-    assert!(err.contains("pipe it instead: printf"), "{err}");
-    assert!(!err.contains("here-document"), "{err}");
+    assert!(err.contains("pass the text with printf"), "{err}");
+    assert!(!err.contains("here-string"), "{err}");
 }
 
 #[test]

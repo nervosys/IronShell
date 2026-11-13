@@ -53,6 +53,8 @@ enum Redir {
     Out { fd: u8, append: bool, target: Word },
     /// `<file`
     In(Word),
+    /// `<<< word`: the word, expanded as one double-quoted word, and a newline
+    Str(Word),
     /// `n>&m`
     Dup { from: u8, to: u8 },
     /// `&>file`
@@ -190,6 +192,39 @@ fn check_body(body: &str) -> PResult<()> {
 struct Lexer<'a> {
     s: &'a [char],
     i: usize,
+}
+
+/// The part that separates the offset from the length in the word of a
+/// `${name:offset:length}`.
+const SUBSTRING_SPLIT: &str = "\u{1}";
+
+fn skip_blanks(c: &[char], i: &mut usize) {
+    while c.get(*i).is_some_and(|x| x.is_whitespace()) {
+        *i += 1;
+    }
+}
+
+/// A C integer constant as bash's arithmetic reads it: decimal, `0x` hex or a
+/// leading `0` for octal.
+fn parse_c_integer(token: &str) -> Option<i64> {
+    if let Some(h) = token
+        .strip_prefix("0x")
+        .or_else(|| token.strip_prefix("0X"))
+    {
+        i64::from_str_radix(h, 16).ok()
+    } else if token.len() > 1 && token.starts_with('0') {
+        i64::from_str_radix(&token[1..], 8).ok()
+    } else {
+        token.parse().ok()
+    }
+}
+
+/// `chars` lexed as the inside of a double-quoted word, appended to `w`.
+fn lex_quoted(chars: &[char], w: &mut Word) -> PResult<()> {
+    let mut text = chars.to_vec();
+    text.push('"');
+    let mut q = Lexer { s: &text, i: 0 };
+    q.double_quoted(w)
 }
 
 fn is_name_start(c: char) -> bool {
@@ -338,11 +373,15 @@ impl<'a> Lexer<'a> {
         if c == '<' {
             match self.peek() {
                 Some('<') => {
-                    return if self.peek_at(1) == Some('<') {
-                        unsupported("here-string (<<<)")
-                    } else {
-                        unsupported("here-document (<<)")
-                    };
+                    if self.peek_at(1) != Some('<') {
+                        return unsupported("here-document (<<)");
+                    }
+                    if fd.is_some_and(|f| f != 0) {
+                        return unsupported("input descriptor");
+                    }
+                    // `<<< word`: the word is the command's standard input.
+                    self.i += 2;
+                    return Ok(Redir::Str(self.target()?));
                 }
                 Some('(') => return unsupported("process substitution"),
                 Some('&') | Some('>') => return unsupported("<& / <>"),
@@ -662,6 +701,15 @@ impl<'a> Lexer<'a> {
                             self.i += 1;
                         }
                     }
+                    // `${name:offset}` and `${name:offset:length}`: `op` stays a
+                    // bare `:`, its word the offset and the length (see
+                    // `Shell::substring`). A `-` right after the colon is the
+                    // `:-` operator above, so a negative offset is written
+                    // with a blank or parentheses.
+                    Some(c)
+                        if op == ":"
+                            && (c.is_ascii_alphanumeric()
+                                || matches!(c, '_' | ' ' | '\t' | '$' | '(')) => {}
                     _ => {
                         let named = param_operator(op.starts_with(':'), &self.s[self.i..]);
                         return unsupported_at(&format!("${{...}} operator `{named}`"), dollar_at);
@@ -688,7 +736,34 @@ impl<'a> Lexer<'a> {
                 }
                 let inner: Vec<char> = self.s[start..self.i].to_vec();
                 self.i += 1;
-                let word = if inner.is_empty() {
+                let word = if op == ":" {
+                    // The offset, then (after a marker part) the length, each
+                    // read as double-quoted text so `$n` and blanks work.
+                    let mut depth = 0i32;
+                    let mut colon = None;
+                    for (k, c) in inner.iter().enumerate() {
+                        match c {
+                            '{' | '(' => depth += 1,
+                            '}' | ')' => depth -= 1,
+                            ':' if depth == 0 => {
+                                colon = Some(k);
+                                break;
+                            }
+                            _ => {}
+                        }
+                    }
+                    let (offset, length) = match colon {
+                        Some(k) => (&inner[..k], Some(&inner[k + 1..])),
+                        None => (&inner[..], None),
+                    };
+                    let mut w = Vec::new();
+                    lex_quoted(offset, &mut w).map_err(|e| relocate(e, start, dollar_at))?;
+                    if let Some(length) = length {
+                        w.push(Part::Lit(SUBSTRING_SPLIT.to_string(), true));
+                        lex_quoted(length, &mut w).map_err(|e| relocate(e, start, dollar_at))?;
+                    }
+                    w
+                } else if inner.is_empty() {
                     vec![Part::Lit(String::new(), true)]
                 } else {
                     let mut sub = Lexer { s: &inner, i: 0 };
@@ -1897,6 +1972,9 @@ impl Shell {
         let Some((op, word)) = op else {
             return value.unwrap_or_default();
         };
+        if op.as_str() == ":" {
+            return self.substring(name, value.unwrap_or_default(), word, stdin);
+        }
         let colon = op.starts_with(':');
         let unset_or_null = match &value {
             None => true,
@@ -1958,6 +2036,150 @@ impl Shell {
                 }
             }
             _ => value.unwrap_or_default(),
+        }
+    }
+
+    /// `${name:offset}` and `${name:offset:length}`: the part of `value` from
+    /// `offset`, `length` long, counted in characters (bash in a UTF-8 locale;
+    /// in the C locale it counts bytes). A negative offset counts from the end,
+    /// and a negative length stops that many characters before the end. An
+    /// offset outside the value gives nothing; a negative length that ends
+    /// before the offset is bash's "substring expression < 0" error. Offset and
+    /// length are sums of integers and variable names, as bash reads them.
+    fn substring(&mut self, name: &str, value: String, word: &Word, stdin: &mut Input) -> String {
+        let split = word
+            .iter()
+            .position(|p| matches!(p, Part::Lit(s, _) if s == SUBSTRING_SPLIT));
+        let (offset_word, length_word) = match split {
+            Some(k) => (word[..k].to_vec(), Some(word[k + 1..].to_vec())),
+            None => (word.clone(), None),
+        };
+        let offset_text = self.expand_assign(&offset_word, stdin);
+        let length_text = length_word.map(|w| self.expand_assign(&w, stdin));
+        let Some(offset) = self.arith_eval(&offset_text) else {
+            self.arith_error(name, &offset_text);
+            return String::new();
+        };
+        let length = match &length_text {
+            None => None,
+            Some(t) => match self.arith_eval(t) {
+                Some(n) => Some(n),
+                None => {
+                    self.arith_error(name, t);
+                    return String::new();
+                }
+            },
+        };
+        let chars: Vec<char> = value.chars().collect();
+        let n = chars.len() as i64;
+        let start = if offset < 0 {
+            n.saturating_add(offset)
+        } else {
+            offset
+        };
+        if !(0..=n).contains(&start) {
+            return String::new();
+        }
+        let end = match length {
+            None => n,
+            Some(l) if l >= 0 => start.saturating_add(l).min(n),
+            Some(l) => n.saturating_add(l),
+        };
+        if end < start {
+            if self.unbound.is_none() {
+                let shown = length_text.unwrap_or_default();
+                self.unbound =
+                    Some(self.expansion_message(shown.trim(), "substring expression < 0"));
+            }
+            return String::new();
+        }
+        chars[start as usize..end as usize].iter().collect()
+    }
+
+    /// Note an offset or length that is not arithmetic this shell reads.
+    fn arith_error(&mut self, name: &str, text: &str) {
+        if self.unbound.is_none() {
+            self.unbound = Some(self.expansion_message(
+                &format!("{name}: {}", text.trim()),
+                "syntax error: operand expected",
+            ));
+        }
+    }
+
+    /// The value of `text` as the integer expression of a substring offset: a
+    /// sum or difference of integers (decimal, `0x` hex, `0` octal), variable
+    /// names (an unset one is 0) and parentheses, with unary `+` and `-`.
+    fn arith_eval(&self, text: &str) -> Option<i64> {
+        let c: Vec<char> = text.chars().collect();
+        let mut i = 0;
+        let v = self.arith_sum(&c, &mut i)?;
+        skip_blanks(&c, &mut i);
+        (i == c.len()).then_some(v)
+    }
+
+    fn arith_sum(&self, c: &[char], i: &mut usize) -> Option<i64> {
+        let mut v = self.arith_term(c, i)?;
+        loop {
+            skip_blanks(c, i);
+            match c.get(*i) {
+                Some('+') => {
+                    *i += 1;
+                    v = v.checked_add(self.arith_term(c, i)?)?;
+                }
+                Some('-') => {
+                    *i += 1;
+                    v = v.checked_sub(self.arith_term(c, i)?)?;
+                }
+                _ => return Some(v),
+            }
+        }
+    }
+
+    fn arith_term(&self, c: &[char], i: &mut usize) -> Option<i64> {
+        skip_blanks(c, i);
+        match *c.get(*i)? {
+            '-' => {
+                *i += 1;
+                self.arith_term(c, i)?.checked_neg()
+            }
+            '+' => {
+                *i += 1;
+                self.arith_term(c, i)
+            }
+            '(' => {
+                *i += 1;
+                let v = self.arith_sum(c, i)?;
+                skip_blanks(c, i);
+                if c.get(*i) == Some(&')') {
+                    *i += 1;
+                    Some(v)
+                } else {
+                    None
+                }
+            }
+            d if d.is_ascii_digit() => {
+                let from = *i;
+                while c.get(*i).is_some_and(|x| x.is_ascii_alphanumeric()) {
+                    *i += 1;
+                }
+                let token: String = c[from..*i].iter().collect();
+                parse_c_integer(&token)
+            }
+            n if is_name_start(n) => {
+                let from = *i;
+                while c.get(*i).is_some_and(|x| is_name_char(*x)) {
+                    *i += 1;
+                }
+                let name: String = c[from..*i].iter().collect();
+                let value = self.var(&name).unwrap_or_default();
+                let value = value.trim();
+                if value.is_empty() {
+                    Some(0)
+                } else {
+                    Some(parse_c_integer(value).unwrap_or(0))
+                }
+            }
+            _ => None,
         }
     }
 
@@ -2216,7 +2438,7 @@ impl Shell {
                         self.last = 1;
                         return Flow::Next(1);
                     }
-                    match std::fs::read(&path) {
+                    match read_file(&path) {
                         Ok(d) => local_in = Some(Input::buf(d)),
                         Err(e) => {
                             sink.eline(&format!("{SHELL_NAME}: {path}: {}", io_reason(&e)));
@@ -2224,6 +2446,12 @@ impl Shell {
                             return Flow::Next(1);
                         }
                     }
+                }
+                Redir::Str(w) => {
+                    // As a double-quoted word: no field splitting and no globbing.
+                    let mut text = self.expand_assign(w, stdin);
+                    text.push('\n');
+                    local_in = Some(Input::buf(text.into_bytes()));
                 }
                 Redir::Out { fd, append, target } => {
                     let path = self.expand(target, stdin).join(" ");
@@ -3123,8 +3351,10 @@ fn resolve_program(
             None => "this form".to_string(),
         }
     };
+    // The in-process utility is what refused; the GNU program that could have
+    // run it comes second.
     let mut msg = format!(
-        "{SHELL_NAME}: {name}: {what} is not supported by the in-process subset, and no GNU-compatible {name} is installed"
+        "{SHELL_NAME}: {name}: the in-process {name} does not support {what}; a GNU-compatible {name} on PATH would run it, and none was found"
     );
     if let Some(hint) = windows_tools_hint() {
         msg.push('\n');
@@ -3705,7 +3935,20 @@ fn redacted(bytes: &[u8]) -> std::borrow::Cow<'_, [u8]> {
     }
 }
 
+/// The bytes of `path`. `/dev/null` reads as an empty file on every platform
+/// (Windows has no such path), as the write side already treats it as a sink.
+fn read_file(path: &str) -> std::io::Result<Vec<u8>> {
+    if path == "/dev/null" {
+        return Ok(Vec::new());
+    }
+    std::fs::read(path)
+}
+
 fn jail_refusal(tool: &str, path: &str) -> Option<String> {
+    // `/dev/null` is no file of the workspace's or anyone's: it holds nothing.
+    if path == "/dev/null" {
+        return None;
+    }
     if crate::security::outside_read_jail(path) {
         crate::security::audit_read_refusal(tool, path);
         return Some(crate::safety::outside_workspace(tool, path).to_string());
@@ -3737,7 +3980,7 @@ fn read_inputs(
             *status = 1;
             continue;
         }
-        match std::fs::read(f) {
+        match read_file(f) {
             Ok(d) => out.push((f.clone(), d)),
             Err(e) => {
                 sink.eline(&format!("{tool}: {f}: {}", io_reason(&e)));
@@ -4054,9 +4297,26 @@ fn printf(args: &[String], sink: &mut Sink) -> Util {
                 i += 1;
                 continue;
             }
+            // The C flags, in any order and any number: `-` left-justifies, `+`
+            // and a space put a sign on a signed number, `#` the alternate form
+            // (`0x`, a leading `0`, a decimal point), `0` pads with zeros.
+            let (mut left, mut plus, mut space, mut alt, mut zero) =
+                (false, false, false, false, false);
+            while let Some(&f) = fmt.get(i) {
+                match f {
+                    '-' => left = true,
+                    '+' => plus = true,
+                    ' ' => space = true,
+                    '#' => alt = true,
+                    '0' => zero = true,
+                    _ => break,
+                }
+                i += 1;
+            }
+            // What follows the flags: the width, then `.` and the precision.
             let mut spec = String::new();
             while let Some(&f) = fmt.get(i) {
-                if f == '-' || f == '0' || f.is_ascii_digit() || f == '.' {
+                if f.is_ascii_digit() || f == '.' {
                     spec.push(f);
                     i += 1;
                 } else {
@@ -4068,15 +4328,9 @@ fn printf(args: &[String], sink: &mut Sink) -> Util {
             let arg = rest.next();
             consumed |= arg.is_some();
             let arg = arg.cloned().unwrap_or_default();
-            let left = spec.starts_with('-');
-            let zero = spec.trim_start_matches('-').starts_with('0');
             // A width is padding allocated up front: `%999999999999s` asked
             // for a terabyte, and a width too long to parse was read as 0.
-            let digits = spec
-                .trim_start_matches(['-', '0'])
-                .split('.')
-                .next()
-                .unwrap_or("");
+            let digits = spec.split('.').next().unwrap_or("");
             let width: usize = if digits.is_empty() {
                 0
             } else {
@@ -4101,6 +4355,11 @@ fn printf(args: &[String], sink: &mut Sink) -> Util {
                     _ => return Util::Decline,
                 },
             };
+            // A number's sign and `0x` prefix are kept apart from its digits,
+            // so the zero padding goes between them.
+            let mut sign = "";
+            let mut prefix = "";
+            let mut numeric = false;
             let body = match conv {
                 's' | 'b' => {
                     let text = if conv == 'b' {
@@ -4113,8 +4372,7 @@ fn printf(args: &[String], sink: &mut Sink) -> Util {
                         None => text,
                     }
                 }
-                'd' | 'i' | 'x' | 'X' | 'o' if precision.is_some() => return Util::Decline,
-                'd' | 'i' | 'x' | 'X' | 'o' => {
+                'd' | 'i' | 'u' | 'x' | 'X' | 'o' => {
                     let n = if arg.is_empty() {
                         0
                     } else {
@@ -4124,53 +4382,100 @@ fn printf(args: &[String], sink: &mut Sink) -> Util {
                         }
                         n
                     };
-                    match conv {
-                        'd' | 'i' => n.to_string(),
+                    numeric = true;
+                    let mut text = match conv {
+                        'd' | 'i' => n.unsigned_abs().to_string(),
                         // As bash does, a negative number is shown as 64 bits.
+                        'u' => (n as u64).to_string(),
                         'x' => format!("{:x}", n as u64),
                         'X' => format!("{:X}", n as u64),
                         _ => format!("{:o}", n as u64),
+                    };
+                    // `+` and the space flag mean something only for a signed
+                    // conversion; `%+x` is `%x`.
+                    if matches!(conv, 'd' | 'i') {
+                        sign = if n < 0 {
+                            "-"
+                        } else if plus {
+                            "+"
+                        } else if space {
+                            " "
+                        } else {
+                            ""
+                        };
                     }
+                    // A precision is the least number of digits; `%.0d` of 0 is
+                    // no digits at all.
+                    if let Some(p) = precision {
+                        if p == 0 && n == 0 {
+                            text.clear();
+                        } else if text.len() < p {
+                            text = format!("{}{text}", "0".repeat(p - text.len()));
+                        }
+                    }
+                    if alt && conv == 'o' && !text.starts_with('0') {
+                        text.insert(0, '0');
+                    } else if alt && n != 0 && matches!(conv, 'x' | 'X') {
+                        prefix = if conv == 'x' { "0x" } else { "0X" };
+                    }
+                    text
                 }
-                'f' => match arg.trim().parse::<f64>() {
-                    Ok(v) if v.is_finite() => format!("{:.*}", precision.unwrap_or(6), v),
-                    Err(_) if arg.is_empty() => format!("{:.*}", precision.unwrap_or(6), 0.0),
-                    _ => return Util::Decline,
-                },
-                'e' | 'E' | 'g' | 'G' => {
+                'f' | 'e' | 'E' | 'g' | 'G' => {
                     let value = match arg.trim().parse::<f64>() {
                         Ok(v) if v.is_finite() => v,
                         Err(_) if arg.is_empty() => 0.0,
                         _ => return Util::Decline,
                     };
+                    numeric = true;
                     let upper = conv.is_ascii_uppercase();
-                    if matches!(conv, 'e' | 'E') {
-                        c_exp(value, precision.unwrap_or(6), upper)
-                    } else {
-                        c_general(value, precision.unwrap_or(6), upper)
+                    let p = precision.unwrap_or(6);
+                    let mut text = match conv {
+                        'f' => format!("{:.*}", p, value),
+                        'e' | 'E' => c_exp(value, p, upper),
+                        _ => c_general(value, p, upper, alt),
+                    };
+                    // `#` keeps the decimal point of `%.0f` and `%.0e`.
+                    if alt && p == 0 && conv != 'g' && conv != 'G' {
+                        let at = text.find(['e', 'E']).unwrap_or(text.len());
+                        text.insert(at, '.');
                     }
+                    let negative = text.starts_with('-');
+                    if negative {
+                        text.remove(0);
+                    }
+                    sign = if negative {
+                        "-"
+                    } else if plus {
+                        "+"
+                    } else if space {
+                        " "
+                    } else {
+                        ""
+                    };
+                    text
                 }
                 'c' => arg.chars().next().map(String::from).unwrap_or_default(),
                 _ => return Util::Decline,
             };
-            let pad = width.saturating_sub(body.chars().count());
+            let pad = width.saturating_sub(sign.len() + prefix.len() + body.chars().count());
+            // With a precision, the `0` flag is ignored for an integer, as in C.
+            let zero_pad = zero
+                && numeric
+                && !(precision.is_some() && matches!(conv, 'd' | 'i' | 'u' | 'x' | 'X' | 'o'));
             if left {
+                out.push_str(sign);
+                out.push_str(prefix);
                 out.push_str(&body);
                 out.push_str(&" ".repeat(pad));
-            } else if zero
-                && matches!(
-                    conv,
-                    'd' | 'i' | 'x' | 'X' | 'o' | 'f' | 'e' | 'E' | 'g' | 'G'
-                )
-            {
-                let (sign, digits) = body
-                    .strip_prefix('-')
-                    .map_or(("", body.as_str()), |d| ("-", d));
+            } else if zero_pad {
                 out.push_str(sign);
+                out.push_str(prefix);
                 out.push_str(&"0".repeat(pad));
-                out.push_str(digits);
+                out.push_str(&body);
             } else {
                 out.push_str(&" ".repeat(pad));
+                out.push_str(sign);
+                out.push_str(prefix);
                 out.push_str(&body);
             }
         }
@@ -4268,9 +4573,9 @@ fn c_exp(v: f64, precision: usize, upper: bool) -> String {
 
 /// C's `%g`: `precision` significant digits (6 by default, 1 for 0). The `%e`
 /// form is used when the exponent is below -4 or at least the precision, else
-/// `%f`; trailing zeros of the fraction are removed (the `#` flag is not in the
-/// subset).
-fn c_general(v: f64, precision: usize, upper: bool) -> String {
+/// `%f`; trailing zeros of the fraction are removed, unless `alt` (the `#`
+/// flag) keeps them and the decimal point.
+fn c_general(v: f64, precision: usize, upper: bool, alt: bool) -> String {
     let p = precision.max(1);
     // The exponent `%e` would show with this precision decides the form.
     let probe = format!("{:.*e}", p - 1, v);
@@ -4285,13 +4590,25 @@ fn c_general(v: f64, precision: usize, upper: bool) -> String {
             s.to_string()
         }
     }
+    let strip = |s: &str| {
+        if alt {
+            // The point stays even with no digit after it (`%#.1g` of 1e10).
+            if s.contains('.') {
+                s.to_string()
+            } else {
+                format!("{s}.")
+            }
+        } else {
+            strip_zeros(s)
+        }
+    };
     if x < -4 || x >= p as i64 {
         let s = c_exp(v, p - 1, upper);
         let at = s.find(['e', 'E']).unwrap_or(s.len());
-        format!("{}{}", strip_zeros(&s[..at]), &s[at..])
+        format!("{}{}", strip(&s[..at]), &s[at..])
     } else {
         let decimals = (p as i64 - 1 - x) as usize;
-        strip_zeros(&format!("{:.*}", decimals, v))
+        strip(&format!("{:.*}", decimals, v))
     }
 }
 
@@ -4601,6 +4918,22 @@ fn tr_set(spec: &str) -> Option<Vec<char>> {
 /// GNU tr does. Other options (`-c`, `-t`) and set forms decline to the real
 /// program.
 fn tr(args: &[String], stdin: &mut Input, sink: &mut Sink) -> Util {
+    if let Some(msg) = invalid_option(
+        "tr",
+        args,
+        "cCdst",
+        &[
+            "complement",
+            "delete",
+            "squeeze-repeats",
+            "truncate-set1",
+            "help",
+            "version",
+        ],
+    ) {
+        sink.eline(&msg);
+        return Util::Done(1);
+    }
     let Some((flags, sets)) = short_flags(args, "ds") else {
         return Util::Decline;
     };
@@ -4922,10 +5255,189 @@ fn ere_to_regex(p: &str) -> Option<String> {
     Some(p.replace("\\<", "\\b").replace("\\>", "\\b"))
 }
 
+/// The `--include`, `--exclude` and `--exclude-dir` globs of a `grep`, each
+/// matched against a file's or directory's base name, as GNU grep does.
+#[derive(Default)]
+struct GrepFilter {
+    include: Vec<String>,
+    exclude: Vec<String>,
+    exclude_dir: Vec<String>,
+}
+
+impl GrepFilter {
+    /// Whether a file is left out. `names` are the strings its name is tried as:
+    /// the base name for a file the walk finds, and for an operand written on the
+    /// command line the whole operand and each tail after a `/`.
+    fn skips_file(&self, names: &[&str]) -> bool {
+        let hit = |globs: &[String]| globs.iter().any(|g| names.iter().any(|n| glob_match(g, n)));
+        hit(&self.exclude) || (!self.include.is_empty() && !hit(&self.include))
+    }
+
+    /// Whether a directory is not entered (`--exclude-dir`).
+    fn skips_dir(&self, names: &[&str]) -> bool {
+        self.exclude_dir.iter().any(|g| {
+            let g = g.trim_end_matches('/');
+            names.iter().any(|n| glob_match(g, n))
+        })
+    }
+}
+
+/// The strings a command-line operand is matched as: the operand, less a
+/// trailing `/`, and every tail of it that starts after a `/`.
+fn operand_names(op: &str) -> Vec<&str> {
+    let t = match op.trim_end_matches('/') {
+        "" => op,
+        t => t,
+    };
+    let mut names = vec![t];
+    for (k, c) in t.char_indices() {
+        if c == '/' {
+            names.push(&t[k + 1..]);
+        }
+    }
+    names
+}
+
+/// Which of `--include`, `--exclude` and `--exclude-dir` the argument is, and its
+/// glob when written `--include=GLOB`; `None` when written `--include GLOB`.
+fn grep_glob_opt(a: &str) -> Option<(&'static str, Option<String>)> {
+    for name in ["include", "exclude-dir", "exclude"] {
+        let long = format!("--{name}");
+        if a == long {
+            return Some((name, None));
+        }
+        if let Some(v) = a.strip_prefix(&format!("{long}=")) {
+            return Some((name, Some(v.to_string())));
+        }
+    }
+    None
+}
+
+/// What GNU getopt says about an argument that starts with `-` and is no option
+/// of the utility: `invalid option -- 'c'` for a short one, `unrecognized option
+/// '--name'` for a long one, then the usage line(s). `short` lists the short
+/// options, each followed by `:` when it takes a value; `long` the long names,
+/// of which a prefix is as good as the whole (getopt's abbreviations). `None`
+/// when every option is one of them. The caller prints it and exits with the
+/// utility's own status (grep and sort 2, cut and tr 1).
+fn invalid_option(tool: &str, args: &[String], short: &str, long: &[&str]) -> Option<String> {
+    let takes_value = |c: char| {
+        short
+            .find(c)
+            .is_some_and(|p| short[p + c.len_utf8()..].starts_with(':'))
+    };
+    let mut i = 0;
+    while i < args.len() {
+        let a = args[i].as_str();
+        i += 1;
+        if a == "--" {
+            break;
+        }
+        let what = if let Some(name) = a.strip_prefix("--") {
+            let name = name.split('=').next().unwrap_or("");
+            if long.iter().any(|l| l.starts_with(name)) {
+                // A long option that takes a value may take it as the next word;
+                // which ones do is the utility's own business, and the worst
+                // outcome of guessing wrong is a missed refusal.
+                continue;
+            }
+            format!("unrecognized option '--{name}'")
+        } else if a.len() > 1 && a.starts_with('-') {
+            let mut bad = None;
+            for (k, c) in a.char_indices().skip(1) {
+                if !short.contains(c) || c == ':' {
+                    bad = Some(c);
+                    break;
+                }
+                if takes_value(c) {
+                    // The rest of the word is the value, or the next word is.
+                    if k + c.len_utf8() >= a.len() {
+                        i += 1;
+                    }
+                    break;
+                }
+            }
+            match bad {
+                Some(c) => format!("invalid option -- '{c}'"),
+                None => continue,
+            }
+        } else {
+            continue;
+        };
+        let usage = if tool == "grep" {
+            "\nUsage: grep [OPTION]... PATTERNS [FILE]..."
+        } else {
+            ""
+        };
+        return Some(format!(
+            "{tool}: {what}{usage}\nTry '{tool} --help' for more information."
+        ));
+    }
+    None
+}
+
+const GREP_SHORT: &str = "0123456789A:B:C:D:EFGHILPRTUVX:abcd:e:f:hilm:noqrsuvwxyZz";
+const GREP_LONG: &[&str] = &[
+    "extended-regexp",
+    "fixed-strings",
+    "basic-regexp",
+    "perl-regexp",
+    "regexp",
+    "file",
+    "ignore-case",
+    "no-ignore-case",
+    "word-regexp",
+    "line-regexp",
+    "null-data",
+    "no-messages",
+    "invert-match",
+    "version",
+    "help",
+    "max-count",
+    "byte-offset",
+    "line-number",
+    "line-buffered",
+    "with-filename",
+    "no-filename",
+    "label",
+    "only-matching",
+    "quiet",
+    "silent",
+    "binary-files",
+    "text",
+    "binary",
+    "unix-byte-offsets",
+    "devices",
+    "directories",
+    "exclude",
+    "exclude-from",
+    "exclude-dir",
+    "include",
+    "recursive",
+    "dereference-recursive",
+    "files-with-matches",
+    "files-without-match",
+    "count",
+    "color",
+    "colour",
+    "initial-tab",
+    "null",
+    "before-context",
+    "after-context",
+    "context",
+    "group-separator",
+    "no-group-separator",
+];
+
 fn grep(args: &[String], stdin: &mut Input, sink: &mut Sink) -> Util {
+    if let Some(msg) = invalid_option("grep", args, GREP_SHORT, GREP_LONG) {
+        sink.eline(&msg);
+        return Util::Done(2);
+    }
     let mut flags = HashSet::new();
     let mut patterns: Vec<String> = Vec::new();
     let mut ops = Vec::new();
+    let mut filter = GrepFilter::default();
     let mut i = 0;
     let mut done = false;
     while i < args.len() {
@@ -4938,12 +5450,33 @@ fn grep(args: &[String], stdin: &mut Input, sink: &mut Sink) -> Util {
                 None => return Util::Decline,
             }
             i += 1;
+        } else if let Some((kind, inline)) = grep_glob_opt(a).filter(|_| !done) {
+            let glob = match inline {
+                Some(g) => g,
+                None => {
+                    i += 1;
+                    match args.get(i) {
+                        Some(g) => g.clone(),
+                        None => {
+                            sink.eline(&format!(
+                                "grep: option '--{kind}' requires an argument\nUsage: grep [OPTION]... PATTERNS [FILE]...\nTry 'grep --help' for more information."
+                            ));
+                            return Util::Done(2);
+                        }
+                    }
+                }
+            };
+            match kind {
+                "include" => filter.include.push(glob),
+                "exclude" => filter.exclude.push(glob),
+                _ => filter.exclude_dir.push(glob),
+            }
         } else if !done && a.starts_with("--") {
-            return Util::Decline;
+            return Util::DeclineFor(a.clone());
         } else if !done && a.len() > 1 && a.starts_with('-') {
             for c in a[1..].chars() {
                 if !"rRnclLivEFwoqshHx".contains(c) {
-                    return Util::Decline;
+                    return Util::DeclineFor(format!("-{c}"));
                 }
                 flags.insert(c);
             }
@@ -4993,7 +5526,7 @@ fn grep(args: &[String], stdin: &mut Input, sink: &mut Sink) -> Util {
                 sink.eline(&refusal);
                 return Util::Done(2);
             }
-            walk_files(".", "", &mut targets, true);
+            walk_files(".", "", &mut targets, true, &filter);
         } else {
             targets.push(("(standard input)".into(), None));
         }
@@ -5008,12 +5541,18 @@ fn grep(args: &[String], stdin: &mut Input, sink: &mut Sink) -> Util {
                 sink.eline(&refusal);
                 status_err = true;
             } else if p.is_dir() {
-                if recursive {
-                    walk_files(op, op, &mut targets, false);
+                if filter.skips_dir(&operand_names(op)) {
+                    // `--exclude-dir` leaves out a directory named on the
+                    // command line too.
+                } else if recursive {
+                    walk_files(op, op, &mut targets, false, &filter);
                 } else if !f('s') {
                     sink.eline(&format!("grep: {op}: Is a directory"));
                 }
-            } else if p.exists() {
+            } else if (p.exists() || op == "/dev/null") && filter.skips_file(&operand_names(op)) {
+                // `--include` and `--exclude` judge a file named on the command
+                // line as well, by its name, before it is opened.
+            } else if p.exists() || op == "/dev/null" {
                 targets.push((op.clone(), Some(op.clone())));
             } else {
                 if !f('s') {
@@ -5038,7 +5577,7 @@ fn grep(args: &[String], stdin: &mut Input, sink: &mut Sink) -> Util {
     let mut any = false;
     for (name, path) in &targets {
         let data = match path {
-            Some(p) => match std::fs::read(p) {
+            Some(p) => match read_file(p) {
                 Ok(d) => d,
                 Err(e) => {
                     if !f('s') {
@@ -5131,7 +5670,13 @@ fn grep(args: &[String], stdin: &mut Input, sink: &mut Sink) -> Util {
 
 /// Files beneath `dir` in directory order, depth first, as GNU grep -r and
 /// find visit them; symbolic links met during the walk are not followed.
-fn walk_files(dir: &str, shown: &str, out: &mut Vec<(String, Option<String>)>, strip_dot: bool) {
+fn walk_files(
+    dir: &str,
+    shown: &str,
+    out: &mut Vec<(String, Option<String>)>,
+    strip_dot: bool,
+    filter: &GrepFilter,
+) {
     let Ok(rd) = std::fs::read_dir(dir) else {
         return;
     };
@@ -5158,8 +5703,10 @@ fn walk_files(dir: &str, shown: &str, out: &mut Vec<(String, Option<String>)>, s
             continue;
         }
         if ft.is_dir() {
-            walk_files(&path, &display, out, false);
-        } else {
+            if !filter.skips_dir(&[name.as_str()]) {
+                walk_files(&path, &display, out, false, filter);
+            }
+        } else if !filter.skips_file(&[name.as_str()]) {
             out.push((display, Some(path)));
         }
     }
@@ -5347,6 +5894,46 @@ fn sort_key_text<'a>(line: &'a str, fields: &[(usize, usize)], key: &SortKey) ->
 }
 
 fn sort(args: &[String], stdin: &mut Input, sink: &mut Sink) -> Util {
+    if let Some(msg) = invalid_option(
+        "sort",
+        args,
+        "bcCdfghiMmnrRsuVyzk:o:S:t:T:",
+        &[
+            "batch-size",
+            "buffer-size",
+            "check",
+            "compress-program",
+            "debug",
+            "dictionary-order",
+            "field-separator",
+            "files0-from",
+            "general-numeric-sort",
+            "human-numeric-sort",
+            "ignore-case",
+            "ignore-leading-blanks",
+            "ignore-nonprinting",
+            "key",
+            "merge",
+            "month-sort",
+            "numeric-sort",
+            "output",
+            "parallel",
+            "random-sort",
+            "random-source",
+            "reverse",
+            "sort",
+            "stable",
+            "temporary-directory",
+            "unique",
+            "version-sort",
+            "zero-terminated",
+            "help",
+            "version",
+        ],
+    ) {
+        sink.eline(&msg);
+        return Util::Done(2);
+    }
     let Some(spec) = SortSpec::parse(args) else {
         return Util::Decline;
     };
@@ -5368,7 +5955,7 @@ fn sort(args: &[String], stdin: &mut Input, sink: &mut Sink) -> Util {
             status = 2;
             continue;
         }
-        match std::fs::read(f) {
+        match read_file(f) {
             Ok(d) => inputs.push(d),
             Err(e) => {
                 sink.eline(&format!("sort: cannot read: {f}: {}", io_reason(&e)));
@@ -5521,6 +6108,26 @@ fn cut_list(s: &str) -> Option<Vec<(usize, usize)>> {
 }
 
 fn cut(args: &[String], stdin: &mut Input, sink: &mut Sink) -> Util {
+    if let Some(msg) = invalid_option(
+        "cut",
+        args,
+        "b:c:d:f:nsz",
+        &[
+            "bytes",
+            "characters",
+            "complement",
+            "delimiter",
+            "fields",
+            "only-delimited",
+            "output-delimiter",
+            "zero-terminated",
+            "help",
+            "version",
+        ],
+    ) {
+        sink.eline(&msg);
+        return Util::Done(1);
+    }
     let mut delim = '\t';
     let mut fields = None;
     let mut chars = None;
@@ -6945,7 +7552,7 @@ fn write_of(r: &Redir) -> Option<(String, String)> {
             (op, target)
         }
         Redir::Both(target) => ("&>", target),
-        Redir::In(_) | Redir::Dup { .. } => return None,
+        Redir::In(_) | Redir::Str(_) | Redir::Dup { .. } => return None,
     };
     let text = literal_text(target);
     if text == "/dev/null" {

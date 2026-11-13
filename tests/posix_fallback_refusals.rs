@@ -130,11 +130,11 @@ fn a_flag_with_no_gnu_program_is_refused_with_status_2() {
     for (script, want) in [
         (
             "ls -R tree",
-            "ish: ls: -R is not supported by the in-process subset, and no GNU-compatible ls is installed\n",
+            "ish: ls: the in-process ls does not support -R; a GNU-compatible ls on PATH would run it, and none was found\n",
         ),
         (
             "sort -h nums.txt",
-            "ish: sort: -h is not supported by the in-process subset, and no GNU-compatible sort is installed\n",
+            "ish: sort: the in-process sort does not support -h; a GNU-compatible sort on PATH would run it, and none was found\n",
         ),
     ] {
         let (out, err, code) = sb.run(script);
@@ -159,7 +159,7 @@ fn system32_is_never_the_fallback_for_a_subset_name() {
     assert_eq!(out.status.code(), Some(2));
     assert!(out.stdout.is_empty());
     assert!(
-        err.contains("no GNU-compatible sort is installed"),
+        err.contains("the in-process sort does not support -h"),
         "stderr was {err:?}"
     );
 }

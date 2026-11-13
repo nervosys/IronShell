@@ -114,11 +114,12 @@ fn a_replacement_names_its_operator_and_suggests_sed() {
 }
 
 #[test]
-fn a_substring_names_the_offset_and_suggests_cut() {
+fn a_case_conversion_names_its_operator_and_suggests_tr() {
+    // `${x:1}` runs in-process since round 36; `^^` is still outside the subset.
     refused_with(
-        "offset",
-        "x=abc; echo ${x:1}\n",
-        "${...} operator `:offset` at line 1, column 13",
-        "cut -c",
+        "upper",
+        "x=abc; echo ${x^^}\n",
+        "${...} operator `^^` at line 1, column 13",
+        "change the text with tr or sed",
     );
 }
