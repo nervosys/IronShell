@@ -160,6 +160,7 @@ call	Pure
 cancel_finetune	WriteLocal
 canonical	Pure
 capabilities	ReadLocal
+capitalize	Pure
 cargo_build_cmd	Exec
 cargo_run	Exec
 cargo_test_cmd	Exec
@@ -390,6 +391,7 @@ evolve_step	Pure
 exec_remote	ReadLocal
 exists	ReadLocal
 exit	Process
+exp	Pure
 explain	Pure
 explain_effects	Pure
 export_audit	ReadLocal
@@ -439,6 +441,7 @@ from-json	ReadLocal
 from-yaml	Pure
 from_csv	Pure
 from_entries	Pure
+from_epoch	Pure
 from_json	ReadLocal
 from_toml	Pure
 from_yaml	Pure
@@ -692,8 +695,12 @@ list_finetunes	ReadLocal
 list_roles	ReadLocal
 lldb	Exec
 lldb_run	Exec
+ln	Pure
 lnav	Exec
 lnav_open	Exec
+log	Pure
+log10	Pure
+log2	Pure
 log_audit	WriteLocal
 logout_sso	WriteLocal
 logrotate	Exec
@@ -1093,6 +1100,7 @@ remove_node	WriteLocal
 render_code	WriteLocal
 render_content	WriteLocal
 render_table	WriteLocal
+repeat	Pure
 repl_broadcast	Pure
 repl_connect	Network
 repl_disconnect	WriteLocal
@@ -1327,6 +1335,7 @@ time	Pure
 timeout	Exec
 timeout_cmd	Exec
 timestamp	Pure
+title	Pure
 tmux_attach	Process
 tmux_kill	Process
 tmux_list	ReadLocal
@@ -1337,6 +1346,7 @@ to-json	Pure
 to-yaml	Pure
 to_csv	Pure
 to_entries	Pure
+to_epoch	Pure
 to_json	Pure
 to_string	Pure
 to_toml	Pure
@@ -1446,6 +1456,7 @@ where	Pure
 where-object	Pure
 whoami	ReadLocal
 windows	ReadLocal
+words	Pure
 workspace_agents	ReadLocal
 workspace_create	WriteLocal
 workspace_join	WriteLocal

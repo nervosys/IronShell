@@ -506,6 +506,11 @@ pub fn math_module() -> Value {
         ("sum", "sum"),
         ("avg", "avg"),
         ("product", "product"),
+        ("log", "log"),
+        ("ln", "ln"),
+        ("log10", "log10"),
+        ("log2", "log2"),
+        ("exp", "exp"),
     ])
 }
 
@@ -527,6 +532,10 @@ pub fn str_module() -> Value {
         ("regex_replace", "regex_replace"),
         ("pad_left", "pad_left"),
         ("pad_right", "pad_right"),
+        ("title", "title"),
+        ("capitalize", "capitalize"),
+        ("repeat", "repeat"),
+        ("words", "words"),
         ("len", "len"),
         ("url_encode", "url_encode"),
         ("url_decode", "url_decode"),
