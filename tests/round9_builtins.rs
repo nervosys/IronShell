@@ -439,8 +439,10 @@ fn date_add_refuses_a_bad_unit_amount_or_date() {
     assert!(refusal(r#"date_add("2024-02-28", "1", "days")"#).contains("E_BAD_ARG"));
     assert!(refusal(r#"date_add("2024-02-28", 1)"#).contains("E_BAD_ARG"));
     assert!(refusal(r#"date_add("someday", 1, "days")"#).contains("E_BAD_VALUE"));
+    // A representable amount whose result leaves 0001-9999 is a value that
+    // cannot be represented (E_BAD_VALUE since round 34).
     let msg = refusal(r#"date_add("2024-02-28", 9223372036854775807, "days")"#);
-    assert!(msg.contains("E_BAD_ARG"), "{msg}");
+    assert!(msg.contains("E_BAD_VALUE"), "{msg}");
 }
 
 // --- to_toml and from_toml ---------------------------------------------------

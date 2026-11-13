@@ -36,10 +36,6 @@ fn text(s: &str) -> Value {
     Value::Str(s.to_string())
 }
 
-fn ints(v: &[i64]) -> Value {
-    Value::Array(v.iter().map(|i| Value::Int(*i)).collect())
-}
-
 fn float_near(v: Value, want: f64) {
     match v {
         Value::Float(f) => assert!((f - want).abs() < 1e-9, "{f} is not {want}"),
