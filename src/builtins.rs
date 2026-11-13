@@ -15163,6 +15163,17 @@ fn bi_sqrt(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
 ///
 /// Example:
 ///   pow(2, 8)     # Returns 256
+/// A Float in an error message. Rust's `{}` prints a huge or tiny Float in full
+/// (1e300 is 301 digits), so those use the exponent form.
+fn float_for_message(x: f64) -> String {
+    let a = x.abs();
+    if a != 0.0 && (a >= 1e16 || a < 1e-4) {
+        format!("{x:e}")
+    } else {
+        format!("{x}")
+    }
+}
+
 fn bi_pow(args: Vec<Value>, _input: Option<Value>) -> Result<Value> {
     if args.len() < 2 {
         return Err(crate::safety::arg_err(
@@ -15188,14 +15199,22 @@ fn bi_pow(args: Vec<Value>, _input: Option<Value>) -> Result<Value> {
     if result.is_infinite() {
         return Err(crate::safety::value_not_representable(
             "pow",
-            format!("math_pow: {base} ** {exp} overflows a Float"),
+            format!(
+                "math_pow: {} ** {} overflows a Float",
+                float_for_message(base),
+                float_for_message(exp)
+            ),
             "use a smaller base or exponent: the largest Float is about 1.8e308",
         ));
     }
     if result.is_nan() {
         return Err(crate::safety::value_not_representable(
             "pow",
-            format!("math_pow: {base} ** {exp} is not a real number"),
+            format!(
+                "math_pow: {} ** {} is not a real number",
+                float_for_message(base),
+                float_for_message(exp)
+            ),
             "a negative base needs a whole-number exponent",
         ));
     }

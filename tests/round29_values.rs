@@ -147,6 +147,33 @@ fn a_backslash_u_with_fewer_than_four_digits_stays_literal() {
     assert_eq!(try_run(r#""\U""#), Ok(text("\\U")));
 }
 
+// ---- math_pow's refusals name the operands compactly ----
+
+#[test]
+fn math_pow_overflow_message_uses_the_exponent_form_for_huge_operands() {
+    let msg = try_run("math.pow(-2, 1e300)").expect_err("must be refused");
+    assert!(
+        msg.contains("math_pow: -2 ** 1e300 overflows a Float"),
+        "{msg}"
+    );
+    assert!(msg.len() < 300, "{msg}");
+    // Small operands keep their plain form, which is the one round 28 pins.
+    let msg = try_run("math.pow(10, 400)").expect_err("must be refused");
+    assert!(
+        msg.contains("math_pow: 10 ** 400 overflows a Float"),
+        "{msg}"
+    );
+}
+
+#[test]
+fn math_pow_nan_message_names_its_operands() {
+    let msg = try_run("math.pow(-2, 0.5)").expect_err("must be refused");
+    assert!(
+        msg.contains("math_pow: -2 ** 0.5 is not a real number"),
+        "{msg}"
+    );
+}
+
 // ---- to_csv keeps a row whose only field is empty ----
 
 #[test]
