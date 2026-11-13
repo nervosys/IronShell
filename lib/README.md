@@ -57,24 +57,24 @@ Mathematical utilities:
 - `lerp`, `inv_lerp` - Linear interpolation
 - `square`, `cube` - Power functions
 - `gcd`, `lcm` - Number theory
-- `factorial`, `fib` - Sequences
+- `factorial`, `fib` - Sequences (a negative n is refused)
 - `deg_to_rad`, `rad_to_deg` - Angle conversion
-- `mean` - Statistics
+- `mean` is the builtin (`avg`), not a lib function: `[1, 2] | mean` is `1.5`
 
 ### string.ish
 String manipulation utilities:
-- `words`, `unwords` - Split/join by spaces
-- `lines`, `unlines` - Split/join by newlines
+- `words`, `unwords` - Split on any whitespace run (spaces, tabs, newlines, CR), drop empty words / join with spaces
+- `unlines` - Join with newlines. `lines` is the builtin (it drops the final terminator and CR before LF); this library does not define it, because an import would shadow the builtin
 - `capitalize`, `title_case` - Case transformation
 - `snake_case`, `kebab_case`, `screaming_snake` - Case styles
 - `is_blank`, `is_not_blank` - Blank checking
-- `is_upper`, `is_lower` - Case checking
-- `repeat`, `reverse_str`, `count_substr` - Utilities
+- `is_upper`, `is_lower` - Case checking: true only with at least one cased letter and no letter of the other case (`"123"` and `""` are false), as Python's `str.isupper`
+- `repeat` - Repeat n times (a negative n is refused), `reverse_str`, `count_substr` (non-overlapping; an empty substring counts len + 1 positions, as Python's `str.count`)
 
 ### collection.ish
 Collection manipulation:
 - `partition` - Split by predicate
-- `union`, `intersect`, `difference` - Set operations
+- `union`, `intersect`, `difference` - Set operations; elements are compared with `==`, so `1` and `1.0` are one element (the builtin `unique` keeps both)
 - `is_subset` - Subset checking
 - `sort_desc` - Reverse sort
 
@@ -84,8 +84,9 @@ Advanced functional programming utilities:
 - `partial`, `partial_right` - Partial application*
 - `twice` - Apply function twice*
 - `complement`, `and_p`, `or_p` - Predicate combinators*
-- `find` - Find first element matching predicate
-- `drop` - Drop first n elements
+- `drop` - Drop first n elements (a negative n is refused)
+
+There is no `find` here: it would shadow the builtin `find` (file search) on import. For the first element matching a predicate, write `arr | where(pred) | first`.
 
 *Note: Functions that return lambdas may have closure issues when imported.
 
@@ -93,9 +94,9 @@ Advanced functional programming utilities:
 Input/output utilities:
 - `read_json` - Read JSON file
 - `read_lines`, `read_trimmed` - Read text files
-- `file_ext`, `file_name`, `file_dir` - Path utilities
-- `path_join` - Join path components
-- `to_json_pretty` - JSON serialization
+- `file_ext`, `file_name`, `file_dir` - Path utilities. They work on the last component: `file_ext("dir/file")` is `""`, `file_ext(".bashrc")` is `""`, `file_name("a/b/")` is `"b"`, `file_dir("/x")` is `"/"`
+- `path_join` - Join path components with one slash at each joint (`path_join(["a/", "/b"])` is `"a/b"`)
+- `to_json_pretty` - Pretty-printed JSON (two spaces per level); `to_json(v)` is compact
 - `parse_yaml`, `parse_csv` - Data parsing
 
 ## Testing

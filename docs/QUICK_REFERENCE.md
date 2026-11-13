@@ -415,11 +415,9 @@ ish
 # TUI mode (interactive terminal UI)
 ish tui
 
-# Check syntax
-ish --check script.ish
-
-# Transpile to bash
-ish --transpile bash script.ish
+# Show the effects a script would have, without running it
+# (a script that does not parse is reported as E_PARSE and exits 2)
+ish --explain script.ish
 
 # Show version
 ish --version
