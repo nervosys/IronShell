@@ -9,15 +9,19 @@ pub let partition = fn(arr, pred) => { pass: arr | where(pred), fail: arr | wher
 
 # ===== Set Operations =====
 
+# Keep the first of each element, comparing with == so 1 and 1.0 are one element.
+# The builtin unique compares the Debug text of each value, which keeps both.
+let dedupe_eq = fn(arr) => arr | reduce(fn(acc, x) => match { _ if (acc | any(fn(y) => y == x)) => acc, _ => acc + [x] }, [])
+
 # Union of two arrays (unique elements from both)
-pub let union = fn(arr1, arr2) => unique(concat(arr1, arr2))
+pub let union = fn(arr1, arr2) => dedupe_eq(concat(arr1, arr2))
 
 # Intersection: filter arr1 to elements also in arr2
 # Note: uses simple O(n*m) approach
-pub let intersect = fn(arr1, arr2) => arr1 | where(fn(x) => arr2 | any(fn(y) => y == x)) | unique
+pub let intersect = fn(arr1, arr2) => dedupe_eq(arr1 | where(fn(x) => arr2 | any(fn(y) => y == x)))
 
 # Difference: elements in arr1 but not in arr2
-pub let difference = fn(arr1, arr2) => arr1 | where(fn(x) => !(arr2 | any(fn(y) => y == x))) | unique
+pub let difference = fn(arr1, arr2) => dedupe_eq(arr1 | where(fn(x) => !(arr2 | any(fn(y) => y == x))))
 
 # Check if arr1 is subset of arr2
 pub let is_subset = fn(arr1, arr2) => arr1 | all(fn(x) => arr2 | any(fn(y) => y == x))
