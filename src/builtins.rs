@@ -776,6 +776,11 @@ lazy_static::lazy_static! {
         // Percent-encoding, RFC 3986 (1188-1189)
         map.insert("url_encode", 1188);
         map.insert("url_decode", 1189);
+        // Optional fields and entries (1190-1193)
+        map.insert("get", 1190);
+        map.insert("has", 1191);
+        map.insert("to_entries", 1192);
+        map.insert("from_entries", 1193);
         // 500-519: Database
         map.insert("db_sqlite_open", 500);
         map.insert("db_sqlite_query", 501);
@@ -3840,6 +3845,10 @@ static BUILTIN_DISPATCH: &[fn(Vec<Value>, Option<Value>, &mut Env) -> Result<Val
     |args, input, _| bi_chunk(args, input),         // 1187
     |args, input, _| bi_url_encode(args, input),    // 1188
     |args, input, _| bi_url_decode(args, input),    // 1189
+    |args, input, _| bi_get(args, input),           // 1190
+    |args, input, _| bi_has(args, input),           // 1191
+    |args, input, _| bi_to_entries(args, input),    // 1192
+    |args, input, _| bi_from_entries(args, input),  // 1193
 ];
 
 /// The dispatch row that serves `name`, if the fast table has one.
@@ -4012,9 +4021,9 @@ fn mapped_spelling(name: &str) -> Vec<String> {
         // slice(xs, 1) or xs | slice(1).
         "skip" | "drop" | "rest" => vec!["slice".to_string()],
         // No builtin tests for one key: keys lists a record's names, which is
-        // what a test of one key reads. No builtin returns a field with a
-        // default either, so get_or has no suggestion.
-        "has" | "has_key" => vec!["keys".to_string()],
+        // what a test of one key reads. `has` is that test, and `get` returns a
+        // field with a default.
+        "has_key" => vec!["has".to_string()],
         // Paths: the text-only path_* builtins. `abspath` has no pure form:
         // path_is_absolute tests it, and fs_realpath resolves it on disk.
         "basename" | "fs_basename" | "file_basename" => vec!["path_basename".to_string()],
@@ -4080,9 +4089,11 @@ fn edit_budget(name: &str) -> usize {
 /// builtins and misspelled *record fields* — which is how module functions
 /// (`file.read`) resolve, and therefore how most agent typos actually present.
 pub fn nearest_names<'a>(name: &str, candidates: impl Iterator<Item = &'a str>) -> Vec<String> {
-    let budget = edit_budget(name);
     let lower = name.to_lowercase();
     let len = lower.chars().count();
+    // A slip is fewer edits than the name has letters: `a` is not a typo of
+    // `b`, however close they sit, so a one-letter name suggests nothing.
+    let budget = edit_budget(name).min(len.saturating_sub(1));
     let mut scored: Vec<(usize, &'a str)> = candidates
         .filter_map(|cand| {
             let cand_lower = cand.to_lowercase();
@@ -10340,14 +10351,291 @@ fn compare_values_for_sort(a: &Value, b: &Value) -> std::cmp::Ordering {
     }
 }
 
-/// Group-Object: PowerShell-style grouping
+/// The subject and the remaining arguments of a builtin that takes a subject
+/// first: the piped value when there is one, otherwise the first argument.
+fn subject_and_rest(
+    builtin: &str,
+    args: Vec<Value>,
+    input: Option<Value>,
+) -> Result<(Value, Vec<Value>)> {
+    match input {
+        Some(v) => Ok((v, args)),
+        None => {
+            let mut args = args;
+            if args.is_empty() {
+                return Err(crate::safety::bad_arg(
+                    builtin,
+                    "a subject (piped or the first argument)",
+                    "nothing",
+                ));
+            }
+            let subject = args.remove(0);
+            Ok((subject, args))
+        }
+    }
+}
+
+/// One step of a `get` path: a record key, or an Array index (negative counts
+/// from the end). `None` when the step is missing.
+fn get_step(current: &Value, step: &Value) -> Result<Option<Value>> {
+    match (current, step) {
+        (Value::Record(map), Value::Str(key)) => Ok(map.get(key).cloned()),
+        (Value::Array(items), Value::Int(i)) => {
+            let len = items.len() as i64;
+            let pos = if *i < 0 { len + *i } else { *i };
+            Ok(usize::try_from(pos)
+                .ok()
+                .and_then(|p| items.get(p))
+                .cloned())
+        }
+        (Value::Array(items), Value::Str(key)) => Ok(key
+            .parse::<i64>()
+            .ok()
+            .and_then(|i| {
+                let len = items.len() as i64;
+                usize::try_from(if i < 0 { len + i } else { i }).ok()
+            })
+            .and_then(|p| items.get(p))
+            .cloned()),
+        (_, Value::Str(_)) | (_, Value::Int(_)) => Ok(None),
+        (_, other) => Err(crate::safety::bad_arg(
+            "get",
+            "a path of field names (String) and indices (Int)",
+            other.type_name(),
+        )),
+    }
+}
+
+/// `get(record, path, default?)`: the value at `path`, or `default` (Null when
+/// omitted) when any step is missing or Null, or the value found is Null.
+///
+/// `path` is a field name, a dotted path (`"u.n"`), or an Array of keys and
+/// indices. A field whose name itself holds a dot is found first by its whole
+/// name. The strict `r.field` access stays an error for a missing field; this
+/// is the form for an optional one.
+///
+/// Example:
+///   {u: {n: 5}} | get("u.n", 0)     # 5
+///   get({a: 1}, "b", 0)             # 0
+fn bi_get(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
+    let (subject, rest) = subject_and_rest("get", args, input)?;
+    if rest.is_empty() || rest.len() > 2 {
+        return Err(crate::safety::bad_arg_with_hint(
+            "get",
+            "a path and an optional default: get(record, path, default?)",
+            &format!("{} arguments after the subject", rest.len()),
+            r#"pass the path, then a default: r | get("u.n", 0)"#,
+        ));
+    }
+    let default = rest.get(1).cloned().unwrap_or(Value::Null);
+    let steps: Vec<Value> = match &rest[0] {
+        Value::Str(path) => {
+            if let Value::Record(map) = &subject {
+                if let Some(v) = map.get(path) {
+                    return Ok(if matches!(v, Value::Null) {
+                        default
+                    } else {
+                        v.clone()
+                    });
+                }
+            }
+            path.split('.').map(|s| Value::Str(s.to_string())).collect()
+        }
+        Value::Int(i) => vec![Value::Int(*i)],
+        Value::Array(items) => items.clone(),
+        other => {
+            return Err(crate::safety::bad_arg(
+                "get",
+                "a path: a field name, a dotted path, or an Array of keys and indices",
+                other.type_name(),
+            ))
+        }
+    };
+    let mut current = subject;
+    for step in &steps {
+        if matches!(current, Value::Null) {
+            return Ok(default);
+        }
+        match get_step(&current, step)? {
+            Some(next) => current = next,
+            None => return Ok(default),
+        }
+    }
+    Ok(if matches!(current, Value::Null) {
+        default
+    } else {
+        current
+    })
+}
+
+/// `has(record, key)`: whether a Record has the field `key` (an Array has the
+/// Int index). A field holding Null is present.
+///
+/// Example:
+///   {a: 1} | has("a")     # true
+///   has({a: 1}, "b")      # false
+fn bi_has(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
+    let (subject, rest) = subject_and_rest("has", args, input)?;
+    if rest.len() != 1 {
+        return Err(crate::safety::bad_arg_with_hint(
+            "has",
+            "one key: has(record, key)",
+            &format!("{} arguments after the subject", rest.len()),
+            r#"pass the key: r | has("a")"#,
+        ));
+    }
+    match (&subject, &rest[0]) {
+        (Value::Record(map), Value::Str(key)) => Ok(Value::Bool(map.contains_key(key))),
+        (Value::Array(items), Value::Int(i)) => {
+            Ok(Value::Bool(*i >= 0 && (*i as usize) < items.len()))
+        }
+        (Value::Record(_), other) => Err(crate::safety::bad_arg(
+            "has",
+            "a String key for a Record",
+            other.type_name(),
+        )),
+        (Value::Array(_), other) => Err(crate::safety::bad_arg(
+            "has",
+            "an Int index for an Array",
+            other.type_name(),
+        )),
+        (other, _) => Err(crate::safety::bad_arg(
+            "has",
+            "a Record (or an Array) as the subject",
+            other.type_name(),
+        )),
+    }
+}
+
+/// `to_entries(record)`: `[{key, value}, ...]`, in the order a Record iterates.
+///
+/// Example:
+///   {a: 1} | to_entries     # [{key: "a", value: 1}]
+fn bi_to_entries(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
+    let (subject, rest) = subject_and_rest("to_entries", args, input)?;
+    if !rest.is_empty() {
+        return Err(crate::safety::bad_arg(
+            "to_entries",
+            "no arguments after the subject",
+            &format!("{} arguments", rest.len()),
+        ));
+    }
+    match subject {
+        Value::Record(map) => Ok(Value::Array(
+            map.into_iter()
+                .map(|(k, v)| {
+                    let mut entry = BTreeMap::new();
+                    entry.insert("key".to_string(), Value::Str(k));
+                    entry.insert("value".to_string(), v);
+                    Value::Record(entry)
+                })
+                .collect(),
+        )),
+        other => Err(crate::safety::bad_arg(
+            "to_entries",
+            "a Record as the subject",
+            other.type_name(),
+        )),
+    }
+}
+
+/// `from_entries(array)`: a Record from `[{key, value}, ...]` records or
+/// `[[key, value], ...]` pairs. A later entry with the same key wins. A key
+/// that is not a String is E_BAD_ARG naming the entry's index.
+///
+/// Example:
+///   [["a", 1], ["b", 2]] | from_entries     # {a: 1, b: 2}
+fn bi_from_entries(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
+    let (subject, rest) = subject_and_rest("from_entries", args, input)?;
+    if !rest.is_empty() {
+        return Err(crate::safety::bad_arg(
+            "from_entries",
+            "no arguments after the subject",
+            &format!("{} arguments", rest.len()),
+        ));
+    }
+    let items = match subject {
+        Value::Array(items) => items,
+        other => {
+            return Err(crate::safety::bad_arg(
+                "from_entries",
+                "an Array of {key, value} records or [key, value] pairs",
+                other.type_name(),
+            ))
+        }
+    };
+    let mut out = BTreeMap::new();
+    for (i, item) in items.into_iter().enumerate() {
+        let (key, value) = match item {
+            Value::Record(mut m) => match m.remove("key") {
+                Some(k) => (k, m.remove("value").unwrap_or(Value::Null)),
+                None => {
+                    return Err(crate::safety::bad_arg_with_hint(
+                        "from_entries",
+                        &format!("entry {i} to have a key field"),
+                        "a Record without one",
+                        "each entry is {key: String, value: Any} or [key, value]",
+                    ))
+                }
+            },
+            Value::Array(mut pair) if pair.len() == 2 => {
+                let value = pair.remove(1);
+                (pair.remove(0), value)
+            }
+            other => {
+                return Err(crate::safety::bad_arg_with_hint(
+                    "from_entries",
+                    &format!("entry {i} to be a {{key, value}} Record or a [key, value] pair"),
+                    other.type_name(),
+                    "each entry is {key: String, value: Any} or [key, value]",
+                ))
+            }
+        };
+        match key {
+            Value::Str(k) => {
+                out.insert(k, value);
+            }
+            other => {
+                return Err(crate::safety::bad_arg_with_hint(
+                    "from_entries",
+                    &format!("entry {i}'s key to be a String"),
+                    other.type_name(),
+                    "convert it first: str(k) or to_string(k)",
+                ))
+            }
+        }
+    }
+    Ok(Value::Record(out))
+}
+
+/// group_by (Group-Object): group rows by a field name or a lambda key. The
+/// subject is piped (`rows | group_by("a")`) or the first argument
+/// (`group_by(rows, "a")`), as for `where` and `sort_by`.
 fn bi_group_object(args: Vec<Value>, input: Option<Value>, env: &mut Env) -> Result<Value> {
-    let input =
-        input.ok_or_else(|| crate::safety::arg_err("Group-Object: requires pipeline input"))?;
+    // A piped value is the subject; otherwise it is the first argument.
+    let (input, args) = match input {
+        Some(v) => (v, args),
+        None => {
+            let mut args = args;
+            if args.is_empty() {
+                return Err(crate::safety::bad_arg_with_hint(
+                    "group_by",
+                    "an Array of rows and a key",
+                    "nothing",
+                    r#"pass the rows and a key: group_by(rows, "field") or rows | group_by("field")"#,
+                ));
+            }
+            let subject = args.remove(0);
+            (subject, args)
+        }
+    };
 
     if args.is_empty() {
-        return Err(crate::safety::arg_err(
-            "Group-Object: requires property name",
+        return Err(crate::safety::bad_arg_with_hint(
+            "group_by",
+            "a field name String or a lambda as the key",
+            "nothing",
+            r#"pass the key: rows | group_by("field") or group_by(rows, fn(r) => r.field)"#,
         ));
     }
 
@@ -10359,7 +10647,7 @@ fn bi_group_object(args: Vec<Value>, input: Option<Value>, env: &mut Env) -> Res
         Value::Lambda(_) => None,
         _ => {
             return Err(crate::safety::arg_err(
-                "Group-Object: property name must be a string or a lambda",
+                "group_by: the key must be a field name String or a lambda",
             ))
         }
     };
@@ -10408,7 +10696,7 @@ fn bi_group_object(args: Vec<Value>, input: Option<Value>, env: &mut Env) -> Res
             Ok(Value::Array(result))
         }
         _ => Err(crate::safety::arg_err(
-            "Group-Object: input must be an array",
+            "group_by: the rows must be an Array",
         )),
     }
 }
@@ -10831,20 +11119,31 @@ fn bi_from_csv(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
         None => return Err(subject_refusal("from_csv", "CSV text")),
     };
 
-    let mut reader = csv::Reader::from_reader(csv_str.as_bytes());
+    parse_delimited(
+        "from-csv",
+        &csv_str,
+        csv::ReaderBuilder::new().delimiter(b','),
+    )
+}
+
+/// Parse delimited text with a header row into an Array of Records, with the
+/// column type inference `from_csv` has. `open("x.tsv")` reads tab-separated
+/// text through this with a tab delimiter and no quoting (TSV has none).
+fn parse_delimited(builtin: &str, text: &str, builder: &mut csv::ReaderBuilder) -> Result<Value> {
+    let mut reader = builder.from_reader(text.as_bytes());
     let headers: Vec<String> = reader
         .headers()
-        .map_err(|e| crate::safety::bad_arg("from-csv", "CSV text", &e.to_string()))?
+        .map_err(|e| crate::safety::bad_arg(builtin, "CSV text", &e.to_string()))?
         .iter()
         .map(|h| h.to_string())
         .collect();
 
-    check_csv_headers("from-csv", &headers)?;
+    check_csv_headers(builtin, &headers)?;
     let mut records = Vec::new();
     for record in reader.records() {
         // A malformed row (unequal field counts, bad quoting) is the caller's
         // text, so E_BAD_ARG; it was an uncoded csv::Error, E_UNKNOWN.
-        records.push(record.map_err(|e| csv_row_error("from-csv", &csv_str, &e))?);
+        records.push(record.map_err(|e| csv_row_error(builtin, text, &e))?);
     }
 
     let rows = csv_rows(&headers, &records);
@@ -11285,9 +11584,44 @@ fn bi_from_yaml(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
         if e.downcast_ref::<crate::safety::SafetyError>().is_some() {
             e
         } else {
-            crate::safety::arg_err(format!("from-yaml: {e}"))
+            let message = format!("from-yaml: {e}");
+            match yaml_unsupported_construct(&message) {
+                Some(construct) => crate::safety::bad_arg_in(
+                    "from_yaml",
+                    message,
+                    &format!(
+                        "the document uses {construct}, which is outside IronShell's YAML subset; convert it to JSON and use from_json, or rewrite it without that construct"
+                    ),
+                ),
+                None => crate::safety::arg_err(message),
+            }
         }
     })
+}
+
+/// The unsupported YAML construct a parse error names, in words for a hint, or
+/// None for an error that is not about the subset (a bad indent, a duplicate key).
+fn yaml_unsupported_construct(message: &str) -> Option<&'static str> {
+    const CONSTRUCTS: [(&str, &str); 7] = [
+        ("anchors (&name)", "anchors (&name)"),
+        ("aliases (*name)", "aliases (*name)"),
+        ("explicit tags (!!type)", "explicit tags (!!type)"),
+        ("folded block scalars (>)", "folded block scalars (>)"),
+        ("block scalars (|)", "block scalars (|)"),
+        ("merge keys (<<)", "merge keys (<<)"),
+        ("multiple YAML documents", "several documents (---)"),
+    ];
+    for (needle, name) in CONSTRUCTS {
+        if message.contains(needle) {
+            return Some(name);
+        }
+    }
+    if message.contains("flow collection") {
+        return Some(
+            "a flow collection that is not valid JSON (YAML flow maps need quoted keys and values)",
+        );
+    }
+    None
 }
 
 /// to-yaml: Convert structured data to YAML.
@@ -31531,6 +31865,12 @@ fn bi_open(args: Vec<Value>, _input: Option<Value>) -> Result<Value> {
             )
         }),
         "csv" => bi_from_csv(vec![], Some(Value::Str(text))),
+        // Tab-separated: the same header row and type inference as CSV.
+        "tsv" => parse_delimited(
+            "open",
+            &text,
+            csv::ReaderBuilder::new().delimiter(b'\t').quoting(false),
+        ),
         _ => Ok(Value::Str(text)),
     }
 }

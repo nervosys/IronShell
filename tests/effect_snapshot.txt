@@ -438,6 +438,7 @@ from-csv	Pure
 from-json	ReadLocal
 from-yaml	Pure
 from_csv	Pure
+from_entries	Pure
 from_json	ReadLocal
 from_toml	Pure
 from_yaml	Pure
@@ -467,6 +468,7 @@ gdb	Exec
 gdb_bt	Exec
 gdb_run	Exec
 generate_compliance	ReadLocal
+get	Pure
 get-content	ReadLocal
 get-files	ReadLocal
 get_roles	ReadLocal
@@ -559,6 +561,7 @@ hadolint_check	ReadLocal
 handle	ReadLocal
 handle_drop	WriteLocal
 handles	ReadLocal
+has	Pure
 has_feature	ReadLocal
 has_permission	ReadLocal
 hash	ReadLocal
@@ -1331,6 +1334,7 @@ to-csv	Pure
 to-json	Pure
 to-yaml	Pure
 to_csv	Pure
+to_entries	Pure
 to_json	Pure
 to_string	Pure
 to_toml	Pure

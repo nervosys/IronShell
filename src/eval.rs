@@ -877,7 +877,18 @@ pub fn eval_expr(expr: &Expr, env: &mut Env) -> Result<Value> {
         Expr::Record(kvs) => {
             let mut m = BTreeMap::new();
             for (k, v) in kvs {
-                m.insert(k.clone(), eval_expr(v, env)?);
+                // A quoted key is a string like any other: `{"${r.name}": 1}`
+                // interpolates, and a plain one stays a constant. A later key
+                // of the same text wins, as a repeated literal key does.
+                let key = if k.contains("${") {
+                    match interpolate_string(k, env)? {
+                        Value::Str(s) => s,
+                        other => other.to_display_string(),
+                    }
+                } else {
+                    k.replace(crate::parser::ESCAPED_DOLLAR, "$")
+                };
+                m.insert(key, eval_expr(v, env)?);
             }
             Ok(Value::Record(m))
         }
@@ -1348,7 +1359,7 @@ fn module_field_error(
         .or_else(|| {
             candidates
                 .is_empty()
-                .then(|| crate::safety::record_keys_hint(map.keys().map(|k| k.as_str())))
+                .then(|| crate::safety::missing_field_hint(field, map.keys().map(|k| k.as_str())))
         });
     crate::safety::unknown_field_hinted(field, candidates, specific)
 }
@@ -1628,7 +1639,7 @@ fn index_value(target: &Value, idx: &Value, object: &Expr) -> Result<Value> {
             let candidates = crate::builtins::nearest_names(key, map.keys().map(|k| k.as_str()));
             let specific = candidates
                 .is_empty()
-                .then(|| crate::safety::record_keys_hint(map.keys().map(|k| k.as_str())));
+                .then(|| crate::safety::missing_field_hint(key, map.keys().map(|k| k.as_str())));
             crate::safety::unknown_field_hinted(key, candidates, specific)
         }),
         (Value::Array(_) | Value::Str(_), other) => Err(crate::safety::bad_arg(

@@ -108,12 +108,15 @@ format_number
 from-csv
 from-yaml
 from_csv
+from_entries
 from_toml
 from_yaml
+get
 group
 group-object
 group_by
 gui_wait
+has
 help
 in
 input_autocomplete
@@ -281,6 +284,7 @@ to-csv
 to-json
 to-yaml
 to_csv
+to_entries
 to_json
 to_string
 to_toml
