@@ -740,6 +740,8 @@ lazy_static::lazy_static! {
         map.insert("uuid", 484);
         map.insert("base64_encode", 485);
         map.insert("base64_decode", 486);
+        map.insert("hex_encode", 487);
+        map.insert("hex_decode", 488);
         map.insert("md5", 1158); // was 480, crypto_hash: md5 answered SHA-256
         map.insert("sha256", 1159); // was 480, crypto_hash: md5 answered SHA-256
         // Appended with the other rows: the id is the row's index in BUILTIN_DISPATCH.

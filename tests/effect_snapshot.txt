@@ -137,8 +137,8 @@ avg	Pure
 awk	Pure
 awk_process	Pure
 backup_file	WriteLocal
-base64_decode	ReadLocal
-base64_encode	ReadLocal
+base64_decode	Pure
+base64_encode	Pure
 bat	ReadLocal
 bat_view	ReadLocal
 best_individual	Pure
@@ -240,8 +240,8 @@ cron_enable	Exec
 cron_list	ReadLocal
 cron_remove	Destructive
 crossover_strategy	Pure
-crypto_base64_decode	ReadLocal
-crypto_base64_encode	ReadLocal
+crypto_base64_decode	Pure
+crypto_base64_encode	Pure
 crypto_cert_info	ReadLocal
 crypto_cert_verify	ReadLocal
 crypto_checksum	ReadLocal
@@ -571,6 +571,8 @@ helm_status	Network
 helm_uninstall	Destructive
 helm_upgrade	Exec
 help	Pure
+hex_decode	Pure
+hex_encode	Pure
 host	Network
 host_lookup	Network
 hostname	ReadLocal

@@ -2810,11 +2810,9 @@ pub static SIGNATURES: &[Signature] = &[
         category: None,
         subject_required: false,
         aliases: &[],
-        // No union type exists for "an Array of Records or a Record", so the
-        // subject is Any here and the body refuses other values with E_BAD_ARG.
         subject: Some(Ty::Any),
         params: &[rest("fields", Ty::Str, "field names to keep")],
-        returns: "Array",
+        returns: "Array | Record",
         doc: "Keep only the named fields of each record. The subject is an Array of Records (each record becomes one with only those fields) or a single Record (it becomes one Record); any other value is refused with E_BAD_ARG. A field a record does not have is left out of its result, without an error. Piped, the arguments are the field names; called directly, the first argument is the subject.",
         examples: &[
             (r#"[{a: 1, b: 2}] | pick("a") | first | keys | len"#, "1"),
@@ -6995,7 +6993,7 @@ pub static SIGNATURES: &[Signature] = &[
         name: "crypto_hex_encode",
         category: None,
         subject_required: false,
-        aliases: &[],
+        aliases: &["hex_encode"],
         subject: Some(Ty::Str),
         params: &[],
         returns: "String",
@@ -7009,7 +7007,7 @@ pub static SIGNATURES: &[Signature] = &[
         name: "crypto_hex_decode",
         category: None,
         subject_required: false,
-        aliases: &[],
+        aliases: &["hex_decode"],
         subject: Some(Ty::Str),
         params: &[],
         returns: "String",

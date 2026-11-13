@@ -115,6 +115,8 @@ group-object
 group_by
 gui_wait
 help
+hex_decode
+hex_encode
 in
 input_autocomplete
 input_confirm
