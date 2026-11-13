@@ -9695,7 +9695,7 @@ fn format_value_one_line(v: &Value) -> String {
         Value::Float(x) => x.to_string(),
         Value::Str(s) => s.clone(),
         Value::Uri(s) => s.clone(),
-        Value::Array(a) => format!("[len={}]", a.len()),
+        Value::Array(_) => crate::value::plain_text(v, false),
         Value::Record(_) => "{…}".into(),
         Value::Table(t) => format!("<Table rows={}>", t.rows.len()),
         Value::Lambda(_) => "<lambda>".into(),
@@ -9714,7 +9714,7 @@ fn value_to_string(value: &Value) -> String {
         Value::Float(f) => f.to_string(),
         Value::Bool(b) => b.to_string(),
         Value::Uri(s) => s.clone(),
-        Value::Array(a) => format!("[len={}]", a.len()),
+        Value::Array(_) => crate::value::plain_text(value, false),
         Value::Record(_) => "{…}".into(),
         Value::Table(t) => format!("<Table rows={}>", t.rows.len()),
         Value::Lambda(_) => "<lambda>".into(),
@@ -22440,14 +22440,26 @@ fn aecon_render(v: &Value) -> String {
         Value::Record(m) => {
             let pairs: Vec<String> = m
                 .iter()
-                .map(|(k, val)| format!("{}={}", k, aecon_atom(val)))
+                .map(|(k, val)| format!("{}={}", k, aecon_item(val)))
                 .collect();
             format!("{{{}}}", pairs.join(" "))
         }
         Value::Array(arr) => {
-            let items: Vec<String> = arr.iter().map(aecon_atom).collect();
+            let items: Vec<String> = arr.iter().map(aecon_item).collect();
             format!("[{}]", items.join(","))
         }
+        other => aecon_atom(other),
+    }
+}
+
+/// Render a value that sits inside a `[...]` or `{k=v}` container. A string there
+/// is always JSON-quoted, however plain it looks, so the elements `a,b` and `1`
+/// cannot read back as `[a,b,1]`. The quoted form is a valid JSON string, so
+/// the whole `[...]` is valid JSON when it holds only strings, numbers and
+/// booleans. A table cell stays bare: TSV already separates it.
+fn aecon_item(v: &Value) -> String {
+    match v {
+        Value::Str(s) => serde_json::to_string(s).unwrap_or_else(|_| format!("{s:?}")),
         other => aecon_atom(other),
     }
 }

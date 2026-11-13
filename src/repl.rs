@@ -600,22 +600,42 @@ fn colorize(s: &str, hex_color: &str) -> String {
 
 /// Colorized pretty-print using theme colors from config
 fn pp_colored(v: &Value) -> String {
+    pp_colored_at(v, false)
+}
+
+/// [`pp_colored`] for a value inside a container when `nested`. A string there
+/// is a quoted, escaped literal, and a collection is shown in full.
+fn pp_colored_at(v: &Value, nested: bool) -> String {
     let colors = get_theme_colors();
     match v {
         Value::Null => colorize("null", &colors.dim),
         Value::Bool(b) => colorize(&b.to_string(), &colors.boolean),
         Value::Int(n) => colorize(&n.to_string(), &colors.number),
         Value::Float(x) => colorize(&x.to_string(), &colors.number),
-        Value::Str(s) => colorize(&format!("\"{}\"", s), &colors.string),
+        Value::Str(s) if nested => colorize(&crate::value::quote_str(s), &colors.string),
+        Value::Str(s) => colorize(s, &colors.string),
         Value::Uri(u) => colorize(u, &colors.uri),
         Value::Array(items) => {
-            let mut s = String::new();
-            s.push_str(&colorize("[", &colors.punctuation));
-            for (i, it) in items.iter().enumerate() {
+            let shown = if nested {
+                items.len().min(crate::value::NESTED_ARRAY_SHOWN)
+            } else {
+                items.len()
+            };
+            let mut s = colorize("[", &colors.punctuation);
+            for (i, it) in items[..shown].iter().enumerate() {
                 if i > 0 {
                     s.push_str(", ");
                 }
-                s.push_str(&pp_item_colored(it));
+                s.push_str(&pp_colored_at(it, true));
+            }
+            if shown < items.len() {
+                if shown > 0 {
+                    s.push_str(", ");
+                }
+                s.push_str(&colorize(
+                    &format!("... ({} more)", items.len() - shown),
+                    &colors.dim,
+                ));
             }
             s.push_str(&colorize("]", &colors.punctuation));
             s
@@ -631,7 +651,7 @@ fn pp_colored(v: &Value) -> String {
                 first = false;
                 s.push_str(&colorize(k, &colors.key));
                 s.push_str(": ");
-                s.push_str(&pp_item_colored(v));
+                s.push_str(&pp_colored_at(v, true));
             }
             s.push_str(&colorize("}", &colors.punctuation));
             s
@@ -642,156 +662,10 @@ fn pp_colored(v: &Value) -> String {
         Value::Future(_) => colorize("<future>", &colors.dim),
         Value::Error(msg) => colorize(&format!("Error: {}", msg), &colors.error),
         Value::Builtin(b) => colorize(&format!("<builtin:{}>", b.name), &colors.dim),
-    }
-}
-
-fn pp_item_colored(v: &Value) -> String {
-    let colors = get_theme_colors();
-    match v {
-        Value::Null => colorize("null", &colors.dim),
-        Value::Bool(b) => colorize(&b.to_string(), &colors.boolean),
-        Value::Int(n) => colorize(&n.to_string(), &colors.number),
-        Value::Float(x) => colorize(&x.to_string(), &colors.number),
-        Value::Str(s) => colorize(&format!("\"{}\"", s), &colors.string),
-        Value::Uri(u) => colorize(u, &colors.uri),
-        Value::Array(a) => colorize(&format!("[…{}]", a.len()), &colors.punctuation),
-        // See `pp_item`: a record one level deep shows its fields, or an array
-        // of records renders as nothing at all.
-        Value::Record(map) => {
-            let mut s = colorize("{", &colors.punctuation);
-            for (i, (k, val)) in map.iter().enumerate() {
-                if i > 0 {
-                    s.push_str(&colorize(", ", &colors.punctuation));
-                }
-                s.push_str(&colorize(k, &colors.key));
-                s.push_str(&colorize(": ", &colors.punctuation));
-                s.push_str(&pp_leaf_colored(val));
-            }
-            s.push_str(&colorize("}", &colors.punctuation));
-            s
-        }
-        Value::Table(t) => colorize(&format!("<Table rows={}>", t.rows.len()), &colors.dim),
-        Value::Lambda(_) => colorize("<lambda>", &colors.dim),
-        Value::AsyncLambda(_) => colorize("<async lambda>", &colors.dim),
-        Value::Future(_) => colorize("<future>", &colors.dim),
-        Value::Error(msg) => colorize(&format!("Error: {}", msg), &colors.error),
-        Value::Builtin(b) => colorize(&format!("<builtin:{}>", b.name), &colors.dim),
-    }
-}
-
-/// Colorized [`pp_leaf`].
-fn pp_leaf_colored(v: &Value) -> String {
-    let colors = get_theme_colors();
-    match v {
-        Value::Array(a) => colorize(&format!("[len={}]", a.len()), &colors.punctuation),
-        Value::Record(m) => colorize(&format!("{{fields={}}}", m.len()), &colors.dim),
-        other => pp_item_colored(other),
     }
 }
 
 // Non-colored versions for when colors are disabled
 fn pp(v: &Value) -> String {
-    match v {
-        Value::Null => "null".into(),
-        Value::Bool(b) => b.to_string(),
-        Value::Int(n) => n.to_string(),
-        Value::Float(x) => x.to_string(),
-        Value::Str(s) => s.clone(),
-        Value::Uri(u) => u.clone(),
-        Value::Array(items) => {
-            let mut s = String::new();
-            s.push('[');
-            for (i, it) in items.iter().enumerate() {
-                if i > 0 {
-                    s.push_str(", ");
-                }
-                s.push_str(&pp_item(it));
-            }
-            s.push(']');
-            s
-        }
-        Value::Record(map) => {
-            let mut s = String::new();
-            s.push('{');
-            let mut first = true;
-            for (k, v) in map {
-                if !first {
-                    s.push_str(", ");
-                }
-                first = false;
-                s.push_str(k);
-                s.push_str(": ");
-                s.push_str(&pp_item(v));
-            }
-            s.push('}');
-            s
-        }
-        Value::Table(t) => format!("<Table rows={}>", t.rows.len()),
-        Value::Lambda(_) => "<lambda>".into(),
-        Value::AsyncLambda(_) => "<async lambda>".into(),
-        Value::Future(_) => "<future>".into(),
-        Value::Builtin(b) => format!("<builtin:{}>", b.name),
-        Value::Error(msg) => format!("Error: {}", msg),
-    }
-}
-
-#[allow(dead_code)]
-fn pp_item(v: &Value) -> String {
-    match v {
-        Value::Null => "null".into(),
-        Value::Bool(b) => b.to_string(),
-        Value::Int(n) => n.to_string(),
-        Value::Float(x) => x.to_string(),
-        // Quoted, as `print` and the coloured form show it: `["a", "", "b"]`
-        // is readable, and `[a, , b]` loses the empty string.
-        Value::Str(s) => format!("\"{s}\""),
-        Value::Uri(u) => u.clone(),
-        Value::Array(a) => format!("[len={}]", a.len()),
-        // A record nested one level deep renders its fields.
-        //
-        // This used to be `{…}`, and because an array of records is the single
-        // most common thing a shell produces, that meant the flagship example
-        // printed nothing:
-        //
-        //     ls("src") | pick("name", "size")
-        //     [{…}, {…}, {…}, … 45 of them]
-        //
-        // Not a token budget — `[{a: 1}, {a: 2}]` did it too. The renderer
-        // simply stopped one level too early. Volume is already handled by
-        // `budget_value` on the way in, so eliding here bought nothing and cost
-        // the answer. Arrays keep their `[len=N]` summary, which is deliberate
-        // and documented (docs/book/src/ai/tools.md), and anything nested
-        // *inside* this record still elides, so the depth stays bounded at two.
-        Value::Record(map) => {
-            let mut s = String::from("{");
-            for (i, (k, val)) in map.iter().enumerate() {
-                if i > 0 {
-                    s.push_str(", ");
-                }
-                s.push_str(k);
-                s.push_str(": ");
-                s.push_str(&pp_leaf(val));
-            }
-            s.push('}');
-            s
-        }
-        Value::Table(t) => format!("<Table rows={}>", t.rows.len()),
-        Value::Lambda(_) => "<lambda>".into(),
-        Value::AsyncLambda(_) => "<async lambda>".into(),
-        Value::Future(_) => "<future>".into(),
-        Value::Builtin(b) => format!("<builtin:{}>", b.name),
-        Value::Error(msg) => format!("Error: {}", msg),
-    }
-}
-
-/// Depth two: scalars in full, collections as a summary.
-///
-/// This is where the recursion stops, so a deeply nested value cannot make one
-/// line of REPL output unbounded.
-fn pp_leaf(v: &Value) -> String {
-    match v {
-        Value::Array(a) => format!("[len={}]", a.len()),
-        Value::Record(m) => format!("{{fields={}}}", m.len()),
-        other => pp_item(other),
-    }
+    crate::value::plain_text(v, false)
 }

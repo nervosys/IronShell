@@ -2153,7 +2153,7 @@ pub fn display_value(v: &Value) -> String {
         Value::Float(x) => x.to_string(),
         Value::Str(s) => s.clone(),
         Value::Uri(u) => u.clone(),
-        Value::Array(a) => format!("[len={}]", a.len()),
+        Value::Array(_) => crate::value::plain_text(v, false),
         Value::Record(_) => "{…}".into(),
         Value::Table(t) => format!("<Table rows={}>", t.rows.len()),
         Value::Lambda(_) => "<lambda>".into(),

@@ -336,6 +336,82 @@ impl Value {
     }
 }
 
+/// Most elements a nested array shows before `... (N more)`. Keeps one line of
+/// output bounded. A top-level array is never cut by this.
+pub const NESTED_ARRAY_SHOWN: usize = 100;
+
+/// The body of an IronShell double-quoted string literal for `s`, without the
+/// quotes. `\`, `"` and `${` are escaped, and control characters become `\n`,
+/// `\r`, `\t` or `\u{H}`, so the text parses back to `s`.
+pub fn escape_str_body(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 2);
+    let mut chars = s.chars().peekable();
+    while let Some(c) = chars.next() {
+        match c {
+            '\\' => out.push_str("\\\\"),
+            '"' => out.push_str("\\\""),
+            '$' if chars.peek() == Some(&'{') => out.push_str("\\$"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c if (c as u32) < 0x20 || c as u32 == 0x7f => {
+                out.push_str(&format!("\\u{{{:x}}}", c as u32))
+            }
+            c => out.push(c),
+        }
+    }
+    out
+}
+
+/// `s` as an IronShell string literal: quoted, and escaped by [`escape_str_body`].
+pub fn quote_str(s: &str) -> String {
+    format!("\"{}\"", escape_str_body(s))
+}
+
+/// Plain text for `v`, as `ish -c` shows a result: no colour, and collections in
+/// full. A string is raw at the top level and a quoted, escaped literal inside a
+/// container (`nested`). Nested arrays past [`NESTED_ARRAY_SHOWN`] end in
+/// `... (N more)`.
+pub fn plain_text(v: &Value, nested: bool) -> String {
+    match v {
+        Value::Null => "null".into(),
+        Value::Bool(b) => b.to_string(),
+        Value::Int(n) => n.to_string(),
+        Value::Float(x) => x.to_string(),
+        Value::Str(s) if nested => quote_str(s),
+        Value::Str(s) => s.clone(),
+        Value::Uri(u) => u.clone(),
+        Value::Array(items) => {
+            let shown = if nested {
+                items.len().min(NESTED_ARRAY_SHOWN)
+            } else {
+                items.len()
+            };
+            let mut parts: Vec<String> = items[..shown]
+                .iter()
+                .map(|it| plain_text(it, true))
+                .collect();
+            if shown < items.len() {
+                parts.push(format!("... ({} more)", items.len() - shown));
+            }
+            format!("[{}]", parts.join(", "))
+        }
+        Value::Record(map) => {
+            let fields: Vec<String> = map
+                .iter()
+                .map(|(k, val)| format!("{k}: {}", plain_text(val, true)))
+                .collect();
+            format!("{{{}}}", fields.join(", "))
+        }
+        Value::Table(t) => format!("<Table rows={}>", t.rows.len()),
+        Value::Lambda(_) => "<lambda>".into(),
+        Value::AsyncLambda(_) => "<async lambda>".into(),
+        Value::Future(_) => "<future>".into(),
+        Value::Builtin(b) => format!("<builtin:{}>", b.name),
+        Value::Error(msg) => format!("Error: {}", msg),
+    }
+}
+
 // ----------- Pretty printing (crossterm) - native only -----------
 
 #[cfg(feature = "native")]
@@ -408,7 +484,7 @@ pub mod pretty {
             Value::Bool(b) => write!(w, "{}", (theme.boolean)(&b.to_string())),
             Value::Int(n) => write!(w, "{}", (theme.number)(&n.to_string())),
             Value::Float(x) => write!(w, "{}", (theme.number)(&x.to_string())),
-            Value::Str(s) => write!(w, "\"{}\"", (theme.string)(s)),
+            Value::Str(s) => write!(w, "\"{}\"", (theme.string)(&escape_str_body(s))),
             Value::Uri(u) => write!(w, "{}", (theme.uri)(u)),
             Value::Array(a) => {
                 write!(w, "[")?;
@@ -564,7 +640,7 @@ impl fmt::Display for Value {
             Value::Bool(b) => write!(f, "{}", b),
             Value::Int(n) => write!(f, "{}", n),
             Value::Float(x) => write!(f, "{}", x),
-            Value::Str(s) => write!(f, "\"{}\"", s),
+            Value::Str(s) => write!(f, "{}", quote_str(s)),
             Value::Uri(u) => write!(f, "{}", u),
             Value::Array(a) => {
                 write!(f, "[")?;
