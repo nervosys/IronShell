@@ -154,7 +154,7 @@ add = fn(a, b) => a + b
 open("issues.json") | where(fn(r) => (r.title | lower | contains("x")) || (r.body | lower | contains("x")))
 
 # Rows: `.field` in a pipeline stage's argument is the row (jq's spelling),
-# `|.field` projects, `open` parses by extension (JSON, JSONL, TOML, YAML, CSV)
+# `|.field` projects, `open` parses by extension (JSON, JSONL, TOML, YAML, CSV, TSV)
 open("issues.json") | where(.state == "open" && .comments > 5) |.number
 open("Cargo.toml").package.version
 cat("src/*.rs") | lines | len          # globs in cat/ls; glob("src/**/*.rs")

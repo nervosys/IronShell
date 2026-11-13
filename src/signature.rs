@@ -2234,7 +2234,7 @@ pub static SIGNATURES: &[Signature] = &[
         // a Haiku run returned the whole `{Count, Group, Name}` record: the
         // right fact in a form nobody asked for. The idiom that answers it is
         // named here rather than left to be discovered.
-        doc: r#"Group records by a field name or by a lambda key (`group_by(.region)`, `group_by(fn(r) => r.region)`), returning {Name, Count, Group} records. For "which, and how many": | sort_by("Count", "desc") | first | fn(g) => "${g.Name} ${g.Count}"."#,
+        doc: r#"Group records by a field name or by a lambda key (`group_by(.region)`, `group_by(fn(r) => r.region)`), returning {Name, Count, Group} records. The subject is piped or the first argument: `rows | group_by("a")` and `group_by(rows, "a")` are the same. Name is always a String, the key's text (the Int key 1 is Name "1", and Int 1 and String "1" stay separate groups with the same Name), and the groups are sorted by Name as text, not by first appearance or by number: "10" comes before "9". A row without the field groups under Name "". For "which, and how many": | sort_by("Count", "desc") | first | fn(g) => "${g.Name} ${g.Count}"."#,
         examples: &[
             (
                 r#"[{user: "a"}, {user: "a"}, {user: "b"}] | group_by("user") | len"#,
@@ -2247,6 +2247,14 @@ pub static SIGNATURES: &[Signature] = &[
             (
                 r#"[{user: "a"}, {user: "a"}, {user: "b"}] | group_by(fn(r) => r.user) | len"#,
                 "2",
+            ),
+            (
+                r#"group_by([{a: 1}, {a: 2}, {a: 1}], "a") | map(fn(g) => g.Count)"#,
+                "[2, 1]",
+            ),
+            (
+                r#"[{n: 10}, {n: 9}] | group_by("n") | map(fn(g) => g.Name)"#,
+                r#"["10", "9"]"#,
             ),
         ],
     },
@@ -2836,6 +2844,71 @@ pub static SIGNATURES: &[Signature] = &[
         ],
     },
     Signature {
+        name: "get",
+        category: Some("Core"),
+        subject_required: false,
+        aliases: &[],
+        subject: Some(Ty::Any),
+        params: &[
+            req("path", Ty::Any, "a field name, a dotted path such as \"u.n\", or an Array of keys and indices"),
+            opt("default", Ty::Any, "returned when a step is missing or Null; Null when omitted"),
+        ],
+        returns: "Any",
+        doc: r#"Read an optional field without an error. Returns the value at path, or default (Null when omitted) when any step of the path is missing or Null, or when the value found is Null. The path is a field name, a dotted path ("u.n" reads r.u.n), or an Array of keys and indices (negative indices count from the end). A field whose own name holds a dot is matched by its whole name first. Plain r.field stays strict: a missing field is E_UNKNOWN_FIELD. Piped, the arguments are the path and the default; called directly, the first argument is the subject."#,
+        examples: &[
+            (r#"{u: {n: 5}} | get("u.n", 0)"#, "5"),
+            (r#"get({u: {n: 5}}, "u.n")"#, "5"),
+            (r#"{a: 1} | get("b", 0)"#, "0"),
+            (r#"typeof(get({a: 1}, "b"))"#, "Null"),
+            (r#"get({u: null}, "u.n", "none")"#, r#""none""#),
+            (r#"get({xs: [10, 20]}, ["xs", 1])"#, "20"),
+        ],
+    },
+    Signature {
+        name: "has",
+        category: Some("Core"),
+        subject_required: false,
+        aliases: &[],
+        subject: Some(Ty::Any),
+        params: &[req("key", Ty::Any, "a String field name for a Record, an Int index for an Array")],
+        returns: "Bool",
+        doc: "Whether a Record has the field key (an Array has the Int index). A field that holds Null is present: has tells absent from Null, which get does not. Piped, the argument is the key; called directly, the first argument is the subject.",
+        examples: &[
+            (r#"{a: 1} | has("a")"#, "true"),
+            (r#"has({a: 1}, "b")"#, "false"),
+            (r#"{a: null} | has("a")"#, "true"),
+        ],
+    },
+    Signature {
+        name: "to_entries",
+        category: Some("Core"),
+        subject_required: false,
+        aliases: &[],
+        subject: Some(Ty::Record),
+        params: &[],
+        returns: "Array",
+        doc: "A Record as an Array of {key, value} records, in the order a Record iterates (sorted by key). The inverse of from_entries.",
+        examples: &[
+            ("{a: 1} | to_entries", r#"[{key: "a", value: 1}]"#),
+            ("to_entries({a: 1, b: 2}) | len", "2"),
+        ],
+    },
+    Signature {
+        name: "from_entries",
+        category: Some("Core"),
+        subject_required: false,
+        aliases: &[],
+        subject: Some(Ty::Array),
+        params: &[],
+        returns: "Record",
+        doc: "Build a Record from an Array of {key, value} records or [key, value] pairs. A later entry with the same key wins. A key that is not a String is refused with E_BAD_ARG naming the entry's index. The inverse of to_entries.",
+        examples: &[
+            (r#"[["a", 1], ["b", 2]] | from_entries"#, "{a: 1, b: 2}"),
+            (r#"from_entries([{key: "a", value: 1}, {key: "a", value: 2}])"#, "{a: 2}"),
+            (r#"{a: 1} | to_entries | from_entries"#, "{a: 1}"),
+        ],
+    },
+    Signature {
         // Categorised by hand: `categorize_builtin` read the name and filed
         // this under Archive, next to the compression builtins.
         name: "zip",
@@ -3117,9 +3190,9 @@ pub static SIGNATURES: &[Signature] = &[
         subject_required: false,
         aliases: &[],
         subject: None,
-        params: &[req("path", Ty::Str, "a file; .json, .jsonl, .toml, .yaml/.yml and .csv are parsed")],
+        params: &[req("path", Ty::Str, "a file; .json, .jsonl, .toml, .yaml/.yml, .csv and .tsv are parsed")],
         returns: "Any",
-        doc: "Read a file and parse it by extension (JSON, JSON lines, TOML, YAML, CSV), or return its text. A file that does not parse is E_BAD_VALUE, not retryable, and its hint gives the line and column.",
+        doc: "Read a file and parse it by extension (JSON, JSON lines, TOML, YAML, CSV, TSV), or return its text. A .tsv file is read like a .csv one with a tab delimiter: a header row, columns typed by the same inference, and no quoting (a quote character is data). A file that does not parse is E_BAD_VALUE, not retryable, and its hint gives the line and column.",
         examples: &[
             (r#"open("Cargo.toml").package.name"#, r#""iron-shell""#),
             (r#"typeof(open("README.md"))"#, "String"),

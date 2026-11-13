@@ -208,7 +208,9 @@ fn eval_expr_wasm(expr: &Expr, env: &mut Env) -> Result<Value, String> {
         Expr::Record(fields) => {
             let mut map = BTreeMap::new();
             for (k, v) in fields {
-                map.insert(k.clone(), eval_expr_wasm(v, env)?);
+                // A quoted key interpolates like any string.
+                let key = interpolate_string(k, env)?;
+                map.insert(key, eval_expr_wasm(v, env)?);
             }
             Ok(Value::Record(map))
         }

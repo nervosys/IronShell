@@ -189,14 +189,12 @@ fn skip_drop_and_rest_are_suggested_as_slice() {
 }
 
 #[test]
-fn has_and_has_key_are_suggested_as_keys() {
-    for name in ["has", "has_key"] {
-        assert_eq!(
-            iron_shell::builtins::did_you_mean(name),
-            vec!["keys".to_string()],
-            "{name}"
-        );
-    }
+fn has_key_is_suggested_as_has() {
+    // `has` itself exists now (round 33), so only the other spelling is mapped.
+    assert_eq!(
+        iron_shell::builtins::did_you_mean("has_key"),
+        vec!["has".to_string()]
+    );
 }
 
 #[test]

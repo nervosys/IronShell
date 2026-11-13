@@ -74,7 +74,11 @@ fn a_string_and_a_number_still_do_not_order_and_the_hint_names_the_fix() {
 fn a_missing_field_hint_lists_the_record_keys_sorted() {
     let e = coded(r#"r = {Name: "a", Count: 1, Group: 2}; r.missing_field"#);
     assert_eq!(e.code.as_str(), ErrorCode::UnknownField.as_str());
-    assert_eq!(e.hint, "the record has: Count, Group, Name");
+    assert!(
+        e.hint.ends_with("the record has: Count, Group, Name"),
+        "{}",
+        e.hint
+    );
 }
 
 #[test]
@@ -82,9 +86,12 @@ fn a_missing_field_hint_stops_at_twelve_keys_then_an_ellipsis() {
     let fields: Vec<String> = (1..=13).map(|i| format!("k{i:02}: {i}")).collect();
     let src = format!("r = {{{}}}; r.missing_field", fields.join(", "));
     let e = coded(&src);
-    assert_eq!(
-        e.hint,
-        "the record has: k01, k02, k03, k04, k05, k06, k07, k08, k09, k10, k11, k12, …"
+    assert!(
+        e.hint.ends_with(
+            "the record has: k01, k02, k03, k04, k05, k06, k07, k08, k09, k10, k11, k12, …"
+        ),
+        "{}",
+        e.hint
     );
 }
 

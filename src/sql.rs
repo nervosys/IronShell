@@ -507,6 +507,16 @@ fn run(
                 format!("the query ran past its {}s budget", QUERY_BUDGET.as_secs()),
                 "narrow the query, or bound a recursive CTE with LIMIT",
             );
+        } else if text.contains("no such table") {
+            // Several tables come in as a Record of Arrays, one field per
+            // table; a piped Array is only ever the table `t`.
+            (
+                text.clone(),
+                format!(
+                    "{}; to join several tables, pass a Record of tables as the subject: {{t: a, customers: b}} | sql(\"select ... from t join customers c on ...\")",
+                    schema_hint(conn)
+                ),
+            )
         } else {
             (text.clone(), schema_hint(conn))
         };

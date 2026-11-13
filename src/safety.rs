@@ -3313,6 +3313,16 @@ pub fn record_keys_hint<'a>(keys: impl Iterator<Item = &'a str>) -> String {
     format!("the record has: {listed}")
 }
 
+/// The hint for a record that lacks `field` when no key is close enough to
+/// suggest: it says the field is absent and names `get` for an optional one,
+/// then lists the record's keys ([`record_keys_hint`]).
+pub fn missing_field_hint<'a>(field: &str, keys: impl Iterator<Item = &'a str>) -> String {
+    format!(
+        "this record has no field `{field}`; use get(r, \"{field}\") for an optional field (Null when missing). {}",
+        record_keys_hint(keys)
+    )
+}
+
 /// A code for an uncoded error whose cause is an I/O or HTTP error: one passed
 /// up with a bare `?` or `.context()`, which no call site coded. The cause
 /// says whose fault it is as well as a call site would: a missing file is
