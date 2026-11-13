@@ -405,6 +405,37 @@ fn split_params(args: &[Value]) -> (&[Value], &[Value]) {
     }
 }
 
+/// Whether a String opens with a read the query runner takes: select, with or
+/// values, in any letter case.
+fn looks_like_query(text: &str) -> bool {
+    text.split_whitespace().next().is_some_and(|word| {
+        ["select", "with", "values"]
+            .iter()
+            .any(|kw| word.eq_ignore_ascii_case(kw))
+    })
+}
+
+/// A result with two columns of one name cannot be a Record: the second
+/// overwrote the first, so `select 1 as a, 2 as a` answered {a: 2} and a
+/// self-join lost one `name`. Refused, with the fix named.
+fn refuse_duplicate_columns(builtin: &str, columns: &[String]) -> Result<()> {
+    let mut seen = std::collections::BTreeSet::new();
+    for name in columns {
+        if !seen.insert(name.as_str()) {
+            return Err(bad(
+                builtin,
+                format!(
+                    "{builtin}: the result has two columns named \"{name}\"; give each a distinct name with AS"
+                ),
+                "alias each column with its own name, such as select a.name as a_name, b.name as b_name".to_string(),
+                "distinct column names",
+                name.clone(),
+            ));
+        }
+    }
+    Ok(())
+}
+
 /// A bind parameter as the SQLite value it is bound as. Only the scalars a
 /// comparison can use are accepted; a Bool binds as 1 or 0, as it is stored.
 fn bind_value(builtin: &str, position: usize, v: &Value) -> Result<rusqlite::types::Value> {
@@ -450,14 +481,25 @@ fn run(
     )
     .map_err(|e| internal(builtin, &e))?;
 
+    // ATTACH is the one statement the authorizer refuses that a caller might
+    // expect to work, so only it is named; a write or a pragma gets the plain
+    // read-only hint.
+    let is_attach = query
+        .split_whitespace()
+        .next()
+        .is_some_and(|word| word.eq_ignore_ascii_case("attach"));
     let query_err = |e: rusqlite::Error| {
         let text = e.to_string();
         let (message, hint) = if text.contains("not authorized") {
             (
                 format!("only reads are allowed here ({text})"),
-                "sql is read-only and cannot ATTACH; use db_sqlite_exec to change a database \
-                 file"
-                    .to_string(),
+                if is_attach {
+                    "sql is read-only and cannot ATTACH; use db_sqlite_exec to change a database \
+                     file"
+                        .to_string()
+                } else {
+                    "sql is read-only: use db_sqlite_exec to change a database file".to_string()
+                },
             )
         } else if text.contains("interrupted") {
             return crate::safety::budget_exceeded(
@@ -621,6 +663,26 @@ fn connect(
             Ok((conn, query, None))
         }
         2 => {
+            // `sql("select ? as x", "notarray")`: the second String would be read
+            // as the query and the first as a source file, which answered "no
+            // database named". Text where the parameters go is named as the
+            // mistake instead.
+            if let (Value::Str(first), Value::Str(second)) = (&args[0], &args[1]) {
+                if first.contains(char::is_whitespace)
+                    && looks_like_query(first)
+                    && !looks_like_query(second)
+                {
+                    return Err(bad(
+                        builtin,
+                        format!(
+                            "{builtin}: the parameters must be an Array, e.g. {builtin}(\"select ? as x\", [\"notarray\"])"
+                        ),
+                        format!("pass the bind values as an Array after the query: {builtin}(query, [value, ...])"),
+                        "Array",
+                        "String".to_string(),
+                    ));
+                }
+            }
             let source = str_arg(0, "the source")?;
             let query = str_arg(1, "the query")?;
             // A file source is read: the jail judges it as it judges `open`,
@@ -707,7 +769,9 @@ fn query_once(
     if let Some(k) = key {
         cache_put(k, conn);
     }
-    result
+    let (columns, rows) = result?;
+    refuse_duplicate_columns(builtin, &columns)?;
+    Ok((columns, rows))
 }
 
 /// `sql` / `sqlite_query` / `db_sqlite_query`: rows as records. A trailing

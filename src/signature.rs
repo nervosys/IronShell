@@ -1910,8 +1910,8 @@ pub static SIGNATURES: &[Signature] = &[
             "an array to aggregate, or two numbers",
         )],
         returns: "Number",
-        doc: "Largest element of an array, or the larger of two numbers.",
-        examples: &[("[1, 5, 3] | max", "5"), ("max(2, 9)", "9")],
+        doc: "Largest element of an array of numbers or of Strings (Strings by code point, as sort orders them), or the larger of two numbers. An array mixing numbers and Strings, or an empty array, is refused.",
+        examples: &[("[1, 5, 3] | max", "5"), ("max(2, 9)", "9"), (r#"["pear", "apple", "fig"] | max"#, r#""pear""#)],
     },
     Signature {
         name: "ninja_build",
@@ -2002,8 +2002,8 @@ pub static SIGNATURES: &[Signature] = &[
             "an array to aggregate, or two numbers",
         )],
         returns: "Number",
-        doc: "Smallest element of an array, or the smaller of two numbers.",
-        examples: &[("[1, 5, 3] | min", "1"), ("min(2, 9)", "2")],
+        doc: "Smallest element of an array of numbers or of Strings (Strings by code point, as sort orders them), or the smaller of two numbers. An array mixing numbers and Strings, or an empty array, is refused.",
+        examples: &[("[1, 5, 3] | min", "1"), ("min(2, 9)", "2"), (r#"["pear", "apple", "fig"] | min"#, r#""apple""#)],
     },
     Signature {
         name: "mise_use",
@@ -2257,10 +2257,11 @@ pub static SIGNATURES: &[Signature] = &[
         subject: Some(Ty::Array),
         params: &[],
         returns: "Float",
-        doc: "Arithmetic mean of a numeric array.",
+        doc: "Arithmetic mean of a numeric array. An empty array is refused with E_BAD_ARG, as min and max refuse one: its mean is undefined.",
         examples: &[
             ("[1, 2, 3, 4] | mean", "2.5"),
             ("[1, 2] | avg | round(2)", "1.5"),
+            (r#"(try { [] | avg } catch e { e.error.code })"#, "E_BAD_ARG"),
         ],
     },
     Signature {
@@ -2292,14 +2293,16 @@ pub static SIGNATURES: &[Signature] = &[
                 Ty::Any,
                 "field name (String), or fn(record) -> Any",
             ),
-            opt("order", Ty::Str, r#""desc" for descending; default ascending"#),
+            opt("order", Ty::Str, r#""asc" or "desc", in any letter case; default ascending"#),
         ],
         returns: "Array",
-        doc: "Sort an array of records by a field name or a lambda; propagate key-evaluation errors.",
+        doc: "Sort an array of records by a field name or a lambda. Every key must be a number or every key a String; a row whose key is null, a Bool, or of another kind is refused with E_BAD_ARG naming the row, so filter with where first or give a default in the lambda. A row missing the named field is E_UNKNOWN_FIELD, and an order other than asc or desc is E_BAD_ARG. Key-evaluation errors propagate.",
         examples: &[
             (r#"[{n: 2}, {n: 1}] | sort_by("n") | first | fn(r) => r.n"#, "1"),
-            (r#"[{n: 1}, {n: 2}] | sort_by("n", "desc") | first | fn(r) => r.n"#, "2"),
+            (r#"[{n: 1}, {n: 2}] | sort_by("n", "DESC") | first | fn(r) => r.n"#, "2"),
             ("[{n: 2}, {n: 1}] | sort_by(fn(r) => r.n)", "[{n: 1}, {n: 2}]"),
+            (r#"(try { [{n: 1}, {m: 2}] | sort_by("n") } catch e { e.error.code })"#, "E_UNKNOWN_FIELD"),
+            (r#"(try { [{n: 1}, {n: 2}] | sort_by("n", "sideways") } catch e { e.error.code })"#, "E_BAD_ARG"),
         ],
     },
     Signature {
@@ -2354,7 +2357,7 @@ pub static SIGNATURES: &[Signature] = &[
             "how many to return, as an array; omit for the single element",
         )],
         returns: "Any",
-        doc: "First element of an array, or the first `count` elements.",
+        doc: "First element of an array, or the first `count` elements. A negative count is refused with E_BAD_ARG, as take refuses one.",
         examples: &[("[1, 2, 3] | first", "1"), ("[1, 2, 3] | first(1)", "[1]"), ("[1, 2, 3] | first(2)", "[1, 2]")],
     },
     Signature {
@@ -2369,7 +2372,7 @@ pub static SIGNATURES: &[Signature] = &[
             "how many to return, as an array; omit for the single element",
         )],
         returns: "Any",
-        doc: "Last element of an array, or the last `count` elements.",
+        doc: "Last element of an array, or the last `count` elements. A negative count is refused with E_BAD_ARG, as take refuses one.",
         examples: &[("[1, 2, 3] | last", "3"), ("[1, 2, 3] | last(1)", "[3]"), ("[1, 2, 3] | last(2)", "[2, 3]")],
     },
     Signature {

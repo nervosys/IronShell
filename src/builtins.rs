@@ -3978,6 +3978,13 @@ fn mapped_spelling(name: &str) -> Vec<String> {
         // Substrings: slice(s, start, end) takes characters. `str.substring` and
         // `str.substr` are JavaScript's and Python-adjacent spellings of it.
         "substring" | "substr" | "slice" => vec!["slice".to_string()],
+        // Dropping the first elements, or keeping the rest, is slice:
+        // slice(xs, 1) or xs | slice(1).
+        "skip" | "drop" | "rest" => vec!["slice".to_string()],
+        // No builtin tests for one key: keys lists a record's names, which is
+        // what a test of one key reads. No builtin returns a field with a
+        // default either, so get_or has no suggestion.
+        "has" | "has_key" => vec!["keys".to_string()],
         _ => Vec::new(),
     }
 }
@@ -5705,8 +5712,14 @@ fn bi_avg(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
 
     match arr {
         Value::Array(items) => {
+            // An empty mean is undefined, as min and max of nothing are: NaN
+            // answered it at exit 0.
             if items.is_empty() {
-                return Ok(Value::Float(f64::NAN));
+                return Err(crate::safety::bad_arg_in(
+                    "avg",
+                    "avg of an empty array is undefined",
+                    "check the array is not empty first, such as with len, or give a default for the empty case",
+                ));
             }
 
             let mut sum: f64 = 0.0;
@@ -14105,7 +14118,14 @@ fn bi_first(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
         1
     };
 
-    if count <= 0 {
+    // A negative count was taken as 0 and answered [], as take did before it
+    // refused the same thing.
+    if count < 0 {
+        return Err(crate::safety::arg_err(
+            "first count must be a nonnegative Int",
+        ));
+    }
+    if count == 0 {
         return Ok(Value::Array(vec![]));
     }
 
@@ -14155,7 +14175,12 @@ fn bi_last(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
         1
     };
 
-    if count <= 0 {
+    if count < 0 {
+        return Err(crate::safety::arg_err(
+            "last count must be a nonnegative Int",
+        ));
+    }
+    if count == 0 {
         return Ok(Value::Array(vec![]));
     }
 
@@ -14950,23 +14975,44 @@ fn fold_extremum(items: &[Value], want_max: bool) -> Result<Value> {
             "min of an empty array is undefined"
         }));
     }
+    let name = if want_max { "max" } else { "min" };
+    // Strings order by code point, as sort orders them, so an array of Strings
+    // has a least and a greatest. A mix of Strings and numbers has neither.
+    if items.iter().all(|v| matches!(v, Value::Str(_))) {
+        let mut best: Option<&String> = None;
+        for v in items {
+            if let Value::Str(s) = v {
+                best = Some(match best {
+                    None => s,
+                    Some(b) if want_max && s > b => s,
+                    Some(b) if !want_max && s < b => s,
+                    Some(b) => b,
+                });
+            }
+        }
+        if let Some(b) = best {
+            return Ok(Value::Str(b.clone()));
+        }
+    }
     // Stay in Int while every element is one, so `[1, 5, 3] | max` is `5` and
     // not `5.0`: an agent comparing the answer to a literal should not have to
     // know whether the aggregate silently promoted.
     let all_int = items.iter().all(|v| matches!(v, Value::Int(_)));
     let mut best: Option<f64> = None;
     for v in items {
-        let n = match v {
-            Value::Int(i) => *i as f64,
-            Value::Float(f) => *f,
-            other => {
-                return Err(crate::safety::arg_err(&format!(
-                    "{} requires numeric elements, found {}",
-                    if want_max { "max" } else { "min" },
-                    other.type_name()
-                )))
-            }
-        };
+        let n =
+            match v {
+                Value::Int(i) => *i as f64,
+                Value::Float(f) => *f,
+                other => return Err(crate::safety::bad_arg_in(
+                    name,
+                    format!(
+                        "{name}: elements must all be numbers or all Strings, found {}",
+                        other.type_name()
+                    ),
+                    "min and max take a list of numbers or a list of Strings, not a mix of them",
+                )),
+            };
         best = Some(match best {
             None => n,
             Some(b) if want_max => b.max(n),
@@ -25699,8 +25745,9 @@ fn bi_now(_args: Vec<Value>, _input: Option<Value>) -> Result<Value> {
     Ok(Value::Int(duration.as_secs() as i64))
 }
 
-/// sort_by(fn, direction?) - Sort array by key function
-/// Usage: arr | sort_by(fn(x) => x.name) or arr | sort_by(fn(x) => x.size, "desc")
+/// sort_by(key, order?) - Sort rows by a field name or a lambda key
+/// Usage: arr | sort_by(fn(x) => x.name) or arr | sort_by("size", "desc")
+/// The order is asc or desc in any letter case; anything else is refused.
 fn bi_sort_by(args: Vec<Value>, input: Option<Value>, env: &mut Env) -> Result<Value> {
     let arr = input
         .as_ref()
@@ -25716,55 +25763,114 @@ fn bi_sort_by(args: Vec<Value>, input: Option<Value>, env: &mut Env) -> Result<V
         })
         .ok_or_else(|| crate::safety::arg_err("sort_by requires array input"))?;
 
-    let lambda = args.iter().find_map(|v| match v {
-        Value::Lambda(l) => Some(l),
-        _ => None,
-    });
-
-    let descending = args.iter().any(|v| match v {
-        Value::Str(s) => s == "desc" || s == "descending",
-        _ => false,
-    });
-
-    // A bare field name is accepted as the sort key: `sort_by("size")` rather
-    // than `sort_by(fn(f) => f.size)`.
-    //
-    // Added after hitting this while using the shell as an agent. The string
-    // form is what most callers reach for first, and it previously failed
-    // twice over: the argument was silently ignored (only "desc"/"descending"
-    // were recognised), and the call then errored for want of a lambda — one
-    // wasted round-trip on a call that read as obviously correct.
-    //
-    // "desc"/"descending" stay reserved as the direction, so a field actually
-    // named that must use the lambda form. Stated rather than papered over.
-    let field = args.iter().find_map(|v| match v {
-        Value::Str(s) if s != "desc" && s != "descending" => Some(s.clone()),
-        _ => None,
-    });
-
-    if lambda.is_none() && field.is_none() {
-        return Err(crate::safety::bad_arg(
+    // The arguments after the subject: a key, then an optional order. The
+    // subject is the first argument only when no piped Array took its place.
+    let positional: &[Value] = if matches!(input, Some(Value::Array(_))) {
+        &args
+    } else {
+        args.get(1..).unwrap_or(&[])
+    };
+    if positional.len() > 2 {
+        return Err(crate::safety::bad_arg_with_hint(
             "sort_by",
-            "a key: either a field name (\"size\") or a lambda (fn(x) => x.size)",
-            "neither",
+            "a key and an optional order: sort_by(key, \"asc\" or \"desc\")",
+            &format!("{} arguments", positional.len()),
+            "pass the key first, then asc or desc",
         ));
     }
 
-    // Extract keys for each element
-    let mut keyed: Vec<(Value, Value)> = arr
-        .iter()
-        .map(|item| {
-            let key = match (&lambda, &field) {
+    // A lone "asc" or "desc" is a direction with no key, so it is refused
+    // rather than read as a field named that. A field with such a name needs
+    // the lambda form.
+    let is_direction = |v: &Value| matches!(v, Value::Str(s) if s.eq_ignore_ascii_case("asc") || s.eq_ignore_ascii_case("desc"));
+    let key = match positional.first() {
+        Some(v) if matches!(v, Value::Lambda(_)) => Some(v),
+        Some(v) if matches!(v, Value::Str(_)) && !(positional.len() == 1 && is_direction(v)) => {
+            Some(v)
+        }
+        _ => None,
+    };
+    let (lambda, field) = match key {
+        Some(Value::Lambda(l)) => (Some(l), None),
+        Some(Value::Str(s)) => (None, Some(s)),
+        _ => {
+            return Err(crate::safety::bad_arg(
+                "sort_by",
+                "a key: either a field name (\"size\") or a lambda (fn(x) => x.size)",
+                "neither",
+            ))
+        }
+    };
+
+    // Ascending unless the order says desc. Any other word is refused, not
+    // ignored: a sideways order sorted the rows the same as asc did.
+    let descending = match positional.get(1) {
+        None => false,
+        Some(Value::Str(s)) if s.eq_ignore_ascii_case("asc") => false,
+        Some(Value::Str(s)) if s.eq_ignore_ascii_case("desc") => true,
+        Some(other) => {
+            let got = match other {
+                Value::Str(s) => format!("\"{s}\""),
+                o => o.type_name().to_string(),
+            };
+            return Err(crate::safety::bad_arg_with_hint(
+                "sort_by",
+                "an order of \"asc\" or \"desc\"",
+                &got,
+                "pass asc or desc, in any letter case, or leave the order out for ascending",
+            ));
+        }
+    };
+
+    // Extract keys for each element. A row with no such field is refused, not
+    // given a Null key: a Null key has no place in the order.
+    let mut keyed: Vec<(Value, Value)> = Vec::with_capacity(arr.len());
+    for (row, item) in arr.iter().enumerate() {
+        let key =
+            match (lambda, field) {
                 (Some(l), _) => call_lambda(l, &[item.clone()], env)?,
                 (None, Some(f)) => match item {
-                    Value::Record(m) => m.get(f).cloned().unwrap_or(Value::Null),
-                    _ => Value::Null,
+                    Value::Record(m) => match m.get(f) {
+                        Some(v) => v.clone(),
+                        None => {
+                            let keys: Vec<&str> = m.keys().map(String::as_str).collect();
+                            return Err(sort_by_missing_field(
+                                row,
+                                f,
+                                crate::builtins::nearest_names(f, keys.iter().copied()),
+                                crate::safety::record_keys_hint(keys.iter().copied()),
+                            ));
+                        }
+                    },
+                    other => return Err(crate::safety::bad_arg_with_hint(
+                        "sort_by",
+                        "records when sorting by a field name",
+                        other.type_name(),
+                        "use the lambda form, sort_by(fn(r) => ...), for rows that are not records",
+                    )),
                 },
                 (None, None) => Value::Null,
             };
-            Ok((key, item.clone()))
-        })
-        .collect::<Result<_>>()?;
+        keyed.push((key, item.clone()));
+    }
+
+    // Keys must all be numbers or all Strings, as `sort` requires of its
+    // elements. A Null, a Bool, or a number among Strings has no order, and the
+    // rows would come back in input order with exit 0.
+    let mut first_kind: Option<&'static str> = None;
+    for (row, (key, _)) in keyed.iter().enumerate() {
+        let kind = match key {
+            Value::Int(_) | Value::Float(_) => "number",
+            Value::Str(_) => "String",
+            _ => "",
+        };
+        if kind.is_empty() || matches!(first_kind, Some(f) if f != kind) {
+            return Err(sort_by_unordered_key(row, key));
+        }
+        if first_kind.is_none() {
+            first_kind = Some(kind);
+        }
+    }
 
     // Sort by keys
     keyed.sort_by(|(a, _), (b, _)| {
@@ -25778,6 +25884,42 @@ fn bi_sort_by(args: Vec<Value>, input: Option<Value>, env: &mut Env) -> Result<V
 
     let result: Vec<Value> = keyed.into_iter().map(|(_, v)| v).collect();
     Ok(Value::Array(result))
+}
+
+/// A row that has no field named `field`: the E_UNKNOWN_FIELD the lambda form
+/// gives, with the row named and the candidates from that row's own fields.
+fn sort_by_missing_field(
+    row: usize,
+    field: &str,
+    candidates: Vec<String>,
+    hint: String,
+) -> anyhow::Error {
+    anyhow::Error::new(crate::safety::SafetyError {
+        code: crate::safety::ErrorCode::UnknownField,
+        message: format!("sort_by: row {row} has no field '{field}'"),
+        builtin: "sort_by".to_string(),
+        hint,
+        approval: None,
+        did_you_mean: candidates,
+        expected: String::new(),
+        got: String::new(),
+        extra: serde_json::Map::new(),
+    })
+}
+
+/// A key `sort_by` cannot order: a Null, a Bool, or a value of another kind
+/// than the rows before it.
+fn sort_by_unordered_key(row: usize, key: &Value) -> anyhow::Error {
+    let shown = match key {
+        Value::Str(s) => format!("\"{s}\""),
+        Value::Int(_) | Value::Float(_) => key.to_display_string(),
+        other => other.type_name().to_string(),
+    };
+    crate::safety::bad_arg_in(
+        "sort_by",
+        format!("sort_by: row {row}'s key is {shown}; keys must all be numbers or all strings"),
+        "filter the rows with where first, or give every row a key in the lambda, such as a default for a missing value",
+    )
 }
 
 /// Helper to compare two values for sorting
@@ -47857,11 +47999,24 @@ fn sqlite_exec_run(db_path: &str, sql: &str, safe: bool) -> Result<Value> {
     // Every mutating sqlite builtin comes through here, and a SQL error was a
     // bare `false` with sqlite3's message discarded.
     if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        // A statement that does not parse is the SQL's fault, not the service's:
+        // sqlite3 says so in its own words, and the generic hint would send the
+        // caller to check a daemon.
+        if stderr.contains("syntax error") || stderr.contains("Parse error") {
+            return Err(crate::safety::tool_failed_hinted(
+                "db_sqlite_exec",
+                "sqlite3",
+                output.status.code(),
+                &stderr,
+                "the SQL did not parse; check the statement near the quoted token",
+            ));
+        }
         return Err(crate::safety::tool_failed(
             "db_sqlite_exec",
             "sqlite3",
             output.status.code(),
-            &String::from_utf8_lossy(&output.stderr),
+            &stderr,
         ));
     }
     Ok(Value::Bool(true))

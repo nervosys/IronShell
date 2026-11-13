@@ -1969,14 +1969,37 @@ pub fn tool_failed(
         Some(c) => format!("exited {c}"),
         None => "was killed by a signal".to_string(),
     };
-    tool_failed_text(builtin, command, status_text, stderr)
+    tool_failed_text(builtin, command, status_text, stderr, None)
+}
+
+/// [`tool_failed`] whose hint is `hint` in place of the one that says the tool
+/// is installed but rejected the work. For a failure whose cause the tool's own
+/// stderr names, such as a SQL statement that does not parse.
+pub fn tool_failed_hinted(
+    builtin: &str,
+    command: &str,
+    status: Option<i32>,
+    stderr: &str,
+    hint: &str,
+) -> anyhow::Error {
+    let status_text = match status {
+        Some(c) => format!("exited {c}"),
+        None => "was killed by a signal".to_string(),
+    };
+    tool_failed_text(builtin, command, status_text, stderr, Some(hint))
 }
 
 /// [`tool_failed`] for an exit code that is an HRESULT-style value, such as a
 /// winget `APPINSTALLER_CLI_ERROR_*` code. It is shown in hex (`0x8A150001`),
 /// because the decimal form of those codes is unrecognisable.
 pub fn tool_failed_code(builtin: &str, command: &str, code: u32, stderr: &str) -> anyhow::Error {
-    tool_failed_text(builtin, command, format!("exited 0x{code:08X}"), stderr)
+    tool_failed_text(
+        builtin,
+        command,
+        format!("exited 0x{code:08X}"),
+        stderr,
+        None,
+    )
 }
 
 fn tool_failed_text(
@@ -1984,6 +2007,7 @@ fn tool_failed_text(
     command: &str,
     status_text: String,
     stderr: &str,
+    hint: Option<&str>,
 ) -> anyhow::Error {
     let stderr = stderr.trim();
     let said = if stderr.is_empty() {
@@ -1995,10 +2019,13 @@ fn tool_failed_text(
         code: ErrorCode::ToolFailed,
         message: format!("{builtin}: `{command}` {status_text} {said}"),
         builtin: builtin.to_string(),
-        hint: format!(
-            "`{command}` is installed but rejected this work; check that its \
-             service is running and that the arguments are valid for this host"
-        ),
+        hint: match hint {
+            Some(hint) => hint.to_string(),
+            None => format!(
+                "`{command}` is installed but rejected this work; check that its \
+                 service is running and that the arguments are valid for this host"
+            ),
+        },
         approval: None,
         did_you_mean: Vec::new(),
         expected: format!("`{command}` to exit 0"),
