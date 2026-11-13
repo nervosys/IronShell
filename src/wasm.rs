@@ -421,6 +421,19 @@ fn eval_lambda(lam: &Lambda, args: &[Value], env: &mut Env) -> Result<Value, Str
 
 #[cfg(feature = "web")]
 fn eval_binop(op: &BinOp, left: &Value, right: &Value) -> Result<Value, String> {
+    let result = eval_binop_unchecked(op, left, right)?;
+    if let Value::Float(f) = &result {
+        if !f.is_finite() {
+            return Err(format!(
+                "float overflow in operator {op:?}: the result is not a finite number"
+            ));
+        }
+    }
+    Ok(result)
+}
+
+#[cfg(feature = "web")]
+fn eval_binop_unchecked(op: &BinOp, left: &Value, right: &Value) -> Result<Value, String> {
     match (op, left, right) {
         (BinOp::Add, Value::Int(a), Value::Int(b)) => Ok(Value::Int(a + b)),
         (BinOp::Add, Value::Float(a), Value::Float(b)) => Ok(Value::Float(a + b)),
@@ -447,7 +460,12 @@ fn eval_binop(op: &BinOp, left: &Value, right: &Value) -> Result<Value, String> 
         }
         (BinOp::Div, Value::Float(a), Value::Int(b)) if *b != 0 => Ok(Value::Float(a / *b as f64)),
         (BinOp::Div, _, _) => Err("division by zero".to_string()),
-        (BinOp::Rem, Value::Int(a), Value::Int(b)) if *b != 0 => Ok(Value::Int(a % b)),
+        (BinOp::Rem, Value::Int(a), Value::Int(b)) if *b != 0 => Ok(Value::Int(a.wrapping_rem(*b))),
+        (BinOp::Rem, Value::Float(a), Value::Float(b)) if *b != 0.0 => Ok(Value::Float(a % b)),
+        (BinOp::Rem, Value::Int(a), Value::Float(b)) if *b != 0.0 => {
+            Ok(Value::Float(*a as f64 % b))
+        }
+        (BinOp::Rem, Value::Float(a), Value::Int(b)) if *b != 0 => Ok(Value::Float(a % *b as f64)),
         (BinOp::Rem, _, _) => Err("modulo by zero".to_string()),
         (BinOp::Pow, Value::Int(a), Value::Int(b)) => Ok(Value::Float((*a as f64).powf(*b as f64))),
         (BinOp::Pow, Value::Float(a), Value::Float(b)) => Ok(Value::Float(a.powf(*b))),

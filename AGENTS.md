@@ -184,6 +184,7 @@ date_add("2024-02-28", 1, "days")    date_diff("2024-02-29", "2026-11-09")    da
 from_toml(to_toml({a: 1})).a           # TOML: to_toml(record) -> String; from_toml(text) -> Record
 merge({a: 1, b: 2}, {b: 3}).b         # merge(a, b): shallow Record merge, b's fields win; `a | merge(b)` pipes
 [1, 2] + [3]   # [1, 2, 3]: + concatenates Arrays
+-7.5 % 2       # -1.5: % takes the sign of the dividend, unlike Python; Int and Float mix as Float
 mut r = {a: 1}
 r.a = 2                                # set a field of a `mut` record; r.a.b = v needs r.a to exist already; other copies keep theirs
 rows | sql("select * from t where amount > ?", [100])   # a trailing Array binds the ? placeholders

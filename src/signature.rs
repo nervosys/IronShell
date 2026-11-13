@@ -1850,11 +1850,13 @@ pub static SIGNATURES: &[Signature] = &[
             "decimal places; 0 returns an Int",
         )],
         returns: "Number",
-        doc: "Round a number, optionally to a number of decimal places.",
+        doc: "Round a number, optionally to a number of decimal places. The tie rule is half away from zero, applied to the exact binary value of a Float, as format_number does: 2.675 is stored as 2.67499999..., so round(2.675, 2) is 2.67, while an exact tie such as 0.125 or 2.5 goes up (round(0.125, 2) is 0.13, round(2.5) is 3, round(-2.5) is -3).",
         examples: &[
             ("round(4.966, 2)", "4.97"),
             ("4.966 | round(2)", "4.97"),
             ("round(4.5)", "5"),
+            ("round(2.675, 2)", "2.67"),
+            ("round(0.125, 2)", "0.13"),
         ],
     },
     Signature {

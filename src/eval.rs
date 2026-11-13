@@ -2486,7 +2486,35 @@ fn value_eq(a: &Value, b: &Value) -> bool {
     }
 }
 
+/// A binary operator's result. IronShell numbers are finite, and the operands
+/// of a Float operator are finite too, so a non-finite Float result is an
+/// overflow (`1e308 * 10`) or an undefined power (`(-8) ** 0.5`): refused, as an
+/// Int that does not fit in 64 bits is.
 fn binop(op: &BinOp, a: Value, b: Value) -> Result<Value> {
+    let result = binop_unchecked(op, a, b)?;
+    if let Value::Float(f) = &result {
+        if !f.is_finite()
+            && matches!(
+                op,
+                BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Rem | BinOp::Pow
+            )
+        {
+            let message = if f.is_nan() {
+                format!("float result in operator {op:?}: the result is not a finite number")
+            } else {
+                format!("float overflow in operator {op:?}: the result is not a finite number")
+            };
+            return Err(crate::safety::value_not_representable(
+                &format!("operator {op:?}"),
+                message,
+                "the largest Float is about 1.8e308; scale the operands down, or split the computation",
+            ));
+        }
+    }
+    Ok(result)
+}
+
+fn binop_unchecked(op: &BinOp, a: Value, b: Value) -> Result<Value> {
     use BinOp::*;
     Ok(match (op, a, b) {
         // Int results are checked: a result past 64 bits is an error, not a
@@ -2542,8 +2570,14 @@ fn binop(op: &BinOp, a: Value, b: Value) -> Result<Value> {
         (Div, Value::Int(x), Value::Float(y)) => Value::Float((x as f64) / y),
         (Div, Value::Float(x), Value::Int(y)) => Value::Float(x / (y as f64)),
 
-        // `i64::MIN % -1` does not fit either, and panics in Rust unless checked.
-        (Rem, Value::Int(x), Value::Int(y)) => Value::Int(checked_int(x.checked_rem(y), "Rem")?),
+        // `i64::MIN % -1` is 0, but `%` panics in Rust on it; `wrapping_rem` gives
+        // the true 0. The divisor is not 0 here (refused above).
+        (Rem, Value::Int(x), Value::Int(y)) => Value::Int(x.wrapping_rem(y)),
+        // Float remainder follows the dividend's sign, as Int `%` does (-7.5 % 2 is
+        // -1.5), unlike Python. Int and Float together promote to Float.
+        (Rem, Value::Float(x), Value::Float(y)) => Value::Float(x % y),
+        (Rem, Value::Int(x), Value::Float(y)) => Value::Float((x as f64) % y),
+        (Rem, Value::Float(x), Value::Int(y)) => Value::Float(x % (y as f64)),
 
         (Eq, x, y) => Value::Bool(value_eq(&x, &y)),
         (Ne, x, y) => Value::Bool(!value_eq(&x, &y)),
@@ -2609,7 +2643,10 @@ fn binop(op: &BinOp, a: Value, b: Value) -> Result<Value> {
                 let exp = u32::try_from(y).map_err(|_| crate::safety::integer_overflow("Pow"))?;
                 Value::Int(checked_int(x.checked_pow(exp), "Pow")?)
             } else {
-                // negative exponent -> float result
+                // negative exponent -> float result; 0 ** -1 is 1 / 0
+                if x == 0 {
+                    return Err(divide_by_zero("division", "operator Pow"));
+                }
                 Value::Float((x as f64).powf(y as f64))
             }
         }

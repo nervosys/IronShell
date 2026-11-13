@@ -73,11 +73,12 @@ fn negating_i64_min_is_refused() {
 }
 
 #[test]
-fn remainder_of_i64_min_by_minus_one_is_refused() {
+fn remainder_of_i64_min_by_minus_one_is_zero() {
     let _g = lock();
+    // The true remainder is 0; it does not overflow.
     assert_eq!(
-        refusal("x = -9223372036854775807 - 1; x % -1").message,
-        "integer overflow in operator Rem"
+        run("x = -9223372036854775807 - 1; x % -1").unwrap(),
+        Value::Int(0)
     );
 }
 

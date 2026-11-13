@@ -15394,7 +15394,11 @@ fn bi_abs(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
     };
 
     match val {
-        Value::Int(n) => Ok(Value::Int(n.abs())),
+        // abs(i64::MIN) does not fit in an Int: refused, as `-x` on it is.
+        Value::Int(n) => n
+            .checked_abs()
+            .map(Value::Int)
+            .ok_or_else(|| crate::safety::integer_overflow("Abs")),
         Value::Float(f) => Ok(Value::Float(f.abs())),
         _ => Err(crate::safety::arg_err("abs requires numeric input")),
     }
@@ -15621,8 +15625,22 @@ fn bi_round(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
         (Value::Int(n), _) => Ok(Value::Int(n)),
         (Value::Float(f), None) | (Value::Float(f), Some(0)) => Ok(Value::Int(f.round() as i64)),
         (Value::Float(f), Some(d)) => {
-            let scale = 10f64.powi(d as i32);
-            Ok(Value::Float((f * scale).round() / scale))
+            // The same rule as format_number: round the exact binary value, half
+            // away from zero, so round(2.675, 2) is 2.67 (2.675 is stored as
+            // 2.67499999...) and round(0.125, 2) is 0.13. A Float of 1e15 or more
+            // has no fraction digits to round.
+            if f.abs() >= 1.0e15 {
+                return Ok(Value::Float(f));
+            }
+            let (int_digits, frac_digits) = round_exact_decimal(f.abs(), d as usize);
+            let rounded: f64 = format!("{int_digits}.{frac_digits}")
+                .parse()
+                .map_err(|_| crate::safety::arg_err("round: the result is not a number"))?;
+            Ok(Value::Float(if f < 0.0 && rounded != 0.0 {
+                -rounded
+            } else {
+                rounded
+            }))
         }
         _ => Err(crate::safety::arg_err("round requires numeric input")),
     }
@@ -15716,6 +15734,19 @@ fn bi_pow(args: Vec<Value>, _input: Option<Value>) -> Result<Value> {
             let exp32 = u32::try_from(*e).map_err(|_| overflow())?;
             return b.checked_pow(exp32).map(Value::Int).ok_or_else(overflow);
         }
+    }
+
+    // Zero to a negative power is 1 / 0, which `/` refuses as a division by zero.
+    if base == 0.0 && exp < 0.0 {
+        return Err(crate::safety::bad_value_in(
+            "pow",
+            format!(
+                "division by zero: {} ** {}",
+                float_for_message(base),
+                float_for_message(exp)
+            ),
+            "a zero base needs an exponent of 0 or more; guard the base before raising it",
+        ));
     }
 
     let result = base.powf(exp);
@@ -16432,8 +16463,97 @@ fn not_a_date(builtin: &str, text: &str) -> anyhow::Error {
     )
 }
 
+/// The refusal for a year outside 0001 to 9999, the four-digit years of ISO 8601.
+fn year_out_of_range(builtin: &str, text: &str) -> anyhow::Error {
+    crate::safety::value_not_representable(
+        builtin,
+        format!("{builtin}: {text:?} is out of range: the year must be from 0001 to 9999"),
+        "ISO 8601 years are four digits, 0001 to 9999, with no sign",
+    )
+}
+
+/// Whether a year is one the date builtins read and write.
+fn year_in_range(year: i32) -> bool {
+    (1..=9999).contains(&year)
+}
+
+/// Refuse date text that is date-shaped but not in the strict ISO form: a
+/// signed or five-digit year (E_BAD_VALUE), a field that is not zero-padded
+/// (`2024-2-9`, `T1:2:3`), or a leap second (`23:59:60`) (E_BAD_ARG). Text that
+/// does not look like a date is left to the parser, which refuses it as not a date.
+fn check_iso_shape(builtin: &str, text: &str) -> Result<()> {
+    let b = text.as_bytes();
+    let signed = matches!(b.first(), Some(b'+' | b'-')) && b.get(1).is_some_and(u8::is_ascii_digit);
+    let start = usize::from(signed);
+    let year_len = b[start..].iter().take_while(|c| c.is_ascii_digit()).count();
+    if year_len == 0 || b.get(start + year_len) != Some(&b'-') {
+        return Ok(());
+    }
+    if signed || year_len > 4 {
+        return Err(year_out_of_range(builtin, text));
+    }
+    let digits = |s: &[u8]| s.iter().all(u8::is_ascii_digit);
+    let not_padded = |what: &str| {
+        crate::safety::bad_arg_in(
+            builtin,
+            format!("{builtin}: {text:?} is not zero-padded: expected {what}"),
+            "write every field with its full width: 2024-02-09, or 2024-02-09T08:05:03Z",
+        )
+    };
+    let padded_date = year_len == 4
+        && b.len() >= 10
+        && b[4] == b'-'
+        && digits(&b[5..7])
+        && b[7] == b'-'
+        && digits(&b[8..10]);
+    if !padded_date {
+        return Err(not_padded("YYYY-MM-DD"));
+    }
+    if let Some(&sep) = b.get(10) {
+        if sep == b'T' || sep == b' ' {
+            let t = &b[11..];
+            let padded_time = t.len() >= 8
+                && digits(&t[0..2])
+                && t[2] == b':'
+                && digits(&t[3..5])
+                && t[5] == b':'
+                && digits(&t[6..8]);
+            if !padded_time {
+                return Err(not_padded("YYYY-MM-DDTHH:MM:SS"));
+            }
+            if &t[6..8] == b"60" {
+                return Err(leap_second(builtin, text));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn leap_second(builtin: &str, text: &str) -> anyhow::Error {
+    crate::safety::bad_arg_in(
+        builtin,
+        format!("{builtin}: {text:?} has a leap second: leap seconds are not supported"),
+        "write second 59 or the next minute; seconds run from 00 to 59",
+    )
+}
+
+/// The checks on a parsed instant: no leap second, and a year from 0001 to 9999.
+fn check_instant(builtin: &str, text: &str, instant: chrono::DateTime<chrono::Utc>) -> Result<()> {
+    use chrono::{Datelike as _, Timelike as _};
+    if instant.nanosecond() >= 1_000_000_000 {
+        return Err(leap_second(builtin, text));
+    }
+    if !year_in_range(instant.year()) {
+        return Err(year_out_of_range(builtin, text));
+    }
+    Ok(())
+}
+
 fn parse_iso(builtin: &str, text: &str) -> Result<(chrono::DateTime<chrono::Utc>, bool)> {
-    iso_instant(text).ok_or_else(|| not_a_date(builtin, text))
+    check_iso_shape(builtin, text)?;
+    let (instant, date_only) = iso_instant(text).ok_or_else(|| not_a_date(builtin, text))?;
+    check_instant(builtin, text, instant)?;
+    Ok((instant, date_only))
 }
 
 /// The ISO 8601 text of an instant: `2024-02-29` for a date, otherwise the UTC
@@ -16464,15 +16584,19 @@ fn check_strftime(builtin: &str, layout: &str) -> Result<()> {
 /// one it is UTC, and a layout with no time is midnight UTC.
 fn parse_with_layout(builtin: &str, text: &str, layout: &str) -> Result<Value> {
     if let Ok(dt) = chrono::DateTime::parse_from_str(text, layout) {
-        return Ok(Value::Str(iso_text(dt.with_timezone(&chrono::Utc), false)));
+        let instant = dt.with_timezone(&chrono::Utc);
+        check_instant(builtin, text, instant)?;
+        return Ok(Value::Str(iso_text(instant, false)));
     }
     if let Ok(naive) = chrono::NaiveDateTime::parse_from_str(text, layout) {
+        check_instant(builtin, text, naive.and_utc())?;
         return Ok(Value::Str(iso_text(naive.and_utc(), false)));
     }
     if let Some(midnight) = chrono::NaiveDate::parse_from_str(text, layout)
         .ok()
         .and_then(|date| date.and_hms_opt(0, 0, 0))
     {
+        check_instant(builtin, text, midnight.and_utc())?;
         return Ok(Value::Str(iso_text(midnight.and_utc(), true)));
     }
     // With a format the format is what failed: naming the text as "not a date"
@@ -16641,6 +16765,9 @@ fn add_calendar_months(
         .checked_add(i64::from(instant.month0()))?
         .checked_add(months)?;
     let year = i32::try_from(index.div_euclid(12)).ok()?;
+    if !year_in_range(year) {
+        return None;
+    }
     let month = u32::try_from(index.rem_euclid(12)).ok()? + 1;
     let date = (1..=instant.day())
         .rev()
@@ -16696,11 +16823,16 @@ fn bi_date_add(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
             .and_then(chrono::TimeDelta::try_seconds)
             .and_then(|delta| instant.checked_add_signed(delta)),
     };
+    // The answer stays in the years 0001 to 9999, the four-digit years of ISO 8601.
+    let moved = moved.filter(|m| {
+        use chrono::Datelike as _;
+        year_in_range(m.year())
+    });
     let Some(moved) = moved else {
-        return Err(crate::safety::bad_arg_in(
+        return Err(crate::safety::value_not_representable(
             B,
             format!("{B}: {amount} {unit} moves {text:?} out of range"),
-            "use a smaller amount",
+            "use a smaller amount: dates run from 0001-01-01 to 9999-12-31",
         ));
     };
     let whole_days = matches!(unit, "weeks" | "days" | "months" | "years");
@@ -16904,6 +17036,46 @@ fn bi_merge(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
     Ok(Value::Record(merged))
 }
 
+/// The integer and fraction digits of a non-negative finite Float rounded to
+/// `cut` decimals, half away from zero, on its exact binary value: 2.675 is
+/// stored as 2.67499999..., so it rounds to 2.67, and an exact tie (0.125, 2.5)
+/// goes up. Every fraction digit of an f64 is written out (at most 1074), so the
+/// digit after the cut is exact. `format_number` and `round(x, digits)` share it.
+fn round_exact_decimal(magnitude: f64, cut: usize) -> (String, String) {
+    let exact = format!("{magnitude:.1100}");
+    let (whole, fraction) = exact.split_once('.').unwrap_or((exact.as_str(), ""));
+    let fraction = fraction.as_bytes();
+    let mut digits: Vec<u8> = whole
+        .bytes()
+        .chain((0..cut).map(|k| fraction.get(k).copied().unwrap_or(b'0')))
+        .map(|b| b - b'0')
+        .collect();
+    if fraction.get(cut).copied().unwrap_or(b'0') >= b'5' {
+        // Add one to the last digit, carrying leftwards.
+        let mut k = digits.len();
+        loop {
+            if k == 0 {
+                digits.insert(0, 1);
+                break;
+            }
+            k -= 1;
+            if digits[k] == 9 {
+                digits[k] = 0;
+            } else {
+                digits[k] += 1;
+                break;
+            }
+        }
+    }
+    let split = digits.len() - cut;
+    let text: String = digits.iter().map(|d| char::from(d + b'0')).collect();
+    let int_digits = match text[..split].trim_start_matches('0') {
+        "" => "0".to_string(),
+        s => s.to_string(),
+    };
+    (int_digits, text[split..].to_string())
+}
+
 /// The most decimals `format_number` writes; past this the scaled value would
 /// not fit the integer arithmetic it uses.
 const FORMAT_NUMBER_MAX_DECIMALS: i64 = 15;
@@ -16997,46 +17169,24 @@ fn bi_format_number(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
             // is exact. It decides: 5 or more goes up, which also rounds an exact
             // tie (0.125, 2.5) away from zero.
             let magnitude = f.abs();
+            // The cap is on the scaled value: the number times 10^decimals must
+            // stay below 1e38. Fewer decimals only help when there are some.
             if magnitude * 10f64.powi(decimals as i32) >= 1.0e38 {
+                let hint = if decimals > 0 {
+                    "pass fewer decimals or a smaller number"
+                } else {
+                    "pass a number below 1e38"
+                };
                 return Err(crate::safety::bad_arg_in(
                     B,
-                    format!("{B}: the number is too large to write with {decimals} decimals"),
-                    "pass fewer decimals or a smaller number",
+                    format!(
+                        "{B}: the number is too large to write: it times 10^{decimals} must stay below 1e38"
+                    ),
+                    hint,
                 ));
             }
-            let exact = format!("{magnitude:.1100}");
-            let (whole, fraction) = exact.split_once('.').unwrap_or((exact.as_str(), ""));
-            let fraction = fraction.as_bytes();
-            let cut = decimals as usize;
-            let mut digits: Vec<u8> = whole
-                .bytes()
-                .chain((0..cut).map(|k| fraction.get(k).copied().unwrap_or(b'0')))
-                .map(|b| b - b'0')
-                .collect();
-            if fraction.get(cut).copied().unwrap_or(b'0') >= b'5' {
-                // Add one to the last digit, carrying leftwards.
-                let mut k = digits.len();
-                loop {
-                    if k == 0 {
-                        digits.insert(0, 1);
-                        break;
-                    }
-                    k -= 1;
-                    if digits[k] == 9 {
-                        digits[k] = 0;
-                    } else {
-                        digits[k] += 1;
-                        break;
-                    }
-                }
-            }
-            let split = digits.len() - cut;
-            let text: String = digits.iter().map(|d| char::from(d + b'0')).collect();
-            let int_digits = match text[..split].trim_start_matches('0') {
-                "" => "0".to_string(),
-                s => s.to_string(),
-            };
-            (f < 0.0, int_digits, text[split..].to_string())
+            let (int_digits, frac_digits) = round_exact_decimal(magnitude, decimals as usize);
+            (f < 0.0, int_digits, frac_digits)
         }
         other => {
             return Err(crate::safety::bad_arg_in(
