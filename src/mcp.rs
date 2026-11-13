@@ -601,6 +601,10 @@ impl McpServer {
                 // byte-stable for equal values.
                 let text = if crate::agent_api::deterministic_mode() {
                     crate::builtins::render_canonical(&v).unwrap_or_else(|| "null".to_string())
+                } else if name == "ontology_describe" {
+                    // The discovery tools speak JSON; the record's display form
+                    // (`{aliases: null, builtin: pick}`) is not.
+                    serde_json::to_string(&v.to_json()).unwrap_or_else(|_| v.to_display_string())
                 } else if crate::safety::current_mode() == crate::safety::Mode::Agent
                     && matches!(
                         v,
