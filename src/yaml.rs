@@ -685,6 +685,10 @@ fn needs_quoting(s: &str) -> bool {
     if radix_integer(s).is_some() || s.chars().any(needs_escape) {
         return true;
     }
+    // A number or date to a YAML 1.1 reader, though this reader keeps it a String.
+    if yaml11_non_string(s) {
+        return true;
+    }
     s.contains(':')
         || s.contains('#')
         || s.contains('\n')
@@ -695,6 +699,30 @@ fn needs_quoting(s: &str) -> bool {
             '-', '?', '&', '*', '!', '|', '>', '%', '@', '`', '[', '{', ',',
         ])
         || s.trim() != s
+}
+
+/// Whether a YAML 1.1 reader (PyYAML) reads `s` as a number or a date: digits
+/// with underscores (`1_000`), an ISO date or datetime prefix (`2026-01-02`), a
+/// binary integer (`0b101`), or a number with a leading `+` or `.` (`+12`, `.5`).
+/// A sexagesimal `1:20` is already quoted by the colon rule.
+fn yaml11_non_string(s: &str) -> bool {
+    let b = s.as_bytes();
+    let digits_with_underscores = s.contains('_')
+        && b.first().is_some_and(u8::is_ascii_digit)
+        && b.iter().all(|c| c.is_ascii_digit() || *c == b'_');
+    let date = b.len() >= 10
+        && b[..4].iter().all(u8::is_ascii_digit)
+        && b[4] == b'-'
+        && b[5..7].iter().all(u8::is_ascii_digit)
+        && b[7] == b'-'
+        && b[8..10].iter().all(u8::is_ascii_digit);
+    let unsigned = s.strip_prefix(['+', '-']).unwrap_or(s);
+    let binary = unsigned
+        .strip_prefix("0b")
+        .is_some_and(|d| !d.is_empty() && d.bytes().all(|c| c == b'0' || c == b'1'));
+    let dotted = (s.starts_with('+') || s.starts_with('.'))
+        && s[1..].starts_with(|c: char| c.is_ascii_digit());
+    digits_with_underscores || date || binary || dotted
 }
 
 /// Whether `c` is written escaped in a double-quoted scalar: a C0 control, DEL,

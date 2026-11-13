@@ -174,6 +174,40 @@ fn math_pow_nan_message_names_its_operands() {
     );
 }
 
+// ---- YAML 1.1 readers would read these as numbers or dates: they are quoted ----
+
+#[test]
+fn to_yaml_quotes_strings_that_yaml_11_reads_as_numbers_or_dates() {
+    let out = run(r#"["1_000", "2026-01-02", "0b101", "+12", ".5", "1:20"] | to_yaml"#);
+    let Value::Str(text) = out else {
+        panic!("to_yaml gives a String")
+    };
+    for quoted in [
+        "\"1_000\"",
+        "\"2026-01-02\"",
+        "\"0b101\"",
+        "\"+12\"",
+        "\".5\"",
+        "\"1:20\"",
+    ] {
+        assert!(text.contains(quoted), "{quoted} not in {text}");
+    }
+}
+
+#[test]
+fn yaml_strings_that_look_like_numbers_round_trip_as_strings() {
+    let v = run(r#"["1_000", "2026-01-02", "0b101", "+12", ".5", "1:20"] | to_yaml | from_yaml"#);
+    assert_eq!(
+        v,
+        Value::Array(
+            ["1_000", "2026-01-02", "0b101", "+12", ".5", "1:20"]
+                .iter()
+                .map(|s| text(s))
+                .collect()
+        )
+    );
+}
+
 // ---- to_csv keeps a row whose only field is empty ----
 
 #[test]
