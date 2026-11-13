@@ -10897,7 +10897,12 @@ fn bi_to_csv(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
     match input {
         Value::Array(arr) => {
             let headers: Vec<String> = match (columns, arr.first()) {
-                (Some(names), _) => names,
+                (Some(names), _) => {
+                    // A repeated column name would write the column twice, and each
+                    // record has one value per name: refused, as the reader refuses it.
+                    check_csv_headers("to_csv", &names)?;
+                    names
+                }
                 (None, None) => return Ok(Value::Str(String::new())),
                 (None, Some(Value::Record(_))) => {
                     // The keys of every record, sorted, so a key that only a later
