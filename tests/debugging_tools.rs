@@ -76,39 +76,35 @@ fn test_assert_truthy_int() {
 }
 
 #[test]
-fn test_assert_false_returns_error() {
-    let result = run("let r = assert(false)\nr");
-    match result {
-        Value::Error(msg) => assert_eq!(msg, "assertion failed"),
-        _ => panic!("Expected Error, got {:?}", result),
-    }
+fn test_assert_false_raises_e_assert() {
+    // A failed assert raises like error(): catchable, with a structured code.
+    let result = run(r#"try { assert(false) } catch e { e.code }"#);
+    assert_eq!(result, Value::Str("E_ASSERT".to_string()));
+    let msg = run(r#"try { assert(false) } catch e { e.message }"#);
+    assert_eq!(msg, Value::Str("assertion failed".to_string()));
 }
 
 #[test]
 fn test_assert_false_with_message() {
-    let result = run("let r = assert(false, \"custom message\")\nr");
-    match result {
-        Value::Error(msg) => assert_eq!(msg, "custom message"),
-        _ => panic!("Expected Error, got {:?}", result),
-    }
+    let msg = run(r#"try { assert(false, "custom message") } catch e { e.message }"#);
+    assert_eq!(
+        msg,
+        Value::Str("assertion failed: custom message".to_string())
+    );
+    let err = run_result(r#"assert(false, "custom message")"#).unwrap_err();
+    assert!(err.contains("E_ASSERT"), "{err}");
 }
 
 #[test]
 fn test_assert_null_is_falsy() {
-    let result = run("let r = assert(null)\nr");
-    match result {
-        Value::Error(_) => (), // Expected
-        _ => panic!("Expected Error for null assertion"),
-    }
+    let code = run(r#"try { assert(null) } catch e { e.code }"#);
+    assert_eq!(code, Value::Str("E_ASSERT".to_string()));
 }
 
 #[test]
 fn test_assert_empty_string_is_falsy() {
-    let result = run("let r = assert(\"\")\nr");
-    match result {
-        Value::Error(_) => (), // Expected
-        _ => panic!("Expected Error for empty string assertion"),
-    }
+    let code = run(r#"try { assert("") } catch e { e.code }"#);
+    assert_eq!(code, Value::Str("E_ASSERT".to_string()));
 }
 
 #[test]

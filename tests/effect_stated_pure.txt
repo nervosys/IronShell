@@ -42,6 +42,7 @@ budget
 call
 canonical
 ceil
+chunk
 clear
 cloud_deploy
 cloud_instance_connect

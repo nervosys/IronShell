@@ -166,8 +166,8 @@ pub fn eval_program_statement(s: &Stmt, discard: bool, env: &mut Env) -> Result<
     // An error value that a statement *produces* and nothing binds or
     // catches is an uncaught error. `throw` and `assert` produce error
     // values rather than unwinding, so without this `throw "x"` was
-    // followed by the next statement and the program exited 0 --
-    // `assert(false)` included. Bound with `let` or handled in `try`, an
+    // followed by the next statement and the program exited 0. (`assert`
+    // raises an error instead, so it never reaches here.) Bound with `let` or handled in `try`, an
     // error value is still an ordinary value, and naming one (`r` on its
     // own line) shows it rather than raising it.
     if let (Stmt::Expr(e), Value::Error(msg)) = (s, &value) {

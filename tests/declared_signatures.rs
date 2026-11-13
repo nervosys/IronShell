@@ -1114,23 +1114,24 @@ fn an_optional_parameter_is_demonstrated_both_ways() {
 }
 
 #[test]
-fn a_pipeline_only_builtin_says_so_before_the_body_does() {
-    // `uniq([1, 1, 2])` failed with E_UNKNOWN and "uniq: no input provided".
-    // The direct form is genuinely unsupported, but "unsupported" was being
-    // reported with the one code the taxonomy tells an agent not to reason
-    // about, for a condition knowable before the body ran.
-    let e = err(
-        "uniq",
-        vec![Value::Array(vec![Value::Int(1), Value::Int(1)])],
+fn uniq_takes_its_array_directly_and_unique_refuses_a_string_with_a_hint() {
+    // `uniq([1, 1, 2])` used to fail with E_UNKNOWN. It is the same call as the
+    // piped form now, so the direct form answers.
+    assert_eq!(
+        ok(
+            "uniq",
+            vec![Value::Array(vec![Value::Int(1), Value::Int(1)])]
+        ),
+        Value::Array(vec![Value::Int(1)])
     );
+    // `unique` takes only an Array, so a String is refused coded, with the hint
+    // toward lines or split("") rather than a bare type error.
+    let e = err("unique", vec![Value::Str("aab".to_string())]);
     assert!(e.contains("E_BAD_ARG"), "still uncoded: {e}");
-    assert!(
-        e.contains("piped subject"),
-        "the refusal must say what shape of call is wanted: {e}"
-    );
+    assert!(e.contains("lines") && e.contains("split"), "{e}");
     assert!(!e.contains("E_UNKNOWN"), "{e}");
 
-    // The supported form is untouched.
+    // The piped form is untouched.
     let mut env = env();
     let out = call_with_input(
         "uniq",

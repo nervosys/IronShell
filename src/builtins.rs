@@ -772,6 +772,7 @@ lazy_static::lazy_static! {
         map.insert("path_normalize", 1184);
         map.insert("path_is_absolute", 1185);
         map.insert("path_split", 1186);
+        map.insert("chunk", 1187);
         // 500-519: Database
         map.insert("db_sqlite_open", 500);
         map.insert("db_sqlite_query", 501);
@@ -3833,6 +3834,7 @@ static BUILTIN_DISPATCH: &[fn(Vec<Value>, Option<Value>, &mut Env) -> Result<Val
     |args, input, _| bi_path_normalize(args, input), // 1184
     |args, input, _| bi_path_is_absolute(args, input), // 1185
     |args, input, _| bi_path_split(args, input),    // 1186
+    |args, input, _| bi_chunk(args, input),         // 1187
 ];
 
 /// The dispatch row that serves `name`, if the fast table has one.
@@ -5693,38 +5695,34 @@ fn bi_sum(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
     }
 }
 
+/// unique(array) - Remove every duplicate, keeping the first of each, in order.
+/// The subject is an Array, piped or as the first argument. A String is
+/// refused (the signature check gives the hint: lines or split("") first).
+///
+/// Example:
+///   [1, 2, 1, 3] | unique          # [1, 2, 3]
+///   unique(["b", "a", "b"])        # ["b", "a"]
 fn bi_unique(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
-    let array = if let Some(input) = input {
-        match input {
-            Value::Array(arr) => arr,
-            Value::Str(s) => {
-                let lines: Vec<Value> =
-                    s.lines().map(|line| Value::Str(line.to_string())).collect();
-                lines
-            }
-            _ => {
-                return Err(crate::safety::arg_err(
-                    "unique: input must be an array or string",
-                ))
-            }
+    let subject = match (input, args.first()) {
+        (Some(input), _) => input,
+        (None, Some(first)) => first.clone(),
+        (None, None) => {
+            return Err(crate::safety::bad_arg(
+                "unique",
+                "a piped Array",
+                "a direct call with no subject",
+            ))
         }
-    } else if !args.is_empty() {
-        match &args[0] {
-            Value::Array(arr) => arr.clone(),
-            other => {
-                return Err(crate::safety::bad_arg(
-                    "unique",
-                    "argument: Array",
-                    other.type_name(),
-                ))
-            }
+    };
+    let array = match subject {
+        Value::Array(arr) => arr,
+        other => {
+            return Err(crate::safety::bad_arg(
+                "unique",
+                "an Array as the subject",
+                other.type_name(),
+            ))
         }
-    } else {
-        return Err(crate::safety::bad_arg(
-            "unique",
-            "a piped Array or String",
-            "a direct call with no subject",
-        ));
     };
 
     // True unique - removes all duplicates (not just consecutive)
@@ -6681,7 +6679,10 @@ fn bi_assert(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
                 Value::Str(s) => Some(s.clone()),
                 _ => None,
             })
-            .unwrap_or_else(|| "assertion failed".to_string());
+            .map_or_else(
+                || "assertion failed".to_string(),
+                |m| format!("assertion failed: {m}"),
+            );
         (input_val, message)
     } else if !args.is_empty() {
         // Args: arg 0 is condition, arg 1 is message
@@ -6691,7 +6692,10 @@ fn bi_assert(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
                 Value::Str(s) => Some(s.clone()),
                 _ => None,
             })
-            .unwrap_or_else(|| "assertion failed".to_string());
+            .map_or_else(
+                || "assertion failed".to_string(),
+                |m| format!("assertion failed: {m}"),
+            );
         (args[0].clone(), message)
     } else {
         return Err(crate::safety::arg_err(
@@ -6715,7 +6719,7 @@ fn bi_assert(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
     if is_truthy {
         Ok(Value::Bool(true))
     } else {
-        Ok(Value::Error(msg))
+        Err(crate::safety::assertion_failed(msg))
     }
 }
 
@@ -9411,31 +9415,99 @@ fn bi_sort(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
     Ok(Value::Array(sorted))
 }
 
+/// chunk(array, size) - Split an Array into consecutive pieces of `size`
+/// elements. The last piece is shorter when the length is not a multiple of
+/// `size`; an empty Array gives no pieces. `size` must be an Int of at least 1.
+///
+/// Example:
+///   [1, 2, 3] | chunk(2)        # [[1, 2], [3]]
+///   chunk([1, 2, 3, 4], 2)      # [[1, 2], [3, 4]]
+fn bi_chunk(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
+    // Piped, the subject is the input and the size is the first argument;
+    // called directly, the array is the first argument and the size the second.
+    let (subject, size_arg) = match input {
+        Some(v) => (v, args.first()),
+        None => match args.first() {
+            Some(v) => (v.clone(), args.get(1)),
+            None => {
+                return Err(crate::safety::bad_arg(
+                    "chunk",
+                    "an Array as the subject",
+                    "nothing",
+                ))
+            }
+        },
+    };
+    let items = match subject {
+        Value::Array(a) => a,
+        other => {
+            return Err(crate::safety::bad_arg(
+                "chunk",
+                "an Array as the subject",
+                other.type_name(),
+            ))
+        }
+    };
+    let size = match size_arg {
+        Some(Value::Int(n)) if *n >= 1 => *n as usize,
+        Some(Value::Int(n)) => {
+            return Err(crate::safety::bad_arg(
+                "chunk",
+                "a size of at least 1",
+                &n.to_string(),
+            ))
+        }
+        Some(other) => {
+            return Err(crate::safety::bad_arg(
+                "chunk",
+                "a size: an Int of at least 1",
+                other.type_name(),
+            ))
+        }
+        None => {
+            return Err(crate::safety::bad_arg(
+                "chunk",
+                "a size: an Int of at least 1",
+                "nothing",
+            ))
+        }
+    };
+    Ok(Value::Array(
+        items
+            .chunks(size)
+            .map(|c| Value::Array(c.to_vec()))
+            .collect(),
+    ))
+}
+
 fn bi_uniq(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
     let _count = args
         .iter()
         .any(|arg| matches!(arg, Value::Str(s) if s == "-c" || s == "--count"));
 
-    let array = if let Some(input) = input {
-        match input {
-            Value::Array(arr) => arr,
-            Value::Str(s) => {
-                let lines: Vec<Value> =
-                    s.lines().map(|line| Value::Str(line.to_string())).collect();
-                lines
-            }
-            _ => {
-                return Err(crate::safety::arg_err(
-                    "uniq: input must be an array or string",
-                ))
-            }
+    // The subject is the piped value, or the first argument of a direct call.
+    // A String is split into lines (`s.lines()`), as the piped form always did.
+    let subject = match (input, args.first()) {
+        (Some(input), _) => input,
+        (None, Some(first)) => first.clone(),
+        (None, None) => {
+            return Err(crate::safety::bad_arg(
+                "uniq",
+                "an Array or a String",
+                "a direct call with no subject",
+            ))
         }
-    } else {
-        return Err(crate::safety::bad_arg(
-            "uniq",
-            "a piped Array or String",
-            "a direct call with no subject",
-        ));
+    };
+    let array = match subject {
+        Value::Array(arr) => arr,
+        Value::Str(s) => s.lines().map(|line| Value::Str(line.to_string())).collect(),
+        other => {
+            return Err(crate::safety::bad_arg(
+                "uniq",
+                "an Array or a String",
+                other.type_name(),
+            ))
+        }
     };
 
     let mut unique = Vec::new();
@@ -15286,6 +15358,24 @@ fn bi_pow(args: Vec<Value>, _input: Option<Value>) -> Result<Value> {
         Value::Float(f) => *f,
         _ => return Err(crate::safety::arg_err("pow requires numeric exponent")),
     };
+
+    // Int to a non-negative Int stays an exact Int, as the `**` operator does. An
+    // overflow is refused, never saturated: the same refusal as `2 * 4611686018427387904`.
+    if let (Value::Int(b), Value::Int(e)) = (&args[0], &args[1]) {
+        if *e >= 0 {
+            let overflow = || {
+                crate::safety::value_not_representable(
+                    "pow",
+                    format!(
+                        "integer overflow in operator Pow: {b} ** {e} does not fit in a 64-bit Int"
+                    ),
+                    "use a Float: pow(2.0, 100)",
+                )
+            };
+            let exp32 = u32::try_from(*e).map_err(|_| overflow())?;
+            return b.checked_pow(exp32).map(Value::Int).ok_or_else(overflow);
+        }
+    }
 
     let result = base.powf(exp);
     // IronShell numbers are finite: an overflow (10 ** 400) or a NaN (a negative
@@ -23068,18 +23158,34 @@ fn bi_pick(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
             "none",
         ));
     }
+    // The subject is an Array of Records or a single Record. Anything else is
+    // refused: passing it through unchanged made `pick("a", "b")` return "a".
     let result = match value {
-        Value::Array(a) => Value::Array(
-            a.iter()
-                .map(|e| match e {
-                    Value::Record(m) => pick_record(m, &fields),
-                    other => other.clone(),
-                })
-                .collect(),
-        ),
+        Value::Array(a) => {
+            let mut rows = Vec::with_capacity(a.len());
+            for (i, e) in a.iter().enumerate() {
+                match e {
+                    Value::Record(m) => rows.push(pick_record(m, &fields)),
+                    other => {
+                        return Err(crate::safety::bad_arg(
+                            "pick",
+                            "an Array of Records",
+                            &format!("element {i} as {}", other.type_name()),
+                        ))
+                    }
+                }
+            }
+            Value::Array(rows)
+        }
         Value::Record(m) => pick_record(&m, &fields),
         Value::Table(t) => Value::Array(t.rows.iter().map(|m| pick_record(m, &fields)).collect()),
-        other => other,
+        other => {
+            return Err(crate::safety::bad_arg(
+                "pick",
+                "an Array of Records or a Record",
+                other.type_name(),
+            ))
+        }
     };
     Ok(result)
 }

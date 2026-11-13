@@ -2392,11 +2392,14 @@ pub static SIGNATURES: &[Signature] = &[
         category: None,
         subject_required: false,
         aliases: &[],
-        subject: Some(Ty::Sequence),
+        subject: Some(Ty::Array),
         params: &[],
         returns: "Array",
-        doc: "Remove duplicate elements, preserving first-seen order.",
-        examples: &[("[1, 2, 1, 3] | unique", "[1, 2, 3]")],
+        doc: "Remove every duplicate element, keeping the first of each in order. The subject is an Array, piped or as the argument; a String is refused: pipe it through lines for lines, or through split(\"\") for characters, first.",
+        examples: &[
+            ("[1, 2, 1, 3] | unique", "[1, 2, 3]"),
+            (r#"unique(["b", "a", "b"])"#, r#"["b", "a"]"#),
+        ],
     },
     Signature {
         name: "any",
@@ -2807,11 +2810,32 @@ pub static SIGNATURES: &[Signature] = &[
         category: None,
         subject_required: false,
         aliases: &[],
-        subject: Some(Ty::Array),
+        // No union type exists for "an Array of Records or a Record", so the
+        // subject is Any here and the body refuses other values with E_BAD_ARG.
+        subject: Some(Ty::Any),
         params: &[rest("fields", Ty::Str, "field names to keep")],
         returns: "Array",
-        doc: "Keep only the named fields of each record.",
-        examples: &[(r#"[{a: 1, b: 2}] | pick("a") | first | keys | len"#, "1")],
+        doc: "Keep only the named fields of each record. The subject is an Array of Records (each record becomes one with only those fields) or a single Record (it becomes one Record); any other value is refused with E_BAD_ARG. A field a record does not have is left out of its result, without an error. Piped, the arguments are the field names; called directly, the first argument is the subject.",
+        examples: &[
+            (r#"[{a: 1, b: 2}] | pick("a") | first | keys | len"#, "1"),
+            (r#"pick({a: 1, b: 2}, "a") | keys | len"#, "1"),
+            (r#"pick({a: 1, b: 2}, "a", "zz") | keys | len"#, "1"),
+        ],
+    },
+    Signature {
+        name: "chunk",
+        category: Some("Array"),
+        subject_required: false,
+        aliases: &[],
+        subject: Some(Ty::Array),
+        params: &[req("size", Ty::Int, "elements per piece, an Int of at least 1")],
+        returns: "Array",
+        doc: "Split an Array into consecutive pieces of size elements, each an Array. The last piece is shorter when the length is not a multiple of size; an empty Array gives no pieces. A size below 1 is refused with E_BAD_ARG. Piped, the size is the argument; called directly, the array comes first.",
+        examples: &[
+            ("[1, 2, 3] | chunk(2) | len", "2"),
+            ("[1, 2, 3] | chunk(2)", "[[1, 2], [3]]"),
+            ("chunk([1, 2, 3, 4], 2)", "[[1, 2], [3, 4]]"),
+        ],
     },
     Signature {
         // Categorised by hand: `categorize_builtin` read the name and filed
@@ -2831,19 +2855,21 @@ pub static SIGNATURES: &[Signature] = &[
         ],
     },
     Signature {
-        // `subject_required`: `uniq([1, 1, 2])` failed with E_UNKNOWN and
-        // "uniq: no input provided". The direct form is genuinely
-        // unsupported, and saying so in the declaration makes the refusal
-        // coded and the requirement visible in the signature.
+        // The direct form takes the same subject as the piped one: `uniq([1, 1, 2])`
+        // and `[1, 1, 2] | uniq` are the same call.
         name: "uniq",
         category: Some("Array"),
-        subject_required: true,
+        subject_required: false,
         aliases: &[],
         subject: Some(Ty::Sequence),
         params: &[],
         returns: "Array",
-        doc: "Remove ADJACENT duplicate elements, like Unix uniq: [1, 1, 2, 1] keeps the second 1. For every duplicate, not only neighbours, use unique or arr.unique. Pipeline only.",
-        examples: &[("[1, 1, 2] | uniq | len", "2")],
+        doc: "Remove ADJACENT duplicate elements, like Unix uniq: [1, 1, 2, 1] keeps the second 1. The subject is an Array, piped or as the argument. A String is split into lines first (one element per line, as lines does), then its adjacent duplicates are dropped: \"a\\na\\nb\" gives [\"a\", \"b\"]. Only adjacent duplicates go, as in Unix uniq; for every duplicate, not only neighbours, use unique or arr.unique. The -c flag is accepted and ignored.",
+        examples: &[
+            ("[1, 1, 2] | uniq | len", "2"),
+            ("uniq([1, 1, 2, 1])", "[1, 2, 1]"),
+            (r#""a\na\na\nb" | uniq"#, r#"["a", "b"]"#),
+        ],
     },
     Signature {
         name: "abs",
@@ -3079,9 +3105,9 @@ pub static SIGNATURES: &[Signature] = &[
         returns: "Array",
         doc: "Split text into lines without their terminators; a final newline adds no empty line.",
         examples: &[
-            (r#"cat("Cargo.toml") | lines | first"#, r#""[workspace]""#),
-            (r#"(cat("src/*.rs") | lines | len) > 1000"#, "true"),
+            (r#""a\nb" | lines"#, r#"["a", "b"]"#),
             (r#"lines("a\nb\n") | len"#, "2"),
+            (r#""x\r\ny" | lines | last"#, r#""y""#),
         ],
     },
     Signature {
@@ -7761,12 +7787,18 @@ pub static SIGNATURES: &[Signature] = &[
         subject_required: false,
         aliases: &[],
         subject: Some(Ty::Any),
-        params: &[opt("message", Ty::Str, "error message when the condition is false")],
+        params: &[
+            opt("condition", Ty::Any, "the condition, when it is not piped in: a falsy value (false, 0, null, \"\", [], {}) fails"),
+            opt("message", Ty::Str, "the reason, shown as \"assertion failed: message\"; default \"assertion failed\""),
+        ],
         returns: "Bool",
-        doc: "Refuse with the message unless the condition is true; true otherwise.",
+        doc: "Return true when the condition is truthy. When it is falsy, raise E_ASSERT with the message as \"assertion failed: message\" (or \"assertion failed\" alone), so try { } catch e { e.code } and e.message work. Piped, the condition is the piped value and the only argument is the message.",
         examples: &[
             (r#"assert(1 == 1)"#, r#"true"#),
             (r#"assert(true, "never shown")"#, r#"true"#),
+            (r#"true | assert("never shown")"#, r#"true"#),
+            (r#"(try { assert(false, "x must be positive") } catch e { e.code })"#, "E_ASSERT"),
+            (r#"(try { assert(false, "x must be positive") } catch e { e.message })"#, "assertion failed: x must be positive"),
         ],
     },
     Signature {
@@ -15058,6 +15090,26 @@ pub const TAKES_NO_INPUT: &[&str] = &[
     "zip_list",
 ];
 
+/// The refusal for a subject of the wrong type. A String where an Array is
+/// declared gets a hint toward the text builtins, since that is the usual slip.
+fn subject_refusal(
+    name: &str,
+    want: Ty,
+    got: &Value,
+    sig: &Signature,
+    position: &str,
+) -> anyhow::Error {
+    let expected = format!("{} as the {position}: {}", want.as_str(), sig.render());
+    if want == Ty::Array && matches!(got, Value::Str(_)) {
+        return crate::safety::bad_arg_in(
+            name,
+            format!("{name}: expected {expected}, got {}", got.type_name()),
+            "a String is text, not an Array: pipe it through lines for lines, or through split(\"\") for characters, then pipe the Array on",
+        );
+    }
+    crate::safety::bad_arg(name, &expected, got.type_name())
+}
+
 pub fn validate(name: &str, args: &[Value], input: Option<&Value>) -> anyhow::Result<()> {
     let Some(sig) = signature_of(name) else {
         return Ok(());
@@ -15084,11 +15136,7 @@ pub fn validate(name: &str, args: &[Value], input: Option<&Value>) -> anyhow::Re
     // A declared subject must match when one was piped in.
     if let (Some(want), Some(got)) = (sig.subject, input) {
         if !want.accepts(got) {
-            return Err(crate::safety::bad_arg(
-                name,
-                &format!("{} as the piped subject: {}", want.as_str(), sig.render()),
-                got.type_name(),
-            ));
+            return Err(subject_refusal(name, want, got, sig, "piped subject"));
         }
     }
 
@@ -15124,11 +15172,7 @@ pub fn validate(name: &str, args: &[Value], input: Option<&Value>) -> anyhow::Re
     if params_start == 1 && sig.params.is_empty() {
         if let (Some(want), Some(got)) = (sig.subject, args.first()) {
             if !want.accepts(got) {
-                return Err(crate::safety::bad_arg(
-                    name,
-                    &format!("{} as the subject: {}", want.as_str(), sig.render()),
-                    got.type_name(),
-                ));
+                return Err(subject_refusal(name, want, got, sig, "subject"));
             }
         }
     }
