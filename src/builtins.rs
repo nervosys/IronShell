@@ -773,7 +773,7 @@ lazy_static::lazy_static! {
         map.insert("path_is_absolute", 1185);
         map.insert("path_split", 1186);
         map.insert("chunk", 1187);
-        // Percent-encoding, RFC 3986 (1189-1189)
+        // Percent-encoding, RFC 3986 (1188-1189)
         map.insert("url_encode", 1188);
         map.insert("url_decode", 1189);
         // 500-519: Database
