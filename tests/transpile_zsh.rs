@@ -25,18 +25,18 @@ fn numeric_assignment() {
 fn variable_arg_as_identifier() {
     let zsh = "echo $HOME";
     let ae = transpile_zsh_to_ae(zsh).expect("transpile ok");
-    assert!(
-        ae.contains("echo(HOME)") || ae.contains("echo( HOME )"),
-        "got:\n{}",
-        ae
-    );
+    assert!(ae.contains("print(HOME)"), "got:\n{}", ae);
 }
 
 #[test]
 fn pipeline_basic() {
     let zsh = r#"echo "hello $USER" | grep hello"#;
     let ae = transpile_zsh_to_ae(zsh).expect("transpile ok");
-    assert!(ae.contains("echo") && ae.contains("grep"), "got:\n{}", ae);
+    assert!(
+        ae.contains("\"hello ${USER}\"") && ae.contains("grep"),
+        "got:\n{}",
+        ae
+    );
 }
 
 #[test]
@@ -99,7 +99,7 @@ fn export_variable() {
 fn array_literal() {
     let zsh = "local arr=(one two three)";
     let ae = transpile_zsh_to_ae(zsh).expect("transpile ok");
-    assert!(ae.contains("let arr = ["), "got:\n{}", ae);
+    assert!(ae.contains("let sh_arr = ["), "got:\n{}", ae);
 }
 
 #[test]

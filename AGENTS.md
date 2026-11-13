@@ -92,7 +92,7 @@ background jobs) is refused before any of it runs, naming the construct and its 
 `IRONSHELL_ALLOW_SH` is set. With it, the unsupported parts fall back to the transpiler, which may
 delegate them to `bash -lc`; that fallback is not contained.
 Its own refusals exit 2 for a syntax error (`E_PARSE`, which runs nothing in either mode) and for a flag no GNU-compatible program can run on Windows, 77 for a construct outside the subset (refused before anything runs), 1 for a write or read the workspace jail refuses (that command fails and the script goes on unless `set -e` stops it), and 75 for a program that needs approval, whose command fails the same way.
-Zsh and PowerShell input still goes through the transpilers only.
+Zsh input runs the same engine after a small rewrite of zsh-only words (`setopt`/`unsetopt` of history, prompt, completion and beep options are no-ops, `errexit`/`nounset`/`pipefail` map to `set`, `nullglob` is accepted only in a script with no glob; any other option is refused by name; `print -l/-n/-r` become `printf`/`echo`; `echo` interprets backslash escapes as zsh does), so `;`, `&&`/`||`, flags, `grep`/`wc`/`sort`/`tr`/`head`/`find`/`date`, `cd` and globs behave as under `ish -b`. Differences from zsh that remain: an unquoted `$var` word-splits as in POSIX sh, and an unmatched glob stays literal instead of failing. A zsh-only construct (arrays, `[[ ]]`, `${(f)x}`, functions) is refused before anything runs, naming the construct and its line. The one thing zsh does that the engine does not is `**`: a lone `ish --zsh -c 'ls **/*.txt'` goes through the transpiler, and `**` mixed with other commands is refused. PowerShell input goes through the transpiler only.
 On Windows, a script run as a command (`./x.sh` whose first line is a `#!/bin/sh` or `#!/bin/bash` shebang, or `sh FILE` / `bash FILE`) runs in a child `ish -b` with the same mode and workspace, and its status becomes the command's status; the child gates its own commands, so the script itself has no Exec gate.
 
 ```bash
@@ -110,9 +110,9 @@ ish --pwsh -c 'Get-ChildItem *.rs | Measure-Object'   # PowerShell subset: see n
 echo 'cat /etc/hosts' | ish --bash
 ```
 
-The PowerShell transpiler covers a subset only: `-Parameter` flags (`-Recurse`, `-Path`, `-Name`) and `Where-Object { … }` do not parse (E_PARSE), and `Select-Object Name` returns empty records. `Get-ChildItem` needs a path or glob before a pipe (bare `Get-ChildItem | …` passes null).
+The PowerShell transpiler covers a subset only. `;` separates statements; `Write-Host`, `Write-Output` and every value-producing statement print as they run, in order; `$x = 5; $x + 2` prints 7 (`+ - * %` between variables, numbers and strings; no `/` or comparisons). Only cmdlets whose IronShell target takes the same positional arguments are mapped (`PS_MAP` in `src/transpile/powershell.rs`, each target checked by `tests/round30_transpile.rs`). A `-Parameter` of a mapped cmdlet (`-Recurse`, `-Path`), `$env:X`, `$(...)`, here-strings and `Where-Object { ... }` make the script fail before anything runs, naming the parameter or construct and its line; an unmapped command (`Get-Content`), block or operator is refused the same way unless `IRONSHELL_ALLOW_SH` runs it through `pwsh`. A variable named like an IronShell module (`$file`, `$user`) is renamed `sh_file` in the translation.
 
-Transpilers map 100+ commands per shell to native IronShell builtins, with block accumulation for multi-line constructs (`if`/`for`/`while`/`case`/`function`).
+The zsh and PowerShell transpilers map only commands whose IronShell builtin takes the same arguments; block accumulation (`if`/`for`/`while`/`case`/`function`) hands multi-line constructs to `sh()` and is refused by name unless `IRONSHELL_ALLOW_SH` is set.
 
 ### Option 5: Agentic Syntax (legacy; not recommended)
 

@@ -16,3 +16,20 @@ pub mod agentic;
 pub mod bash;
 pub mod powershell;
 pub mod zsh;
+
+/// A construct a transpiler could not translate and handed to `sh(...)`
+/// instead: what it was, and the 1-based source line it started on. A caller
+/// that does not allow `sh` refuses these by name before anything runs.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Fallback {
+    pub line: usize,
+    pub construct: String,
+}
+
+/// What a mapped command does to the output: a `Value` command produces a
+/// value that a shell would print, a `Quiet` one is run for its effect.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Kind {
+    Value,
+    Quiet,
+}
