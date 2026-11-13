@@ -40,6 +40,10 @@ pub enum Stmt {
         /// `None` when the binding has no annotation.
         #[serde(default)]
         ty: Option<String>,
+        /// `name = value` written without `let`. A refusal to rebind a name then
+        /// reads as an assignment, not a `let`.
+        #[serde(default)]
+        bare: bool,
     },
     Expr(Expr),
     /// Field assignment: `r.a.b = value`. `r` is rebound to a copy of its
@@ -194,8 +198,9 @@ pub enum Pattern {
     Wildcard,
     // Variable binding: x
     Ident(String),
-    // Literal patterns
+    // Literal patterns (a numeric literal matches by the same equality as `==`)
     LitInt(i64),
+    LitFloat(f64),
     LitStr(String),
     LitBool(bool),
     Null,

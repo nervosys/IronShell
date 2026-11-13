@@ -126,8 +126,16 @@ const OPTIONAL_CHAIN_HINT: &str =
     "IronShell has no ?. operator; test for null first: if a == null { null } else { a.b }";
 
 /// The hint for `while`, `for` and `loop`, which IronShell does not have.
-const LOOP_HINT: &str = "IronShell has no loop statements; iterate with map/where/reduce \
-     over arr.range(n) or a list, or recurse";
+const LOOP_HINT: &str =
+    "IronShell has no loop statements; iterate with map / where / reduce / each, \
+     or arr.range(n) | each(...)";
+
+/// The hint for a `|` inside a call's argument that the call cannot take.
+const PIPE_ARG_HINT: &str =
+    "`|` binds loosest: parenthesize the pipeline, e.g. (\"Hello\" | upper) == \"HELLO\"";
+
+/// The hint for `def f(...)`, which IronShell does not have.
+const FUNCTION_HINT: &str = "functions are values: f = fn(x) => x + 1";
 
 /// A `[start:end]` index, carried as a typed error so `parse_program` can give
 /// it the slice hint in place of the generic one.
@@ -1503,6 +1511,7 @@ impl Parser {
                     is_mut: true,
                     visibility,
                     ty: None,
+                    bare: false,
                 });
             }
         }
@@ -1523,6 +1532,7 @@ impl Parser {
                     is_mut: false,
                     visibility,
                     ty: None,
+                    bare: true,
                 });
             }
         }
@@ -1561,6 +1571,7 @@ impl Parser {
                 is_mut,
                 visibility,
                 ty,
+                bare: false,
             })
         } else if self.match_tok(Tok::Import) {
             // Parse import statement
@@ -1860,8 +1871,10 @@ impl Parser {
     fn parse_paren_call_args(&mut self) -> Result<Vec<Expr>> {
         self.match_tok(Tok::LParen);
         let mut args = Vec::new();
+        let mut arg_start = self.i;
         if !self.check(Tok::RParen) {
             loop {
+                arg_start = self.i;
                 // An argument that mentions `.field` without a receiver
                 // is a function of the row: wrap it as one.
                 let saved = (self.implicit_row, self.implicit_used);
@@ -1885,8 +1898,44 @@ impl Parser {
                 break;
             }
         }
-        self.need(Tok::RParen, "expected ')' after arguments")?;
+        self.need_call_close(arg_start)?;
         Ok(args)
+    }
+
+    /// The `)` that ends a call's arguments, where the last argument began at
+    /// `arg_start`. A `|` in that argument with no `)` after it is the pipe
+    /// binding loosest, so the error says how to parenthesize it.
+    fn need_call_close(&mut self, arg_start: usize) -> Result<()> {
+        if !self.check(Tok::RParen) && self.pipe_in_span(arg_start) {
+            let tok = self.peek();
+            return Err(anyhow::Error::new(HintedSyntax {
+                msg: format!(
+                    "expected ')' after arguments at line {}, column {}",
+                    tok.line, tok.col
+                ),
+                hint: PIPE_ARG_HINT.to_string(),
+            }));
+        }
+        self.need(Tok::RParen, "expected ')' after arguments")
+    }
+
+    /// Whether a `|` outside any bracket lies in the tokens from `start` to the
+    /// current one.
+    fn pipe_in_span(&self, start: usize) -> bool {
+        let span = match self.toks.get(start..self.i) {
+            Some(span) => span,
+            None => return false,
+        };
+        let mut depth = 0usize;
+        for t in span {
+            match t.kind {
+                Tok::LParen | Tok::LBracket | Tok::LBrace => depth += 1,
+                Tok::RParen | Tok::RBracket | Tok::RBrace => depth = depth.saturating_sub(1),
+                Tok::Pipe if depth == 0 => return true,
+                _ => {}
+            }
+        }
+        false
     }
 
     /// `module.member(` as a pipeline stage: the callee chain when the tokens ahead
@@ -2270,8 +2319,10 @@ impl Parser {
             // on the line before: `x = 5` then `(x + 1) * 2` called `5(...)`.
             if self.check(Tok::LParen) && self.continues_line() && self.match_tok(Tok::LParen) {
                 let mut args = Vec::new();
+                let mut arg_start = self.i;
                 if !self.check(Tok::RParen) {
                     loop {
+                        arg_start = self.i;
                         let a = self.parse_expr()?;
                         args.push(a);
                         if self.match_tok(Tok::Comma) {
@@ -2280,7 +2331,7 @@ impl Parser {
                         break;
                     }
                 }
-                self.need(Tok::RParen, "expected ')' after arguments")?;
+                self.need_call_close(arg_start)?;
                 e = Expr::Call {
                     callee: Box::new(e),
                     args,
@@ -2538,6 +2589,21 @@ impl Parser {
         if self.match_tok(Tok::Null) {
             return Ok(Expr::Null);
         }
+        // `def f(...)`: a named function, which IronShell spells as a lambda value.
+        if self.check(Tok::Ident)
+            && self.peek().text.as_str() == "def"
+            && self.peek_ahead(1) == Some(Tok::Ident)
+            && self.peek_ahead(2) == Some(Tok::LParen)
+        {
+            let at = self.peek();
+            return Err(anyhow::Error::new(HintedSyntax {
+                msg: format!(
+                    "`def` starts a function at line {}, column {}",
+                    at.line, at.col
+                ),
+                hint: FUNCTION_HINT.to_string(),
+            }));
+        }
         // `while (...)`, `for x in ...`, `loop { ... }`: a loop head. The next
         // token is what makes it one, so `for = 1` and `for.x` stay names.
         if self.check(Tok::Ident)
@@ -2552,6 +2618,10 @@ impl Parser {
                         | Tok::Int
                         | Tok::Float
                         | Tok::String
+                        | Tok::True
+                        | Tok::False
+                        | Tok::Null
+                        | Tok::Bang
                 )
             })
         {
@@ -2691,7 +2761,9 @@ impl Parser {
     fn parse_match(&mut self) -> Result<Expr> {
         // match expr { arms }         — explicit scrutinee
         // match { arms }              — implicit scrutinee (first param of enclosing lambda)
-        let scrutinee = if self.check(Tok::LBrace) {
+        // match {k: v} { arms }       — a record literal is the scrutinee: an arm
+        //                               never starts `ident :`, so that `{` is one
+        let scrutinee = if self.check(Tok::LBrace) && !self.at_record_literal() {
             // No explicit scrutinee — use first param of enclosing lambda
             let param = self
                 .lambda_param_stack
@@ -2845,10 +2917,19 @@ impl Parser {
             return Ok(Pattern::Wildcard);
         }
 
-        // Literals
+        // Literals. A number may carry a leading `-`.
+        let negative =
+            self.check(Tok::Minus) && matches!(self.peek_ahead(1), Some(Tok::Int | Tok::Float));
+        if negative {
+            self.i += 1;
+        }
         if self.match_tok(Tok::Int) {
             let n: i64 = self.prev().text.parse().unwrap_or(0);
-            return Ok(Pattern::LitInt(n));
+            return Ok(Pattern::LitInt(if negative { -n } else { n }));
+        }
+        if self.match_tok(Tok::Float) {
+            let x: f64 = self.prev().text.parse().unwrap_or(0.0);
+            return Ok(Pattern::LitFloat(if negative { -x } else { x }));
         }
         if self.match_tok(Tok::String) {
             let s = self.prev().text.clone();
@@ -2982,6 +3063,13 @@ impl Parser {
 
     fn check_any(&self, ks: &[Tok]) -> bool {
         ks.iter().any(|k| self.peek().kind == *k)
+    }
+    /// Whether the `{` at the current token opens a record literal: `{ word :`.
+    /// No match arm starts that way, since a pattern is never followed by `:`.
+    fn at_record_literal(&self) -> bool {
+        self.check(Tok::LBrace)
+            && self.peek_ahead(1) == Some(Tok::Ident)
+            && self.peek_ahead(2) == Some(Tok::Colon)
     }
     fn peek_ahead(&self, offset: usize) -> Option<Tok> {
         if self.i + offset < self.toks.len() {
