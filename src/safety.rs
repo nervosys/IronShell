@@ -2605,6 +2605,24 @@ pub fn fs_write_error(
     fs_error_as(builtin, path, e, true)
 }
 
+/// Whether an OS error says a directory is not empty: `ERROR_DIR_NOT_EMPTY`
+/// (145) on Windows, `ENOTEMPTY` (39 on Linux, 66 elsewhere on Unix).
+pub fn dir_not_empty(e: &std::io::Error) -> bool {
+    if e.kind() == std::io::ErrorKind::DirectoryNotEmpty {
+        return true;
+    }
+    let code = e.raw_os_error();
+    if cfg!(windows) {
+        code == Some(145)
+    } else if cfg!(target_os = "linux") {
+        code == Some(39)
+    } else if cfg!(unix) {
+        code == Some(66)
+    } else {
+        false
+    }
+}
+
 fn fs_error_as(
     builtin: &str,
     path: impl AsRef<std::path::Path>,
@@ -2620,6 +2638,12 @@ fn fs_error_as(
     // message shows the ordinary form, as the other builtins' paths do.
     let path = strip_verbatim_prefix(path.as_ref()).display().to_string();
     let path = path.as_str();
+    // The name the caller typed: file_mkdir is spelled `mkdir`.
+    let shown = if builtin == "file_mkdir" {
+        "mkdir"
+    } else {
+        builtin
+    };
     match e.kind() {
         std::io::ErrorKind::NotFound => match writing.then(|| missing_parent_of(path)).flatten() {
             Some(parent) => parent_missing(builtin, path, &parent),
@@ -2646,6 +2670,36 @@ fn fs_error_as(
             format!("{builtin}: the operating system denied access to `{path}`"),
             "check the file's permissions and owner; the shell did not refuse this",
         ),
+        // A directory with something in it is not removed by rmdir without
+        // `recursive`. The OS says so; the caller needs the fix, not the code.
+        _ if dir_not_empty(e) => bad_state_with_hint(
+            shown,
+            &format!("`{path}` is not empty"),
+            &if builtin == "rmdir" {
+                format!("rmdir(\"{path}\", true) removes it and its contents")
+            } else {
+                "a directory is removed only when it is empty; empty it first".to_string()
+            },
+        ),
+        // The name is taken. For mkdir that is a file (or a directory it
+        // would have made), and the caller must choose another path.
+        _ if e.kind() == std::io::ErrorKind::AlreadyExists
+            || (cfg!(windows) && e.raw_os_error() == Some(183)) =>
+        {
+            if std::path::Path::new(path).is_file() {
+                bad_state_with_hint(
+                    shown,
+                    &format!("`{path}` exists and is a file"),
+                    "choose another path, or remove that file first",
+                )
+            } else {
+                bad_state_with_hint(
+                    shown,
+                    &format!("`{path}` already exists"),
+                    "choose another path; the existing one is left as it is",
+                )
+            }
+        }
         // ERROR_PRIVILEGE_NOT_HELD: a symbolic link without the privilege or
         // Developer Mode. std does not count it as PermissionDenied, but it is
         // the operating system refusing all the same.
