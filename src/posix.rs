@@ -5747,10 +5747,15 @@ fn subst_nth(
 }
 
 /// The SUFFIX of a `sed` in-place option, or `None` when `s` is not one. GNU
-/// takes the suffix only attached (`-i.bak`), and `-i` alone has none. A suffix
-/// with `/` or `*` (GNU's backup-name template) declines.
+/// takes the suffix only attached (`-i.bak`), and `-i` alone has none. The long
+/// form is the same option: `--in-place` or `--in-place=SUFFIX`. A suffix with
+/// `/` or `*` (GNU's backup-name template) declines.
 fn sed_inplace_suffix(s: &str) -> Option<String> {
-    let rest = s.strip_prefix("-i")?;
+    let rest = match s.strip_prefix("--in-place") {
+        Some("") => "",
+        Some(tail) => tail.strip_prefix('=')?,
+        None => s.strip_prefix("-i")?,
+    };
     (!rest.contains(['/', '*'])).then(|| rest.to_string())
 }
 

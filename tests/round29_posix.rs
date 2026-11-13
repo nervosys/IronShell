@@ -89,3 +89,27 @@ fn printf_keeps_i64_max_exact_and_quiet() {
         ("9223372036854775807\n", "", 0)
     );
 }
+
+// ---- sed: the GNU long form of -i ----
+
+#[test]
+fn sed_long_in_place_with_a_suffix_keeps_a_backup() {
+    // GNU: sed --in-place=.b s/a/b/ f.txt
+    let (out, err, code) = run(
+        "sed-suffix",
+        &[("f.txt", "a\n")],
+        "sed --in-place=.b s/a/b/ f.txt && cat f.txt f.txt.b",
+    );
+    assert_eq!((out.as_str(), err.as_str(), code), ("b\na\n", "", 0));
+}
+
+#[test]
+fn sed_long_in_place_without_a_suffix_edits_in_place() {
+    // GNU: sed --in-place s/a/b/ g.txt
+    let (out, err, code) = run(
+        "sed-bare",
+        &[("g.txt", "a\n")],
+        "sed --in-place s/a/b/ g.txt && cat g.txt",
+    );
+    assert_eq!((out.as_str(), err.as_str(), code), ("b\n", "", 0));
+}
