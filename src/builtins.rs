@@ -772,6 +772,9 @@ lazy_static::lazy_static! {
         map.insert("path_normalize", 1184);
         map.insert("path_is_absolute", 1185);
         map.insert("path_split", 1186);
+        // Percent-encoding, RFC 3986 (1187-1188)
+        map.insert("url_encode", 1187);
+        map.insert("url_decode", 1188);
         // 500-519: Database
         map.insert("db_sqlite_open", 500);
         map.insert("db_sqlite_query", 501);
@@ -3833,6 +3836,8 @@ static BUILTIN_DISPATCH: &[fn(Vec<Value>, Option<Value>, &mut Env) -> Result<Val
     |args, input, _| bi_path_normalize(args, input), // 1184
     |args, input, _| bi_path_is_absolute(args, input), // 1185
     |args, input, _| bi_path_split(args, input),    // 1186
+    |args, input, _| bi_url_encode(args, input),    // 1187
+    |args, input, _| bi_url_decode(args, input),    // 1188
 ];
 
 /// The dispatch row that serves `name`, if the fast table has one.
@@ -36886,47 +36891,185 @@ fn zip_file_args(builtin: &str, args: &[Value]) -> Result<Vec<String>> {
     Ok(files)
 }
 
-/// The command that writes a zip archive, or with `update` refreshes one. Both
-/// the Unix zip and PowerShell's Compress-Archive are run from an argv.
-fn zip_command(
-    archive: &str,
-    files: &[String],
-    update: bool,
-) -> (&'static str, std::process::Command) {
-    if cfg!(target_os = "windows") {
-        let mut cmd = crate::safety::child_command("powershell");
-        if update {
-            let script = crate::ps_script!(
-                "Compress-Archive -Path {} -Update -DestinationPath {}",
-                crate::safety::ps_join(files.iter().map(|f| crate::safety::ps_quote(f)), ","),
-                crate::safety::ps_quote(archive)
-            );
-            cmd.args(["-NoProfile", "-Command", &script]);
-        } else {
-            let script = crate::ps_script!(
-                "Compress-Archive -Path {} -DestinationPath {}",
-                crate::safety::ps_join(files.iter().map(|f| crate::safety::ps_quote(f)), ","),
-                crate::safety::ps_quote(archive)
-            );
-            cmd.args(["-NoProfile", "-Command", &script]);
-        }
-        ("powershell", cmd)
-    } else {
-        let mut cmd = crate::safety::child_command("zip");
-        cmd.arg("-q");
-        if update {
-            cmd.arg("-u");
-        }
-        cmd.arg(archive).args(files);
-        ("zip", cmd)
+/// What a zip write has taken in so far: the entry names (a name may be stored
+/// once), the source bytes read, and the entry count.
+struct ZipBuild {
+    names: std::collections::HashSet<String>,
+    bytes: u64,
+    entries: usize,
+}
+
+fn zip_write_error(builtin: &str, e: impl std::fmt::Display) -> anyhow::Error {
+    crate::safety::io_fault(
+        builtin,
+        &format!("writing the zip archive failed: {e}"),
+        "check the free space and that the archive's folder is writable",
+    )
+}
+
+/// Take `name` for a new entry, refusing a second entry of the same name.
+fn zip_claim_name(builtin: &str, st: &mut ZipBuild, name: &str) -> Result<()> {
+    if !st.names.insert(name.to_string()) {
+        return Err(crate::safety::bad_arg_with_hint(
+            builtin,
+            "members that are stored under different names",
+            &format!("two members would both be stored as `{name}`"),
+            "pass each file or folder once; members are stored under their last path component",
+        ));
     }
+    Ok(())
+}
+
+/// Add `fs_path`, a file or a whole folder, to `w` under `entry_name`. Empty
+/// folders are kept as directory entries. A symlink to a folder is not followed.
+fn zip_add_tree(
+    builtin: &str,
+    w: &mut zip::ZipWriter<std::fs::File>,
+    fs_path: &std::path::Path,
+    entry_name: &str,
+    st: &mut ZipBuild,
+) -> Result<()> {
+    let shown = fs_path.to_string_lossy().into_owned();
+    let meta =
+        std::fs::metadata(fs_path).map_err(|e| crate::safety::fs_error(builtin, &shown, &e))?;
+    st.entries += 1;
+    if st.entries > WALK_MAX_ENTRIES {
+        return Err(walk_over(builtin, WALK_MAX_ENTRIES));
+    }
+    let opts = zip::write::SimpleFileOptions::default()
+        .compression_method(zip::CompressionMethod::Deflated);
+    if meta.is_dir() {
+        zip_claim_name(builtin, st, &format!("{entry_name}/"))?;
+        w.add_directory(entry_name, opts)
+            .map_err(|e| zip_write_error(builtin, e))?;
+        let mut kids = Vec::new();
+        for k in
+            std::fs::read_dir(fs_path).map_err(|e| crate::safety::fs_error(builtin, &shown, &e))?
+        {
+            kids.push(k.map_err(|e| crate::safety::fs_error(builtin, &shown, &e))?);
+        }
+        kids.sort_by_key(|k| k.file_name());
+        for k in kids {
+            let p = k.path();
+            let is_link = std::fs::symlink_metadata(&p)
+                .map(|m| m.file_type().is_symlink())
+                .unwrap_or(false);
+            if is_link && p.is_dir() {
+                continue;
+            }
+            let child = format!("{entry_name}/{}", k.file_name().to_string_lossy());
+            zip_add_tree(builtin, w, &p, &child, st)?;
+        }
+        return Ok(());
+    }
+    zip_claim_name(builtin, st, entry_name)?;
+    #[cfg(unix)]
+    let opts = {
+        use std::os::unix::fs::PermissionsExt as _;
+        opts.unix_permissions(meta.permissions().mode() & 0o777)
+    };
+    w.start_file(entry_name, opts)
+        .map_err(|e| zip_write_error(builtin, e))?;
+    let mut src =
+        std::fs::File::open(fs_path).map_err(|e| crate::safety::fs_error(builtin, &shown, &e))?;
+    let n = std::io::copy(&mut src, w).map_err(|e| crate::safety::fs_error(builtin, &shown, &e))?;
+    st.bytes = st.bytes.saturating_add(n);
+    if st.bytes > FILE_OUTPUT_CAP {
+        return Err(crate::safety::budget_exceeded(
+            builtin,
+            format!("the members total more than {FILE_OUTPUT_CAP} bytes"),
+            "nothing was written; archive fewer or smaller members",
+        ));
+    }
+    Ok(())
+}
+
+/// Write `members` (each under its last path component) into `out`. With `old`,
+/// the entries of that existing archive follow, except those the members
+/// replace: this is `zip_add`'s update.
+fn zip_write_archive(
+    builtin: &str,
+    out: std::fs::File,
+    old: Option<&str>,
+    members: &[String],
+) -> Result<()> {
+    let mut w = zip::ZipWriter::new(out);
+    let mut st = ZipBuild {
+        names: std::collections::HashSet::new(),
+        bytes: 0,
+        entries: 0,
+    };
+    for m in members {
+        let p = std::path::Path::new(m);
+        let leaf = p
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .or_else(|| {
+                std::fs::canonicalize(p)
+                    .ok()
+                    .and_then(|c| c.file_name().map(|n| n.to_string_lossy().into_owned()))
+            })
+            .ok_or_else(|| {
+                crate::safety::bad_arg(builtin, "a file or folder with a name", m.as_str())
+            })?;
+        zip_add_tree(builtin, &mut w, p, &leaf, &mut st)?;
+    }
+    if let Some(old) = old {
+        let f = std::fs::File::open(old).map_err(|e| crate::safety::fs_error(builtin, old, &e))?;
+        let mut src = zip::ZipArchive::new(f).map_err(|e| zip_not_an_archive(builtin, old, e))?;
+        for i in 0..src.len() {
+            let entry = src
+                .by_index_raw(i)
+                .map_err(|e| zip_not_an_archive(builtin, old, e))?;
+            let name = entry
+                .name()
+                .map(|n| n.into_owned())
+                .unwrap_or_else(|_| String::from_utf8_lossy(entry.name_raw()).into_owned());
+            if st.names.contains(&name) {
+                continue;
+            }
+            w.raw_copy_file(entry)
+                .map_err(|e| zip_write_error(builtin, e))?;
+        }
+    }
+    w.finish().map_err(|e| zip_write_error(builtin, e))?;
+    Ok(())
+}
+
+/// The members of a zip call, resolved. Under an enforced workspace each must
+/// lie inside it, and each must exist.
+fn zip_resolve_members(builtin: &str, files: &[String]) -> Result<Vec<String>> {
+    let enforce = crate::safety::current_mode() == crate::safety::Mode::Agent
+        || std::env::var("IRONSHELL_WORKSPACE").is_ok();
+    let mut out = Vec::with_capacity(files.len());
+    for f in files {
+        let m = crate::safety::resolve_path_str(f);
+        if enforce && !crate::safety::within_workspace(&m) {
+            return Err(crate::safety::policy_deny(
+                builtin,
+                format!("member '{m}' is outside the workspace"),
+                "archive only paths inside the workspace",
+            ));
+        }
+        if std::fs::metadata(&m).is_err() {
+            return Err(crate::safety::not_found(builtin, "file", f));
+        }
+        out.push(m);
+    }
+    Ok(out)
 }
 
 // 330: bi_zip_create - Write a new zip archive from files.
 //
+// Written in-process: this used to run PowerShell's Compress-Archive, whose
+// raw error text leaked out, which dropped empty folders, and which wrote
+// no archive for a lone empty folder while the call answered true.
+//
 // An existing archive is refused rather than added to: that is zip_add's job.
-// Every file operand must be a string, and at least one is required. A failed
-// run removes the archive it started.
+// Every file operand must be a string, and at least one is required. Each
+// member is stored under its last path component (a folder with everything
+// inside it, empty folders included). A failed run removes the archive it
+// started.
 fn bi_zip_create(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
     refuse_piped("zip_create", &input)?;
     let archive = match args.first() {
@@ -36944,14 +37087,10 @@ fn bi_zip_create(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
     crate::safety::reject_option_like("zip_create", &files)?;
     let archive = guard_local_write("zip_create", &crate::safety::resolve_path_str(&archive))?;
     refuse_existing("zip_create", &archive)?;
-    let files: Vec<String> = files
-        .iter()
-        .map(|f| crate::safety::resolve_path_str(f))
-        .collect();
+    let members = zip_resolve_members("zip_create", &files)?;
     // The archive is new (refused above if it exists), so rollback removes it.
-    crate::tx::snapshot(&archive);
-    let (tool, cmd) = zip_command(&archive, &files, false);
-    if let Err(e) = run_checked("zip_create", tool, cmd, LOCAL_DEADLINE_SECS) {
+    let out = create_new_output("zip_create", &archive)?;
+    if let Err(e) = zip_write_archive("zip_create", out, None, &members) {
         remove_partial(&archive);
         return Err(e);
     }
@@ -37091,9 +37230,8 @@ fn zip_archive_entries(
     archive_source_jail(builtin, archive)?;
     let file =
         std::fs::File::open(archive).map_err(|e| crate::safety::fs_error(builtin, archive, &e))?;
-    let mut zip = zip::ZipArchive::new(file).map_err(|e| {
-        crate::safety::tool_failed(builtin, "zip", None, &format!("not a zip archive: {e}"))
-    })?;
+    let mut zip =
+        zip::ZipArchive::new(file).map_err(|e| zip_not_an_archive(builtin, archive, e))?;
     if zip.len() > WALK_MAX_ENTRIES {
         return Err(walk_over(builtin, WALK_MAX_ENTRIES));
     }
@@ -37359,66 +37497,120 @@ fn bi_zip_extract(args: Vec<Value>, _input: Option<Value>) -> Result<Value> {
     // Extraction writes every member of the archive, which is not known until
     // it runs, so the journal cannot snapshot them.
     refuse_in_transaction("zip_extract", "extracting an archive cannot be rolled back")?;
-    // Refuse a member that would land outside the destination before the tool
-    // writes anything.
+    // Refuse a member that would land outside the destination before anything
+    // is written.
     let (members, declared) = zip_archive_entries("zip_extract", &archive)?;
     check_archive_entries("zip_extract", members.iter().cloned())?;
     check_archive_budget("zip_extract", declared)?;
+    crate::safety::reject_option_like("zip_extract", std::slice::from_ref(&archive))?;
+    crate::safety::reject_option_like("zip_extract", std::slice::from_ref(&dest))?;
+    let dest = guard_local_write("zip_extract", &dest)?;
+    check_archive_protected("zip_extract", &dest, &members)?;
+    zip_extract_in_process(&archive, &dest)?;
+    Ok(Value::Bool(true))
+}
 
-    #[cfg(target_os = "windows")]
-    {
-        let dest = guard_local_write("zip_extract", &dest)?;
-        check_archive_protected("zip_extract", &dest, &members)?;
-        let cmd = crate::ps_script!(
-            "Expand-Archive -Path {} -DestinationPath {}",
-            crate::safety::ps_quote(&archive),
-            crate::safety::ps_quote(&dest)
-        );
-        let mut bounded_cmd = crate::safety::child_command("powershell");
-        bounded_cmd.args(["-Command", &cmd]);
-        // Archives can be large; extraction is bounded by the long deadline.
-        let output = bounded_cmd_output(
-            "zip_extract",
-            "powershell",
-            bounded_cmd,
-            TOOL_LONG_DEADLINE_SECS,
-        )?;
-        if !output.status.success() {
-            return Err(crate::safety::tool_failed(
-                "zip_extract",
-                "Expand-Archive",
-                output.status.code(),
-                &String::from_utf8_lossy(&output.stderr),
-            ));
+/// Writes every member of a zip archive under `dest`, in-process. This used to
+/// run Expand-Archive or unzip, which on the hosts that found it exited 0 with
+/// nothing written: the call said `true` and the destination was empty. Here
+/// what was written is counted, so success is never claimed for a non-empty
+/// archive that produced nothing.
+///
+/// Every entry name is checked again as it is written (`archive_entry_escapes`),
+/// a component holding `:` is refused on Windows (an alternate data stream), and
+/// symlink entries are not created, since a later member could be written
+/// through one.
+fn zip_extract_in_process(archive: &str, dest: &str) -> Result<()> {
+    use std::io::Read as _;
+    const B: &str = "zip_extract";
+    refuse_in_transaction(B, "extracting an archive cannot be rolled back")?;
+    let file = std::fs::File::open(archive).map_err(|e| crate::safety::fs_error(B, archive, &e))?;
+    let mut zip = zip::ZipArchive::new(file).map_err(|e| zip_not_an_archive(B, archive, e))?;
+    let root = std::path::Path::new(dest);
+    std::fs::create_dir_all(root).map_err(|e| crate::safety::fs_error(B, dest, &e))?;
+    let mut written: usize = 0;
+    let mut links: usize = 0;
+    let mut total: u64 = 0;
+    for i in 0..zip.len() {
+        let mut entry = zip
+            .by_index(i)
+            .map_err(|e| zip_not_an_archive(B, archive, e))?;
+        let name = entry
+            .name()
+            .map(|n| n.into_owned())
+            .unwrap_or_else(|_| String::from_utf8_lossy(entry.name_raw()).into_owned());
+        if archive_entry_escapes(&name) {
+            return Err(refuse_archive_entry(B, &name));
         }
-        Ok(Value::Bool(true))
-    }
-    #[cfg(not(target_os = "windows"))]
-    {
-        crate::safety::reject_option_like("zip_extract", std::slice::from_ref(&archive))?;
-        crate::safety::reject_option_like("zip_extract", std::slice::from_ref(&dest))?;
-        let dest = guard_local_write("zip_extract", &dest)?;
-        check_archive_protected("zip_extract", &dest, &members)?;
-        let mut cmd = crate::safety::child_command("unzip");
-        cmd.args([&archive, "-d", &dest]);
-        // Archives can be large; extraction is bounded by the long deadline.
-        let output = bounded_cmd_output("zip_extract", "unzip", cmd, TOOL_LONG_DEADLINE_SECS)?;
-        if !output.status.success() {
-            return Err(crate::safety::tool_failed(
-                "zip_extract",
-                "unzip",
-                output.status.code(),
-                &String::from_utf8_lossy(&output.stderr),
-            ));
+        let parts: Vec<&str> = name
+            .split(['/', '\\'])
+            .filter(|p| !p.is_empty() && *p != ".")
+            .collect();
+        if cfg!(target_os = "windows") && parts.iter().any(|p| p.contains(':')) {
+            return Err(refuse_archive_entry(B, &name));
         }
-        return Ok(Value::Bool(true));
+        if parts.is_empty() {
+            continue;
+        }
+        let mut target = root.to_path_buf();
+        for p in &parts {
+            target.push(p);
+        }
+        if entry.is_dir() || name.ends_with('/') || name.ends_with('\\') {
+            std::fs::create_dir_all(&target)
+                .map_err(|e| crate::safety::fs_error(B, &target.to_string_lossy(), &e))?;
+            written += 1;
+            continue;
+        }
+        if entry.is_symlink() {
+            links += 1;
+            continue;
+        }
+        if let Some(parent) = target.parent() {
+            std::fs::create_dir_all(parent)
+                .map_err(|e| crate::safety::fs_error(B, &parent.to_string_lossy(), &e))?;
+        }
+        let shown = target.to_string_lossy().into_owned();
+        let mut out = std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .open(&target)
+            .map_err(|e| crate::safety::fs_error(B, &shown, &e))?;
+        let room = ARCHIVE_EXTRACT_MAX_BYTES.saturating_sub(total);
+        let n = std::io::copy(&mut (&mut entry).take(room.saturating_add(1)), &mut out)
+            .map_err(|e| zip_not_an_archive(B, archive, e))?;
+        total = total.saturating_add(n);
+        check_archive_budget(B, total)?;
+        written += 1;
     }
+    if written == 0 && links > 0 {
+        return Err(crate::safety::bad_state_with_hint(
+            B,
+            "the archive holds only symbolic links, which are not extracted",
+            "nothing was written; extract it with tar or unzip if links are wanted",
+        ));
+    }
+    Ok(())
+}
+
+/// The error for a file that is not a readable zip archive: `E_BAD_ARG`, as
+/// `zip_list` answers, rather than a tool failure.
+fn zip_not_an_archive(builtin: &str, archive: &str, e: impl std::fmt::Display) -> anyhow::Error {
+    crate::safety::bad_arg_with_hint(
+        builtin,
+        "a zip archive",
+        &format!("not a zip archive: {archive}: {e}"),
+        "the file is damaged or is not a .zip; check its path and how it was made",
+    )
 }
 
 // 333: bi_zip_add - Add or refresh files in an existing zip archive.
 //
 // The archive must already exist; a missing one is E_NOT_FOUND, not a new file.
-// The Unix zip is run with -u, so only new or newer files are written.
+// A member whose name the archive already holds replaces that entry. The
+// archive is rewritten beside itself and moved into place, so a failed run
+// leaves the original untouched.
 fn bi_zip_add(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
     refuse_piped("zip_add", &input)?;
     let archive = match args.first() {
@@ -37438,14 +37630,23 @@ fn bi_zip_add(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
     if !std::path::Path::new(&archive).is_file() {
         return Err(crate::safety::not_found("zip_add", "archive", &archive));
     }
-    let files: Vec<String> = files
-        .iter()
-        .map(|f| crate::safety::resolve_path_str(f))
-        .collect();
-    // `zip -u` rewrites the one existing archive in place.
+    let members = zip_resolve_members("zip_add", &files)?;
+    // The one existing archive is rewritten in place.
     crate::tx::snapshot(&archive);
-    let (tool, cmd) = zip_command(&archive, &files, true);
-    run_checked("zip_add", tool, cmd, LOCAL_DEADLINE_SECS)?;
+    let tmp = format!("{archive}.ish-tmp-{}", std::process::id());
+    let out = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&tmp)
+        .map_err(|e| crate::safety::fs_error("zip_add", &tmp, &e))?;
+    if let Err(e) = zip_write_archive("zip_add", out, Some(&archive), &members) {
+        remove_partial(&tmp);
+        return Err(e);
+    }
+    if let Err(e) = std::fs::rename(&tmp, &archive) {
+        remove_partial(&tmp);
+        return Err(crate::safety::fs_error("zip_add", &archive, &e));
+    }
     Ok(Value::Bool(true))
 }
 
@@ -46883,6 +47084,19 @@ fn bi_crypto_hash(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
     // algorithm and the second does not, so a call that already worked keeps
     // its meaning: `crypto_hash("md5", "sha256")` still hashes the text "md5".
     if input.is_none() {
+        // A lone algorithm name is not data: `crypto.hash("sha256")` hashed the
+        // text "sha256" and answered as if the caller's data had been hashed.
+        if let [Value::Str(only)] = args.as_slice() {
+            if is_hash_algorithm(only) {
+                return Err(crate::safety::bad_arg_in(
+                    "crypto_hash",
+                    format!(
+                        "crypto.hash: `{only}` is an algorithm name; pass the data too: crypto.hash(\"{only}\", data) or data | crypto.hash(\"{only}\")"
+                    ),
+                    "put the algorithm first and the data after it, or pipe the data in; to hash the text itself, spell the algorithm: crypto.hash(\"sha256\", \"sha256\")",
+                ));
+            }
+        }
         if let [Value::Str(first), Value::Str(second)] = args.as_slice() {
             if is_hash_algorithm(first) && !is_hash_algorithm(second) {
                 return Ok(Value::Str(digest_hex(
@@ -47253,9 +47467,27 @@ fn bi_crypto_base64_decode(args: Vec<Value>, input: Option<Value>) -> Result<Val
     let data = hex_subject("crypto_base64_decode", &args, input)?;
     // Wrapped input (as `base64` writes it) decodes: whitespace is not data.
     let compact: String = data.chars().filter(|c| !c.is_ascii_whitespace()).collect();
-    let bytes = STANDARD.decode(compact.as_bytes()).map_err(|e| {
-        crate::safety::bad_arg("crypto_base64_decode", "valid base64", &e.to_string())
-    })?;
+    let bytes = match STANDARD.decode(compact.as_bytes()) {
+        Ok(b) => b,
+        Err(first) => {
+            // Unpadded input and the URL-safe alphabet (`-` and `_` for `+` and
+            // `/`) are base64 too: JWT segments are written that way. Normalise
+            // and retry; input that is still invalid keeps the first error.
+            use base64::engine::general_purpose::STANDARD_NO_PAD;
+            let normal: String = compact
+                .trim_end_matches('=')
+                .chars()
+                .map(|c| match c {
+                    '-' => '+',
+                    '_' => '/',
+                    other => other,
+                })
+                .collect();
+            STANDARD_NO_PAD.decode(normal.as_bytes()).map_err(|_| {
+                crate::safety::bad_arg("crypto_base64_decode", "valid base64", &first.to_string())
+            })?
+        }
+    };
     // Bytes that are not text were replaced with U+FFFD, silently.
     String::from_utf8(bytes).map(Value::Str).map_err(|_| {
         crate::safety::bad_arg(
@@ -47302,7 +47534,79 @@ fn bi_crypto_hex_decode(args: Vec<Value>, input: Option<Value>) -> Result<Value>
         .chunks(2)
         .map(|p| u8::from_str_radix(std::str::from_utf8(p).unwrap_or("00"), 16).unwrap_or(0))
         .collect();
-    Ok(Value::Str(String::from_utf8_lossy(&bytes).to_string()))
+    // Bytes that are not text used to become U+FFFD, silently, as
+    // base64_decode's did; they are refused the same way.
+    String::from_utf8(bytes).map(Value::Str).map_err(|_| {
+        crate::safety::bad_arg(
+            "crypto_hex_decode",
+            "hex of UTF-8 text (these bytes are binary)",
+            "non-UTF-8 bytes",
+        )
+    })
+}
+
+/// The bytes of `s` that RFC 3986 keeps as they are: `A-Z a-z 0-9 - . _ ~`.
+fn url_unreserved(b: u8) -> bool {
+    b.is_ascii_alphanumeric() || matches!(b, b'-' | b'.' | b'_' | b'~')
+}
+
+/// `url_encode(s)`: RFC 3986 percent-encoding of the UTF-8 bytes of `s`. Only
+/// the unreserved characters are kept; everything else, a space and `/`
+/// included, becomes `%XX` in upper-case hex.
+fn bi_url_encode(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
+    let data = hex_subject("url_encode", &args, input)?;
+    let mut out = String::with_capacity(data.len());
+    for b in data.bytes() {
+        if url_unreserved(b) {
+            out.push(b as char);
+        } else {
+            out.push_str(&format!("%{b:02X}"));
+        }
+    }
+    Ok(Value::Str(out))
+}
+
+/// `url_decode(s)`: undo `url_encode`. A `%` that is not followed by two hex
+/// digits is E_BAD_ARG, and so is a result that is not UTF-8. A `+` stays a
+/// `+`; it is not turned into a space (that is a form-encoding rule, not RFC
+/// 3986's).
+fn bi_url_decode(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
+    let data = hex_subject("url_decode", &args, input)?;
+    let src = data.as_bytes();
+    let hex = |b: u8| (b as char).to_digit(16).map(|d| d as u8);
+    let mut bytes = Vec::with_capacity(src.len());
+    let mut i = 0;
+    while i < src.len() {
+        if src[i] == b'%' {
+            let pair = match (src.get(i + 1).copied(), src.get(i + 2).copied()) {
+                (Some(h), Some(l)) => hex(h).zip(hex(l)),
+                _ => None,
+            };
+            match pair {
+                Some((h, l)) => bytes.push(h * 16 + l),
+                None => {
+                    let shown: String = data[i..].chars().take(3).collect();
+                    return Err(crate::safety::bad_arg_with_hint(
+                        "url_decode",
+                        "`%` followed by two hex digits",
+                        &format!("{shown:?} at byte {i}"),
+                        "encode a literal percent sign as %25",
+                    ));
+                }
+            }
+            i += 3;
+        } else {
+            bytes.push(src[i]);
+            i += 1;
+        }
+    }
+    String::from_utf8(bytes).map(Value::Str).map_err(|_| {
+        crate::safety::bad_arg(
+            "url_decode",
+            "percent-encoded UTF-8 text (these bytes are binary)",
+            "non-UTF-8 bytes",
+        )
+    })
 }
 
 /// Envelope version tag for authenticated ciphertext. A ciphertext that does

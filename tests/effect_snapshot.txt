@@ -1373,6 +1373,8 @@ unique	Pure
 unzip	WriteLocal
 upper	Pure
 uptime	ReadLocal
+url_decode	Pure
+url_encode	Pure
 user_add	Privileged
 user_del	Privileged
 user_list	ReadLocal

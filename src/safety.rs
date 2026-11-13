@@ -2002,6 +2002,58 @@ pub fn tool_failed_code(builtin: &str, command: &str, code: u32, stderr: &str) -
     )
 }
 
+/// The hint for a tool that ran and failed. "Check that its service is
+/// running" is only true of a client for a daemon; a program that crashed (a
+/// signal, or a status such as -1073741819) or that rejected its arguments gets
+/// a hint that says what happened.
+fn tool_failed_default_hint(command: &str, status_text: &str) -> String {
+    const SERVICE_CLIENTS: &[&str] = &[
+        "docker",
+        "podman",
+        "kubectl",
+        "helm",
+        "systemctl",
+        "launchctl",
+        "service",
+        "sc",
+        "nerdctl",
+        "colima",
+    ];
+    let program = command
+        .split_whitespace()
+        .next()
+        .unwrap_or(command)
+        .rsplit(['/', '\\'])
+        .next()
+        .unwrap_or(command)
+        .trim_end_matches(".exe")
+        .to_ascii_lowercase();
+    if status_text == "was killed by a signal" {
+        return format!(
+            "`{command}` was killed by a signal before it finished; run it by hand to see why"
+        );
+    }
+    let code = status_text
+        .strip_prefix("exited ")
+        .and_then(|c| c.parse::<i64>().ok());
+    if let Some(c) = code {
+        if !(0..=255).contains(&c) {
+            return format!("the program crashed (status {c}); run `{command}` by hand to see why");
+        }
+    }
+    if SERVICE_CLIENTS.contains(&program.as_str()) {
+        format!(
+            "`{command}` is installed but rejected this work; check that its \
+             service is running and that the arguments are valid for this host"
+        )
+    } else {
+        format!(
+            "`{command}` is installed but rejected this work; check that the \
+             arguments are valid for this host"
+        )
+    }
+}
+
 fn tool_failed_text(
     builtin: &str,
     command: &str,
@@ -2021,10 +2073,7 @@ fn tool_failed_text(
         builtin: builtin.to_string(),
         hint: match hint {
             Some(hint) => hint.to_string(),
-            None => format!(
-                "`{command}` is installed but rejected this work; check that its \
-                 service is running and that the arguments are valid for this host"
-            ),
+            None => tool_failed_default_hint(command, &status_text),
         },
         approval: None,
         did_you_mean: Vec::new(),
@@ -2129,7 +2178,7 @@ pub fn not_found(builtin: &str, kind: &str, name: &str) -> anyhow::Error {
     // A path is not an identifier. For a file or directory the useful facts are
     // where a relative path was resolved and how to look, not a list to choose
     // an identifier from.
-    let hint = if matches!(kind, "file" | "directory" | "path") {
+    let hint = if matches!(kind, "file" | "directory" | "path" | "archive") {
         let here = std::env::current_dir()
             .map(|d| d.display().to_string())
             .unwrap_or_else(|_| "the current directory".to_string());
