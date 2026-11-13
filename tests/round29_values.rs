@@ -208,6 +208,21 @@ fn yaml_strings_that_look_like_numbers_round_trip_as_strings() {
     );
 }
 
+// ---- a stray backslash names the likely earlier `\"` ----
+
+#[test]
+fn a_stray_backslash_hints_at_an_earlier_string_that_ended_early() {
+    // `"a\""` is one string, `a"`, five characters long, so the backslash at column 7
+    // is outside any string.
+    let msg = try_run(r#""a\"" \ "b""#).expect_err("must be refused");
+    assert!(msg.contains("E_PARSE"), "{msg}");
+    assert!(msg.contains("at line 1, column 7"), "{msg}");
+    assert!(
+        msg.contains("an earlier string may have ended early"),
+        "{msg}"
+    );
+}
+
 // ---- to_csv keeps a row whose only field is empty ----
 
 #[test]

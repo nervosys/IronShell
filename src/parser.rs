@@ -1382,6 +1382,14 @@ fn lex_marked(src: &str) -> Result<(Vec<Spanned>, std::collections::HashSet<usiz
                 }
                 continue; // Don't push a token, just skip the comment
             }
+            // A backslash outside a string. The usual cause is an earlier string
+            // that ended at a `\"`, which is an escaped quote inside a string.
+            '\\' => {
+                return Err(anyhow::Error::new(ParseError::with_hint(
+                    format!("unknown character '\\' at line {start_line}, column {start_col}"),
+                    "a backslash outside a string: an earlier string may have ended early, since \" inside a string is an escaped quote; write C:\\ for a trailing backslash",
+                )));
+            }
             other => {
                 return Err(anyhow!(
                     "unknown character '{}' at line {}, column {}",
