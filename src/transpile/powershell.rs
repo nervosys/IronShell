@@ -175,7 +175,24 @@ fn describe_ps_complex(s: &str) -> String {
         }
         "function" => "function definition".to_string(),
         _ => {
-            if s.contains("$(") {
+            // A statement that starts with a cmdlet-like word (Verb-Noun) that
+            // PS_MAP does not map is an unmapped command, not an operator.
+            let word = s.split_whitespace().next().unwrap_or("");
+            let mut parts = word.split('-');
+            let verb_noun = matches!(
+                (parts.next(), parts.next(), parts.next()),
+                (Some(v), Some(n), None)
+                    if !v.is_empty()
+                        && !n.is_empty()
+                        && v.chars().all(|c| c.is_ascii_alphabetic())
+                        && n.chars().all(|c| c.is_ascii_alphanumeric())
+            );
+            if verb_noun
+                && map_ps_cmdlet(&w).is_none()
+                && !matches!(w.as_str(), "write-host" | "write-output")
+            {
+                format!("command `{}`", word)
+            } else if s.contains("$(") {
                 "subexpression `$(...)`".to_string()
             } else if s.contains(">>") || s.contains("2>&1") || s.contains("*>") {
                 "redirection".to_string()

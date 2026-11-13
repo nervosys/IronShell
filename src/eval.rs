@@ -971,6 +971,13 @@ pub fn eval_expr(expr: &Expr, env: &mut Env) -> Result<Value> {
                     Ok(val)
                 }
                 Err(e) => {
+                    // In agent mode a policy refusal is not catchable: it stops
+                    // the script with its own exit status.
+                    if e.downcast_ref::<crate::safety::SafetyError>()
+                        .is_some_and(|se| se.is_uncatchable_in_agent_mode())
+                    {
+                        return Err(e);
+                    }
                     // Runtime error - catch it. Safety refusals carry structured
                     // data, and the catch variable is bound to their record (see
                     // `caught_error_record`). Other errors stay as strings. A

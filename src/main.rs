@@ -1523,10 +1523,16 @@ fn refuse_sh_fallbacks(shell: &str, fallbacks: &[transpile::Fallback]) {
     } else {
         format!("rewrite it with commands this {shell} transpiler maps, write it in ish, or set IRONSHELL_ALLOW_SH=true to run the untranslated parts through {shell}, outside the effect gate")
     };
+    // An unmapped command is named as one: it is not an operator or expression.
+    let reason = if f.construct.starts_with("command `") {
+        "has no IronShell mapping"
+    } else {
+        "is not translated to IronShell"
+    };
     let e = iron_shell::safety::policy_deny(
         shell,
         format!(
-            "{} at line {} is not translated to IronShell, so nothing in this script was run",
+            "{} at line {} {reason}, so nothing in this script was run",
             f.construct, f.line
         ),
         hint,

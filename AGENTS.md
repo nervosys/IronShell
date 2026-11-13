@@ -174,6 +174,7 @@ match score { s if s >= 90 => "A", s if s >= 80 => "B", _ => "F" }
 # Error handling
 result = try { risky() } catch e { "fallback" }
 try { error("bad", {field: "age"}) } catch e { e.code }   # "E_USER"; error(message[, extra Record]) raises your own
+# In agent mode `try` does not catch E_NEEDS_APPROVAL, E_OUTSIDE_WORKSPACE or E_POLICY_DENY: it re-raises them and the script stops with their exit status (75/77). Human mode catches them.
 
 # Script arguments: `ish script.ish a b` gives the script args() == ["a", "b"] (empty under -c)
 # A script file echoes the value of its last expression only; earlier values are not printed.

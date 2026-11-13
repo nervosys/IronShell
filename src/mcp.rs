@@ -518,13 +518,14 @@ impl McpServer {
                 input_schema: serde_json::json!({
                     "type": "object",
                     "properties": {
-                        "name": { "type": "string", "description": "builtin name to invoke" },
+                        "name": { "type": "string", "description": "builtin name to invoke; `builtin` is accepted as an alias of `name`" },
+                        "builtin": { "type": "string", "description": "alias of `name`" },
                         "args": {
                             "type": ["array", "object"],
                             "description": "the arguments: an array in parameter order, or an object keyed by parameter name (subject is the piped value)"
                         }
                     },
-                    "required": ["name"],
+                    "anyOf": [{ "required": ["name"] }, { "required": ["builtin"] }],
                 }),
             },
         ]
@@ -634,6 +635,20 @@ impl McpServer {
         }
     }
 
+    /// The builtin a call to the `ironshell` meta-tool names, and the key that
+    /// named it: `name`, or `builtin` as an alias. Empty when neither is a
+    /// non-empty string.
+    fn meta_builtin_key(arguments: &JsonValue) -> (&'static str, &str) {
+        for key in ["name", "builtin"] {
+            if let Some(s) = arguments.get(key).and_then(JsonValue::as_str) {
+                if !s.is_empty() {
+                    return (key, s);
+                }
+            }
+        }
+        ("name", "")
+    }
+
     /// Route an MCP `tools/call` by tool name. The compact-mode `ironshell` meta-tool
     /// unwraps `{name, args}` and invokes that builtin; any other name is treated as
     /// a builtin invoked with its `args` array. Every path goes through
@@ -641,7 +656,7 @@ impl McpServer {
     /// uniformly whether the agent is in compact or full mode.
     pub fn route_tool_call(&self, name: &str, arguments: &JsonValue) -> McpToolResult {
         if name == Self::META_INVOKE_TOOL {
-            let inner = arguments.get("name").and_then(|v| v.as_str()).unwrap_or("");
+            let (key, inner) = Self::meta_builtin_key(arguments);
             if inner.is_empty() {
                 return McpToolResult {
                     content: vec![McpContent::Text {
@@ -654,7 +669,9 @@ impl McpServer {
             // beside it is refused rather than dropped.
             if let Some(map) = arguments.as_object() {
                 if map.contains_key("args") {
-                    if let Some(extra) = map.keys().find(|k| !matches!(k.as_str(), "name" | "args"))
+                    if let Some(extra) = map
+                        .keys()
+                        .find(|k| k.as_str() != key && k.as_str() != "args")
                     {
                         return Self::unknown_argument("ironshell", extra, "name, args");
                     }
@@ -662,7 +679,7 @@ impl McpServer {
             }
             let mut rest = arguments.clone();
             if let Some(map) = rest.as_object_mut() {
-                map.remove("name");
+                map.remove(key);
             }
             return self.route_named(inner, &rest);
         }
@@ -936,13 +953,7 @@ impl McpServer {
             .unwrap_or_else(|| JsonValue::Array(vec![]));
         // The meta-tool without a builtin name is a protocol error too, in the
         // same error object as an unknown tool, not a tool result.
-        if name == Self::META_INVOKE_TOOL
-            && arguments
-                .get("name")
-                .and_then(JsonValue::as_str)
-                .unwrap_or("")
-                .is_empty()
-        {
+        if name == Self::META_INVOKE_TOOL && Self::meta_builtin_key(&arguments).1.is_empty() {
             return Err((
                 -32602,
                 "ironshell: missing 'name' (the builtin to invoke)".to_string(),
