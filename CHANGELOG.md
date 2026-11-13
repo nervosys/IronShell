@@ -224,6 +224,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `ish -b` `sort` breaks ties between equal keys on the whole line unless `-s` (or `-u`) is given, and `-r` reverses that too, as GNU sort does; `sort -k1,1` of `b 2`, `a 1`, `b 1`, `a 2` gave `b 2` before `b 1`.
 - `ish -b` `printf` reads an integer argument as a C constant, as bash does: `010` is 8, `0x1f` is 31, `'A` is 65; an invalid one (`08`, `12abc`) prints what it read, names it on stderr, and the status is 1.
 - `ish -b` `sed` keeps a missing final newline on stdout, and does not join a file without one to the next file's first line, as GNU sed does.
+- An error inside a `${...}` interpolation fails the string with that error, so `try` catches it; it was printed into the text as `${r.zz} [error: ...]` and the script exited 0. An unclosed `${` is E_PARSE at the `$`; it was read as if closed.
+- `match` compares numeric patterns as `==` does (`1` matches `1.0`), accepts Float and negative literal patterns, takes a record literal as its subject, and says `match: no arm matches <value>` with a hint to add `_ => ...`.
+- `while`, `loop` and `def` get the same no-loop-statements / functions-are-values hints `for` gets; a pipe left unparenthesized in a call argument is told that `|` binds loosest; a bare `x = x + 1` on an immutable name says `assign:` (not `let:`); `r.a.b = 1` with no `r.a` says to create it first.
+- Did-you-mean needs a closer match for short names, and a swap of two neighbouring letters counts as one edit: `lenn` still offers `len` and `file.raed` offers `file.read`, while `nope` is no longer offered `Some`.
+- A string literal decodes `\UHHHHHHHH` (eight hex digits) as that code point; it was kept as ten literal characters. A backslash not followed by an escape (as in `C:\Users`) is still kept.
+- `format_number` rounds the exact binary value: `format_number(2.675, 2)` is `2.67` (2.675 is stored as 2.67499...); an exact tie still rounds away from zero.
+- `math.pow` refuses an infinite or NaN result with E_BAD_VALUE; `10 ** 400` returned inf. `float("inf")` says IronShell numbers are finite; `int("1_000")` says it is not a decimal integer.
+- `crypto.hash` names both arguments when neither is an algorithm; it named the data as the bad algorithm. `json.parse` names a lone UTF-16 surrogate escape instead of serde's `unexpected end of hex escape`. `str.substring` and `str.substr` point to `slice`.
+- `ish -c` quotes strings inside an Array or Record result, as `print` does; `[a, , b]` hid the empty string in `["a", "", "b"]`.
+- `file_insert` at line 1 of a UTF-8 BOM file keeps the BOM first; it was pushed into the text after the inserted line. `file_edit` keeps a leading BOM and all-CRLF line breaks (it rewrote both), and its refusals name the edit and the key.
+- `to_csv` refuses a repeated column name and a NaN or infinite Float cell (with its path), as `to_json` does. `open` on a directory says it is a directory, not that it does not exist.
+- `to_yaml` double-quotes and escapes control characters, DEL, U+0085, U+2028 and U+2029, which it wrote raw; `from_yaml` decodes `\f` and `\v`, and reads `0o17` and `0x1F` as Int (YAML 1.2 core), with `to_yaml` quoting strings that look like them.
+- `file_write` names the element of a mixed Array that is not a String; its doc says lines are joined with `\n` and no line break follows the last.
+- Tests find `ish` by `CARGO_BIN_EXE_ish`; newer Cargo builds test binaries outside `target/debug/deps`, so the old guess named a missing file. The declared-example loops take a shared lock, so `session_undo`'s examples undo only their own steps.
 
 
 ## [14.0.1] - 2026-11-08
