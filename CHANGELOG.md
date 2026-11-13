@@ -103,6 +103,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `assert` raises a catchable E_ASSERT error, so `e.code` and `e.message` work; it raised a bare String. Its declaration names the condition and the optional message.
 - `unique` takes only an Array in both forms (a String is refused with a hint toward `lines` or `split(s, "")`); `uniq` takes an Array or a String split into lines, in either form, dropping adjacent duplicates.
 - `base64_decode` accepts unpadded and URL-safe (`-_`) input.
+- A quoted record key containing `${...}` is interpolated: `{"${r.customer}": r.region}` kept the literal text as the key.
+- `ish agent execute` exits with the status the command line gives the response's error code (75 for an approval, 127 for an unknown builtin, 64 for a bad argument) instead of 1; a file name given as the request is told the argument is JSON text.
+- MCP `ontology_describe` returns JSON text, as the other tools do. `base64_encode` and `base64_decode` are classed pure (they read no file). `pick` is declared `Array | Record`.
 
 ### Added
 
@@ -158,6 +161,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `chunk(array, size)` splits an Array into pieces (the last may be shorter); `arr.chunk` now exists, as the module's description promised.
 - `url_encode` and `url_decode` (RFC 3986 percent-encoding of UTF-8, also `str.url_encode`/`str.url_decode`); `url_decode` refuses a malformed `%` sequence and does not turn `+` into a space.
 - `crypto.hash_file`, `crypto.checksum` and `crypto.random_string` are module members; they existed only as flat names.
+- `get(r, path, default?)` reads an optional field or dotted path (`"u.n"`, or an Array of keys and indices), giving the default (Null) when a step is missing or Null; `has(r, key)`; `to_entries` and `from_entries` (`[{key, value}]` or `[[k, v]]`). A missing-field error now points to `get`.
+- `open` parses `.tsv` like `.csv`, with a tab delimiter. `hex_encode` and `hex_decode` resolve as bare names.
 
 ### Fixed
 
@@ -270,6 +275,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `crypto.hex_decode` refuses bytes that are not UTF-8 text, as `base64_decode` does; it replaced them with U+FFFD. `crypto.hash("sha256")` alone is refused instead of hashing the text `sha256`.
 - Agent API: `/eval` without a string `code` is a 400 naming the field (it returned success with Null); `/call` of an unknown builtin is 404 E_UNKNOWN_BUILTIN with a did-you-mean, and a body of `{"args": {...}}` is unwrapped; `/builtins/file.read` and `/call/file.read` resolve module-qualified names; `sql` and `sql_value` accept a lone query by name.
 - `lines`' examples no longer depend on the working directory.
+- `group_by(rows, key)` works as a direct call; it said it needed pipeline input and named Group-Object. Its doc states that Name is the key's text and groups sort as text.
+- `ish -b` reports a `(` after a command word (`echo (`, `echo a(b`) as a syntax error, exit 2, as bash does; it called it a function definition and exited 77.
+- `x in list` inside a call is one error saying `in` is not an operator, with `contains` and `in(list)` as the alternatives; it produced dozens of cascading parse errors.
+- Did-you-mean no longer offers an unrelated one-letter name (`a` suggested `b`).
+- `from_yaml` names the unsupported construct (anchor, tag, block scalar, flow collection, ...) and suggests JSON; its hint was the generic `from_yaml takes String`. sql's `no such table` hint says to pass a Record of tables for a join.
+- `ish agent schema --help` and the unknown-format error list the same formats.
 
 
 ## [14.0.1] - 2026-11-08
