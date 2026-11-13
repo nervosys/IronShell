@@ -1172,9 +1172,17 @@ impl Parser {
                 }
                 // `greet() {`: the name is where the definition starts.
                 Some(Tok::LParen)
-                    if words.len() == 1 && assigns.is_empty() && redirs.is_empty() =>
+                    if words.len() == 1
+                        && assigns.is_empty()
+                        && redirs.is_empty()
+                        && matches!(self.toks.get(self.i + 1), Some(Tok::RParen)) =>
                 {
                     return unsupported_at("function definition", start);
+                }
+                // A `(` after a command's name is not a subshell (that starts a
+                // command) and not `name()`: bash's syntax error.
+                Some(Tok::LParen) if !words.is_empty() => {
+                    return self.syntax("a `(` can only start a subshell or follow a function name as `name()`; quote it to pass it as text".to_string());
                 }
                 // `name=(...)`: the assignment with an empty value is the word
                 // before the `(`. Arrays are not in the subset.
