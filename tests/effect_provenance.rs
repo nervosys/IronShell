@@ -71,7 +71,14 @@ fn reviewed_pure_builtins_are_distinguished_from_the_fallthrough() {
     declared_pure.sort_unstable();
     assert_eq!(
         declared_pure,
-        ["sd", "sd_replace"],
+        [
+            "base64_decode",
+            "base64_encode",
+            "crypto_base64_decode",
+            "crypto_base64_encode",
+            "sd",
+            "sd_replace"
+        ],
         "update the reviewed Pure inventory when classifying another builtin"
     );
 }

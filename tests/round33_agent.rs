@@ -104,6 +104,9 @@ fn item3_agent_execute_exits_with_the_status_of_the_error_code() {
     let exec =
         |request: &str| sb.ish(&["--agent", "--workspace", ".", "agent", "execute", request]);
 
+    // The file exists, so rm reaches the approval gate (a missing file is
+    // E_NOT_FOUND first).
+    std::fs::write(sb.0.join("f"), "x").unwrap();
     let out = exec(r#"{"action":"call","builtin":"rm","args":["f"]}"#);
     assert_eq!(out.status.code(), Some(75), "{}", text(&out.stdout));
 
