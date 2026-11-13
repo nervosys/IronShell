@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [14.0.2] - 2026-11-13
+
 ### Security
 
 - A relative workspace root (`--workspace proj` or `IRONSHELL_WORKSPACE=proj`) no longer lets a write escape it: `file_write("../x", ...)` was judged as `proj/x` and written as `x`, outside the workspace, while reads of the same path were refused. The root is now always absolute, and `--workspace` is fixed at startup.
@@ -115,7 +117,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `tar_create` stores a member inside the current directory under its relative path and one outside it under its last component; it stored the absolute path, so extraction recreated the whole tree.
 - An in-process refusal names the tool and the flag (`the in-process tr does not support -c`) before mentioning a GNU program on PATH, and a bad option to `tr`, `grep`, `sort` or `cut` fails as GNU does (`tr: invalid option -- '_'`, status 1 or 2).
 - The MCP `ironshell` tool accepts `builtin` as an alias of `name`. An unmapped PowerShell cmdlet is refused as `command Remove-Item at line N has no IronShell mapping`.
-- A Float always displays as a Float: `print(100.0)`, `sqrt(16)`, `6 / 2` and `-0.0` show `100.0`, `4.0`, `3.0` and `-0.0` (in print, `ish -c`, the REPL, `"${x}"`, `str()` and `join`); they showed `100`, `4`, `3` and `-0`, so a Float could not be told from an Int and a CSV cell read as `100` displayed differently from what to_csv wrote. A magnitude of 1e16 or more, or under 1e-5, uses exponent form (`1e21`, `1e-7`), as to_json does; 1e21 printed 22 digits. Int display, the JSON, YAML, TOML and CSV writers, and `format_number` are unchanged.
+- A Float always displays as a Float: `print(100.0)`, `sqrt(16)`, `6 / 2` and `-0.0` show `100.0`, `4.0`, `3.0` and `-0.0` (in print, `ish -c`, the REPL, `"${x}"`, `str()` and `join`); they showed `100`, `4`, `3` and `-0`, so a Float could not be told from an Int and a CSV cell read as `100` displayed differently from what to_csv wrote. A magnitude of 1e16 or more, or under 1e-5, uses exponent form (`1e21`, `1e-7`; to_json writes the same number as `1e+21`); 1e21 printed 22 digits. Int display, the JSON, YAML, TOML and CSV writers, and `format_number` are unchanged.
 
 ### Added
 
@@ -4595,7 +4597,8 @@ N/A - Initial release
 
 See [ROADMAP.md](ROADMAP.md) for upcoming features.
 
-[Unreleased]: https://github.com/nervosys/IronShell/compare/v14.0.1...HEAD
+[Unreleased]: https://github.com/nervosys/IronShell/compare/v14.0.2...HEAD
+[14.0.2]: https://github.com/nervosys/IronShell/compare/v14.0.1...v14.0.2
 [14.0.1]: https://github.com/nervosys/IronShell/compare/v14.0.0...v14.0.1
 [14.0.0]: https://github.com/nervosys/AetherShell/compare/v12.0.2...v14.0.0
 [8.0.0]: https://github.com/nervosys/AetherShell/compare/v7.4.0...v8.0.0
