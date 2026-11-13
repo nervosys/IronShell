@@ -663,6 +663,19 @@ pub fn read_jail_dispatch(builtin: &str, args: &[crate::value::Value], piped: bo
         if TAKES_REMOTE.contains(&builtin) && (is_url(s) || is_remote_spec(s)) {
             return Ok(());
         }
+        // A write to a Windows device name (`NUL`) is refused as such, before the
+        // jail: the name resolves to `\\.\NUL`, which the jail would call
+        // outside the workspace, and `CON` already answers E_BAD_ARG.
+        if cfg!(windows)
+            && matches!(
+                crate::safety::effect_of(builtin),
+                Effect::WriteLocal | Effect::Destructive
+            )
+        {
+            if let Some(name) = crate::safety::reserved_device_name(s) {
+                return Err(crate::safety::reserved_device_error(builtin, &name).into());
+            }
+        }
         // A glob reads the files under its literal directory, so that
         // directory is what is judged: `../*.rs` is outside, `src/*.rs` is not.
         // A name that exists is judged whole, even with `[` or `?` in it. A

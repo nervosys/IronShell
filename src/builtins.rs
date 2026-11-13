@@ -49985,6 +49985,10 @@ fn bi_db_sqlite_exec(args: Vec<Value>, _input: Option<Value>) -> Result<Value> {
 /// so it does not go through here.
 fn sqlite_exec_contained(args: Vec<Value>) -> Result<Value> {
     let (db_path, sql) = sqlite_exec_prepare(args)?;
+    // The undo journal's step for the database: absent before when this call
+    // creates it, so undo removes it. One step however many statements the
+    // builtin runs.
+    crate::journal::record_file_once("db_sqlite_exec", &db_path);
     crate::tx::snapshot(&db_path);
     sqlite_exec_run(&db_path, &sql, true)
 }
@@ -50120,6 +50124,8 @@ fn bi_db_sqlite_create(args: Vec<Value>, _input: Option<Value>) -> Result<Value>
     crate::safety::reject_option_like("db_sqlite_create", std::slice::from_ref(&db_path))?;
     // Opening creates the file, so it is jailed as a write.
     let db_path = guard_local_write("db_sqlite_create", &db_path)?;
+    // A database that is new is recorded as absent before, so undo removes it.
+    crate::journal::record_file_once("db_sqlite_create", &db_path);
     // Just touch the file to create empty database
     sqlite_db_file("db_sqlite_create", &db_path)?;
     let mut cmd = crate::safety::child_command("sqlite3");
@@ -50471,6 +50477,8 @@ fn bi_db_sqlite_to_csv(args: Vec<Value>, _input: Option<Value>) -> Result<Value>
         let csv = String::from_utf8_lossy(&output.stdout).to_string();
         if let Some(path) = output_path {
             crate::tx::snapshot(&path);
+            // The journal step names the file written, not the database read.
+            crate::journal::record_file_once("db_sqlite_to_csv", &path);
             write_file_atomically("db_sqlite_to_csv", &path, csv.as_bytes())?;
             return Ok(Value::Str(path));
         }
@@ -68499,6 +68507,9 @@ fn bi_dd_copy(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
     let dst = text(1, "destination")?;
     // dd truncates and writes the destination in place, on every platform.
     crate::safety::refuse_hard_linked_write("dd_copy", &dst)?;
+    // The journal step names the destination (absent before, or replaced), not
+    // the source, which is only read.
+    crate::journal::record_file_once("dd_copy", &dst);
     let mut operands = vec![format!("if={src}"), format!("of={dst}")];
     match args.get(2) {
         None => {}

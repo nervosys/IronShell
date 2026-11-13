@@ -585,7 +585,7 @@ fn written_path_argument(builtin: &str) -> Option<usize> {
     let canonical = crate::signature::signature_of(builtin).map_or(builtin, |s| s.name);
     match canonical {
         "file_write" | "file_append" | "json_set" | "save_json" | "file_patch" | "file_replace"
-        | "file_insert" | "file_edit" | "touch" | "rm" => Some(0),
+        | "file_insert" | "file_edit" | "touch" | "rm" | "tee" => Some(0),
         "file_copy" => Some(1),
         _ => None,
     }
@@ -805,7 +805,72 @@ fn records_its_own_steps(builtin: &str) -> bool {
             | "age_encrypt"
             | "age_decrypt"
             | "age_keygen"
+            | "dd_copy"
+            | "db_sqlite_create"
+            | "db_sqlite_open"
+            | "db_sqlite_insert"
+            | "db_sqlite_update"
+            | "db_sqlite_delete"
+            | "db_sqlite_create_table"
+            | "db_sqlite_drop_table"
+            | "db_sqlite_vacuum"
+            | "db_sqlite_import"
+            | "db_sqlite_to_csv"
+            | "db_json_to_sqlite"
+            | "db_kv_set"
+            | "db_kv_delete"
+            | "db_kv_store"
     )
+}
+
+/// Record the pre-state of the one file `builtin` is about to write or create,
+/// as one step, unless the call in flight already recorded it. For a builtin
+/// that writes a file no argument names as a bare path (a database it opens, an
+/// output it creates): absent before is recorded as absent, so undo removes a
+/// file the call created instead of restoring an empty one.
+///
+/// A builtin that reaches its writer more than once in a call (`db_kv_set`
+/// creates its table, then inserts) records one step: the entry just before is
+/// the same path, and a step the dispatcher has settled is sealed, so an
+/// unsealed last entry for the path belongs to this call.
+pub fn record_file_once(builtin: &str, path: &str) {
+    if !enabled() || is_journal_builtin(builtin) || path.is_empty() || path == ":memory:" {
+        return;
+    }
+    let normalized = normalized_path(path);
+    let mut s = state();
+    if let Some(last) = s.journal.last() {
+        if last.path == normalized && last.after.is_none() && last.reversible() {
+            return;
+        }
+    }
+    discard_redo(&mut s);
+    let group = Some(take_seq(&mut s));
+    push_capture(&mut s, builtin, Effect::WriteLocal, normalized, group);
+}
+
+/// Write `bytes` over `path` for an undo or a redo. A file that is read-only
+/// refuses the write (on Windows always), and the step being undone may be the
+/// `chmod` that made it so: the content is then written under the owner's write
+/// bit, which is the mode the file had when the step began. A file that was
+/// already read-only before the step cannot have been written by one.
+#[allow(clippy::permissions_set_readonly_false)]
+fn write_over(path: &str, bytes: &[u8]) -> std::io::Result<()> {
+    match std::fs::write(path, bytes) {
+        Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => {
+            let mut perms = std::fs::metadata(path)?.permissions();
+            if !perms.readonly() {
+                return Err(e);
+            }
+            #[cfg(unix)]
+            perms.set_mode(perms.mode() | 0o200);
+            #[cfg(not(unix))]
+            perms.set_readonly(false);
+            std::fs::set_permissions(path, perms)?;
+            std::fs::write(path, bytes)
+        }
+        other => other,
+    }
 }
 
 /// Record the pre-state of named paths that a builtin is about to write or
@@ -1183,7 +1248,7 @@ fn undo_at(s: &mut State, index: usize, force: bool, out: &mut Vec<Rewound>) -> 
         }
     }
     let outcome = match &entry.before {
-        Before::Contents(bytes) => match std::fs::write(&entry.path, bytes) {
+        Before::Contents(bytes) => match write_over(&entry.path, bytes) {
             Ok(()) => {
                 push_redo(s, &entry, after);
                 Outcome::Restored(what)
@@ -1436,7 +1501,7 @@ pub fn redo(n: usize) -> Vec<Outcome> {
             }
         };
         let outcome = match &r.after {
-            Before::Contents(bytes) => match std::fs::write(&r.path, bytes) {
+            Before::Contents(bytes) => match write_over(&r.path, bytes) {
                 Ok(()) => Outcome::Reapplied(what),
                 Err(e) => Outcome::Failed {
                     what,
