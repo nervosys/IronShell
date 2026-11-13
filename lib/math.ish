@@ -65,16 +65,18 @@ pub let gcd = fn(a, b) => match b {
 # Least common multiple
 pub let lcm = fn(a, b) => abs(a * b) / gcd(a, b)
 
-# Factorial
+# Factorial; a negative n is refused
 pub let factorial = fn(n) => match {
+    _ if n < 0 => error("factorial: n must not be negative", {n: n}),
     _ if n <= 1 => 1,
     _ => n * factorial(n - 1)
 }
 
-# Fibonacci
+# Fibonacci; a negative n is refused
 pub let fib = fn(n) => match {
-    0 => 0,
-    1 => 1,
+    _ if n < 0 => error("fib: n must not be negative", {n: n}),
+    _ if n == 0 => 0,
+    _ if n == 1 => 1,
     _ => fib(n - 1) + fib(n - 2)
 }
 
@@ -88,8 +90,8 @@ pub let rad_to_deg = fn(rad) => rad * 180.0 / PI
 
 # ===== Statistics =====
 
-# Mean (average)
-pub let mean = fn(arr) => sum(arr) / len(arr)
+# There is no lib `mean`: the builtin mean (avg) is the average, a Float, and NaN
+# for an empty array. A lib definition would shadow it on import with different results.
 
 # Export all public items
 export {
@@ -97,6 +99,5 @@ export {
     is_even, is_odd, is_positive, is_negative, is_zero, sign,
     lerp, inv_lerp, square, cube,
     gcd, lcm, factorial, fib,
-    deg_to_rad, rad_to_deg,
-    mean
+    deg_to_rad, rad_to_deg
 }
