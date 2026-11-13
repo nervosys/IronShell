@@ -38261,6 +38261,78 @@ fn check_archive_protected(
     Ok(())
 }
 
+/// The directories under `dir`'s first existing ancestor that do not exist yet,
+/// outermost first, appended to `out` unless already there. The paths are in the
+/// journal's spelling.
+fn plan_missing_dirs(
+    dir: &std::path::Path,
+    seen: &mut std::collections::HashSet<String>,
+    out: &mut Vec<String>,
+) {
+    let mut missing: Vec<std::path::PathBuf> = Vec::new();
+    let mut cursor = Some(dir);
+    while let Some(d) = cursor {
+        if d.as_os_str().is_empty() || d.exists() {
+            break;
+        }
+        missing.push(d.to_path_buf());
+        cursor = d.parent();
+    }
+    for d in missing.into_iter().rev() {
+        let p = crate::journal::normalized_path(&d.to_string_lossy());
+        if seen.insert(p.clone()) {
+            out.push(p);
+        }
+    }
+}
+
+/// Every path an extraction of `entries` (name, is-a-directory) under `root`
+/// will create or overwrite, in the order the journal step must hold them: each
+/// missing directory before what goes in it. Undo walks the step backwards, so
+/// files go first and each created directory is removed innermost first, and
+/// only while empty. Names are split as the extractors split them. An entry that
+/// would escape `root` is left out (the extractors refuse it).
+fn extraction_journal_paths(
+    root: &std::path::Path,
+    entries: impl Iterator<Item = (String, bool)>,
+) -> Vec<String> {
+    let mut seen = std::collections::HashSet::new();
+    let mut out = Vec::new();
+    plan_missing_dirs(root, &mut seen, &mut out);
+    for (name, is_dir) in entries {
+        if archive_entry_escapes(&name) {
+            continue;
+        }
+        let mut target = root.to_path_buf();
+        let mut any = false;
+        for part in name
+            .split(['/', '\\'])
+            .filter(|p| !p.is_empty() && *p != ".")
+        {
+            target.push(part);
+            any = true;
+        }
+        if !any {
+            continue;
+        }
+        if is_dir {
+            plan_missing_dirs(&target, &mut seen, &mut out);
+            continue;
+        }
+        if let Some(parent) = target.parent() {
+            plan_missing_dirs(parent, &mut seen, &mut out);
+        }
+        if target.is_dir() {
+            continue;
+        }
+        let p = crate::journal::normalized_path(&target.to_string_lossy());
+        if seen.insert(p.clone()) {
+            out.push(p);
+        }
+    }
+    out
+}
+
 fn refuse_archive_entry(builtin: &str, name: &str) -> anyhow::Error {
     crate::safety::policy_deny(
         builtin,
@@ -38593,6 +38665,32 @@ fn zip_extract_in_process(archive: &str, dest: &str) -> Result<()> {
     let file = std::fs::File::open(archive).map_err(|e| crate::safety::fs_error(B, archive, &e))?;
     let mut zip = zip::ZipArchive::new(file).map_err(|e| zip_not_an_archive(B, archive, e))?;
     let root = std::path::Path::new(dest);
+    // One journal step for everything this call writes, recorded before the
+    // first byte: each file it creates (undo removes it) or overwrites (undo
+    // puts the bytes back), and each directory it creates. The archive is only
+    // read, so it is not in the step.
+    if crate::journal::enabled() {
+        let mut listed: Vec<(String, bool)> = Vec::new();
+        for i in 0..zip.len() {
+            let f = zip
+                .by_index_raw(i)
+                .map_err(|e| zip_not_an_archive(B, archive, e))?;
+            let name = f
+                .name()
+                .map(|n| n.into_owned())
+                .unwrap_or_else(|_| String::from_utf8_lossy(f.name_raw()).into_owned());
+            if f.is_symlink() {
+                continue;
+            }
+            let is_dir = f.is_dir() || name.ends_with('/') || name.ends_with('\\');
+            listed.push((name, is_dir));
+        }
+        crate::journal::record_group(
+            B,
+            crate::safety::Effect::WriteLocal,
+            extraction_journal_paths(root, listed.into_iter()),
+        );
+    }
     std::fs::create_dir_all(root).map_err(|e| crate::safety::fs_error(B, dest, &e))?;
     let mut written: usize = 0;
     let mut links: usize = 0;
@@ -38698,6 +38796,12 @@ fn bi_zip_add(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
     let members = zip_resolve_members("zip_add", &files)?;
     // The one existing archive is rewritten in place.
     crate::tx::snapshot(&archive);
+    // The journal keeps the archive's previous bytes; undo writes them back.
+    crate::journal::record_group(
+        "zip_add",
+        crate::safety::Effect::WriteLocal,
+        vec![archive.clone()],
+    );
     let tmp = format!("{archive}.ish-tmp-{}", std::process::id());
     let out = std::fs::OpenOptions::new()
         .write(true)
@@ -38811,8 +38915,20 @@ fn bi_tar_create(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
     }
 
     let out = guard_local_write("tar_create", &archive)?;
-    let mut argv: Vec<&str> = vec!["-c", "-f", "-", "--"];
-    argv.extend(members.iter().map(String::as_str));
+    // Each member is stored under a relative name (see `tar_member_name`), so
+    // extraction does not recreate the absolute tree it came from. tar is told
+    // where to find each one with `-C`.
+    let placed: Vec<(String, String)> = members.iter().map(|m| tar_member_name(m)).collect();
+    let mut argv: Vec<&str> = vec!["-c", "-f", "-"];
+    let mut dir_now: Option<&str> = None;
+    for (dir, name) in &placed {
+        if dir_now != Some(dir.as_str()) {
+            argv.push("-C");
+            argv.push(dir.as_str());
+            dir_now = Some(dir.as_str());
+        }
+        argv.push(name.as_str());
+    }
     // A .tar.gz or .tgz name gets a gzipped stream, which tar_list and
     // tar_extract read back. The plain tar stream was written under that name.
     if archive_kind(&archive) == Some("tar.gz") {
@@ -38821,6 +38937,48 @@ fn bi_tar_create(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
         tool_to_new_file("tar_create", "tar", &argv, &out)?;
     }
     Ok(Value::Bool(true))
+}
+
+/// How `tar_create` stores one member: the directory tar is run from, and the
+/// name it stores. A member inside the current directory is stored as its path
+/// from it (normalised, so `./a/../b` is `b`, and never with `..`); one outside
+/// it, or the current directory itself, under its last component, with its tree
+/// below that for a folder. The name never starts with `-`, so tar reads it as a
+/// name, and always uses `/`.
+fn tar_member_name(member: &str) -> (String, String) {
+    let base = crate::journal::normalized_path(&crate::safety::resolve_path_str("."));
+    let abs = crate::journal::normalized_path(member);
+    let abs_path = std::path::Path::new(&abs);
+    let (dir, name) = match abs_path
+        .strip_prefix(&base)
+        .ok()
+        .filter(|rel| rel.components().next().is_some())
+    {
+        Some(rel) => (base.clone(), rel.to_path_buf()),
+        None => match (abs_path.parent(), abs_path.file_name()) {
+            (Some(parent), Some(last)) => (
+                parent.to_string_lossy().into_owned(),
+                std::path::PathBuf::from(last),
+            ),
+            _ => (abs.clone(), std::path::PathBuf::from(".")),
+        },
+    };
+    let parts: Vec<String> = name
+        .components()
+        .filter_map(|c| match c {
+            std::path::Component::Normal(p) => Some(p.to_string_lossy().into_owned()),
+            _ => None,
+        })
+        .collect();
+    let mut name = if parts.is_empty() {
+        ".".to_string()
+    } else {
+        parts.join("/")
+    };
+    if name.starts_with('-') {
+        name = format!("./{name}");
+    }
+    (dir, name)
 }
 
 fn bi_tar_extract(args: Vec<Value>, _input: Option<Value>) -> Result<Value> {
@@ -38850,6 +39008,23 @@ fn bi_tar_extract(args: Vec<Value>, _input: Option<Value>) -> Result<Value> {
     check_archive_budget("tar_extract", declared)?;
     let mut cmd = crate::safety::child_command("tar");
     cmd.args(["-xvf", &archive]);
+    // The journal step for the files and directories this call writes: see
+    // `extraction_journal_paths`. Recorded after the jail has passed, before the
+    // destination is created or anything is written. The archive is not in it.
+    let journal_step = |root: &str| {
+        if crate::journal::enabled() {
+            crate::journal::record_group(
+                "tar_extract",
+                crate::safety::Effect::WriteLocal,
+                extraction_journal_paths(
+                    std::path::Path::new(root),
+                    members
+                        .iter()
+                        .map(|(n, _)| (n.clone(), n.ends_with('/') || n.ends_with('\\'))),
+                ),
+            );
+        }
+    };
     if let Some(d) = dest {
         crate::safety::reject_option_like("tar_extract", std::slice::from_ref(&d))?;
         // The central check judges only paths that already exist. A `-C`
@@ -38859,10 +39034,12 @@ fn bi_tar_extract(args: Vec<Value>, _input: Option<Value>) -> Result<Value> {
         check_archive_protected("tar_extract", &d, &members)?;
         // unzip and Expand-Archive create a missing destination; `tar -C` fails
         // on one ("could not chdir"), so it is created here, after the jail.
+        journal_step(&d);
         std::fs::create_dir_all(&d).map_err(|e| crate::safety::fs_error("tar_extract", &d, &e))?;
         cmd.args(["-C", &d]);
     } else {
         check_archive_protected("tar_extract", ".", &members)?;
+        journal_step(".");
     }
     // Archives can be large; extraction is bounded by the long deadline.
     let output = bounded_cmd_output("tar_extract", "tar", cmd, TOOL_LONG_DEADLINE_SECS)?;
@@ -39372,6 +39549,13 @@ fn bi_bzip2_compress(args: Vec<Value>, _input: Option<Value>) -> Result<Value> {
     let file = crate::safety::resolve_path_str(&file);
     let out = guard_local_write("bzip2_compress", &format!("{file}.bz2"))?;
     crate::tx::snapshot(&out); // absent until written: bzip2 will not replace it
+
+    // The journal step names the file bzip2 writes, not the input it only reads.
+    crate::journal::record_group(
+        "bzip2_compress",
+        crate::safety::Effect::WriteLocal,
+        vec![out.clone()],
+    );
     let mut cmd = crate::safety::child_command("bzip2");
     cmd.args(["-k", &file]);
     // Compressing a large file can outlast the short deadlines.
@@ -49647,6 +49831,13 @@ fn bi_db_sqlite_backup(args: Vec<Value>, _input: Option<Value>) -> Result<Value>
         ));
     }
     crate::tx::snapshot(&backup_path);
+    // The journal step names the backup (absent before, or replaced), never the
+    // database, which is only read; a default `<db>.backup` is named by no argument.
+    crate::journal::record_group(
+        "db_sqlite_backup",
+        crate::safety::Effect::WriteLocal,
+        vec![backup_path.clone()],
+    );
     sqlite_db_file("db_sqlite_backup", &db_path)?;
     sqlite_vacuum_into("db_sqlite_backup", &db_path, &backup_path)?;
     Ok(Value::Bool(true))
@@ -53828,6 +54019,13 @@ fn bi_file_backup(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
         reversible: true,
         fs_paths: true,
     })?;
+    // The journal step names the file this call writes (the backup), not the
+    // source it only reads: undo removes a new backup, or restores one replaced.
+    crate::journal::record_group(
+        "file_backup",
+        crate::safety::Effect::WriteLocal,
+        vec![backup.clone()],
+    );
     let bytes = backup_file_atomically(&path, &backup)?;
     Ok(Value::Record(BTreeMap::from([
         ("path".into(), Value::Str(path)),
@@ -68561,6 +68759,19 @@ fn create_new_output(builtin: &str, path: &str) -> Result<std::fs::File> {
     // zstd) are in tx::IRREVERSIBLE and refused inside a transaction before they
     // get here, and the gzip builtins snapshot their output themselves.
     crate::tx::snapshot(path);
+    // The undo journal's step for the file this call creates: absent before, so
+    // undo removes it. Only a builtin that writes files is recorded; a failed
+    // call's step is dropped by the dispatcher.
+    if matches!(
+        crate::safety::effect_of(builtin),
+        crate::safety::Effect::WriteLocal | crate::safety::Effect::Destructive
+    ) {
+        crate::journal::record_group(
+            builtin,
+            crate::safety::Effect::WriteLocal,
+            vec![path.to_string()],
+        );
+    }
     std::fs::OpenOptions::new()
         .write(true)
         .create_new(true)
@@ -68576,6 +68787,17 @@ fn create_new_output(builtin: &str, path: &str) -> Result<std::fs::File> {
                 crate::safety::fs_error(builtin, path, &e)
             }
         })
+}
+
+/// The undo journal's step for a file the call is about to create (absent
+/// before, so undo removes it). For a tool that writes its own output file, which
+/// no argument of the journal's guess names, or names as a bare file name.
+fn journal_new_file(builtin: &str, path: &str) {
+    crate::journal::record_group(
+        builtin,
+        crate::safety::Effect::WriteLocal,
+        vec![path.to_string()],
+    );
 }
 
 /// Refuses an output path that already exists, for a tool that writes its own file.
@@ -69095,6 +69317,13 @@ fn bi_ssh_keygen(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
     let public = format!("{filename}.pub");
     refuse_existing("ssh_keygen", &filename)?;
     refuse_existing("ssh_keygen", &public)?;
+    // Both files are new: one journal step, so undo removes the pair (the
+    // public key is derived, so no argument names it).
+    crate::journal::record_group(
+        "ssh_keygen",
+        crate::safety::Effect::WriteLocal,
+        vec![filename.clone(), public.clone()],
+    );
     let mut cmd = crate::safety::child_command("ssh-keygen");
     cmd.args(["-t", key_type.as_str(), "-f", filename.as_str(), "-N", ""]);
     match run_checked("ssh_keygen", "ssh-keygen", cmd, LOCAL_DEADLINE_SECS) {
@@ -69626,6 +69855,7 @@ fn bi_openssl_genrsa(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
     refuse_option("openssl_genrsa", &file_path)?;
     let file_path = guard_local_write("openssl_genrsa", &file_path)?;
     refuse_existing("openssl_genrsa", &file_path)?;
+    journal_new_file("openssl_genrsa", &file_path);
     let bits_text = bits.to_string();
     let mut cmd = crate::safety::child_command("openssl");
     cmd.args(["genrsa", "-out", file_path.as_str(), bits_text.as_str()]);
@@ -69774,6 +70004,7 @@ fn bi_gpg_encrypt(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
     regular_file_arg("gpg_encrypt", &input)?;
     let output_file = guard_local_write("gpg_encrypt", &format!("{input}.gpg"))?;
     refuse_existing("gpg_encrypt", &output_file)?;
+    journal_new_file("gpg_encrypt", &output_file);
     let mut cmd = crate::safety::child_command("gpg");
     cmd.args([
         "--batch",
@@ -69824,6 +70055,7 @@ fn bi_gpg_decrypt(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
         .unwrap_or_else(|| format!("{input}.decrypted"));
     let output_file = guard_local_write("gpg_decrypt", &stem)?;
     refuse_existing("gpg_decrypt", &output_file)?;
+    journal_new_file("gpg_decrypt", &output_file);
     let mut cmd = crate::safety::child_command("gpg");
     cmd.args([
         "--batch",
@@ -74545,6 +74777,7 @@ fn bi_age_encrypt(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
         &crate::safety::resolve_path_str(&output_file),
     )?;
     refuse_existing("age_encrypt", &output_file)?;
+    journal_new_file("age_encrypt", &output_file);
     let mut cmd = crate::safety::child_command("age");
     cmd.args([
         "-r",
@@ -74613,6 +74846,7 @@ fn bi_age_decrypt(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
         &crate::safety::resolve_path_str(&output_file),
     )?;
     refuse_existing("age_decrypt", &output_file)?;
+    journal_new_file("age_decrypt", &output_file);
     let mut cmd = crate::safety::child_command("age");
     cmd.args([
         "-d",
@@ -74650,6 +74884,7 @@ fn bi_age_keygen(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
     let output_file =
         guard_local_write("age_keygen", &crate::safety::resolve_path_str(&output_file))?;
     refuse_existing("age_keygen", &output_file)?;
+    journal_new_file("age_keygen", &output_file);
     let mut cmd = crate::safety::child_command("age-keygen");
     cmd.args(["-o", output_file.as_str()]);
     // With -o, age-keygen writes the identity to the file and prints the public

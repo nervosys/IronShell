@@ -3432,10 +3432,13 @@ fn check_write_in_place(path: &str) -> Result<String, String> {
 /// so the `reversible` the guard is told is true.
 fn write_file(path: &str, data: &[u8], append: bool) -> Result<(), String> {
     let mark = crate::journal::mark();
-    crate::journal::record_before(
+    // Named explicitly, not guessed from an argument: the guess skips a bare
+    // file name (`e1.txt`, which has no directory part), which is what a human
+    // session passes, so only agent mode's absolute paths were recorded.
+    crate::journal::record_paths(
         "posix",
         crate::safety::Effect::WriteLocal,
-        &[crate::value::Value::Str(path.to_string())],
+        vec![path.to_string()],
     );
     // The handle is judged for hard links and truncated only after that check.
     let res = crate::safety::open_in_place("posix", Path::new(path), append)
@@ -4772,6 +4775,29 @@ fn tee(args: &[String], stdin: &mut Input, sink: &mut Sink) -> Util {
     Util::Done(status)
 }
 
+/// Record, before `mkdir` runs, the directories it will create under `path`:
+/// the missing ones outermost first (only `path` itself without `-p`). Nothing
+/// is recorded when the journal is off or the directory exists.
+fn record_created_dirs(path: &str, parents: bool) {
+    let target = crate::journal::normalized_path(path);
+    let mut created: Vec<String> = Vec::new();
+    let mut cursor = Some(Path::new(&target));
+    while let Some(dir) = cursor {
+        if dir.as_os_str().is_empty() || dir.exists() {
+            break;
+        }
+        created.push(dir.display().to_string());
+        if !parents {
+            break;
+        }
+        cursor = dir.parent();
+    }
+    created.reverse();
+    if !created.is_empty() {
+        crate::journal::record_group("mkdir", crate::safety::Effect::WriteLocal, created);
+    }
+}
+
 /// `mkdir [-p] DIR...`: each directory is judged by the jail as a `>` target is,
 /// so a directory outside the workspace is refused and nothing is made.
 fn mkdir(args: &[String], sink: &mut Sink) -> Util {
@@ -4793,11 +4819,16 @@ fn mkdir(args: &[String], sink: &mut Sink) -> Util {
                 continue;
             }
         };
+        // Every directory this creates is one journal step, as the mkdir
+        // builtin records it: undo removes them innermost first, while empty.
+        let mark = crate::journal::mark();
+        record_created_dirs(&resolved, parents);
         let res = if parents {
             std::fs::create_dir_all(&resolved)
         } else {
             std::fs::create_dir(&resolved)
         };
+        crate::journal::settle(mark, res.is_ok());
         if let Err(e) = res {
             let why = if e.kind() == std::io::ErrorKind::AlreadyExists {
                 "File exists".to_string()

@@ -769,9 +769,43 @@ pub fn record_before(builtin: &str, effect: Effect, args: &[Value]) {
 /// directory removal is recorded as irreversible ([`record_irreversible`]). The
 /// guess resolves a relative name against the process directory, not the
 /// workspace, so it captured the wrong path.
+///
+/// The archive and compression builtins are here too: the guess takes every
+/// string argument that is a file, which is the file they only read (the
+/// archive being extracted, the source being compressed), while the files they
+/// write are never an argument. Each records the files it writes, before it
+/// writes them: an extraction every member and created directory, a creator its
+/// new output, `zip_add` and `file_backup` the file they replace.
 fn records_its_own_steps(builtin: &str) -> bool {
     let canonical = crate::signature::signature_of(builtin).map_or(builtin, |s| s.name);
-    matches!(canonical, "file_move" | "file_mkdir" | "rmdir")
+    matches!(
+        canonical,
+        "file_move"
+            | "file_mkdir"
+            | "rmdir"
+            | "zip_extract"
+            | "tar_extract"
+            | "zip_create"
+            | "zip_add"
+            | "tar_create"
+            | "gzip_compress"
+            | "gzip_decompress"
+            | "bzip2_compress"
+            | "bzip2_decompress"
+            | "xz_compress"
+            | "xz_decompress"
+            | "zstd_compress"
+            | "zstd_decompress"
+            | "file_backup"
+            | "ssh_keygen"
+            | "db_sqlite_backup"
+            | "openssl_genrsa"
+            | "gpg_encrypt"
+            | "gpg_decrypt"
+            | "age_encrypt"
+            | "age_decrypt"
+            | "age_keygen"
+    )
 }
 
 /// Record the pre-state of named paths that a builtin is about to write or

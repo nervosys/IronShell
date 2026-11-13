@@ -11151,7 +11151,7 @@ pub static SIGNATURES: &[Signature] = &[
             },
         ],
         returns: "Bool",
-        doc: "Create a tar archive at a new path from the given members, and return true. The archive is streamed to a new file, so an existing one is refused rather than truncated; in agent mode or when a workspace is set (`--workspace` or IRONSHELL_WORKSPACE) it is jailed to the workspace, and it is capped in size and deadlined; a partial archive is removed on failure. Names that could be read as options are refused. Piped input is refused.",
+        doc: "Create a tar archive at a new path from the given members, and return true. The archive is streamed to a new file, so an existing one is refused rather than truncated; in agent mode or when a workspace is set (`--workspace` or IRONSHELL_WORKSPACE) it is jailed to the workspace, and it is capped in size and deadlined; a partial archive is removed on failure. Names that could be read as options are refused. Piped input is refused. A member inside the current directory is stored by its relative path as written (normalised, never with `..`); one outside it, or the current directory itself, under its last path component, with its tree below that for a folder, so no absolute path is stored (zip_create stores every member under its last component). The journal step for the call is the archive it creates.",
         examples: &[
             (r#"(try { tar_create("a.tar") } catch e { e.error.code })"#, "E_BAD_ARG"),
             (r#"(try { tar_create("-x.tar", "f") } catch e { e.error.code })"#, "E_BAD_ARG"),
@@ -11943,7 +11943,7 @@ pub static SIGNATURES: &[Signature] = &[
             rest("files", Ty::Str, "one or more files to add"),
         ],
         returns: "Bool",
-        doc: "Create a zip archive from files and folders, in-process on every platform. A folder is stored with everything in it, empty folders included; each member is stored under its last path component. An existing archive is refused (use zip_add); a missing member is E_NOT_FOUND; two members with one stored name are E_BAD_ARG. A failed run removes the archive it started.",
+        doc: "Create a zip archive from files and folders, in-process on every platform. A folder is stored with everything in it, empty folders included; each member is stored under its last path component (tar_create keeps a relative path inside the current directory as written, and uses the last component only for a member outside it). An existing archive is refused (use zip_add); a missing member is E_NOT_FOUND; two members with one stored name are E_BAD_ARG. A failed run removes the archive it started.",
         examples: &[
             (r#"(try { zip_create("out.zip", "no-such-file.txt") } catch e { e.error.code })"#, "E_NOT_FOUND"),
             (r#"(try { zip_create("out.zip") } catch e { e.error.code })"#, "E_BAD_ARG"),
