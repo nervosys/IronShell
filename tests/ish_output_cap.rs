@@ -10,12 +10,9 @@ use std::process::{Command, Output, Stdio};
 
 /// The `ish` binary built alongside this test.
 fn ish() -> PathBuf {
-    let mut p = std::env::current_exe().expect("test exe path");
-    p.pop();
-    if p.ends_with("deps") {
-        p.pop();
-    }
-    p.join(format!("ish{}", std::env::consts::EXE_SUFFIX))
+    // Cargo names the binary it built; the test binary's own folder is not
+    // a reliable guess (newer Cargo builds tests under build/<crate>/out).
+    std::path::PathBuf::from(env!("CARGO_BIN_EXE_ish"))
 }
 
 /// A string of 31 two-byte characters (62 bytes). Almost any cap lands in the
