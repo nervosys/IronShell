@@ -116,6 +116,37 @@ fn cmp_int_float_covers_infinities_nan_and_range_edges() {
     assert_eq!(cmp_int_float(-1, -1.5), Some(Ordering::Greater));
 }
 
+// ---- `\U` with four to seven hex digits is refused, not kept as text ----
+
+fn try_run(src: &str) -> Result<Value, String> {
+    let mut env = iron_shell::modules::env_with_modules();
+    let stmts = iron_shell::parser::parse_program(src).map_err(|e| format!("{e:#}"))?;
+    iron_shell::eval::eval_program(&stmts, &mut env).map_err(|e| format!("{e:#}"))
+}
+
+#[test]
+fn a_long_unicode_escape_with_four_to_seven_digits_is_e_parse() {
+    for src in [
+        r#""x\U0001F60 y""#,
+        r#""\U000041""#,
+        r#""\U0000041""#,
+        r#""\U0001F60""#,
+    ] {
+        let msg = try_run(src).expect_err("must be refused");
+        assert!(msg.contains("E_PARSE"), "{src}: {msg}");
+        assert!(msg.contains("invalid unicode escape"), "{src}: {msg}");
+        assert!(msg.contains("UHHHHHHHH"), "{src}: {msg}");
+    }
+}
+
+#[test]
+fn a_backslash_u_with_fewer_than_four_digits_stays_literal() {
+    assert_eq!(try_run(r#""C:\UEFI""#), Ok(text("C:\\UEFI")));
+    assert_eq!(try_run(r#""C:\Users""#), Ok(text("C:\\Users")));
+    assert_eq!(try_run(r#""\U041""#), Ok(text("\\U041")));
+    assert_eq!(try_run(r#""\U""#), Ok(text("\\U")));
+}
+
 // ---- to_csv keeps a row whose only field is empty ----
 
 #[test]

@@ -502,7 +502,8 @@ fn unclosed_interpolation(line: usize, col: usize) -> anyhow::Error {
     ))
 }
 
-/// A `\u` escape that is not `\uHHHH` or `\u{H..H}` naming a scalar value. `at`
+/// A `\u` escape that is not `\uHHHH` or `\u{H..H}` naming a scalar value (or a
+/// `\U` with four to seven hex digits, which is not the eight it needs). `at`
 /// is the index just after the `u`; the message quotes the escape as written,
 /// up to the closing quote, a newline, or its own end.
 fn invalid_unicode_escape(
@@ -1202,6 +1203,23 @@ fn lex_marked(src: &str) -> Result<(Vec<Spanned>, std::collections::HashSet<usiz
                                         }
                                     },
                                     None => {
+                                        // Four to seven hex digits after `\U` are a
+                                        // malformed escape, not text: `\U0001F60 ` is
+                                        // refused. Fewer keep the backslash, so
+                                        // `C:\Users` and `C:\UEFI` read as written.
+                                        let run = chars[pos..]
+                                            .iter()
+                                            .take_while(|c| c.is_ascii_hexdigit())
+                                            .count();
+                                        if (4..=7).contains(&run) {
+                                            return Err(invalid_unicode_escape(
+                                                escape_line,
+                                                escape_col,
+                                                &chars,
+                                                pos,
+                                                'U',
+                                            ));
+                                        }
                                         s.push('\\');
                                         s.push('U');
                                     }
