@@ -16,22 +16,34 @@ pub let read_trimmed = fn(path) => trim(cat(path))
 
 # ===== File Path Utilities =====
 
-# Get file extension
-pub let file_ext = fn(path) => last(split(path, "."))
+# The path with backslashes as slashes and trailing slashes removed
+let path_clean = fn(path) => regex_replace(replace(path, "\\", "/"), "/+$", "")
 
-# Get filename from path (works with both / and \)
-pub let file_name = fn(path) => last(split(replace(path, "\\", "/"), "/"))
+# Get filename from path (works with both / and \; a trailing slash is ignored)
+pub let file_name = fn(path) => last(split(path_clean(path), "/"))
 
-# Get directory from path
-pub let file_dir = fn(path) => join(slice(split(replace(path, "\\", "/"), "/"), 0, len(split(replace(path, "\\", "/"), "/")) - 1), "/")
+# Get file extension of the last path component, without its dot. "" when there
+# is none: a leading dot does not start one (".bashrc" has no extension).
+pub let file_ext = fn(path) => match {
+    _ if regex_match(regex_replace(file_name(path), "^\\.+", ""), "\\.") => last(split(file_name(path), ".")),
+    _ => ""
+}
 
-# Join path components
-pub let path_join = fn(parts) => join(parts, "/")
+# Get directory from path: "/" for a file directly under the root, "" for a
+# bare name with no directory part
+pub let file_dir = fn(path) => match {
+    _ if !regex_match(path_clean(path), "/") => "",
+    _ if regex_match(path_clean(path), "^/[^/]*$") => "/",
+    _ => regex_replace(path_clean(path), "/[^/]*$", "")
+}
+
+# Join path components with one slash at each joint: "a/" + "/b" is "a/b"
+pub let path_join = fn(parts) => regex_replace(join(parts, "/"), "/{2,}", "/")
 
 # ===== Data Serialization =====
 
-# Convert to pretty-printed JSON
-pub let to_json_pretty = fn(data) => json_stringify(data)
+# Convert to pretty-printed JSON (two spaces per level)
+pub let to_json_pretty = fn(data) => to_json(data, 2)
 
 # Parse YAML content
 pub let parse_yaml = fn(content) => from_yaml(content)

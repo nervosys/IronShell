@@ -35,16 +35,18 @@ pub let or_p = fn(p1, p2) => fn(x) => p1(x) || p2(x)
 
 # ===== Collection Utilities =====
 
-# Find first element matching predicate
-pub let find = fn(arr, pred) => first(arr | where(pred))
-
-# Drop first n elements
-pub let drop = fn(arr, n) => arr | slice(n, len(arr))
+# Drop first n elements; a negative n is refused.
+# (There is no lib `find`: it would shadow the builtin `find` (file search) on
+# import. For the first element matching a predicate, write arr | where(pred) | first.)
+pub let drop = fn(arr, n) => match {
+    _ if n < 0 => error("drop: count must not be negative", {n: n}),
+    _ => arr | slice(n, len(arr))
+}
 
 # Export all public items
 export {
     curry, uncurry, partial, partial_right,
     twice,
     complement, and_p, or_p,
-    find, drop
+    drop
 }
