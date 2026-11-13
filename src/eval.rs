@@ -2706,6 +2706,23 @@ fn interpolation_name_error(e: anyhow::Error) -> anyhow::Error {
     }
 }
 
+/// A `${` that no `}` closes. The lexer refuses these in double-quoted strings,
+/// so this is the check for a single-quoted one, which is not lexed for holes.
+fn unclosed_interpolation_error() -> anyhow::Error {
+    anyhow::Error::new(crate::parser::ParseError::with_hint(
+        "unclosed interpolation `${`: no `}` closes it before the string ends",
+        "close it with }, or write \\${ for a literal ${",
+    ))
+}
+
+/// A `${...}` hole that is not one expression.
+fn bad_hole_error(expr: &str) -> anyhow::Error {
+    anyhow::Error::new(crate::parser::ParseError::with_hint(
+        format!("the interpolation `${{{expr}}}` is not one expression"),
+        "write one expression inside ${...}, or write \\${ for a literal ${",
+    ))
+}
+
 /// Interpolate ${expr} patterns in a string
 fn interpolate_string(s: &str, env: &mut Env) -> Result<Value> {
     let mut result = String::new();
@@ -2717,52 +2734,47 @@ fn interpolate_string(s: &str, env: &mut Env) -> Result<Value> {
             // The hole's end is found by the lexer's own rule, so a string
             // literal inside the hole can hold `}` or `${` without ending it.
             let body = i + 2;
-            let (expr_str, next) = match crate::parser::interp_hole_end(&chars, body) {
-                Some(end) => (chars[body..end - 1].iter().collect::<String>(), end),
-                None => (chars[body..].iter().collect::<String>(), chars.len()),
+            let expr_str = match crate::parser::interp_hole_end(&chars, body) {
+                Some(end) => {
+                    i = end;
+                    chars[body..end - 1].iter().collect::<String>()
+                }
+                // A hole no `}` closes is refused, as the lexer refuses one in
+                // a literal. A single-quoted string is not lexed for holes, so
+                // this is where its unclosed `${` is caught.
+                None => return Err(unclosed_interpolation_error()),
             };
-            i = next;
 
-            // Parse and evaluate the expression
-            match crate::parser::parse_program(&expr_str) {
-                Ok(stmts) if !stmts.is_empty() => {
-                    if let crate::ast::Stmt::Expr(expr) = &stmts[0] {
-                        match eval_expr(expr, env) {
-                            Ok(val) => {
-                                // `to_display_string` renders every variant the
-                                // way a user wrote it. The fallback here used to
-                                // be `format!("{:?}", other)`, so interpolating
-                                // an array or a record printed Rust's Debug —
-                                // `"x: ${r}"` came out as
-                                // `x: Record({"a": Int(1)})`.
-                                result.push_str(&val.to_display_string());
-                            }
-                            // A name nothing binds is an error of the string, not a
-                            // hole to print: `"${nosuch}"` must not come out as text.
-                            Err(e)
-                                if crate::safety::code_of(&e)
-                                    == crate::safety::ErrorCode::UnknownName =>
-                            {
-                                return Err(interpolation_name_error(e));
-                            }
-                            Err(e) => {
-                                // On error, keep the ${expr} literal
-                                result.push_str(&format!("${{{}}} [error: {}]", expr_str, e));
-                            }
-                        }
-                    } else {
-                        result.push_str(&format!("${{{}}}", expr_str));
-                    }
+            // Parse and evaluate the expression. A hole that does not parse, or
+            // is not one expression, is refused: printing its text as if it had
+            // been interpolated hid the mistake.
+            let stmts = match crate::parser::parse_program(&expr_str) {
+                Ok(stmts) => stmts,
+                Err(_) => return Err(bad_hole_error(&expr_str)),
+            };
+            let expr = match stmts.as_slice() {
+                [crate::ast::Stmt::Expr(expr)] => expr,
+                _ => return Err(bad_hole_error(&expr_str)),
+            };
+            // An error in the hole is the error of the whole expression, so a
+            // `try` around the string catches it. It used to be printed inside
+            // the text as `${...} [error: ...]` and the string ran on.
+            match eval_expr(expr, env) {
+                Ok(val) => {
+                    // `to_display_string` renders every variant the
+                    // way a user wrote it. The fallback here used to
+                    // be `format!("{:?}", other)`, so interpolating
+                    // an array or a record printed Rust's Debug —
+                    // `"x: ${r}"` came out as
+                    // `x: Record({"a": Int(1)})`.
+                    result.push_str(&val.to_display_string());
                 }
-                _ => {
-                    // A hole that does not parse is reported the same way one
-                    // that fails to evaluate is. Keeping the literal silently
-                    // meant `"${msg.from}"` — invalid because `from` is a
-                    // keyword — printed itself verbatim, which reads as a
-                    // successful interpolation of a string that happens to look
-                    // like one.
-                    result.push_str(&format!("${{{}}} [error: does not parse]", expr_str));
+                // A name nothing binds is an error of the string, not a
+                // hole to print: `"${nosuch}"` must not come out as text.
+                Err(e) if crate::safety::code_of(&e) == crate::safety::ErrorCode::UnknownName => {
+                    return Err(interpolation_name_error(e));
                 }
+                Err(e) => return Err(e),
             }
         } else {
             result.push(if chars[i] == crate::parser::ESCAPED_DOLLAR {

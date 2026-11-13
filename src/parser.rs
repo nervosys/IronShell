@@ -482,6 +482,18 @@ fn unterminated_string(line: usize, col: usize) -> anyhow::Error {
     ))
 }
 
+/// A `${` interpolation hole with no `}` to close it. Reported at the `$`, where
+/// the hole starts and where the fix goes.
+fn unclosed_interpolation(line: usize, col: usize) -> anyhow::Error {
+    anyhow::Error::new(ParseError::with_hint(
+        format!(
+            "unclosed interpolation `${{` at line {}, column {}",
+            line, col
+        ),
+        "close it with }, or write \\${ for a literal ${",
+    ))
+}
+
 /// A `\u` escape that is not `\uHHHH` or `\u{H..H}` naming a scalar value. `at`
 /// is the index just after the `u`; the message quotes the escape as written,
 /// up to the closing quote, a newline, or its own end.
@@ -1103,6 +1115,10 @@ fn lex_marked(src: &str) -> Result<(Vec<Spanned>, std::collections::HashSet<usiz
                             }
                             continue;
                         }
+                        // A `${` that no `}` closes used to be kept as text, and
+                        // the string then evaluated the rest of itself as a hole:
+                        // `"a ${x"` printed `a 1`. It is refused where it starts.
+                        return Err(unclosed_interpolation(line, col.saturating_sub(1)));
                     }
                     if ch == '\\' {
                         // Where the backslash is, for a malformed `\u` report.
