@@ -38,6 +38,15 @@ fn on_eval_stack(f: fn()) {
     iron_shell::safety::with_eval_stack(f);
 }
 
+/// Held while a test evaluates declared examples. The undo journal is one per
+/// process, and `session_undo`'s examples undo the newest steps in it: run
+/// beside another loop's `file_write` examples, they undid that loop's steps
+/// and were refused, because the files had changed after them.
+fn examples_lock() -> std::sync::MutexGuard<'static, ()> {
+    static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    LOCK.lock().unwrap_or_else(|e| e.into_inner())
+}
+
 fn env() -> Env {
     static ISOLATED: std::sync::Once = std::sync::Once::new();
     ISOLATED.call_once(|| {
@@ -867,6 +876,7 @@ fn every_declaration_accepts_its_own_examples() {
 }
 
 fn every_declaration_accepts_its_own_examples_body() {
+    let _examples = examples_lock();
     // The examples are the part an agent copies, and they are also the cheapest
     // possible check that a declaration is not narrower than the builtin: if a
     // declaration rejects its own documented form, it will reject the agent's.
@@ -904,6 +914,7 @@ fn a_self_contained_example_produces_the_result_it_claims() {
 }
 
 fn a_self_contained_example_produces_the_result_it_claims_body() {
+    let _examples = examples_lock();
     // An example with a wrong expected value is a lie in the catalogue, which
     // is the one place an agent has no way to check.
     //
@@ -1232,6 +1243,7 @@ fn a_machine_dependent_example_answers_in_its_type_or_says_why_not() {
 }
 
 fn a_machine_dependent_example_answers_in_its_type_or_says_why_not_body() {
+    let _examples = examples_lock();
     for (name, why) in MACHINE_DEPENDENT {
         assert!(
             !why.trim().is_empty(),

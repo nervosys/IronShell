@@ -143,6 +143,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - String literals accept `\0`, `\'` and `\xHH` up to `\x7F`.
 - `ish -b` runs `${name%pat}`, `${name%%pat}`, `${name#pat}` and `${name##pat}`, and sed's `\U`, `\L`, `\u`, `\l` and `\E` in a replacement, as GNU sed does.
 - `journal()` rows carry `id`, the value `undo({id})` takes.
+- `ish -b` runs `sed -i` (and `-iSUFFIX` for a backup) in-process, through the workspace jail and the undo journal as a `>` redirection is; it used to need approval to run the real sed.
 
 ### Fixed
 
@@ -220,6 +221,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `to_yaml` writes an empty Record or Array as `{}` or `[]`, not Rust debug text; keeps a whole Float as `1.0`; and quotes yes, no, on, off, y and n so YAML 1.1 readers keep them as text. `from_yaml` reads `.inf` and `.nan` as Floats, decodes double-quoted escapes (`é`, `\U0001F600`, `\n`), and drops a comment after a quoted scalar.
 - A JSON lines error gives the file's line and the column, in `open` and in `sql`; a CSV error under CRLF gives the right line and says how many fields the row has.
 - A `from_json` parse error is not retryable; `from_toml` names a 64-bit overflow as one and gives a reason for a value missing after `=`.
+- `ish -b` `sort` breaks ties between equal keys on the whole line unless `-s` (or `-u`) is given, and `-r` reverses that too, as GNU sort does; `sort -k1,1` of `b 2`, `a 1`, `b 1`, `a 2` gave `b 2` before `b 1`.
+- `ish -b` `printf` reads an integer argument as a C constant, as bash does: `010` is 8, `0x1f` is 31, `'A` is 65; an invalid one (`08`, `12abc`) prints what it read, names it on stderr, and the status is 1.
+- `ish -b` `sed` keeps a missing final newline on stdout, and does not join a file without one to the next file's first line, as GNU sed does.
 
 
 ## [14.0.1] - 2026-11-08

@@ -4014,6 +4014,9 @@ fn printf(args: &[String], sink: &mut Sink) -> Util {
     let fmt: Vec<char> = fmt.chars().collect();
     let mut rest = args[1..].iter();
     let mut out = String::new();
+    // bash's complaints about integer arguments; they go to stderr only once the
+    // whole format is done, so a declined format is not reported twice.
+    let mut complaints: Vec<String> = Vec::new();
     loop {
         let mut consumed = false;
         let mut i = 0;
@@ -4103,21 +4106,28 @@ fn printf(args: &[String], sink: &mut Sink) -> Util {
                     }
                 }
                 'd' | 'i' | 'x' | 'X' | 'o' if precision.is_some() => return Util::Decline,
-                'd' | 'i' => match arg.trim().parse::<i64>() {
-                    Ok(n) => n.to_string(),
-                    Err(_) if arg.is_empty() => "0".into(),
-                    Err(_) => return Util::Decline,
-                },
-                'x' | 'X' | 'o' => match arg.trim().parse::<i64>() {
-                    // As bash does, a negative number is shown as 64 bits.
-                    Ok(n) => match conv {
+                'd' | 'i' | 'x' | 'X' | 'o' => {
+                    let n = if arg.is_empty() {
+                        0
+                    } else {
+                        match printf_int_arg(&arg) {
+                            Some((n, complaint)) => {
+                                if let Some(c) = complaint {
+                                    complaints.push(format!("printf: {arg}: {c}"));
+                                }
+                                n
+                            }
+                            None => return Util::Decline,
+                        }
+                    };
+                    match conv {
+                        'd' | 'i' => n.to_string(),
+                        // As bash does, a negative number is shown as 64 bits.
                         'x' => format!("{:x}", n as u64),
                         'X' => format!("{:X}", n as u64),
                         _ => format!("{:o}", n as u64),
-                    },
-                    Err(_) if arg.is_empty() => "0".into(),
-                    Err(_) => return Util::Decline,
-                },
+                    }
+                }
                 'f' => match arg.trim().parse::<f64>() {
                     Ok(v) if v.is_finite() => format!("{:.*}", precision.unwrap_or(6), v),
                     Err(_) if arg.is_empty() => format!("{:.*}", precision.unwrap_or(6), 0.0),
@@ -4165,7 +4175,68 @@ fn printf(args: &[String], sink: &mut Sink) -> Util {
         }
     }
     sink.out.extend_from_slice(out.as_bytes());
-    Util::Done(0)
+    for c in &complaints {
+        sink.eline(c);
+    }
+    Util::Done(if complaints.is_empty() { 0 } else { 1 })
+}
+
+/// How bash reads an integer argument of `printf` (its `getintmax`). A leading
+/// quote gives the code of the character after it. Otherwise the text is a C
+/// integer constant (`strtoimax` in base 0): leading blanks, an optional sign,
+/// `0x` for hex, a leading `0` for octal, decimal otherwise. The value is what
+/// was read before any text that is not part of the number, and the complaint
+/// is bash's words for that text. `None` when the value does not fit in 64
+/// bits, which is left to the real printf.
+fn printf_int_arg(arg: &str) -> Option<(i64, Option<&'static str>)> {
+    if let Some(rest) = arg.strip_prefix(['\'', '"']) {
+        return Some((rest.chars().next().map_or(0, |c| c as u32 as i64), None));
+    }
+    let body = arg.trim_start_matches([' ', '\t', '\n', '\r', '\x0b', '\x0c']);
+    let (neg, body) = match body.as_bytes().first().copied() {
+        Some(b'-') => (true, &body[1..]),
+        Some(b'+') => (false, &body[1..]),
+        _ => (false, body),
+    };
+    let hex = body.starts_with("0x") || body.starts_with("0X");
+    let (radix, prefix) = if hex {
+        (16, 2)
+    } else if body.starts_with('0') {
+        (8, 1)
+    } else {
+        (10, 0)
+    };
+    let digits = &body[prefix..];
+    let n = digits
+        .bytes()
+        .take_while(|b| (*b as char).is_digit(radix))
+        .count();
+    // In hex with no digit after `0x`, only the `0` is read.
+    let (value_digits, rest) = if radix == 16 && n == 0 {
+        ("", &body[1..])
+    } else if radix == 10 && n == 0 {
+        ("", body)
+    } else {
+        (&digits[..n], &digits[n..])
+    };
+    let complaint = if radix == 10 && n == 0 {
+        Some("invalid number")
+    } else if rest.is_empty() {
+        None
+    } else if hex {
+        Some("invalid hex number")
+    } else if radix == 8 && body.as_bytes().get(1).is_some_and(u8::is_ascii_digit) {
+        Some("invalid octal number")
+    } else {
+        Some("invalid number")
+    };
+    let mag = if value_digits.is_empty() {
+        0
+    } else {
+        u64::from_str_radix(value_digits, radix).ok()?
+    };
+    let value = if neg { -(mag as i128) } else { mag as i128 };
+    Some((i64::try_from(value).ok()?, complaint))
 }
 
 /// C's `%e`: one digit, the decimals, then `e`, a sign and at least two
@@ -5340,24 +5411,28 @@ fn sort(args: &[String], stdin: &mut Input, sink: &mut Sink) -> Util {
         }
         std::cmp::Ordering::Equal
     };
-    // With no keys, equal lines fall back to comparing the whole line, unless
-    // `-s`. With keys, equal lines keep their input order.
-    let last_resort = spec.keys.is_empty() && !spec.stable;
+    // Lines that compare equal fall back to comparing the whole line (GNU's
+    // last resort), unless `-s` or `-u`, which keep input order. A global `-r`
+    // reverses the whole comparison, the fallback included; a stable tie keeps
+    // its input order.
+    let last_resort = !spec.stable && !spec.unique;
     let mut order: Vec<usize> = (0..lines.len()).collect();
     order.sort_by(|&i, &j| {
-        by_keys(i, j).then_with(|| {
+        let o = by_keys(i, j).then_with(|| {
             if last_resort {
                 collate(&lines[i], &lines[j])
             } else {
                 std::cmp::Ordering::Equal
             }
-        })
+        });
+        if spec.reverse {
+            o.reverse()
+        } else {
+            o
+        }
     });
     if spec.unique {
         order.dedup_by(|&mut j, &mut i| by_keys(i, j) == std::cmp::Ordering::Equal);
-    }
-    if spec.reverse {
-        order.reverse();
     }
     for i in order {
         sink.out.extend_from_slice(lines[i].as_bytes());
@@ -5667,17 +5742,105 @@ fn subst_nth(
     out
 }
 
+/// The SUFFIX of a `sed` in-place option, or `None` when `s` is not one. GNU
+/// takes the suffix only attached (`-i.bak`), and `-i` alone has none. A suffix
+/// with `/` or `*` (GNU's backup-name template) declines.
+fn sed_inplace_suffix(s: &str) -> Option<String> {
+    let rest = s.strip_prefix("-i")?;
+    (!rest.contains(['/', '*'])).then(|| rest.to_string())
+}
+
+/// `sed -i` runs `sed` on each FILE in place. Each one is judged as a `>` target
+/// is ([`check_write_in_place`]) and read through the read jail, so an outside
+/// FILE is refused and left alone, as the other FILEs still run. Each is
+/// edited on its own: line numbers and `$` restart, and a range starts closed
+/// (GNU's `-s`). `q` stops after its FILE. With a SUFFIX the original bytes go
+/// to FILE+SUFFIX first, as a new file. The output keeps a missing final
+/// newline missing, as GNU does.
+fn sed_in_place(
+    prog: &mut [SedLine],
+    quiet: bool,
+    suffix: &str,
+    files: &[String],
+    sink: &mut Sink,
+) -> Util {
+    if files.is_empty() {
+        sink.eline("sed: no input files");
+        return Util::Done(1);
+    }
+    let mut status = 0;
+    let mut quit = false;
+    for f in files {
+        if quit {
+            break;
+        }
+        if f == "-" {
+            sink.eline("sed: couldn't edit -: not a regular file");
+            status = 4;
+            continue;
+        }
+        let resolved = match check_write_in_place(f) {
+            Ok(p) => p,
+            Err(msg) => {
+                sink.eline(&msg);
+                status = 1;
+                continue;
+            }
+        };
+        if let Some(refusal) = jail_refusal("sed", f) {
+            sink.eline(&refusal);
+            status = 1;
+            continue;
+        }
+        let data = match std::fs::read(&resolved) {
+            Ok(d) => d,
+            Err(e) => {
+                sink.eline(&format!("sed: can't read {f}: {}", io_reason(&e)));
+                status = 2;
+                continue;
+            }
+        };
+        for sl in prog.iter_mut() {
+            sl.active = false;
+        }
+        let mut out = Vec::new();
+        quit |= sed_run(prog, quiet, &data, true, &mut out);
+        if !suffix.is_empty() {
+            let backup = match check_write_in_place(&format!("{f}{suffix}")) {
+                Ok(p) => p,
+                Err(msg) => {
+                    sink.eline(&msg);
+                    status = 1;
+                    continue;
+                }
+            };
+            if let Err(msg) = write_file(&backup, &data, false) {
+                sink.eline(&msg);
+                status = 1;
+                continue;
+            }
+        }
+        if let Err(msg) = write_file(&resolved, &out, false) {
+            sink.eline(&msg);
+            status = 1;
+        }
+    }
+    Util::Done(status)
+}
+
 fn sed(args: &[String], stdin: &mut Input, sink: &mut Sink) -> Util {
     let mut quiet = false;
     let mut ere = false;
     let mut scripts = Vec::new();
     let mut files = Vec::new();
+    let mut inplace: Option<String> = None;
     let mut i = 0;
     while i < args.len() {
         let a = &args[i];
         match a.as_str() {
             "-n" => quiet = true,
             "-E" | "-r" => ere = true,
+            s if sed_inplace_suffix(s).is_some() => inplace = sed_inplace_suffix(s),
             "-e" => {
                 i += 1;
                 match args.get(i) {
@@ -5850,18 +6013,61 @@ fn sed(args: &[String], stdin: &mut Input, sink: &mut Sink) -> Util {
     if prog.is_empty() {
         return Util::Decline;
     }
+    if let Some(suffix) = inplace {
+        return sed_in_place(&mut prog, quiet, &suffix, &files, sink);
+    }
     let mut status = 0;
     let mut data = Vec::new();
     for (_, d) in read_inputs("sed", &files, stdin, sink, &mut status) {
+        // A file without a final newline still ends its last line: GNU sed
+        // does not join it to the next file's first line.
+        if !data.is_empty() && !data.ends_with(b"\n") {
+            data.push(b'\n');
+        }
         data.extend_from_slice(&d);
     }
-    let lines = lines_of(&data);
+    let mut out = Vec::new();
+    // As GNU sed, a last line with no final newline is printed without one.
+    sed_run(&mut prog, quiet, &data, true, &mut out);
+    sink.out.extend_from_slice(&out);
+    Util::Done(status)
+}
+
+/// Runs the sed program `prog` over the lines of `data`, appending what it prints
+/// to `out`. With `keep_missing_newline`, a last line with no final newline
+/// is printed without one, as GNU sed does; otherwise each printed line ends in a
+/// newline. Returns true when `q` ran, so no later input is read.
+fn sed_run(
+    prog: &mut [SedLine],
+    quiet: bool,
+    data: &[u8],
+    keep_missing_newline: bool,
+    out: &mut Vec<u8>,
+) -> bool {
+    let unterminated = keep_missing_newline && !data.is_empty() && !data.ends_with(b"\n");
+    // Set when the last line went out without its newline: the next output
+    // starts with that newline.
+    let mut missing = false;
+    let emit = |dst: &mut Vec<u8>, missing: &mut bool, text: &[u8], last: bool| {
+        if *missing {
+            dst.push(b'\n');
+            *missing = false;
+        }
+        dst.extend_from_slice(text);
+        if last && unterminated {
+            *missing = true;
+        } else {
+            dst.push(b'\n');
+        }
+    };
+    let lines = lines_of(data);
     let n = lines.len();
     let hits = |a: &Addr, ln: usize, line: &[u8]| match a {
         Addr::Line(k) => *k == ln,
         Addr::Last => ln == n,
         Addr::Re(r) => r.is_match(line),
     };
+    let mut quit = false;
     'lines: for (idx, line) in lines.iter().enumerate() {
         let ln = idx + 1;
         let mut pattern = line.to_vec();
@@ -5896,19 +6102,16 @@ fn sed(args: &[String], stdin: &mut Input, sink: &mut Sink) -> Util {
                 continue;
             }
             match &sl.cmd {
-                SedCmd::Print => {
-                    sink.out.extend_from_slice(&pattern);
-                    sink.out.push(b'\n');
-                }
+                SedCmd::Print => emit(out, &mut missing, &pattern, ln == n),
                 SedCmd::Delete => {
                     deleted = true;
                     break;
                 }
                 SedCmd::Quit => {
                     if !quiet {
-                        sink.out.extend_from_slice(&pattern);
-                        sink.out.push(b'\n');
+                        emit(out, &mut missing, &pattern, ln == n);
                     }
+                    quit = true;
                     break 'lines;
                 }
                 SedCmd::Subst(re, rep, global, print, nth) => {
@@ -5927,18 +6130,16 @@ fn sed(args: &[String], stdin: &mut Input, sink: &mut Sink) -> Util {
                     let changed = replaced != pattern;
                     pattern = replaced;
                     if changed && *print {
-                        sink.out.extend_from_slice(&pattern);
-                        sink.out.push(b'\n');
+                        emit(out, &mut missing, &pattern, ln == n);
                     }
                 }
             }
         }
         if !deleted && !quiet {
-            sink.out.extend_from_slice(&pattern);
-            sink.out.push(b'\n');
+            emit(out, &mut missing, &pattern, ln == n);
         }
     }
-    Util::Done(status)
+    quit
 }
 
 fn ls(args: &[String], sink: &mut Sink) -> Util {
@@ -6577,6 +6778,18 @@ pub fn write_operands(head: &str, args: &[String]) -> Option<Vec<String>> {
         "tee" => tee_operands(args),
         "mkdir" => short_flags(args, "p").map(|(_, ops)| ops),
         "touch" => short_flags(args, "").map(|(_, ops)| ops),
+        "sed" => {
+            // `sed -i` writes each FILE, and a backup FILE+SUFFIX when it has one.
+            let suffix = args.iter().find_map(|a| sed_inplace_suffix(a))?;
+            let mut out = Vec::new();
+            for f in sed_operands(args)?.into_iter().filter(|f| f != "-") {
+                if !suffix.is_empty() {
+                    out.push(format!("{f}{suffix}"));
+                }
+                out.push(f);
+            }
+            Some(out)
+        }
         _ => None,
     }
 }
@@ -6610,6 +6823,7 @@ fn sed_operands(args: &[String]) -> Option<Vec<String>> {
         let a = args[i].as_str();
         match a {
             "-n" | "-E" | "-r" => {}
+            s if sed_inplace_suffix(s).is_some() => {}
             "-e" => {
                 i += 1;
                 if i >= args.len() {

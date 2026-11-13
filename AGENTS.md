@@ -73,7 +73,7 @@ tools = get_agent_api_tools("http://localhost:3002")
 `if`/`for`/`while`, `test`, and GNU-compatible `ls`/`find`/`grep`/`head`/`tail`/
 `wc`/`sort`/`uniq`/`cut`/`sed`/`cat`/`tee`/`tr`/`mkdir`/`touch`/`echo`/`printf` (the common GNU flags, not all: `ls` takes `-a` but not `-l`;
 `sort -k`/`-t`, `cat -n` and printf `%x` and `%.Nf` run in-process too). `tee` takes `-a`, and each file it names
-is judged as a `>` redirection is, so `tee ../f` is refused and writes nothing; so is each operand of `mkdir [-p]` and `touch`. That refusal is the workspace jail's, so it applies in agent mode (`--agent`) or when a workspace is set (`--workspace`, or `IRONSHELL_WORKSPACE`); in a plain human session with no workspace, `ish -b` writes where bash would. `tr` takes `-d`, `-s`, ranges and `[:upper:]`-style classes. On Windows, an unsupported flag
+is judged as a `>` redirection is, so `tee ../f` is refused and writes nothing; so is each operand of `mkdir [-p]` and `touch`. `sed -i[SUFFIX]` edits each file in place under the same jail and journal (a backup FILE+SUFFIX first). That refusal is the workspace jail's, so it applies in agent mode (`--agent`) or when a workspace is set (`--workspace`, or `IRONSHELL_WORKSPACE`); in a plain human session with no workspace, `ish -b` writes where bash would. `tr` takes `-d`, `-s`, ranges and `[:upper:]`-style classes. On Windows, an unsupported flag
 runs a GNU-compatible program if one is on PATH, and otherwise exits 2 naming the flag (elsewhere it runs the
 PATH program of that name). Other commands run as the
 real program, directly, through the effect gate — never via `bash -c` — so

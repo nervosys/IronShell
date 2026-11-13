@@ -26,12 +26,9 @@ use std::process::{Command, Stdio};
 use std::time::Duration;
 
 fn ae() -> std::path::PathBuf {
-    let mut p = std::env::current_exe().expect("test exe");
-    p.pop();
-    if p.ends_with("deps") {
-        p.pop();
-    }
-    p.join(format!("ish{}", std::env::consts::EXE_SUFFIX))
+    // Cargo names the binary it built; the test binary's own folder is not
+    // a reliable guess (newer Cargo builds tests under build/<crate>/out).
+    std::path::PathBuf::from(env!("CARGO_BIN_EXE_ish"))
 }
 
 /// What happened when the shell was handed this source.
