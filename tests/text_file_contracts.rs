@@ -327,7 +327,7 @@ fn structured_edits_support_aliases_pipes_and_descending_operation_order() {
             panic!("expected applied metadata");
         };
         assert_eq!(diff_record(applied[0].clone())["op"], s("replace_range"));
-        assert_eq!(std::fs::read_to_string(&path).unwrap(), "B0\nb\nC\n");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "B0\r\nb\r\nC\r\n");
         let append = edit_record(vec![
             ("op", s("insert")),
             ("line", Value::Int(i64::MAX)),
@@ -336,7 +336,10 @@ fn structured_edits_support_aliases_pipes_and_descending_operation_order() {
         let result =
             diff_record(call_with_input(name, vec![s("input")], Some(append), &mut env).unwrap());
         assert_eq!(result["final_lines"], Value::Int(4));
-        assert_eq!(std::fs::read_to_string(&path).unwrap(), "B0\nb\nC\ntail\n");
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "B0\r\nb\r\nC\r\ntail\r\n"
+        );
     }
     std::fs::write(&path, "a\nb\nc\n").unwrap();
     call(
@@ -566,7 +569,7 @@ fn structured_edits_code_read_failures_guard_aliases_and_roll_back() {
     std::fs::write(&unrelated, "keep").unwrap();
     iron_shell::tx::begin().unwrap();
     call("file_edit", vec![s("input"), edit.clone()], &mut env).unwrap();
-    assert_eq!(std::fs::read_to_string(&path).unwrap(), "new\nb\n");
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), "new\r\nb\r\n");
     assert_eq!(std::fs::read_to_string(&unrelated).unwrap(), "keep");
     iron_shell::tx::rollback().unwrap();
     assert_eq!(std::fs::read_to_string(&path).unwrap(), "a\r\nb");

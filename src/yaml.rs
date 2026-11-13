@@ -24,7 +24,7 @@
 //! - Nested block mappings (indentation-based) and block sequences (`- `)
 //! - Scalars: null/`~`, booleans, integers, floats, strings
 //! - Single-quoted scalars (`''` is the one escape) and double-quoted scalars,
-//!   which decode every YAML 1.2 escape: `\0 \a \b \e \n \r \t \" \/ \\`,
+//!   which decode every YAML 1.2 escape: `\0 \a \b \e \f \v \n \r \t \" \/ \\`,
 //!   `\xhh`, `\uhhhh` and `\Uhhhhhhhh`
 //! - `#` comments, blank lines, leading `---` and trailing `...`
 //! - Flow collections that are valid JSON (`[1, 2]`, `{"a": 1}`)
@@ -393,14 +393,34 @@ fn parse_scalar(raw: &str, number: usize) -> Result<Value> {
     };
 
     // An integer past the 64-bit range would read as a Float and lose its digits.
-    if crate::builtins::is_wide_integer(s) {
-        return Err(crate::safety::value_not_representable(
+    // A 0o or 0x integer past it is refused the same way.
+    let overflow = || {
+        crate::safety::value_not_representable(
             "from_yaml",
             format!("from_yaml: line {number}: integer overflow at {s}: it does not fit in a 64-bit Int"),
             &format!("quote it as a string to keep the digits, such as \"{s}\""),
-        ));
+        )
+    };
+    if let Some((radix, digits)) = radix_integer(s) {
+        return i64::from_str_radix(digits, radix)
+            .map(Value::Int)
+            .map_err(|_| overflow());
+    }
+    if crate::builtins::is_wide_integer(s) {
+        return Err(overflow());
     }
     Ok(plain_scalar(s))
+}
+
+/// The digits and radix of a YAML 1.2 core octal (`0o17`) or hex (`0x1F`)
+/// integer: no sign, a lowercase prefix, and at least one digit.
+fn radix_integer(s: &str) -> Option<(u32, &str)> {
+    if let Some(digits) = s.strip_prefix("0o") {
+        return (!digits.is_empty() && digits.bytes().all(|b| (b'0'..=b'7').contains(&b)))
+            .then_some((8, digits));
+    }
+    let digits = s.strip_prefix("0x")?;
+    (!digits.is_empty() && digits.bytes().all(|b| b.is_ascii_hexdigit())).then_some((16, digits))
 }
 
 /// Type a plain (unquoted) scalar the way YAML 1.2 core schema does.
@@ -452,6 +472,8 @@ fn unescape_double(s: &str, number: usize) -> Result<String> {
             'a' => out.push('\u{7}'),
             'b' => out.push('\u{8}'),
             'e' => out.push('\u{1b}'),
+            'f' => out.push('\u{c}'),
+            'v' => out.push('\u{b}'),
             'n' => out.push('\n'),
             'r' => out.push('\r'),
             't' => out.push('\t'),
@@ -659,6 +681,10 @@ fn needs_quoting(s: &str) -> bool {
     ) {
         return true;
     }
+    // A 0o or 0x integer reads back as an Int, so a String that looks like one is quoted.
+    if radix_integer(s).is_some() || s.chars().any(needs_escape) {
+        return true;
+    }
     s.contains(':')
         || s.contains('#')
         || s.contains('\n')
@@ -671,15 +697,29 @@ fn needs_quoting(s: &str) -> bool {
         || s.trim() != s
 }
 
+/// Whether `c` is written escaped in a double-quoted scalar: a C0 control, DEL,
+/// or a character a reader may take for a line or paragraph break.
+fn needs_escape(c: char) -> bool {
+    c < ' ' || matches!(c, '\u{7f}' | '\u{85}' | '\u{2028}' | '\u{2029}')
+}
+
 fn escape_double(s: &str) -> String {
     let mut out = String::with_capacity(s.len() + 2);
     for c in s.chars() {
         match c {
             '"' => out.push_str("\\\""),
             '\\' => out.push_str("\\\\"),
-            '\n' => out.push_str("\\n"),
+            '\0' => out.push_str("\\0"),
+            '\u{7}' => out.push_str("\\a"),
+            '\u{8}' => out.push_str("\\b"),
             '\t' => out.push_str("\\t"),
+            '\n' => out.push_str("\\n"),
+            '\u{b}' => out.push_str("\\v"),
+            '\u{c}' => out.push_str("\\f"),
             '\r' => out.push_str("\\r"),
+            '\u{1b}' => out.push_str("\\e"),
+            c if c < ' ' || c == '\u{7f}' => out.push_str(&format!("\\x{:02X}", c as u32)),
+            c if needs_escape(c) => out.push_str(&format!("\\u{:04X}", c as u32)),
             other => out.push(other),
         }
     }

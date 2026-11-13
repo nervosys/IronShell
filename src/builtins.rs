@@ -10908,7 +10908,12 @@ fn bi_to_csv(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
     match input {
         Value::Array(arr) => {
             let headers: Vec<String> = match (columns, arr.first()) {
-                (Some(names), _) => names,
+                (Some(names), _) => {
+                    // A repeated column name would write the column twice, and each
+                    // record has one value per name: refused, as the reader refuses it.
+                    check_csv_headers("to_csv", &names)?;
+                    names
+                }
                 (None, None) => return Ok(Value::Str(String::new())),
                 (None, Some(Value::Record(_))) => {
                     // The keys of every record, sorted, so a key that only a later
@@ -10965,9 +10970,27 @@ fn bi_to_csv(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
                                             )?
                                             .to_string(),
                                         ),
+                                        // A NaN or infinity cell is refused, as to_json refuses
+                                        // it: written it would read back as the text "NaN".
+                                        Value::Float(f) if !f.is_finite() => {
+                                            let what = if f.is_nan() {
+                                                "NaN"
+                                            } else if *f > 0.0 {
+                                                "infinity"
+                                            } else {
+                                                "negative infinity"
+                                            };
+                                            return Err(crate::safety::value_not_representable(
+                                                "to_csv",
+                                                format!(
+                                                    "to_csv: rows[{index}].{header} is {what}, which CSV cannot hold as a number"
+                                                ),
+                                                "CSV has no NaN or infinity number: replace it with a number or null, or keep it as text",
+                                            ));
+                                        }
                                         // A whole Float keeps its point, so it reads back as a
                                         // Float and not as an Int column.
-                                        Value::Float(f) if f.is_finite() && f.fract() == 0.0 => {
+                                        Value::Float(f) if f.fract() == 0.0 => {
                                             csv_escape(&format!("{f:.1}"))
                                         }
                                         v => csv_escape(&value_to_string(v)),
@@ -31003,6 +31026,16 @@ fn bi_open(args: Vec<Value>, _input: Option<Value>) -> Result<Value> {
         }
     };
     if !std::path::Path::new(&path).is_file() {
+        // A directory exists but is not a file: named as one, not as missing.
+        if !crate::safety::names_a_remote_share(&path) && std::path::Path::new(&path).is_dir() {
+            return Err(crate::safety::bad_arg_in(
+                "open",
+                format!("open: `{path}` is a directory, not a file"),
+                &format!(
+                    "pass a file; to read a directory's files, name them with a glob such as '{path}/**/*'"
+                ),
+            ));
+        }
         return Err(crate::safety::not_found("open", "file", &path));
     }
     let validated = validate_read_path(&path)?;
@@ -50727,24 +50760,28 @@ fn text_to_write(builtin: &str, value: &Value) -> Result<String> {
         Value::Str(s) => Ok(s.clone()),
         Value::Array(items) => {
             let mut lines = Vec::with_capacity(items.len());
-            for item in items {
+            for (index, item) in items.iter().enumerate() {
                 match item {
                     Value::Str(s) => lines.push(s.as_str()),
-                    other => return Err(not_text_to_write(builtin, other, true)),
+                    other => return Err(not_text_to_write(builtin, other, Some(index))),
                 }
             }
+            // Each element is a line: joined with "\n", with no line break after the last.
             Ok(lines.join("\n"))
         }
-        other => Err(not_text_to_write(builtin, other, false)),
+        other => Err(not_text_to_write(builtin, other, None)),
     }
 }
 
-fn not_text_to_write(builtin: &str, value: &Value, in_array: bool) -> anyhow::Error {
+/// The refusal for content that is not text. `element` is the index of the
+/// Array element that is not a String, counted from 0 as the batch messages are.
+fn not_text_to_write(builtin: &str, value: &Value, element: Option<usize>) -> anyhow::Error {
     let got = value.type_name();
-    let message = if in_array {
-        format!("{builtin}: an Array of content must hold Strings, got {got}")
-    } else {
-        format!("{builtin}: content must be a String or an Array of Strings, got {got}")
+    let message = match element {
+        Some(index) => format!(
+            "{builtin}: content: an Array must hold only Strings (lines), element {index} is {got}"
+        ),
+        None => format!("{builtin}: content must be a String or an Array of Strings, got {got}"),
     };
     let hint = match value {
         Value::Bool(_) | Value::Int(_) | Value::Float(_) => {
@@ -51397,6 +51434,14 @@ fn bi_file_insert(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
     }
 
     let file_content = read_text_capped("file_insert", &path)?;
+    // A UTF-8 byte-order mark stays the first bytes of the file. Line numbers
+    // count from the line after it, so line 1 inserts after the BOM, not before.
+    let bom = if file_content.starts_with('\u{FEFF}') {
+        "\u{FEFF}"
+    } else {
+        ""
+    };
+    let file_content = &file_content[bom.len()..];
 
     // Every file line keeps its own bytes, line break included; only the inserted
     // lines are new. Positions count the lines `str::lines` counts.
@@ -51492,9 +51537,11 @@ fn bi_file_insert(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
     // of a file may have no line break: an insert before it leaves it that way,
     // while an insert after it ends that line first, so the new text ends with a
     // line break.
-    let eol = file_line_break(&file_content);
+    let eol = file_line_break(file_content);
     let (before, after) = segments.split_at(insert_pos);
-    let mut out = String::with_capacity(file_content.len() + content.len() + 2 * eol.len());
+    let mut out =
+        String::with_capacity(bom.len() + file_content.len() + content.len() + 2 * eol.len());
+    out.push_str(bom);
     for segment in before {
         out.push_str(segment);
     }
@@ -51718,12 +51765,33 @@ fn bi_file_edit(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
         }
         Ok(first.or(second))
     }
-    fn position(value: Option<Value>) -> Result<usize> {
+    // `key` is the field name(s) as the message quotes them, e.g. `"line"`.
+    fn position(value: Option<Value>, index: usize, key: &str) -> Result<usize> {
         match value {
-            Some(Value::Int(n)) if n > 0 => usize::try_from(n - 1)
-                .map_err(|_| crate::safety::arg_err("file_edit line number is too large")),
-            _ => Err(crate::safety::arg_err(
-                "file_edit line numbers must be positive Int",
+            Some(Value::Int(n)) if n > 0 => usize::try_from(n - 1).map_err(|_| {
+                crate::safety::bad_arg_in(
+                    "file_edit",
+                    format!("file_edit: edit {index} {key} is too large"),
+                    "use a line number within the file",
+                )
+            }),
+            Some(Value::Int(n)) => Err(crate::safety::bad_arg_in(
+                "file_edit",
+                format!("file_edit: edit {index} {key} is {n}; line numbers count from 1"),
+                "use 1 for the first line of the file",
+            )),
+            Some(other) => Err(crate::safety::bad_arg_in(
+                "file_edit",
+                format!(
+                    "file_edit: edit {index} {key} must be an Int from 1, got {}",
+                    other.type_name()
+                ),
+                "give the 1-based line number as an Int",
+            )),
+            None => Err(crate::safety::bad_arg_in(
+                "file_edit",
+                format!("file_edit: edit {index} has no {key} (an Int from 1)"),
+                "every edit names the 1-based line it works on",
             )),
         }
     }
@@ -51748,25 +51816,49 @@ fn bi_file_edit(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
                 "replace" | "replace_range" => "replace_range",
                 "insert" | "insert_at" => "insert_at",
                 "delete" | "delete_range" => "delete_range",
-                _ => return Err(crate::safety::arg_err("file_edit unknown operation")),
+                _ => {
+                    return Err(crate::safety::bad_arg_in(
+                        "file_edit",
+                        format!(
+                            "file_edit: edit {index} has unknown op \"{op}\": use replace, insert or delete"
+                        ),
+                        "replace swaps lines, insert adds lines before a line, delete removes lines",
+                    ))
+                }
             },
-            _ => {
-                return Err(crate::safety::arg_err(
-                    "file_edit requires an operation String",
+            Some(other) => {
+                return Err(crate::safety::bad_arg_in(
+                    "file_edit",
+                    format!(
+                        "file_edit: edit {index} \"op\" must be a String, got {}",
+                        other.type_name()
+                    ),
+                    "use replace, insert or delete",
+                ))
+            }
+            None => {
+                return Err(crate::safety::bad_arg_in(
+                    "file_edit",
+                    format!("file_edit: edit {index} has no \"op\": use replace, insert or delete"),
+                    "use replace, insert or delete",
                 ))
             }
         };
         let start = if op == "insert_at" {
-            position(record.remove("line"))?
+            position(record.remove("line"), index, "\"line\"")?
         } else {
-            position(field(&mut record, "start_line", "line")?)?
+            position(
+                field(&mut record, "start_line", "line")?,
+                index,
+                "\"start_line\" or \"line\"",
+            )?
         };
         let end = if op == "insert_at" {
             start
         } else {
             record
                 .remove("end_line")
-                .map(|v| position(Some(v)))
+                .map(|v| position(Some(v), index, "\"end_line\""))
                 .transpose()?
                 .unwrap_or(start)
         };
@@ -51778,10 +51870,25 @@ fn bi_file_edit(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
         let lines = if op == "delete_range" {
             Vec::new()
         } else {
-            let Some(Value::Str(text)) = field(&mut record, "content", "text")? else {
-                return Err(crate::safety::arg_err(
-                    "file_edit insert and replace require content String",
-                ));
+            let text = match field(&mut record, "content", "text")? {
+                Some(Value::Str(text)) => text,
+                Some(other) => {
+                    return Err(crate::safety::bad_arg_in(
+                        "file_edit",
+                        format!(
+                            "file_edit: edit {index} \"content\" must be a String, got {}",
+                            other.type_name()
+                        ),
+                        "pass the text as a String; several lines are joined with \\n",
+                    ))
+                }
+                None => {
+                    return Err(crate::safety::bad_arg_in(
+                        "file_edit",
+                        format!("file_edit: edit {index} has no \"content\" (a String)"),
+                        "insert and replace need the text as a String; delete takes no content",
+                    ))
+                }
             };
             payload_bytes = payload_bytes.saturating_add(text.len());
             payload_lines = payload_lines.saturating_add(text.lines().count());
@@ -51808,7 +51915,17 @@ fn bi_file_edit(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
         });
     }
     let path = guard_local_write("file_edit", &path)?;
-    let content = line_read("file_edit", &path)?;
+    let raw = line_read("file_edit", &path)?;
+    // A leading UTF-8 byte-order mark is not a line: it is kept as the first
+    // bytes of the file. The lines are written with the file's own line break,
+    // CRLF when every line break in the file is CRLF, LF otherwise.
+    let bom = if raw.starts_with('\u{FEFF}') {
+        "\u{FEFF}"
+    } else {
+        ""
+    };
+    let content = &raw[bom.len()..];
+    let eol = file_line_break(content);
     let count = content.lines().count();
     let max_lines = count.saturating_add(payload_lines);
     if max_lines > MAX_LINES || max_lines.saturating_mul(prepared.len()) > 10_000_000 {
@@ -51819,7 +51936,7 @@ fn bi_file_edit(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
         ));
     }
     let mut lines: Vec<String> = content.lines().map(str::to_owned).collect();
-    drop(content);
+    drop(raw);
     prepared.sort_by(|a, b| b.start.cmp(&a.start));
     let mut applied = Vec::with_capacity(prepared.len());
     for edit in prepared {
@@ -51858,8 +51975,8 @@ fn bi_file_edit(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
         }
         applied.push(Value::Record(result));
     }
-    let bytes = lines.iter().fold(0usize, |n, line| {
-        n.saturating_add(line.len()).saturating_add(1)
+    let bytes = lines.iter().fold(bom.len(), |n, line| {
+        n.saturating_add(line.len()).saturating_add(eol.len())
     });
     if bytes > MAX_BYTES {
         return Err(crate::safety::budget_exceeded(
@@ -51869,9 +51986,10 @@ fn bi_file_edit(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
         ));
     }
     let mut output = String::with_capacity(bytes);
+    output.push_str(bom);
     for line in &lines {
         output.push_str(line);
-        output.push('\n');
+        output.push_str(eol);
     }
     crate::tx::snapshot(&path);
     write_file_atomically("file_edit", &path, output.as_bytes())?;
