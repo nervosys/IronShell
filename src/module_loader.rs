@@ -122,13 +122,9 @@ pub fn import(
     let (path, module) = load(source)?;
     if !items.is_empty() {
         for item in items {
-            let value = module.get(&item.name).ok_or_else(|| {
-                safety::not_found(
-                    "import",
-                    &format!("export in module '{}'", display(&path)),
-                    &item.name,
-                )
-            })?;
+            let value = module
+                .get(&item.name)
+                .ok_or_else(|| missing_export("import", source, &path, &module, &item.name))?;
             let bound = item.alias.as_deref().unwrap_or(&item.name);
             env.set_var_unchecked(bound.to_string(), value.clone());
         }
@@ -137,7 +133,9 @@ pub fn import(
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .push((name.to_string(), source.to_string()));
-        env.set_var_unchecked(name.to_string(), Value::Record(module));
+        // An alias is a `let` binding: its fields cannot be assigned, as a
+        // record's cannot. `set_var_unchecked` would mark it mutable.
+        env.register_module(name, Value::Record(module));
     } else {
         for (name, value) in module {
             env.set_var_unchecked(name, value);
@@ -167,13 +165,9 @@ pub fn export_local(items: &[ExportItem], env: &mut Env) -> Result<()> {
 pub fn reexport(items: &[ExportItem], source: &str, env: &mut Env) -> Result<()> {
     let (path, module) = load(source)?;
     for item in items {
-        let value = module.get(&item.name).ok_or_else(|| {
-            safety::not_found(
-                "export",
-                &format!("export in module '{}'", display(&path)),
-                &item.name,
-            )
-        })?;
+        let value = module
+            .get(&item.name)
+            .ok_or_else(|| missing_export("export", source, &path, &module, &item.name))?;
         let name = item.alias.as_deref().unwrap_or(&item.name);
         env.set_var_unchecked(name.to_string(), value.clone());
         env.add_export(name);
@@ -204,6 +198,71 @@ pub(crate) fn unexported_hint(name: &str) -> Option<String> {
                 f.source
             )
         })
+}
+
+/// The refusal for a name that `source` does not export. A name the module defines
+/// without `pub` says so, as the field form does; otherwise the exports are listed.
+fn missing_export(
+    builtin: &str,
+    source: &str,
+    path: &Path,
+    module: &Exports,
+    name: &str,
+) -> anyhow::Error {
+    let shown = display(path);
+    let hint = if let Some(hint) = private_name_hint(source, name) {
+        hint
+    } else if module.is_empty() {
+        format!("{shown} exports nothing: mark the definitions you want to use `pub`")
+    } else {
+        let names: Vec<&str> = module.keys().map(String::as_str).collect();
+        format!(
+            "the exports of {shown} are {}; use one of them",
+            names.join(", ")
+        )
+    };
+    anyhow::Error::new(SafetyError {
+        code: ErrorCode::NotFound,
+        message: format!("{builtin}: no export in module '{shown}' named '{name}'"),
+        builtin: builtin.to_string(),
+        hint,
+        approval: None,
+        did_you_mean: Vec::new(),
+        expected: format!("an existing export in module '{shown}'"),
+        got: name.to_string(),
+        extra: serde_json::Map::new(),
+    })
+}
+
+/// The hint for `name` when `source` defines it without `pub`: the same words the
+/// `alias.name` form uses, so both paths say one thing.
+fn private_name_hint(source: &str, name: &str) -> Option<String> {
+    let facts = FACTS.lock().unwrap_or_else(|e| e.into_inner());
+    facts
+        .iter()
+        .find(|f| {
+            f.source == source
+                && f.private.iter().any(|p| p == name)
+                && !f.exported.iter().any(|e| e == name)
+        })
+        .map(|f| {
+            format!(
+                "`{name}` is defined in {} but not exported; mark it `pub`",
+                f.source
+            )
+        })
+}
+
+/// A syntax error in a module keeps its `E_PARSE` form and exit status, with the
+/// module's file named beside the line and column the parser reports.
+fn parse_in_module(path: &Path, err: anyhow::Error) -> anyhow::Error {
+    match err.downcast::<crate::parser::ParseError>() {
+        Ok(pe) => anyhow::Error::new(crate::parser::ParseError::with_hint(
+            format!("{} (in module '{}')", pe.message, site_label(path)),
+            pe.hint,
+        )),
+        Err(other) => in_module(path, other),
+    }
 }
 
 /// The hint for a missing field of `alias`, when `alias` names a module imported
@@ -284,7 +343,7 @@ fn load(source: &str) -> Result<(PathBuf, Exports)> {
 
     let source_text = read_module(&path)?;
     let (stmts, lines) = crate::parser::parse_program_with_lines(&source_text)
-        .map_err(|e| in_module(&path, anyhow!("{e:#}")))?;
+        .map_err(|e| parse_in_module(&path, e))?;
 
     let private: Vec<String> = stmts
         .iter()
