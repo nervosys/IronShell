@@ -611,7 +611,7 @@ fn pp_colored_at(v: &Value, nested: bool) -> String {
         Value::Null => colorize("null", &colors.dim),
         Value::Bool(b) => colorize(&b.to_string(), &colors.boolean),
         Value::Int(n) => colorize(&n.to_string(), &colors.number),
-        Value::Float(x) => colorize(&x.to_string(), &colors.number),
+        Value::Float(x) => colorize(&crate::value::float_text(*x), &colors.number),
         Value::Str(s) if nested => colorize(&crate::value::quote_str(s), &colors.string),
         Value::Str(s) => colorize(s, &colors.string),
         Value::Uri(u) => colorize(u, &colors.uri),

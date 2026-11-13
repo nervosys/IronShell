@@ -2684,8 +2684,8 @@ pub static SIGNATURES: &[Signature] = &[
         returns: "Number",
         doc: "The logarithm of a number above 0: natural by default, or in the base given. A number of 0 or less is E_BAD_VALUE, and so is a base of 0 or less or of 1. Ints are read as Floats; the result is a Float.",
         examples: &[
-            (r#"log(1)"#, "0"),
-            (r#"log(1, 2)"#, "0"),
+            (r#"log(1)"#, "0.0"),
+            (r#"log(1, 2)"#, "0.0"),
             (r#"(try { log(0) } catch e { e.error.code })"#, r#""E_BAD_VALUE""#),
             (r#"(try { log(1, 1) } catch e { e.error.code })"#, r#""E_BAD_VALUE""#),
         ],
@@ -2700,7 +2700,7 @@ pub static SIGNATURES: &[Signature] = &[
         returns: "Number",
         doc: "The natural logarithm of a number above 0. A number of 0 or less is E_BAD_VALUE.",
         examples: &[
-            (r#"ln(1)"#, "0"),
+            (r#"ln(1)"#, "0.0"),
             (r#"(try { ln(0) } catch e { e.error.code })"#, r#""E_BAD_VALUE""#),
         ],
     },
@@ -2714,7 +2714,7 @@ pub static SIGNATURES: &[Signature] = &[
         returns: "Number",
         doc: "The base-10 logarithm of a number above 0. A number of 0 or less is E_BAD_VALUE.",
         examples: &[
-            (r#"log10(1)"#, "0"),
+            (r#"log10(1)"#, "0.0"),
             (r#"(try { log10(-5) } catch e { e.error.code })"#, r#""E_BAD_VALUE""#),
         ],
     },
@@ -2728,7 +2728,7 @@ pub static SIGNATURES: &[Signature] = &[
         returns: "Number",
         doc: "The base-2 logarithm of a number above 0. A number of 0 or less is E_BAD_VALUE.",
         examples: &[
-            (r#"log2(1)"#, "0"),
+            (r#"log2(1)"#, "0.0"),
             (r#"(try { log2(0) } catch e { e.error.code })"#, r#""E_BAD_VALUE""#),
         ],
     },
@@ -2742,7 +2742,7 @@ pub static SIGNATURES: &[Signature] = &[
         returns: "Number",
         doc: "e raised to the power of a number. A result too large for a Float is E_BAD_VALUE, never an inf.",
         examples: &[
-            (r#"exp(0)"#, "1"),
+            (r#"exp(0)"#, "1.0"),
             (r#"(try { exp(1000) } catch e { e.error.code })"#, r#""E_BAD_VALUE""#),
         ],
     },
@@ -3131,7 +3131,7 @@ pub static SIGNATURES: &[Signature] = &[
         params: &[],
         returns: "Number",
         doc: "Square root of a number.",
-        examples: &[("sqrt(16)", "4")],
+        examples: &[("sqrt(16)", "4.0")],
     },
     Signature {
         name: "pow",

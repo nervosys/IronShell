@@ -349,7 +349,7 @@ file.read("config.toml")
 sys.hostname()              # "heimdall"
 crypto.uuid()               # "62375508-c80a-4490-9824-6b6a883acc88"
 str.upper("ab")             # "AB"
-math.sqrt(9.0)              # 3
+math.sqrt(9.0)              # 3.0
 ```
 
 ### The system

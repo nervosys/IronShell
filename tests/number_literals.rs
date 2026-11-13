@@ -40,14 +40,14 @@ fn run_script(tag: &str, source: &str) -> (String, String, i32) {
 fn a_bare_exponent_literal_prints_its_value() {
     let (out, err, code) = run_script("bare", "x = 1e10\nx\n");
     assert_eq!(code, 0, "stderr: {err}");
-    assert_eq!(out, "10000000000", "1e10 must be the float 1e10, not 1");
+    assert_eq!(out, "10000000000.0", "1e10 must be the float 1e10, not 1");
 }
 
 #[test]
 fn an_exponent_literal_inside_a_call_prints_its_value() {
     let (out, err, code) = run_script("call", "abs(1.5e3)\n");
     assert_eq!(code, 0, "stderr: {err}");
-    assert_eq!(out, "1500");
+    assert_eq!(out, "1500.0");
 }
 
 #[test]
@@ -61,7 +61,7 @@ fn a_negative_exponent_and_uppercase_e_are_floats() {
 fn an_explicit_plus_exponent_and_a_large_exponent() {
     let (out, err, code) = run_script("plus", "print(1e+3)\n6.02e23\n");
     assert_eq!(code, 0, "stderr: {err}");
-    assert_eq!(out, format!("1000\n{}", 6.02e23_f64));
+    assert_eq!(out, "1000.0\n6.02e23");
 }
 
 #[test]
