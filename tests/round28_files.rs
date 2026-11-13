@@ -229,6 +229,27 @@ fn open_names_a_directory_as_a_directory_not_as_missing() {
 }
 
 #[test]
+fn to_yaml_double_quotes_control_characters_and_round_trips() {
+    let _guard = LOCK.lock().unwrap_or_else(|p| p.into_inner());
+    let original = record(&[
+        ("c", s("\u{1}x")),
+        ("nul", s("a\0b")),
+        ("del", s("x\u{7f}y")),
+        ("cr", s("p\rq")),
+        ("esc", s("a\u{b}b\u{c}c\u{1b}d\u{7}e\u{8}f")),
+        ("seps", s("\u{85}\u{2028}\u{2029}")),
+    ]);
+    let out = text(call("to_yaml", vec![original.clone()]).unwrap());
+    assert!(out.contains(r#"c: "\x01x""#), "{out}");
+    for raw in [
+        '\u{1}', '\0', '\r', '\u{7f}', '\u{85}', '\u{2028}', '\u{2029}',
+    ] {
+        assert!(!out.contains(raw), "raw {raw:?} in {out:?}");
+    }
+    assert_eq!(call("from_yaml", vec![s(&out)]).unwrap(), original, "{out}");
+}
+
+#[test]
 fn file_write_names_the_element_that_is_not_a_string() {
     let _guard = LOCK.lock().unwrap_or_else(|p| p.into_inner());
     let ses = Session::new("write_mixed");

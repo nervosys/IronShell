@@ -24,7 +24,7 @@
 //! - Nested block mappings (indentation-based) and block sequences (`- `)
 //! - Scalars: null/`~`, booleans, integers, floats, strings
 //! - Single-quoted scalars (`''` is the one escape) and double-quoted scalars,
-//!   which decode every YAML 1.2 escape: `\0 \a \b \e \n \r \t \" \/ \\`,
+//!   which decode every YAML 1.2 escape: `\0 \a \b \e \f \v \n \r \t \" \/ \\`,
 //!   `\xhh`, `\uhhhh` and `\Uhhhhhhhh`
 //! - `#` comments, blank lines, leading `---` and trailing `...`
 //! - Flow collections that are valid JSON (`[1, 2]`, `{"a": 1}`)
@@ -452,6 +452,8 @@ fn unescape_double(s: &str, number: usize) -> Result<String> {
             'a' => out.push('\u{7}'),
             'b' => out.push('\u{8}'),
             'e' => out.push('\u{1b}'),
+            'f' => out.push('\u{c}'),
+            'v' => out.push('\u{b}'),
             'n' => out.push('\n'),
             'r' => out.push('\r'),
             't' => out.push('\t'),
@@ -659,6 +661,10 @@ fn needs_quoting(s: &str) -> bool {
     ) {
         return true;
     }
+    // Control characters and line separators are written escaped, so the string is quoted.
+    if s.chars().any(needs_escape) {
+        return true;
+    }
     s.contains(':')
         || s.contains('#')
         || s.contains('\n')
@@ -671,15 +677,29 @@ fn needs_quoting(s: &str) -> bool {
         || s.trim() != s
 }
 
+/// Whether `c` is written escaped in a double-quoted scalar: a C0 control, DEL,
+/// or a character a reader may take for a line or paragraph break.
+fn needs_escape(c: char) -> bool {
+    c < ' ' || matches!(c, '\u{7f}' | '\u{85}' | '\u{2028}' | '\u{2029}')
+}
+
 fn escape_double(s: &str) -> String {
     let mut out = String::with_capacity(s.len() + 2);
     for c in s.chars() {
         match c {
             '"' => out.push_str("\\\""),
             '\\' => out.push_str("\\\\"),
-            '\n' => out.push_str("\\n"),
+            '\0' => out.push_str("\\0"),
+            '\u{7}' => out.push_str("\\a"),
+            '\u{8}' => out.push_str("\\b"),
             '\t' => out.push_str("\\t"),
+            '\n' => out.push_str("\\n"),
+            '\u{b}' => out.push_str("\\v"),
+            '\u{c}' => out.push_str("\\f"),
             '\r' => out.push_str("\\r"),
+            '\u{1b}' => out.push_str("\\e"),
+            c if c < ' ' || c == '\u{7f}' => out.push_str(&format!("\\x{:02X}", c as u32)),
+            c if needs_escape(c) => out.push_str(&format!("\\u{:04X}", c as u32)),
             other => out.push(other),
         }
     }
