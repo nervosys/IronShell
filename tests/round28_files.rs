@@ -103,6 +103,80 @@ fn file_insert_at_line_one_keeps_a_bom_first() {
 }
 
 #[test]
+fn file_edit_keeps_a_bom_and_writes_crlf_only_when_every_break_is_crlf() {
+    let _guard = LOCK.lock().unwrap_or_else(|p| p.into_inner());
+    let ses = Session::new("bom_edit");
+    let path = ses.path("f.txt");
+    let replace = |line: i64, content: &str| {
+        record(&[
+            ("op", s("replace")),
+            ("line", Value::Int(line)),
+            ("content", s(content)),
+        ])
+    };
+    std::fs::write(&path, b"\xEF\xBB\xBFa=1\r\nb=2\r\n").unwrap();
+    call("file_edit", vec![s(&path), replace(2, "c=3")]).unwrap();
+    assert_eq!(std::fs::read(&path).unwrap(), b"\xEF\xBB\xBFa=1\r\nc=3\r\n");
+    // A BOM over an LF file: the BOM stays, and the lines stay LF.
+    std::fs::write(&path, b"\xEF\xBB\xBFa\nb\n").unwrap();
+    call("file_edit", vec![s(&path), replace(1, "z")]).unwrap();
+    assert_eq!(std::fs::read(&path).unwrap(), b"\xEF\xBB\xBFz\nb\n");
+    // Mixed line breaks: the file keeps the LF form, as before.
+    std::fs::write(&path, "a\r\nb\n").unwrap();
+    call("file_edit", vec![s(&path), replace(1, "z")]).unwrap();
+    assert_eq!(std::fs::read(&path).unwrap(), b"z\nb\n");
+}
+
+#[test]
+fn file_edit_refusals_name_the_edit_and_the_key() {
+    let _guard = LOCK.lock().unwrap_or_else(|p| p.into_inner());
+    let ses = Session::new("edit_errors");
+    let path = ses.path("f.txt");
+    std::fs::write(&path, "a\nb\n").unwrap();
+    let cases = [
+        (
+            record(&[("op", s("replace")), ("content", s("x"))]),
+            "has no \"start_line\" or \"line\"",
+        ),
+        (
+            record(&[("op", s("insert")), ("content", s("x"))]),
+            "edit 0 has no \"line\"",
+        ),
+        (
+            record(&[
+                ("op", s("replace")),
+                ("line", Value::Int(0)),
+                ("content", s("x")),
+            ]),
+            "is 0; line numbers count from 1",
+        ),
+        (
+            record(&[("op", s("x")), ("line", Value::Int(1)), ("content", s("x"))]),
+            "unknown op \"x\": use replace, insert or delete",
+        ),
+        (
+            record(&[
+                ("op", s("replace")),
+                ("line", Value::Int(1)),
+                ("content", Value::Int(2)),
+            ]),
+            "\"content\" must be a String, got Int",
+        ),
+    ];
+    for (edit, want) in cases {
+        let se = refusal("file_edit", vec![s(&path), edit]);
+        assert_eq!(se.code.as_str(), "E_BAD_ARG", "{}", se.message);
+        assert!(
+            se.message.contains(want),
+            "wanted {want:?} in {}",
+            se.message
+        );
+        assert!(!se.hint.contains("takes String"), "{}", se.hint);
+    }
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), "a\nb\n");
+}
+
+#[test]
 fn to_csv_refuses_a_repeated_column_name() {
     let _guard = LOCK.lock().unwrap_or_else(|p| p.into_inner());
     let rows = Value::Array(vec![record(&[("a", Value::Int(1))])]);

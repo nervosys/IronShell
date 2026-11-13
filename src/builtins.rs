@@ -51647,12 +51647,33 @@ fn bi_file_edit(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
         }
         Ok(first.or(second))
     }
-    fn position(value: Option<Value>) -> Result<usize> {
+    // `key` is the field name(s) as the message quotes them, e.g. `"line"`.
+    fn position(value: Option<Value>, index: usize, key: &str) -> Result<usize> {
         match value {
-            Some(Value::Int(n)) if n > 0 => usize::try_from(n - 1)
-                .map_err(|_| crate::safety::arg_err("file_edit line number is too large")),
-            _ => Err(crate::safety::arg_err(
-                "file_edit line numbers must be positive Int",
+            Some(Value::Int(n)) if n > 0 => usize::try_from(n - 1).map_err(|_| {
+                crate::safety::bad_arg_in(
+                    "file_edit",
+                    format!("file_edit: edit {index} {key} is too large"),
+                    "use a line number within the file",
+                )
+            }),
+            Some(Value::Int(n)) => Err(crate::safety::bad_arg_in(
+                "file_edit",
+                format!("file_edit: edit {index} {key} is {n}; line numbers count from 1"),
+                "use 1 for the first line of the file",
+            )),
+            Some(other) => Err(crate::safety::bad_arg_in(
+                "file_edit",
+                format!(
+                    "file_edit: edit {index} {key} must be an Int from 1, got {}",
+                    other.type_name()
+                ),
+                "give the 1-based line number as an Int",
+            )),
+            None => Err(crate::safety::bad_arg_in(
+                "file_edit",
+                format!("file_edit: edit {index} has no {key} (an Int from 1)"),
+                "every edit names the 1-based line it works on",
             )),
         }
     }
@@ -51677,25 +51698,49 @@ fn bi_file_edit(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
                 "replace" | "replace_range" => "replace_range",
                 "insert" | "insert_at" => "insert_at",
                 "delete" | "delete_range" => "delete_range",
-                _ => return Err(crate::safety::arg_err("file_edit unknown operation")),
+                _ => {
+                    return Err(crate::safety::bad_arg_in(
+                        "file_edit",
+                        format!(
+                            "file_edit: edit {index} has unknown op \"{op}\": use replace, insert or delete"
+                        ),
+                        "replace swaps lines, insert adds lines before a line, delete removes lines",
+                    ))
+                }
             },
-            _ => {
-                return Err(crate::safety::arg_err(
-                    "file_edit requires an operation String",
+            Some(other) => {
+                return Err(crate::safety::bad_arg_in(
+                    "file_edit",
+                    format!(
+                        "file_edit: edit {index} \"op\" must be a String, got {}",
+                        other.type_name()
+                    ),
+                    "use replace, insert or delete",
+                ))
+            }
+            None => {
+                return Err(crate::safety::bad_arg_in(
+                    "file_edit",
+                    format!("file_edit: edit {index} has no \"op\": use replace, insert or delete"),
+                    "use replace, insert or delete",
                 ))
             }
         };
         let start = if op == "insert_at" {
-            position(record.remove("line"))?
+            position(record.remove("line"), index, "\"line\"")?
         } else {
-            position(field(&mut record, "start_line", "line")?)?
+            position(
+                field(&mut record, "start_line", "line")?,
+                index,
+                "\"start_line\" or \"line\"",
+            )?
         };
         let end = if op == "insert_at" {
             start
         } else {
             record
                 .remove("end_line")
-                .map(|v| position(Some(v)))
+                .map(|v| position(Some(v), index, "\"end_line\""))
                 .transpose()?
                 .unwrap_or(start)
         };
@@ -51707,10 +51752,25 @@ fn bi_file_edit(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
         let lines = if op == "delete_range" {
             Vec::new()
         } else {
-            let Some(Value::Str(text)) = field(&mut record, "content", "text")? else {
-                return Err(crate::safety::arg_err(
-                    "file_edit insert and replace require content String",
-                ));
+            let text = match field(&mut record, "content", "text")? {
+                Some(Value::Str(text)) => text,
+                Some(other) => {
+                    return Err(crate::safety::bad_arg_in(
+                        "file_edit",
+                        format!(
+                            "file_edit: edit {index} \"content\" must be a String, got {}",
+                            other.type_name()
+                        ),
+                        "pass the text as a String; several lines are joined with \\n",
+                    ))
+                }
+                None => {
+                    return Err(crate::safety::bad_arg_in(
+                        "file_edit",
+                        format!("file_edit: edit {index} has no \"content\" (a String)"),
+                        "insert and replace need the text as a String; delete takes no content",
+                    ))
+                }
             };
             payload_bytes = payload_bytes.saturating_add(text.len());
             payload_lines = payload_lines.saturating_add(text.lines().count());
@@ -51737,7 +51797,17 @@ fn bi_file_edit(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
         });
     }
     let path = guard_local_write("file_edit", &path)?;
-    let content = line_read("file_edit", &path)?;
+    let raw = line_read("file_edit", &path)?;
+    // A leading UTF-8 byte-order mark is not a line: it is kept as the first
+    // bytes of the file. The lines are written with the file's own line break,
+    // CRLF when every line break in the file is CRLF, LF otherwise.
+    let bom = if raw.starts_with('\u{FEFF}') {
+        "\u{FEFF}"
+    } else {
+        ""
+    };
+    let content = &raw[bom.len()..];
+    let eol = file_line_break(content);
     let count = content.lines().count();
     let max_lines = count.saturating_add(payload_lines);
     if max_lines > MAX_LINES || max_lines.saturating_mul(prepared.len()) > 10_000_000 {
@@ -51748,7 +51818,7 @@ fn bi_file_edit(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
         ));
     }
     let mut lines: Vec<String> = content.lines().map(str::to_owned).collect();
-    drop(content);
+    drop(raw);
     prepared.sort_by(|a, b| b.start.cmp(&a.start));
     let mut applied = Vec::with_capacity(prepared.len());
     for edit in prepared {
@@ -51787,8 +51857,8 @@ fn bi_file_edit(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
         }
         applied.push(Value::Record(result));
     }
-    let bytes = lines.iter().fold(0usize, |n, line| {
-        n.saturating_add(line.len()).saturating_add(1)
+    let bytes = lines.iter().fold(bom.len(), |n, line| {
+        n.saturating_add(line.len()).saturating_add(eol.len())
     });
     if bytes > MAX_BYTES {
         return Err(crate::safety::budget_exceeded(
@@ -51798,9 +51868,10 @@ fn bi_file_edit(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
         ));
     }
     let mut output = String::with_capacity(bytes);
+    output.push_str(bom);
     for line in &lines {
         output.push_str(line);
-        output.push('\n');
+        output.push_str(eol);
     }
     crate::tx::snapshot(&path);
     write_file_atomically("file_edit", &path, output.as_bytes())?;
