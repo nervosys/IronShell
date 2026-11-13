@@ -140,8 +140,16 @@ fn the_two_number_form_is_untouched() {
 fn an_empty_or_non_numeric_aggregate_is_refused_by_name() {
     let e = err("max", vec![Value::Array(vec![])]);
     assert!(e.contains("empty"), "refusal should name the cause: {e}");
-    let e = err("max", vec![Value::Array(vec![Value::Str("a".into())])]);
-    assert!(e.contains("numeric"), "refusal should name the cause: {e}");
+    // An array of Strings is ordered by code point (round 29); a mix of
+    // Strings and numbers has no order and is refused.
+    let e = err(
+        "max",
+        vec![Value::Array(vec![Value::Str("a".into()), Value::Int(1)])],
+    );
+    assert!(
+        e.contains("all be numbers or all Strings"),
+        "refusal should name the cause: {e}"
+    );
 }
 
 // ── non-vacuity ─────────────────────────────────────────────────────────

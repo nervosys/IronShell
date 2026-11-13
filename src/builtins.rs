@@ -80433,18 +80433,17 @@ mod coded_errors2_tests {
     }
 
     #[test]
-    fn ls_on_a_plain_file_is_coded() {
-        // read_dir on a file fails with an OS error; before the fix that error
-        // reached the caller with no code attached.
+    fn ls_on_a_plain_file_lists_that_file() {
+        // read_dir on a file fails with an OS error, which once reached the
+        // caller uncoded. As GNU ls does, ls of a file now lists that file.
         let file = scratch_path("ls_file");
         fs::write(&file, b"not a directory").unwrap();
         let result = bi_ls(vec![Value::Str(file.display().to_string())], None);
         let _ = fs::remove_file(&file);
-        let e = result.unwrap_err();
-        assert!(
-            code_of(&e).is_some(),
-            "ls on a file must carry an error code, got: {e}"
-        );
+        match result {
+            Ok(Value::Array(entries)) => assert_eq!(entries.len(), 1, "{entries:?}"),
+            other => panic!("ls of a file must list it, got: {other:?}"),
+        }
     }
 
     #[test]

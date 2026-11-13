@@ -114,7 +114,7 @@ fn min_and_max_take_an_array_of_strings_by_code_point() {
 fn min_refuses_a_mix_of_strings_and_numbers() {
     let text = refused("[1, \"a\"] | min");
     assert!(text.contains("E_BAD_ARG"), "{text}");
-    assert!(text.contains("all numbers or all Strings"), "{text}");
+    assert!(text.contains("all be numbers or all Strings"), "{text}");
 }
 
 #[test]

@@ -787,7 +787,7 @@ pub static SIGNATURES: &[Signature] = &[
         name: "tail", category: None, subject_required: false, aliases: &[], subject: Some(Ty::Any),
         params: &[opt("count_or_path", Ty::Any, "nonnegative representable Int count (default 10), or a file String in the count-first direct form")], returns: "Any",
         doc: "Return the last lines of a piped String, or read a UTF-8 file with tail(path,count?) or tail(count,path). Preserve both direct argument orders. Reject non-String input/path and invalid counts; zero yields empty output. Strip line terminators, normalize CRLF to LF and join without a trailing newline. Bound file reads to 64 MiB and validate read paths. Scan backwards and retain only the selected line references. A piped Array gives its last count elements, as last(count) does (default 10).",
-        examples: &[(r#""a\nb\nc" | tail"#, "\"a\nb\nc\""), (r#""a\nb\nc" | tail(2)"#, "\"b\nc\""), (r#"[1, 2, 3, 4] | tail(2)"#, "[3, 4]"),(r#"let d = fs_tempdir("ae_tail"); let f = d + "/x"; file_write(f, "a\nb\nc"); let result = tail(1, f); rmdir(d, true); result"#, r#""c""#)],
+        examples: &[(r#""a\nb\nc" | tail"#, r#""a\nb\nc""#), (r#""a\nb\nc" | tail(2)"#, r#""b\nc""#), (r#"[1, 2, 3, 4] | tail(2)"#, "[3, 4]"),(r#"let d = fs_tempdir("ae_tail"); let f = d + "/x"; file_write(f, "a\nb\nc"); let result = tail(1, f); rmdir(d, true); result"#, r#""c""#)],
     },
     Signature {
         name: "journalctl", category: None, subject_required: false, aliases: &[], subject: None,
@@ -7643,7 +7643,7 @@ pub static SIGNATURES: &[Signature] = &[
         category: Some("FileSystem"),
         subject_required: false,
         aliases: &[],
-        subject: None,
+        subject: Some(Ty::Sequence),
         params: &[rest("part", Ty::Sequence, "a path, or an Array of paths; a part with a root replaces the parts before it")],
         returns: "String",
         doc: "Join path parts with / as os.path.join does, on every platform. Text only: the disk is not read. Backslashes in the parts become /.",

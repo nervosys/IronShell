@@ -300,7 +300,8 @@ fn cp_refuses_a_symbolic_link_destination_to_a_directory() {
 fn fs_realpath_through_a_missing_component_is_null() {
     let d = Dirs::new("realpath");
     d.run(r#"file_write("a.txt", "a\n")"#);
-    assert_eq!(d.value(r#"fs_realpath("nope/../a.txt")"#), "null");
+    // `-c` prints nothing for Null, so the type is what is compared.
+    assert_eq!(d.value(r#"typeof(fs_realpath("nope/../a.txt"))"#), "Null");
     assert_eq!(
         d.value(r#"ends_with(fs_realpath("a.txt"), "a.txt")"#),
         "true"
@@ -311,8 +312,8 @@ fn fs_realpath_through_a_missing_component_is_null() {
 fn env_of_an_unset_variable_is_null_and_a_default_replaces_it() {
     let d = Dirs::new("env");
     assert_eq!(
-        d.value(r#"env("IRONSHELL_ROUND29_NO_SUCH_VARIABLE")"#),
-        "null"
+        d.value(r#"typeof(env("IRONSHELL_ROUND29_NO_SUCH_VARIABLE"))"#),
+        "Null"
     );
     assert_eq!(
         d.value(r#"env("IRONSHELL_ROUND29_NO_SUCH_VARIABLE", "fallback")"#),
