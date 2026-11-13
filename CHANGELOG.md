@@ -27,6 +27,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - The agent-mode read jail runs at the dispatcher: every argument of a parameter whose declared name says it is a path is judged before the builtin runs, existing or not. A sweep of every reading builtin had found 52 builtin/parameter pairs that answered for a file outside the workspace (the `db_sqlite_*` readers, `shellcheck`, `audit_verify`, `fs_lstat`, `fs_realpath`, `fs_tree`, `acl_get`, `file_type` and others), and many that refused an existing outside file answered E_NOT_FOUND for a missing one, which told the agent what exists there.
 - `cp`/`file_copy` judge their source by the read jail: copying an outside file into the workspace used to give the agent a copy of a file `cat` refuses to read. `sql` and `sql_value` judge a file source the same way.
 - `--explain` agrees with the run: a reading, writing or destructive call whose literal path is outside the workspace is `deny`, and in `-b` so are a `<` redirection's file and `cd`'s directory.
+- In agent mode, `try` no longer catches E_NEEDS_APPROVAL, E_OUTSIDE_WORKSPACE or E_POLICY_DENY: the script stops with exit status 75 or 77. `try { rm(x) } catch e { ... }` exited 0, so an agent could take a refusal for success. Human mode still catches them.
+- In agent mode, `fs_tempdir` and `fs_tempfile` create under `<workspace>/.ironshell/tmp/`; they wrote to the system temp directory, outside the workspace.
+- On Windows, a write, create, copy, move, `mkdir`, delete or archive extraction to a path with a reserved device-name component (`CON`, `NUL`, `COM1`, `LPT1`, ...) is refused with E_BAD_ARG; such files could be created but not deleted.
 
 ### Changed
 
@@ -109,6 +112,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `%` works on Floats (and mixed Int and Float), with the sign of the dividend as for Ints (`-7.5 % 2` is `-1.5`; Python gives `0.5`).
 - `round(x, digits)` rounds half away from zero on the exact binary value, as `format_number` does: `round(2.675, 2)` is `2.67` (it gave `2.68`), `round(2.5)` is `3`.
 - Dates are limited to years 0001 to 9999 in every date builtin: `date_add("9999-12-31", 1, "days")` is refused (it gave `+10000-01-01`). `date_parse` and the other date inputs require zero-padded fields (`2024-2-9` is refused) and refuse leap seconds.
+- `tar_create` stores a member inside the current directory under its relative path and one outside it under its last component; it stored the absolute path, so extraction recreated the whole tree.
+- An in-process refusal names the tool and the flag (`the in-process tr does not support -c`) before mentioning a GNU program on PATH, and a bad option to `tr`, `grep`, `sort` or `cut` fails as GNU does (`tr: invalid option -- '_'`, status 1 or 2).
+- The MCP `ironshell` tool accepts `builtin` as an alias of `name`. An unmapped PowerShell cmdlet is refused as `command Remove-Item at line N has no IronShell mapping`.
+- A Float always displays as a Float: `print(100.0)`, `sqrt(16)`, `6 / 2` and `-0.0` show `100.0`, `4.0`, `3.0` and `-0.0` (in print, `ish -c`, the REPL, `"${x}"`, `str()` and `join`); they showed `100`, `4`, `3` and `-0`, so a Float could not be told from an Int and a CSV cell read as `100` displayed differently from what to_csv wrote. A magnitude of 1e16 or more, or under 1e-5, uses exponent form (`1e21`, `1e-7`), as to_json does; 1e21 printed 22 digits. Int display, the JSON, YAML, TOML and CSV writers, and `format_number` are unchanged.
 
 ### Added
 
@@ -169,6 +176,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `log(x, base?)`, `ln`, `log10`, `log2` and `exp` (also under `math.`); they return Floats and refuse a non-positive input or an overflowing result with E_BAD_VALUE.
 - `title`, `capitalize`, `repeat` (refuses a result over 100 MB) and `words` as builtins (also under `str.`); `trim(text, chars)` strips a set of characters from both ends.
 - `from_epoch(seconds)` and `to_epoch(date)` convert between epoch seconds and ISO 8601 UTC, for years 0001 to 9999.
+- `ish -b` runs `${x:offset}` and `${x:offset:length}` (characters, negative offsets and lengths) and `<<<` here-strings in-process; grep takes `--include`, `--exclude` and `--exclude-dir`; printf takes the `+`, space, `#` and `0` flags, `%u` and an integer precision.
 
 ### Fixed
 
@@ -289,6 +297,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `ish agent schema --help` and the unknown-format error list the same formats.
 - Float arithmetic that overflows (`1e308 * 10`) is refused with E_BAD_VALUE; it gave `inf`, though IronShell numbers are finite. `abs` of the smallest Int is refused like unary minus; it wrapped.
 - The smallest Int `% -1` is 0; it was called an overflow. `pow(0, -1)` and `0 ^ -1` say division by zero, not Float overflow. `format_number(1e300, 0)` names the 1e38 cap instead of suggesting fewer decimals.
+- `undo` reported `complete: true` while leaving changes: `zip_extract` and `tar_extract` journaled the archive they read instead of the files they wrote; `gzip_compress`, `file_backup`, `db_sqlite_backup`, `ssh_keygen` and the gpg/age/openssl key and crypt builtins journaled their input instead of their output; `zip_create` and `tar_create` were not journaled. Each now records the files and directories it writes.
+- `ish -b` with the journal on in human mode records redirections, `tee`, `sed -i` and its backup as agent mode does, and `mkdir -p` records the directories it creates.
+- `ish -b` reads `/dev/null` as an empty file on Windows, in `<` and as an operand; it said no such file.
+- A missing `file_move` source says `no file or directory at x` with a path hint.
 
 
 ## [14.0.1] - 2026-11-08
