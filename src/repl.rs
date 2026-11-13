@@ -742,7 +742,9 @@ fn pp_item(v: &Value) -> String {
         Value::Bool(b) => b.to_string(),
         Value::Int(n) => n.to_string(),
         Value::Float(x) => x.to_string(),
-        Value::Str(s) => s.clone(),
+        // Quoted, as `print` and the coloured form show it: `["a", "", "b"]`
+        // is readable, and `[a, , b]` loses the empty string.
+        Value::Str(s) => format!("\"{s}\""),
         Value::Uri(u) => u.clone(),
         Value::Array(a) => format!("[len={}]", a.len()),
         // A record nested one level deep renders its fields.

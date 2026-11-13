@@ -485,8 +485,14 @@ fn unterminated_string(line: usize, col: usize) -> anyhow::Error {
 /// A `\u` escape that is not `\uHHHH` or `\u{H..H}` naming a scalar value. `at`
 /// is the index just after the `u`; the message quotes the escape as written,
 /// up to the closing quote, a newline, or its own end.
-fn invalid_unicode_escape(line: usize, col: usize, chars: &[char], at: usize) -> anyhow::Error {
-    let mut escape = String::from("\\u");
+fn invalid_unicode_escape(
+    line: usize,
+    col: usize,
+    chars: &[char],
+    at: usize,
+    kind: char,
+) -> anyhow::Error {
+    let mut escape = format!("\\{kind}");
     let braced = chars.get(at) == Some(&'{');
     let mut k = at;
     while k < chars.len() && escape.chars().count() < 24 {
@@ -500,13 +506,20 @@ fn invalid_unicode_escape(line: usize, col: usize, chars: &[char], at: usize) ->
             if c == '}' {
                 break;
             }
-        } else if k - at == 4 {
+        } else if kind == 'U' && k - at == 8 {
+            break;
+        } else if kind == 'u' && k - at == 4 {
             break;
         }
     }
+    let hint = if kind == 'U' {
+        "write \\UHHHHHHHH with eight hex digits for a code point up to 10FFFF (not a surrogate)"
+    } else {
+        "write \\uHHHH with four hex digits or \\u{H..H} for a code point up to 10FFFF (not a surrogate)"
+    };
     anyhow::Error::new(ParseError::with_hint(
         format!("invalid unicode escape `{escape}` at line {line}, column {col}"),
-        "write \\uHHHH with four hex digits or \\u{H..H} for a code point up to 10FFFF (not a surrogate)",
+        hint,
     ))
 }
 
@@ -1133,6 +1146,7 @@ fn lex_marked(src: &str) -> Result<(Vec<Spanned>, std::collections::HashSet<usiz
                                             escape_col,
                                             &chars,
                                             pos,
+                                            'u',
                                         ));
                                     }
                                     // A malformed `\x` keeps its backslash, as
@@ -1140,6 +1154,32 @@ fn lex_marked(src: &str) -> Result<(Vec<Spanned>, std::collections::HashSet<usiz
                                     None => {
                                         s.push('\\');
                                         s.push(esc);
+                                    }
+                                },
+                                // `\UHHHHHHHH` (Python's long form): exactly eight
+                                // hex digits. Without them it is not an escape and
+                                // keeps its backslash, so `C:\Users` is unchanged.
+                                'U' => match long_unicode_escape(&chars, pos) {
+                                    Some(value) => match char::from_u32(value) {
+                                        Some(scalar) => {
+                                            for _ in 0..8 {
+                                                advance(&chars, &mut pos, &mut line, &mut col);
+                                            }
+                                            s.push(scalar);
+                                        }
+                                        None => {
+                                            return Err(invalid_unicode_escape(
+                                                escape_line,
+                                                escape_col,
+                                                &chars,
+                                                pos,
+                                                'U',
+                                            ));
+                                        }
+                                    },
+                                    None => {
+                                        s.push('\\');
+                                        s.push('U');
                                     }
                                 },
                                 // Not an escape the lexer knows (`C:\Users`,
@@ -1421,6 +1461,16 @@ fn interp_string_end(chars: &[char], start: usize) -> Option<usize> {
         }
     }
     None
+}
+
+/// The value of a `\U` escape's eight hex digits starting at `at`, or None when
+/// fewer than eight hex digits follow. The value is not checked to be a scalar.
+fn long_unicode_escape(chars: &[char], at: usize) -> Option<u32> {
+    let hex: String = chars.get(at..at + 8)?.iter().collect();
+    if !hex.chars().all(|c| c.is_ascii_hexdigit()) {
+        return None;
+    }
+    u32::from_str_radix(&hex, 16).ok()
 }
 
 /// The scalar named by a `\xHH`, `\uHHHH` or `\u{H..H}` escape whose `x` or `u` is at
