@@ -7671,6 +7671,10 @@ pub fn parse_request(text: &str) -> Result<AgentRequest, AgentResponse> {
         // input looks like, so the hint says how requests are given.
         let hint = if e.to_string().starts_with("trailing characters") {
             several_requests_hint()
+        } else if names_a_file(text) {
+            format!(
+                "the argument is the name of a file, but execute takes the JSON text itself: pass its contents (`ish agent execute \"$(cat FILE)\"`) or pipe the file to stdin. {REQUEST_HINT}"
+            )
         } else {
             REQUEST_HINT.to_string()
         };
@@ -7697,6 +7701,26 @@ pub fn parse_request(text: &str) -> Result<AgentRequest, AgentResponse> {
     };
     serde_json::from_value(value)
         .map_err(|e| bad_request("E_BAD_ARG", format!("Invalid request: {e}"), hint))
+}
+
+/// Whether `text` is one short line naming an existing file inside the working
+/// folder. Only a relative path without `..` is looked at: an absolute or UNC
+/// name is never probed, so this reads nothing outside the folder.
+fn names_a_file(text: &str) -> bool {
+    let t = text.trim();
+    if t.is_empty() || t.len() > 260 || t.contains(['\n', '{', '[', '"']) {
+        return false;
+    }
+    let p = std::path::Path::new(t);
+    if p.is_absolute() || t.starts_with(['\\', '/']) {
+        return false;
+    }
+    if p.components()
+        .any(|c| !matches!(c, std::path::Component::Normal(_)))
+    {
+        return false;
+    }
+    p.is_file()
 }
 
 /// The hint for a pipeline request that does not parse: its shape, whose list
@@ -7806,7 +7830,7 @@ pub fn parse_schema_format(format: &str) -> Option<SchemaFormat> {
 }
 
 /// The format names the error for an unknown one lists.
-pub const SCHEMA_FORMATS_HINT: &str = "openai, claude, gemini, llama, mistral, cohere, grok, deepseek, bedrock, azure, qwen, ollama, lmstudio, vllm, huggingface, openrouter, kimi, yi, glm, reka, ai21, perplexity, together, groq, fireworks, json, ontology, jsonld, owl, shacl";
+pub const SCHEMA_FORMATS_HINT: &str = "openai, claude, gemini, llama, mistral, cohere, grok, deepseek, bedrock, azure, azure_openai, qwen, ollama, lmstudio, vllm, huggingface, openrouter, kimi, yi, glm, reka, ai21, perplexity, together, groq, fireworks, json, compact, ontology, jsonld, owl, shacl";
 
 /// Generate schema in the specified format
 pub fn generate_schema(format: &str) -> Result<String> {

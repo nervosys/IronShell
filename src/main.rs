@@ -256,10 +256,13 @@ enum AgentApiCommands {
     /// Get the language schema for AI agents. The full schema is large: pass
     /// --module <name> for one module's builtins (`ish agent schema --module file`).
     Schema {
-        /// Output format: openai, azure, claude, gemini, llama, mistral, cohere, grok,
-        /// deepseek, bedrock, qwen, ollama, vllm, huggingface, openrouter,
-        /// kimi, yi, glm, reka, ai21, perplexity, together, groq, fireworks, json, compact
-        #[arg(long, short = 'f', default_value = "compact")]
+        // The same list the error for an unknown format prints.
+        #[arg(
+            long,
+            short = 'f',
+            default_value = "compact",
+            help = format!("Output format: {}", iron_shell::agent_api::SCHEMA_FORMATS_HINT)
+        )]
         format: String,
         /// Output to file
         #[arg(long, short = 'o')]
@@ -942,11 +945,17 @@ fn handle_agent_api_command(command: AgentApiCommands) -> Result<()> {
                 Ok(parsed) => {
                     let response = agent_api::process_request(&parsed);
                     println!("{}", serde_json::to_string_pretty(&response)?);
-                    // A failed call exits 1, as a malformed request does, so a
-                    // shell `&&` or a caller's exit check sees the failure.
+                    // A failed call exits with the status the CLI gives the same
+                    // error code (75 needs approval, 127 unknown builtin, ...),
+                    // so a shell `&&` or a caller's exit check sees the failure.
+                    // A malformed request below still exits 1.
                     if !response.success {
                         io::stdout().flush()?;
-                        std::process::exit(1);
+                        let status = response
+                            .code
+                            .as_deref()
+                            .map_or(1, iron_shell::safety::ErrorCode::exit_code_for_wire);
+                        std::process::exit(status);
                     }
                     Ok(())
                 }

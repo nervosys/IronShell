@@ -80,7 +80,7 @@ fn item1_a_failed_call_exits_1_and_still_prints_its_response() {
         r#"{"action":"call","builtin":"upper","args":{"bogus":1}}"#,
     ] {
         let (code, v) = execute_once(request);
-        assert_eq!(code, Some(1), "{request}: {v}");
+        assert!(code.is_some_and(|c| c != 0), "{request}: {v}");
         assert_eq!(v["success"], json!(false), "{request}: {v}");
     }
 }
@@ -97,7 +97,7 @@ fn item1_a_successful_call_still_exits_0() {
 #[test]
 fn item2_an_array_whose_first_element_is_the_subject_names_the_missing_parameter() {
     let (code, v) = execute_once(r#"{"action":"call","builtin":"pow","args":[2]}"#);
-    assert_eq!(code, Some(1), "{v}");
+    assert_eq!(code, Some(64), "{v}");
     assert_eq!(v["error"]["code"], json!("E_BAD_ARG"), "{v}");
     let message = v["error"]["message"].as_str().unwrap_or_default();
     assert!(
@@ -128,7 +128,7 @@ fn item3_a_module_qualified_call_runs_its_builtin() {
 #[test]
 fn item3_an_unknown_module_member_says_to_drop_the_prefix() {
     let (code, v) = execute_once(r#"{"action":"call","builtin":"math.nosuch_zz","args":[1]}"#);
-    assert_eq!(code, Some(1), "{v}");
+    assert_eq!(code, Some(64), "{v}");
     assert_eq!(v["error"]["code"], json!("E_BAD_ARG"), "{v}");
     let hint = v["error"]["hint"].as_str().unwrap_or_default();
     assert!(hint.contains("drop the module prefix"), "{hint}");
@@ -163,7 +163,7 @@ fn item7_a_failure_a_corrected_call_can_clear_stays_retryable() {
 #[test]
 fn item6_sqrt_of_a_negative_states_the_bound_and_the_value_with_a_real_hint() {
     let (code, v) = execute_once(r#"{"action":"call","builtin":"sqrt","args":[-1]}"#);
-    assert_eq!(code, Some(1), "{v}");
+    assert_eq!(code, Some(64), "{v}");
     assert_eq!(v["error"]["code"], json!("E_BAD_ARG"), "{v}");
     let message = v["error"]["message"].as_str().unwrap_or_default();
     assert!(message.contains("a number >= 0"), "{message}");

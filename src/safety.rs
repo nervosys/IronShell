@@ -344,6 +344,9 @@ fn classified_effect(name: &str) -> Option<Effect> {
         "sd_replace" => Some(Effect::Pure),
         // Pairs each element with its position: no input but its argument.
         "enumerate" => Some(Effect::Pure),
+        // In-memory base64 of a String: neither reads a file nor touches the
+        // environment (it was listed ReadLocal with the neighbouring crypto reads).
+        "crypto_base64_decode" | "crypto_base64_encode" => Some(Effect::Pure),
         // Stated Pure until pure-audit-3, which read each body. ReadLocal: reads
         // mutable in-process state (a lock, an atomic, a registry), walks a
         // directory tree, reads the cwd or an environment variable, or stats a
@@ -875,8 +878,6 @@ fn classified_effect(name: &str) -> Option<Effect> {
         | "clipboard_history"
         | "clipboard_types"
         | "cron_list"
-        | "crypto_base64_decode"
-        | "crypto_base64_encode"
         | "crypto_cert_info"
         | "crypto_cert_verify"
         | "crypto_hash"
@@ -1882,6 +1883,43 @@ impl ErrorCode {
             ErrorCode::User | ErrorCode::Assert => 1,
             ErrorCode::Unknown => 1,
         }
+    }
+
+    /// [`ErrorCode::exit_code`] for a code as it appears on the wire (a response's
+    /// `code`): `E_PARSE` is 2 as a syntax error is, an unlisted code is 1.
+    pub fn exit_code_for_wire(code: &str) -> i32 {
+        const ALL: &[ErrorCode] = &[
+            ErrorCode::PolicyDeny,
+            ErrorCode::NeedsApproval,
+            ErrorCode::OutsideWorkspace,
+            ErrorCode::BadArg,
+            ErrorCode::Overflow,
+            ErrorCode::User,
+            ErrorCode::Assert,
+            ErrorCode::BudgetExceeded,
+            ErrorCode::UnknownBuiltin,
+            ErrorCode::UnknownField,
+            ErrorCode::UnknownName,
+            ErrorCode::ToolMissing,
+            ErrorCode::NoUi,
+            ErrorCode::Unimplemented,
+            ErrorCode::BadState,
+            ErrorCode::NotFound,
+            ErrorCode::ToolFailed,
+            ErrorCode::Io,
+            ErrorCode::OsDenied,
+            ErrorCode::DecryptFailed,
+            ErrorCode::FipsDisallowed,
+            ErrorCode::CryptoFailed,
+            ErrorCode::Network,
+            ErrorCode::Unknown,
+        ];
+        if code == "E_PARSE" {
+            return 2;
+        }
+        ALL.iter()
+            .find(|c| c.as_str() == code)
+            .map_or(1, |c| c.exit_code())
     }
 }
 
