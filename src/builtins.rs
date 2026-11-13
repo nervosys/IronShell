@@ -8796,11 +8796,17 @@ fn bi_ls(args: Vec<Value>, _input: Option<Value>) -> Result<Value> {
             }
             // SECURITY: Validate path to prevent traversal attacks (CVSS 8.2)
             let validated_path = validate_read_path(&path_str)?;
-            fs::read_dir(&validated_path)
-                .map_err(|e| crate::safety::fs_error("ls", &validated_path, &e))?
-                .map(|e| e.map(|e| e.path()))
-                .collect::<std::io::Result<Vec<_>>>()
-                .map_err(|e| crate::safety::fs_error("ls", &validated_path, &e))?
+            // A file lists as itself, one entry, as `ls file` does. Reading it
+            // as a directory failed with an OS error.
+            if !validated_path.is_dir() {
+                vec![validated_path]
+            } else {
+                fs::read_dir(&validated_path)
+                    .map_err(|e| crate::safety::fs_error("ls", &validated_path, &e))?
+                    .map(|e| e.map(|e| e.path()))
+                    .collect::<std::io::Result<Vec<_>>>()
+                    .map_err(|e| crate::safety::fs_error("ls", &validated_path, &e))?
+            }
         };
     let mut files = Vec::new();
 
@@ -30907,6 +30913,30 @@ fn bi_fs_readlink(args: Vec<Value>, _input: Option<Value>) -> Result<Value> {
     Ok(Value::Str(target.to_string_lossy().to_string()))
 }
 
+/// Whether a `..` in `path` climbs out of a component that does not exist, or
+/// is not a directory. Windows resolves `..` lexically before the OS sees the
+/// path, so `nope/../a.txt` would canonicalize to `a.txt` even with `nope`
+/// absent. Each component a `..` climbs out of must be an existing directory.
+fn climbs_through_missing(path: &str) -> bool {
+    use std::path::Component;
+    let mut so_far = std::path::PathBuf::new();
+    for component in std::path::Path::new(path).components() {
+        match component {
+            // Out of the working directory itself: that exists.
+            Component::ParentDir if so_far.as_os_str().is_empty() => {}
+            Component::ParentDir => {
+                if !so_far.is_dir() {
+                    return true;
+                }
+                so_far.pop();
+            }
+            Component::CurDir => {}
+            other => so_far.push(other.as_os_str()),
+        }
+    }
+    false
+}
+
 fn bi_fs_realpath(args: Vec<Value>, _input: Option<Value>) -> Result<Value> {
     let path = match args.first() {
         Some(Value::Str(s)) => s.clone(),
@@ -30920,6 +30950,9 @@ fn bi_fs_realpath(args: Vec<Value>, _input: Option<Value>) -> Result<Value> {
     };
 
     // Only a missing path is Null; the old code made every failure Null.
+    if climbs_through_missing(&path) {
+        return Ok(Value::Null);
+    }
     match std::fs::canonicalize(&path) {
         Ok(real) => Ok(Value::Str(
             crate::safety::strip_verbatim_prefix(&real)
@@ -31010,6 +31043,42 @@ fn glob_literal_dir(pattern: &str) -> String {
     }
 }
 
+/// `pattern` with each letter in its wildcard components matched in either case:
+/// `*.txt` becomes `*.[tT][xX][tT]`. Only components with a wildcard are changed,
+/// so a literal directory prefix is still checked as the path it names, and the
+/// letters inside a `[...]` class are left alone.
+#[cfg(windows)]
+fn fold_glob_case(pattern: &str) -> String {
+    pattern
+        .split('/')
+        .map(|component| {
+            if !crate::posix::has_glob_meta(component) {
+                return component.to_string();
+            }
+            let mut out = String::with_capacity(component.len() * 4);
+            let mut in_class = false;
+            for ch in component.chars() {
+                if in_class {
+                    in_class = ch != ']';
+                    out.push(ch);
+                } else if ch == '[' {
+                    in_class = true;
+                    out.push(ch);
+                } else if ch.is_ascii_alphabetic() {
+                    out.push('[');
+                    out.push(ch.to_ascii_lowercase());
+                    out.push(ch.to_ascii_uppercase());
+                    out.push(']');
+                } else {
+                    out.push(ch);
+                }
+            }
+            out
+        })
+        .collect::<Vec<_>>()
+        .join("/")
+}
+
 /// Expand a glob for a typed builtin: `**` is recursive, results sort by
 /// bytes, and a literal directory prefix that does not exist is E_NOT_FOUND
 /// rather than an empty answer that reads like "no files".
@@ -31017,6 +31086,9 @@ fn expand_glob_for(builtin: &str, pattern: &str) -> Result<Vec<String>> {
     crate::security::check_share_egress(builtin, pattern)?;
     // Windows callers may write either separator; globbing is done on `/`.
     let pattern = pattern.replace(char::from(92), "/");
+    // NTFS names are case-insensitive, so `*.TXT` finds `a.txt`.
+    #[cfg(windows)]
+    let pattern = fold_glob_case(&pattern);
     let dir = glob_literal_dir(&pattern);
     // The jail judges the directory the pattern walks before anything is listed,
     // so `glob("../*")` is refused whether or not that directory exists.
@@ -52504,6 +52576,8 @@ fn bi_file_copy(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
     };
     let source = crate::safety::resolve_path_str(&source);
     let dest = crate::safety::resolve_path_str(&dest);
+    // A file onto a directory lands inside it, as `cp` does.
+    let dest = file_copy_target(&source, &dest);
     // The source is read: under the jail, a file outside the workspace may not
     // be copied in, or `cp("../outside/secret", "x")` then `cat("x")` reads
     // what `cat("../outside/secret")` is refused.
@@ -52665,6 +52739,45 @@ fn bi_file_copy(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
     ])))
 }
 
+/// `path` with its symbolic links resolved as far as it exists. The part below
+/// the first missing ancestor is appended as written, so a destination that does
+/// not exist yet still compares with the real location of its parent.
+fn canonical_location(path: &str) -> std::path::PathBuf {
+    let mut rest: Vec<std::ffi::OsString> = Vec::new();
+    let mut current = std::path::Path::new(path);
+    loop {
+        if let Ok(real) = fs::canonicalize(current) {
+            let mut out = real;
+            for part in rest.iter().rev() {
+                out.push(part);
+            }
+            return out;
+        }
+        match (current.parent(), current.file_name()) {
+            (Some(parent), Some(name)) => {
+                rest.push(name.to_os_string());
+                current = parent;
+            }
+            _ => return std::path::PathBuf::from(path),
+        }
+    }
+}
+
+/// The path a copy from `source` to `dest` writes, both resolved. A regular file
+/// copied onto an existing directory goes inside it under its own name, as `cp`
+/// does. A symbolic link destination is not followed: it stays as it is, and the
+/// copy refuses it.
+pub(crate) fn file_copy_target(source: &str, dest: &str) -> String {
+    let src = std::path::Path::new(source);
+    let dst = std::path::Path::new(dest);
+    let source_is_file = fs::symlink_metadata(src).is_ok_and(|m| m.is_file());
+    let dest_is_dir = fs::symlink_metadata(dst).is_ok_and(|m| m.is_dir());
+    match (source_is_file, dest_is_dir, src.file_name()) {
+        (true, true, Some(name)) => dst.join(name).display().to_string(),
+        _ => dest.to_string(),
+    }
+}
+
 /// file_move(source, dest) - Move/rename a file or directory
 fn bi_file_move(args: Vec<Value>, _input: Option<Value>) -> Result<Value> {
     if args.len() < 2 {
@@ -52707,6 +52820,20 @@ fn bi_file_move(args: Vec<Value>, _input: Option<Value>) -> Result<Value> {
     // are caller-supplied, and neither was jailed.
     let (written_source, written_dest) = (source.clone(), dest.clone());
     let (source, dest) = guard_local_move("file_move", &source, &dest)?;
+    // A directory moved into its own tree has no place to go: the OS refused it
+    // as "denied". Refused here, by name, as file_copy refuses an overlap.
+    if fs::metadata(&source).is_ok_and(|m| m.is_dir()) {
+        let source_real = fs::canonicalize(&source).ok();
+        let dest_real = canonical_location(&crate::journal::normalized_path(&dest));
+        if let Some(source_real) = source_real {
+            if dest_real != source_real && dest_real.starts_with(&source_real) {
+                return Err(crate::safety::arg_err(
+                    "file_move: cannot move a directory into itself",
+                ));
+            }
+        }
+    }
+
     // Refused before the rename, which said "no file named" for a missing
     // destination folder (it reads as a missing source) and "denied" for an
     // existing directory. Both are named as what they are, with the fix.
@@ -52809,16 +52936,27 @@ fn bi_file_mkdir(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
         _ => return Err(crate::safety::arg_err("file_mkdir requires a path")),
     };
 
+    // An empty path names nothing: resolving it gave the working directory,
+    // which "exists", and the call reported a creation that did not happen.
+    if path.is_empty() {
+        return Err(crate::safety::bad_arg(
+            "file_mkdir",
+            "path: a non-empty String",
+            "an empty String",
+        ));
+    }
     // Creates a directory at a caller-named path, with no guard until now:
     // `WriteLocal` is not centrally enforced, so nothing jailed it.
     let path = guard_local_write("file_mkdir", &path)?;
 
     let already_exists = std::path::Path::new(&path).exists();
+    // The journal's spelling of the path, so `sub/../m2` and `m2` are one name.
+    let target = crate::journal::normalized_path(&path);
 
     // Inside a transaction, record the highest directory this call creates as
     // absent, so a rollback removes everything it made, parents included.
     if !already_exists {
-        let mut top = std::path::Path::new(&path);
+        let mut top = std::path::Path::new(&target);
         while let Some(parent) = top.parent() {
             if parent.as_os_str().is_empty() || parent.exists() {
                 break;
@@ -52828,7 +52966,24 @@ fn bi_file_mkdir(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
         crate::tx::snapshot(&top.to_string_lossy());
     }
 
-    fs::create_dir_all(&path)
+    // Every directory this call creates, outermost first. One step: undo removes
+    // them innermost first, and only the ones still empty, so a directory that
+    // something was put into afterwards is left alone and reported.
+    let mut created = Vec::new();
+    let mut cursor = Some(std::path::Path::new(&target));
+    while let Some(dir) = cursor {
+        if dir.as_os_str().is_empty() || dir.exists() {
+            break;
+        }
+        created.push(dir.display().to_string());
+        cursor = dir.parent();
+    }
+    created.reverse();
+    if !created.is_empty() {
+        crate::journal::record_group("file_mkdir", crate::safety::Effect::WriteLocal, created);
+    }
+
+    fs::create_dir_all(&target)
         .map_err(|error| crate::safety::fs_error("file_mkdir", &path, &error))?;
 
     let mut result = BTreeMap::new();
@@ -65091,11 +65246,14 @@ pub fn bi_rmdir(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
         reversible: false,
         fs_paths: true,
     })?;
-    // Undo does not restore a directory: the step is recorded as irreversible so
-    // that undo reports it as not reversed. A failed removal leaves no step.
-    crate::journal::record_irreversible(
+    // An empty directory is recorded as one that undo recreates. A directory
+    // with anything in it is recorded as irreversible, so that undo reports it
+    // as not reversed and never reaches past it to an earlier step. A failed
+    // removal leaves no step.
+    crate::journal::record_removed_directory(
         "rmdir",
         crate::safety::Effect::Destructive,
+        &path,
         &format!(
             "a directory removal is not journaled: {path} and what it held cannot be restored by undo"
         ),

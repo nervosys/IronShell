@@ -30,7 +30,7 @@
 
 use crate::safety::Effect;
 use crate::value::Value;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::sync::{Mutex, MutexGuard};
 
 #[cfg(unix)]
@@ -49,8 +49,11 @@ const MAX_TOTAL_BYTES: usize = 64 * 1024 * 1024;
 pub enum Before {
     /// The file existed with these bytes.
     Contents(Vec<u8>),
-    /// The path did not exist, so undoing means removing whatever was created.
+    /// The path did not exist, so undoing means removing whatever was created:
+    /// a file, or a directory that is still empty.
     Absent,
+    /// An empty directory was there, so undoing means creating it again.
+    Directory,
     /// Seen, but not recoverable — with the reason, which is reported verbatim
     /// on rewind rather than being flattened into a failure count.
     Irreversible(String),
@@ -94,7 +97,7 @@ impl Fingerprint {
                 Some(Fingerprint::Digest(hex::encode(digest)))
             }
             Before::Absent => Some(Fingerprint::Absent),
-            Before::Irreversible(_) => None,
+            Before::Directory | Before::Irreversible(_) => None,
         }
     }
 
@@ -155,7 +158,7 @@ pub struct RedoEntry {
     pub builtin: String,
     pub effect: String,
     pub path: String,
-    /// Always `Contents` or `Absent`; anything else is never pushed.
+    /// Always `Contents`, `Absent` or `Directory`; anything else is never pushed.
     pub after: Before,
     /// The group of the undone entry: see [`Entry::group`].
     pub group: Option<usize>,
@@ -224,14 +227,22 @@ struct StoredEntry {
     /// an earlier version wrote, which are single-path steps.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     group: Option<usize>,
+    /// Set for [`Before::Directory`]: an empty directory was there before.
+    #[serde(default, skip_serializing_if = "is_false")]
+    directory: bool,
+}
+
+fn is_false(b: &bool) -> bool {
+    !*b
 }
 
 impl From<&Entry> for StoredEntry {
     fn from(e: &Entry) -> Self {
-        let (contents, irreversible) = match &e.before {
-            Before::Contents(b) => (Some(b.clone()), None),
-            Before::Absent => (None, None),
-            Before::Irreversible(why) => (None, Some(why.clone())),
+        let (contents, irreversible, directory) = match &e.before {
+            Before::Contents(b) => (Some(b.clone()), None, false),
+            Before::Absent => (None, None, false),
+            Before::Directory => (None, None, true),
+            Before::Irreversible(why) => (None, Some(why.clone()), false),
         };
         StoredEntry {
             seq: e.seq,
@@ -242,6 +253,7 @@ impl From<&Entry> for StoredEntry {
             irreversible,
             after: e.after.as_ref().map(Fingerprint::encode),
             group: e.group,
+            directory,
         }
     }
 }
@@ -251,6 +263,7 @@ impl From<StoredEntry> for Entry {
         let before = match (s.contents, s.irreversible) {
             (_, Some(why)) => Before::Irreversible(why),
             (Some(b), None) => Before::Contents(b),
+            (None, None) if s.directory => Before::Directory,
             (None, None) => Before::Absent,
         };
         Entry {
@@ -583,7 +596,8 @@ fn written_path_argument(builtin: &str) -> Option<usize> {
 /// working directory is. Empty when the argument is not a usable path.
 fn written_path_candidates(builtin: &str, args: &[Value]) -> Option<Vec<String>> {
     let index = written_path_argument(builtin)?;
-    let out = match args.get(index) {
+    // A string argument this journal can record as a path.
+    let usable = |v: Option<&Value>| match v {
         Some(Value::Str(s))
             if !s.is_empty()
                 && s.len() <= 4096
@@ -591,26 +605,65 @@ fn written_path_candidates(builtin: &str, args: &[Value]) -> Option<Vec<String>>
                 && !s.contains('\0')
                 && !crate::safety::names_a_remote_share(s) =>
         {
-            vec![absolute_path(&crate::safety::resolve_path_str(s))]
+            Some(crate::safety::resolve_path_str(s))
         }
-        _ => Vec::new(),
+        _ => None,
+    };
+    let out = match usable(args.get(index)) {
+        Some(mut target) => {
+            // A copy into an existing directory writes the file inside it, as
+            // `cp` does, so that is the path the step names.
+            if index == 1 {
+                if let Some(source) = usable(args.first()) {
+                    target = crate::builtins::file_copy_target(&source, &target);
+                }
+            }
+            vec![normalized_path(&target)]
+        }
+        None => Vec::new(),
     };
     Some(out)
 }
 
-/// `path` as an absolute path, joined to the working directory when it is
-/// relative. Journal entries record this form, so `config.txt` and
-/// `C:\...\src\main.txt` in one journal name the same file the same way. Undo
-/// restores the same file either way; only the recorded spelling changes.
-fn absolute_path(path: &str) -> String {
+/// The form every journal entry records a path in: absolute (joined to the
+/// working directory when relative), with `.` and `..` resolved lexically and
+/// one separator style. `sub/../m2` and `m2` name the same file, so they must
+/// be the same entry, or undo checks the wrong spelling and reports a file that
+/// exists as absent. Undo restores the same file either way; only the recorded
+/// spelling changes. Every recording goes through here.
+pub fn normalized_path(path: &str) -> String {
     let p = Path::new(path);
-    if p.is_absolute() {
-        return path.to_string();
+    let absolute: PathBuf = if p.is_absolute() {
+        p.to_path_buf()
+    } else {
+        match std::env::current_dir() {
+            Ok(cwd) => cwd.join(p),
+            Err(_) => p.to_path_buf(),
+        }
+    };
+    let mut out = PathBuf::new();
+    for component in absolute.components() {
+        match component {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                // Only a normal name is resolved away. `..` at a root stays at
+                // the root; a leading `..` that climbs out is kept.
+                let last_is_name =
+                    matches!(out.components().next_back(), Some(Component::Normal(_)));
+                let at_root = matches!(
+                    out.components().next_back(),
+                    Some(Component::RootDir) | Some(Component::Prefix(_))
+                );
+                if last_is_name {
+                    out.pop();
+                } else if !at_root {
+                    out.push("..");
+                }
+            }
+            other => out.push(other.as_os_str()),
+        }
     }
-    match std::env::current_dir() {
-        Ok(cwd) => cwd.join(p).display().to_string(),
-        Err(_) => path.to_string(),
-    }
+    out.display().to_string()
 }
 
 /// A string argument that plausibly names a file this call could write.
@@ -640,7 +693,7 @@ fn candidate_paths(builtin: &str, args: &[Value]) -> Vec<String> {
                 || p.parent()
                     .map(|d| !d.as_os_str().is_empty() && d.is_dir())
                     .unwrap_or(false);
-            let absolute = absolute_path(s);
+            let absolute = normalized_path(s);
             if plausible && !out.contains(&absolute) {
                 out.push(absolute);
             }
@@ -678,6 +731,18 @@ fn capture(path: &str, used: usize) -> Result<Before, String> {
     }
 }
 
+/// [`capture`], except that an empty directory is captured as one: undo recreates
+/// it, and a redo removes it again. Used where a step's own state is read back
+/// (after an undo, or before a redo), not for the paths a call might write.
+fn capture_state(path: &str, used: usize) -> Result<Before, String> {
+    let p = Path::new(path);
+    let is_real_dir = std::fs::symlink_metadata(p).is_ok_and(|m| m.is_dir());
+    if is_real_dir && std::fs::read_dir(p).is_ok_and(|mut d| d.next().is_none()) {
+        return Ok(Before::Directory);
+    }
+    capture(path, used)
+}
+
 /// Record the pre-state of anything `builtin` might overwrite. Call immediately
 /// before dispatch.
 ///
@@ -706,7 +771,7 @@ pub fn record_before(builtin: &str, effect: Effect, args: &[Value]) {
 /// workspace, so it captured the wrong path.
 fn records_its_own_steps(builtin: &str) -> bool {
     let canonical = crate::signature::signature_of(builtin).map_or(builtin, |s| s.name);
-    matches!(canonical, "file_move" | "rmdir")
+    matches!(canonical, "file_move" | "file_mkdir" | "rmdir")
 }
 
 /// Record the pre-state of named paths that a builtin is about to write or
@@ -769,6 +834,7 @@ pub fn would_capture(path: &str) -> bool {
 /// Capture `path` as a new step. The caller holds the journal lock, so the
 /// budget it measures and the entry it pushes are one decision.
 fn push_capture(s: &mut State, builtin: &str, effect: Effect, path: String, group: Option<usize>) {
+    let path = normalized_path(&path);
     let used = held_bytes(s);
     let before = match capture(&path, used) {
         Ok(before) => before,
@@ -822,6 +888,39 @@ pub fn record_irreversible(builtin: &str, effect: Effect, why: &str) {
         effect: effect.as_str().to_string(),
         path: String::new(),
         before: Before::Irreversible(why.to_string()),
+        after: None,
+        group: None,
+    };
+    persist(&entry);
+    s.journal.push(entry);
+}
+
+/// Note the removal of the directory at `path`, before it happens. An empty
+/// directory is recorded as one that undo recreates; anything else cannot be
+/// restored, so it is recorded as irreversible with `tree_why` as the reason.
+/// Like [`record_before`], this discards the redo stack. A removal that fails
+/// leaves no step: the dispatcher settles the call.
+pub fn record_removed_directory(builtin: &str, effect: Effect, path: &str, tree_why: &str) {
+    if !enabled() || is_journal_builtin(builtin) {
+        return;
+    }
+    if !matches!(effect, Effect::WriteLocal | Effect::Destructive) {
+        return;
+    }
+    let path = normalized_path(path);
+    let mut s = state();
+    discard_redo(&mut s);
+    let before = match capture_state(&path, held_bytes(&s)) {
+        Ok(before) => before,
+        Err(_) => Before::Irreversible(tree_why.to_string()),
+    };
+    let seq = take_seq(&mut s);
+    let entry = Entry {
+        seq,
+        builtin: builtin.to_string(),
+        effect: effect.as_str().to_string(),
+        path,
+        before,
         after: None,
         group: None,
     };
@@ -1005,7 +1104,7 @@ fn undo_at(s: &mut State, index: usize, force: bool, out: &mut Vec<Rewound>) -> 
         let now = Fingerprint::of_path(&entry.path);
         // Only an undo that writes the file back recreates it. Undoing a step
         // that created the file removes nothing, and nothing is recreated.
-        let restores = matches!(entry.before, Before::Contents(_));
+        let restores = matches!(entry.before, Before::Contents(_) | Before::Directory);
         let removed =
             restores && now == Some(Fingerprint::Absent) && *sealed != Fingerprint::Absent;
         let changed = if now == Some(Fingerprint::Absent) {
@@ -1031,7 +1130,7 @@ fn undo_at(s: &mut State, index: usize, force: bool, out: &mut Vec<Rewound>) -> 
             return Step::Stop;
         }
     }
-    let after = capture(&entry.path, used);
+    let after = capture_state(&entry.path, used);
     // As in redo: a file is not overwritten or removed unless what it holds
     // now is first kept. A path that is not a file is not touched by this
     // check; the restore below reports it.
@@ -1061,25 +1160,18 @@ fn undo_at(s: &mut State, index: usize, force: bool, out: &mut Vec<Rewound>) -> 
             },
         },
         Before::Absent => {
-            let p = Path::new(&entry.path);
-            if p.is_file() {
-                match std::fs::remove_file(p) {
-                    Ok(()) => {
-                        push_redo(s, &entry, after);
-                        Outcome::Removed(what)
-                    }
-                    Err(e) => Outcome::Failed {
-                        what,
-                        why: e.to_string(),
-                    },
-                }
-            } else {
-                // Never created, so there is nothing to take back.
-                Outcome::Skipped {
-                    what,
-                    why: "was absent before and is absent now".into(),
-                }
+            let outcome = remove_created(&entry.path, what, ABSENT_BEFORE_AND_NOW);
+            if matches!(outcome, Outcome::Removed(_)) {
+                push_redo(s, &entry, after);
             }
+            outcome
+        }
+        Before::Directory => {
+            let outcome = restore_directory(&entry.path, what);
+            if matches!(outcome, Outcome::Restored(_)) {
+                push_redo(s, &entry, after);
+            }
+            outcome
         }
         Before::Irreversible(why) => Outcome::Skipped {
             what,
@@ -1163,6 +1255,76 @@ const CHANGED_SINCE_STEP: &str = "changed after this step, so undoing would disc
 /// Why undo leaves a path alone that was removed after its step.
 const REMOVED_SINCE_STEP: &str = "was removed after this step; undoing would recreate it; left as it is. undo({force: true}) recreates it";
 
+/// Why a step leaves a path alone that it created: it is no longer absent-before.
+const ABSENT_BEFORE_AND_NOW: &str = "was absent before and is absent now";
+
+/// Why a created directory is left alone: something was put in it afterwards,
+/// and removing it would remove that too.
+const NOT_EMPTY_SINCE_STEP: &str = "holds files this step did not record, so it is left as it is";
+
+/// Remove what a step created at `path`: a file, or a directory that is still
+/// empty. A directory with anything in it is left alone and reported, not
+/// removed with its contents. `absent_why` is the reason when nothing is there.
+fn remove_created(path: &str, what: String, absent_why: &str) -> Outcome {
+    let p = Path::new(path);
+    if p.is_file() {
+        return match std::fs::remove_file(p) {
+            Ok(()) => Outcome::Removed(what),
+            Err(e) => Outcome::Failed {
+                what,
+                why: e.to_string(),
+            },
+        };
+    }
+    if std::fs::symlink_metadata(p).is_ok_and(|m| m.is_dir()) {
+        return match std::fs::remove_dir(p) {
+            Ok(()) => Outcome::Removed(what),
+            Err(e) if crate::safety::dir_not_empty(&e) => Outcome::Skipped {
+                what,
+                why: NOT_EMPTY_SINCE_STEP.into(),
+            },
+            Err(e) => Outcome::Failed {
+                what,
+                why: e.to_string(),
+            },
+        };
+    }
+    // Never created, or already gone: there is nothing to take back.
+    Outcome::Skipped {
+        what,
+        why: absent_why.into(),
+    }
+}
+
+/// Recreate the empty directory a step removed. A directory that is there and
+/// empty already is as it was. Anything else in its place is left alone.
+fn restore_directory(path: &str, what: String) -> Outcome {
+    let p = Path::new(path);
+    match std::fs::symlink_metadata(p) {
+        Ok(m) if m.is_dir() => {
+            if std::fs::read_dir(p).is_ok_and(|mut d| d.next().is_none()) {
+                Outcome::Restored(what)
+            } else {
+                Outcome::Skipped {
+                    what,
+                    why: "exists now and holds files, so it is left as it is".into(),
+                }
+            }
+        }
+        Ok(_) => Outcome::Failed {
+            what,
+            why: "a file is in its place".into(),
+        },
+        Err(_) => match std::fs::create_dir(p) {
+            Ok(()) => Outcome::Restored(what),
+            Err(e) => Outcome::Failed {
+                what,
+                why: e.to_string(),
+            },
+        },
+    }
+}
+
 /// Push the state an undone step produced onto the redo stack. Pushes nothing
 /// when that state could not be captured or would exceed the budget: the undo
 /// has already happened and its outcome stands.
@@ -1229,7 +1391,7 @@ pub fn redo(n: usize) -> Vec<Outcome> {
         // The file is not touched unless what it holds now is first kept. If
         // that cannot be kept, the file is left alone and the step stays on the
         // redo stack, so the redo stops here.
-        let current = match capture(&r.path, used) {
+        let current = match capture_state(&r.path, used) {
             Ok(current) => current,
             Err(why) => {
                 out.push(Outcome::Skipped {
@@ -1248,21 +1410,12 @@ pub fn redo(n: usize) -> Vec<Outcome> {
                 },
             },
             Before::Absent => {
-                if Path::new(&r.path).is_file() {
-                    match std::fs::remove_file(&r.path) {
-                        Ok(()) => Outcome::Removed(what),
-                        Err(e) => Outcome::Failed {
-                            what,
-                            why: e.to_string(),
-                        },
-                    }
-                } else {
-                    Outcome::Skipped {
-                        what,
-                        why: "was absent after the step and is absent now".into(),
-                    }
-                }
+                remove_created(&r.path, what, "was absent after the step and is absent now")
             }
+            Before::Directory => match restore_directory(&r.path, what) {
+                Outcome::Restored(what) => Outcome::Reapplied(what),
+                other => other,
+            },
             Before::Irreversible(why) => Outcome::Skipped {
                 what,
                 why: why.clone(),

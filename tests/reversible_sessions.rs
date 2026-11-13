@@ -179,6 +179,9 @@ fn an_irreversible_step_is_reported_and_never_counted_as_restored() {
     let s = Session::new("irreversible");
     let sub = s.path("subdir");
     std::fs::create_dir_all(&sub).expect("subdir");
+    // Not empty: an empty directory is recorded as one undo recreates, so only a
+    // tree is irreversible.
+    std::fs::write(sub.join("kept.txt"), "x").expect("a file in the directory");
 
     // `rmdir`, not `rm`: the operation has to *succeed* for its journal entry to
     // survive, and `rm` on a directory fails (`remove_file` refuses one), which
@@ -191,10 +194,10 @@ fn an_irreversible_step_is_reported_and_never_counted_as_restored() {
     // had not run. Registering `rm` surfaced that. A directory is still the
     // thing being proved irreversible -- trees are not captured -- just via a
     // call that actually removes one.
-    let removed = call("rmdir", vec![Value::Str(sub.clone())]);
+    let removed = call("rmdir", vec![Value::Str(sub.clone()), Value::Bool(true)]);
     assert!(
         removed.is_ok(),
-        "rmdir should remove an empty dir: {removed:?}"
+        "rmdir should remove the directory tree: {removed:?}"
     );
     assert!(
         !std::path::Path::new(&sub).exists(),

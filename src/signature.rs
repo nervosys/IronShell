@@ -985,11 +985,12 @@ pub static SIGNATURES: &[Signature] = &[
     },
     Signature {
         name: "file_copy", category: None, subject_required: false, aliases: &["copy_file", "cp"],
-        subject: None, params: &[req("source", Ty::Str, "regular file or directory tree without symlink entries"), req("destination", Ty::Str, "non-overlapping destination with an existing parent")], returns: "Record",
-        doc: "Copy binary files or merge directory trees, bounded to 10000 entries and 64 MiB total. Preflight destination types and guard all writes; replace files atomically and snapshot modifications for transactions. Pipeline input is refused. In agent mode the source is judged by the read jail, as `cat` is: an outside source is E_OUTSIDE_WORKSPACE.",
+        subject: None, params: &[req("source", Ty::Str, "regular file or directory tree without symlink entries"), req("destination", Ty::Str, "non-overlapping destination with an existing parent, or an existing directory that takes a file copied into it")], returns: "Record",
+        doc: "Copy binary files or merge directory trees, bounded to 10000 entries and 64 MiB total. A file copied onto an existing directory goes inside it under its own name, as cp does; the result's dest names the file written. Preflight destination types and guard all writes; replace files atomically and snapshot modifications for transactions. Pipeline input is refused. In agent mode the source is judged by the read jail, as `cat` is: an outside source is E_OUTSIDE_WORKSPACE.",
         examples: &[
             (r#"let d = fs_tempdir("ae_copy"); file_write(d + "/x", "hi"); let result = file_copy(d + "/x", d + "/y"); rmdir(d, true); result.bytes"#, "2"),
             (r#"let d = fs_tempdir("ae_copy_tree"); file_mkdir(d + "/a"); file_write(d + "/a/x", "hi"); let result = cp(d + "/a", d + "/b"); rmdir(d, true); result.success"#, "true"),
+            (r#"let d = fs_tempdir("ae_copy_into"); file_write(d + "/x", "hi"); file_mkdir(d + "/sub"); let result = cp(d + "/x", d + "/sub"); rmdir(d, true); result.bytes"#, "2"),
         ],
     },
     Signature {
@@ -1001,7 +1002,7 @@ pub static SIGNATURES: &[Signature] = &[
     Signature {
         name: "file_mkdir", category: None, subject_required: false, aliases: &["mkdir", "mkdirp"],
         subject: None, params: &[opt("path", Ty::Str, "the directory to create; its missing parents are created too. Piped, the path is the input")], returns: "Record",
-        doc: "Create a directory and missing parents, returning path, created and success. Direct mkdir(path) or path | mkdir.",
+        doc: "Create a directory and missing parents, returning path, created and success. Direct mkdir(path) or path | mkdir. An empty path is refused. undo removes the directories this call created, while they are still empty.",
         examples: &[(r#"let d = fs_tempdir("ae_mkdir"); let result = mkdir(d + "/a/b"); rmdir(d, true); result.created"#, "true"), (r#"let d = fs_tempdir("ae_mkdir_pipe"); let result = (d + "/p") | mkdir; rmdir(d, true); result.created"#, "true")],
     },
     Signature {
@@ -2045,8 +2046,8 @@ pub static SIGNATURES: &[Signature] = &[
             req("name", Ty::Str, "environment variable to read"),
             opt("default", Ty::Any, "returned when the variable is unset"),
         ],
-        returns: "String",
-        doc: "Read an environment variable, with an optional default when unset.",
+        returns: "String | Null",
+        doc: "Read an environment variable, with an optional default when unset. Null when it is unset and no default is given.",
         examples: &[
             (r#"env("HOME")"#, "/home/me"),
             (r#"env("NOPE", "fallback")"#, "fallback"),
@@ -2782,7 +2783,7 @@ pub static SIGNATURES: &[Signature] = &[
         subject: None,
         params: &[opt("path", Ty::Str, "directory to list; defaults to the working directory")],
         returns: "Array",
-        doc: "List a directory as records with name, path, size and modified.",
+        doc: "List a directory as records with name, path, size and modified. A file lists as itself, as one record; a glob lists its matches.",
         examples: &[
             (r#"(ls("src") | len) > 0"#, "true"),
             (r#"(ls() | len) > 0"#, "true"),
