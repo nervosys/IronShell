@@ -460,6 +460,10 @@ pub struct ParameterDefinition {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ExampleDefinition {
+    /// The example's own text. Empty (and left out of the output) when the
+    /// example has none: repeating the builtin's description on every example
+    /// cost date_diff ~13 KB for one paragraph said ten times.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub description: String,
     pub code: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -703,6 +707,21 @@ fn execute_call(builtin: &str, args: &JsonValue) -> AgentResponse {
             }
         },
     };
+    // A name that is no builtin is refused as one, before its arguments are
+    // read: the argument check would otherwise name 'args' for a builtin that
+    // is not there.
+    if let Some(refusal) = unknown_builtin_refusal(builtin) {
+        crate::record::note_outcome(
+            crate::record::Surface::Api,
+            "",
+            |_| vec![builtin.to_string()],
+            Err(crate::safety::ErrorCode::UnknownBuiltin),
+            started.elapsed(),
+        );
+        return refusal;
+    }
+    let unwrapped = unwrap_args_envelope(builtin, args);
+    let args = &unwrapped;
     // Convert JSON args to IronShell code
     let code = match args_to_code(builtin, args) {
         Ok(c) => c,
@@ -719,7 +738,7 @@ fn execute_call(builtin: &str, args: &JsonValue) -> AgentResponse {
             return AgentResponse {
                 code: Some("E_BAD_ARG".to_string()),
                 hint: Some(
-                    "pass the arguments as a JSON array in parameter order, or as an object keyed by the parameter names describe lists"
+                    "pass the arguments as a JSON array in parameter order, or as an object keyed by the parameter names describe lists; a /call/:builtin body is that arguments object itself (e.g. {\"path\": \".\"}), not {\"args\": ...}"
                         .to_string(),
                 ),
                 success: false,
@@ -1141,6 +1160,12 @@ fn plugin_builtin_response(name: &str) -> AgentResponse {
 
 /// Get information about a specific builtin
 fn describe_builtin(name: &str) -> AgentResponse {
+    // `file.read` names the builtin that member runs (`file_read`), as eval and
+    // `call` resolve it.
+    let resolved = name
+        .split_once('.')
+        .and_then(|(module, member)| crate::modules::builtin_for_member(module, member));
+    let name = resolved.as_deref().unwrap_or(name);
     // The whole catalogue, as the ontology serves it. This read the 16
     // hand-written entries, so `/api/v1/builtins/ontology_manifest` answered
     // "not found" for a builtin the schema lists.
@@ -1629,6 +1654,11 @@ pub(crate) fn named_args_to_positional(
                 out.extend(items)
             }
             Some(value) => out.push(value),
+            // A lone query: `{"source_or_query": "select 1"}` is `sql("select 1")`,
+            // whose one String is the query, so the empty subject has no position.
+            None if i == 0
+                && name.as_str() == "subject"
+                && matches!(canonical.as_str(), "sql" | "sql_value") => {}
             None => {
                 return Err(anyhow!(
                     "argument '{}' of '{}' is optional, but a later argument is given; \
@@ -1641,6 +1671,79 @@ pub(crate) fn named_args_to_positional(
         }
     }
     Ok(out)
+}
+
+/// The refusal for a name that is no builtin (`E_UNKNOWN_BUILTIN`, with the
+/// nearest real names), or `None` when it names one. A module-qualified name
+/// is resolved first, as `describe` resolves it.
+pub fn unknown_builtin_refusal(name: &str) -> Option<AgentResponse> {
+    let response = describe_builtin(name);
+    (response.code.as_deref() == Some("E_UNKNOWN_BUILTIN")).then_some(response)
+}
+
+/// The arguments of a `/call/:builtin` body that was wrapped as the `/execute`
+/// request is: `{"args": {...}}` or `{"args": [...]}`. When that is the whole
+/// body and the builtin has no parameter named `args`, the wrapper is removed.
+/// Anything else is returned as it came.
+fn unwrap_args_envelope(builtin: &str, args: &JsonValue) -> JsonValue {
+    let inner = match args {
+        JsonValue::Object(obj) if obj.len() == 1 => match obj.get("args") {
+            Some(inner @ (JsonValue::Object(_) | JsonValue::Array(_))) => inner,
+            _ => return args.clone(),
+        },
+        _ => return args.clone(),
+    };
+    let takes_args = get_all_builtin_definitions()
+        .into_iter()
+        .find(|d| {
+            d.name == builtin
+                || d.aliases
+                    .as_ref()
+                    .is_some_and(|names| names.iter().any(|n| n == builtin))
+        })
+        .is_some_and(|d| d.parameters.iter().any(|p| p.name == "args"));
+    if takes_args {
+        args.clone()
+    } else {
+        inner.clone()
+    }
+}
+
+/// The `code` of an `/eval` body: a string, or a coded `E_BAD_ARG` response
+/// that names the field. A missing `code` used to evaluate the empty program
+/// and answer `success: true, result: null`.
+pub fn eval_code_from_body(body: &JsonValue) -> Result<String, AgentResponse> {
+    match body.get("code") {
+        Some(JsonValue::String(code)) => Ok(code.clone()),
+        other => {
+            let problem = match other {
+                None => "is missing".to_string(),
+                Some(v) => format!("must be a string, got {}", json_kind(v)),
+            };
+            Err(AgentResponse {
+                code: Some("E_BAD_ARG".to_string()),
+                hint: Some(
+                    "send the IronShell source as a string: {\"code\": \"1 + 1\"}".to_string(),
+                ),
+                success: false,
+                result: None,
+                error: Some(format!("the request field 'code' {problem}")),
+                result_type: None,
+                metadata: Some(json!({"code": "E_BAD_ARG", "field": "code"})),
+            })
+        }
+    }
+}
+
+fn json_kind(v: &JsonValue) -> &'static str {
+    match v {
+        JsonValue::Null => "null",
+        JsonValue::Bool(_) => "a boolean",
+        JsonValue::Number(_) => "a number",
+        JsonValue::String(_) => "a string",
+        JsonValue::Array(_) => "an array",
+        JsonValue::Object(_) => "an object",
+    }
 }
 
 /// Whether `name` is written as an IronShell identifier: a letter or an
@@ -3137,6 +3240,11 @@ const SUBJECT_OPTIONAL_WITHOUT_PARAMS: &[&str] = &[];
 /// the subject), or when the builtin has no parameter to take the value in
 /// (`sqrt(16)`), unless it is listed as running without one.
 fn subject_required_in_tools(sig: &crate::signature::Signature) -> bool {
+    // `sql("select 1 as x")` is a lone query: its one String is
+    // `source_or_query`, not a subject, so the subject is never required.
+    if matches!(sig.name, "sql" | "sql_value") {
+        return false;
+    }
     sig.subject_required
         || sig.params.iter().any(|p| p.required)
         || (sig.params.is_empty() && !SUBJECT_OPTIONAL_WITHOUT_PARAMS.contains(&sig.name))
@@ -3243,7 +3351,7 @@ fn definition_from_signature(
             .examples
             .iter()
             .map(|(code, result)| ExampleDefinition {
-                description: sig.doc.to_string(),
+                description: String::new(),
                 code: (*code).to_string(),
                 result: Some((*result).to_string()),
             })
@@ -3462,6 +3570,11 @@ fn get_all_builtin_definitions() -> Vec<BuiltinDefinition> {
 
     // Sort by category then name for consistent output
     all.sort_by(|a, b| a.category.cmp(&b.category).then(a.name.cmp(&b.name)));
+    // The calling schema is JSON Schema, whatever spelling the entry above
+    // gave a type; the parameter list keeps IronShell's own type names.
+    for d in &mut all {
+        normalize_schema_types(&mut d.json_schema);
+    }
     annotate_effects(all)
 }
 
@@ -3669,7 +3782,16 @@ pub fn ontology_describe_json(query: &str) -> JsonValue {
         let examples: Vec<JsonValue> = d
             .examples
             .iter()
-            .map(|e| json!({ "code": e.code, "description": e.description }))
+            .map(|e| {
+                let mut ex = json!({ "code": e.code });
+                if let Some(result) = &e.result {
+                    ex["result"] = json!(result);
+                }
+                if !e.description.is_empty() {
+                    ex["description"] = json!(e.description);
+                }
+                ex
+            })
             .collect();
         let mut detail = json!({
             "builtin": d.name,
@@ -4041,13 +4163,197 @@ fn get_category_info() -> Vec<CategoryInfo> {
 
 use crate::providers::schema::{builtins_to_tools, ToolFormat};
 
+// ----------------------------------------------------------------------------
+// IronShell types as JSON Schema
+// ----------------------------------------------------------------------------
+//
+// The catalogue's parameter types are IronShell's own words (`String`, `Int`,
+// `Record`, `Array | String`, `Lambda`). Provider function schemas accept JSON
+// Schema only, so every `"type"` the provider formats carry is mapped here. The
+// `ontology` format keeps IronShell's names: they are its vocabulary.
+
+/// One piece of an IronShell type, in JSON Schema terms.
+enum SchemaPiece {
+    /// A JSON Schema type, with the schema of its elements for an array.
+    Type(&'static str, Option<JsonValue>),
+    /// Any value: JSON Schema says so by having no `type` at all.
+    Any,
+    /// A lambda cannot be a JSON value, so it is passed as source text.
+    Lambda,
+}
+
+fn schema_piece(part: &str) -> SchemaPiece {
+    let part = part.trim();
+    let lower = part.to_ascii_lowercase();
+    // `Array<Number>` and `[Number]` say what the elements are.
+    let element = lower
+        .strip_prefix("array<")
+        .and_then(|r| r.strip_suffix('>'))
+        .or_else(|| lower.strip_prefix('[').and_then(|r| r.strip_suffix(']')));
+    if let Some(element) = element {
+        let items = match schema_piece(element) {
+            SchemaPiece::Type(t, items) => {
+                let mut s = json!({ "type": t });
+                if let Some(items) = items {
+                    s["items"] = items;
+                }
+                Some(s)
+            }
+            SchemaPiece::Lambda => Some(json!({ "type": "string" })),
+            SchemaPiece::Any => None,
+        };
+        return SchemaPiece::Type("array", items);
+    }
+    match lower.as_str() {
+        "string" | "str" | "path" | "text" | "uri" | "url" => SchemaPiece::Type("string", None),
+        "int" | "integer" => SchemaPiece::Type("integer", None),
+        "float" | "number" | "numeric" => SchemaPiece::Type("number", None),
+        "bool" | "boolean" => SchemaPiece::Type("boolean", None),
+        "array" | "list" => SchemaPiece::Type("array", None),
+        "record" | "object" | "table" | "map" => SchemaPiece::Type("object", None),
+        "null" | "none" => SchemaPiece::Type("null", None),
+        "lambda" | "fn" | "function" => SchemaPiece::Lambda,
+        // `Any`, `Value`, and a word that is no JSON type: any value is accepted.
+        _ => SchemaPiece::Any,
+    }
+}
+
+/// Rewrite every `"type"` in a schema from an IronShell type name to JSON
+/// Schema. `Any` loses its `type`; a `Lambda` becomes a string whose
+/// description says it is IronShell lambda source; a union (`Array | String`)
+/// becomes a list of types. Keys that start with `x-` are IronShell's own and
+/// are left alone. Applying it twice changes nothing.
+fn normalize_schema_types(schema: &mut JsonValue) {
+    match schema {
+        JsonValue::Object(map) => {
+            if let Some(JsonValue::String(ty)) = map.get("type").cloned() {
+                let mut types: Vec<&'static str> = Vec::new();
+                let mut items: Option<JsonValue> = None;
+                let (mut any, mut lambda) = (false, false);
+                for piece in ty.split('|').map(schema_piece) {
+                    match piece {
+                        SchemaPiece::Type(t, i) => {
+                            if !types.contains(&t) {
+                                types.push(t);
+                            }
+                            items = i;
+                        }
+                        SchemaPiece::Lambda => {
+                            lambda = true;
+                            if !types.contains(&"string") {
+                                types.push("string");
+                            }
+                        }
+                        SchemaPiece::Any => any = true,
+                    }
+                }
+                if any || types.is_empty() {
+                    map.remove("type");
+                } else if types.len() == 1 {
+                    map.insert("type".to_string(), json!(types[0]));
+                    if let (Some(items), false) = (items, map.contains_key("items")) {
+                        map.insert("items".to_string(), items);
+                    }
+                } else {
+                    map.insert("type".to_string(), json!(types));
+                }
+                if lambda {
+                    let note = "IronShell lambda source, e.g. fn(x) => x * 2";
+                    let described = match map.get("description").and_then(JsonValue::as_str) {
+                        Some(d) if !d.is_empty() => format!("{d} ({note})"),
+                        _ => note.to_string(),
+                    };
+                    map.insert("description".to_string(), json!(described));
+                }
+            }
+            for (key, child) in map.iter_mut() {
+                if !key.starts_with("x-") {
+                    normalize_schema_types(child);
+                }
+            }
+        }
+        JsonValue::Array(items) => items.iter_mut().for_each(normalize_schema_types),
+        _ => {}
+    }
+}
+
+/// A schema in the subset Gemini's function declarations document: upper-case
+/// type names, no list-valued `type` (a union is `anyOf`), no `x-` keys.
+fn gemini_schema(schema: &JsonValue) -> JsonValue {
+    match schema {
+        JsonValue::Object(map) => {
+            let mut out = serde_json::Map::new();
+            for (key, value) in map {
+                if key.starts_with("x-") {
+                    continue;
+                }
+                match (key.as_str(), value) {
+                    ("type", JsonValue::String(t)) => {
+                        out.insert(key.clone(), json!(t.to_ascii_uppercase()));
+                    }
+                    ("type", JsonValue::Array(types)) => {
+                        let variants: Vec<JsonValue> = types
+                            .iter()
+                            .filter_map(JsonValue::as_str)
+                            .map(|t| json!({ "type": t.to_ascii_uppercase() }))
+                            .collect();
+                        out.insert("anyOf".to_string(), JsonValue::Array(variants));
+                    }
+                    ("properties", JsonValue::Object(props)) => {
+                        // A property is a schema, whatever it is called.
+                        let props = props
+                            .iter()
+                            .map(|(k, v)| (k.clone(), gemini_schema(v)))
+                            .collect();
+                        out.insert(key.clone(), JsonValue::Object(props));
+                    }
+                    _ => {
+                        out.insert(key.clone(), gemini_schema(value));
+                    }
+                }
+            }
+            JsonValue::Object(out)
+        }
+        JsonValue::Array(items) => JsonValue::Array(items.iter().map(gemini_schema).collect()),
+        other => other.clone(),
+    }
+}
+
+/// OpenAI refuses a function description over 1,024 characters. A longer one
+/// is cut at a word boundary and ends in an ellipsis, and the result fits the
+/// limit.
+fn truncate_description(text: &str, max: usize) -> String {
+    if text.chars().count() <= max {
+        return text.to_string();
+    }
+    let kept: String = text.chars().take(max.saturating_sub(1)).collect();
+    let cut = match kept.rfind(char::is_whitespace) {
+        Some(i) if i > 0 => &kept[..i],
+        _ => kept.as_str(),
+    };
+    format!("{}\u{2026}", cut.trim_end())
+}
+
 /// Convert ontology builtins to tool list in the specified format with optional name prefix
 fn ontology_tools(ontology: &LanguageOntology, format: ToolFormat, prefix: &str) -> Vec<JsonValue> {
+    // OpenAI-shaped tools cap a function description at 1,024 characters.
+    let descriptions: Vec<String> = ontology
+        .builtins
+        .iter()
+        .map(|b| {
+            if format == ToolFormat::OpenAI {
+                truncate_description(&b.description, 1024)
+            } else {
+                b.description.clone()
+            }
+        })
+        .collect();
     builtins_to_tools(
         ontology
             .builtins
             .iter()
-            .map(|b| (b.name.as_str(), b.description.as_str(), &b.json_schema)),
+            .zip(descriptions.iter())
+            .map(|(b, d)| (b.name.as_str(), d.as_str(), &b.json_schema)),
         format,
         prefix,
     )
@@ -4091,7 +4397,29 @@ fn build_claude_schema(ontology: &LanguageOntology) -> JsonValue {
 
 /// Build Google Gemini function declaration schema
 fn build_gemini_schema(ontology: &LanguageOntology) -> JsonValue {
-    let function_declarations = ontology_tools(ontology, ToolFormat::Google, "ironshell_");
+    // Gemini documents its own subset of the schema: upper-case types, `anyOf`
+    // for a union, no extension keys, and no `parameters` for a function that
+    // takes none (an OBJECT with no properties is refused).
+    let function_declarations: Vec<JsonValue> =
+        ontology_tools(ontology, ToolFormat::Google, "ironshell_")
+            .into_iter()
+            .map(|mut declaration| {
+                if let Some(obj) = declaration.as_object_mut() {
+                    let no_params = obj
+                        .get("parameters")
+                        .and_then(|p| p.get("properties"))
+                        .and_then(JsonValue::as_object)
+                        .is_none_or(|props| props.is_empty());
+                    match obj.remove("parameters") {
+                        Some(params) if !no_params => {
+                            obj.insert("parameters".to_string(), gemini_schema(&params));
+                        }
+                        _ => {}
+                    }
+                }
+                declaration
+            })
+            .collect();
 
     json!({
         "format": "gemini_function_calling",
@@ -5631,6 +5959,12 @@ pub mod server {
         axum::extract::Path(builtin): axum::extract::Path<String>,
         Json(args): Json<JsonValue>,
     ) -> impl IntoResponse {
+        // An unknown builtin is a missing resource, not a malformed request.
+        if !builtin.contains('.') {
+            if let Some(refusal) = crate::agent_api::unknown_builtin_refusal(&builtin) {
+                return (StatusCode::NOT_FOUND, Json(refusal));
+            }
+        }
         run_blocking(AgentRequest::Call { builtin, args }, eval_deadline()).await
     }
 
@@ -5648,11 +5982,10 @@ pub mod server {
     }
 
     async fn handle_eval(Json(body): Json<JsonValue>) -> impl IntoResponse {
-        let code = body
-            .get("code")
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .to_string();
+        let code = match crate::agent_api::eval_code_from_body(&body) {
+            Ok(code) => code,
+            Err(refusal) => return (StatusCode::BAD_REQUEST, Json(refusal)),
+        };
 
         run_blocking(AgentRequest::Eval { code }, eval_deadline()).await
     }
@@ -5844,14 +6177,13 @@ pub mod server {
 
     /// Stream code evaluation
     async fn handle_stream_eval(Json(body): Json<JsonValue>) -> Response {
+        let code = match crate::agent_api::eval_code_from_body(&body) {
+            Ok(code) => code,
+            Err(refusal) => return (StatusCode::BAD_REQUEST, Json(refusal)).into_response(),
+        };
         let Some(slot) = try_take_stream_slot(&stream_slots()) else {
             return stream_busy_response();
         };
-        let code = body
-            .get("code")
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .to_string();
         let deadline = eval_deadline();
 
         create_sse_response(async move {
