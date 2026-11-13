@@ -63,3 +63,22 @@ fn an_escaped_dollar_brace_is_still_literal() {
     let v = run("\"a \\${x\"");
     assert_eq!(v, Value::Str("a ${x".into()));
 }
+
+#[test]
+fn a_one_letter_slip_in_a_short_name_still_gets_its_builtin() {
+    let found = iron_shell::builtins::did_you_mean("lenn");
+    assert!(found.contains(&"len".to_string()), "{found:?}");
+}
+
+#[test]
+fn a_four_letter_name_is_not_offered_a_two_letter_slip() {
+    let found = iron_shell::builtins::did_you_mean("nope");
+    assert!(!found.contains(&"Some".to_string()), "{found:?}");
+}
+
+#[test]
+fn an_unknown_name_with_no_near_builtin_has_no_suggestion() {
+    let msg = run_err("f = fn() => zqxv\nf()");
+    assert!(msg.contains("E_UNKNOWN_NAME"), "got: {msg}");
+    assert!(!msg.contains("did you mean"), "got: {msg}");
+}

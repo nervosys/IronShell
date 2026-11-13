@@ -3991,15 +3991,12 @@ pub fn mapped_module_spelling(module: &str, member: &str) -> Vec<String> {
     names.iter().map(|name| name.to_string()).collect()
 }
 
-/// The edit budget for a suggestion to `name`. Budget scales with length: for a
-/// very short name every neighbour is a different command, so only an
-/// exact-ish match is a real suggestion.
+/// The edit budget for a suggestion to `name`: a third of its length, from 1 up
+/// to 3. For a short name every neighbour is a different command, so only a
+/// one-letter slip is a real suggestion. It was 2 for names of 4 to 7 letters,
+/// which offered `None`, `node` and `Some` for `nope`.
 fn edit_budget(name: &str) -> usize {
-    match name.chars().count() {
-        0..=3 => 1,
-        4..=7 => 2,
-        _ => 3,
-    }
+    (name.chars().count() / 3).clamp(1, 3)
 }
 
 /// The nearest names to `name` from an arbitrary candidate set, closest first
@@ -4011,9 +4008,15 @@ fn edit_budget(name: &str) -> usize {
 pub fn nearest_names<'a>(name: &str, candidates: impl Iterator<Item = &'a str>) -> Vec<String> {
     let budget = edit_budget(name);
     let lower = name.to_lowercase();
+    let len = lower.chars().count();
     let mut scored: Vec<(usize, &'a str)> = candidates
         .filter_map(|cand| {
-            edit_distance_within(&lower, &cand.to_lowercase(), budget).map(|d| (d, cand))
+            let cand_lower = cand.to_lowercase();
+            // A name of a very different length is not a slip of this one.
+            if cand_lower.chars().count().abs_diff(len) > 2 {
+                return None;
+            }
+            edit_distance_within(&lower, &cand_lower, budget).map(|d| (d, cand))
         })
         .collect();
     // Deterministic: distance first, then name, so the same typo always yields
