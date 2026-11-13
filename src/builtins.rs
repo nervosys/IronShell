@@ -30,6 +30,11 @@ use crate::{
 };
 use std::time::Duration;
 
+use crate::path_builtins::{
+    bi_path_basename, bi_path_dirname, bi_path_extension, bi_path_is_absolute, bi_path_join,
+    bi_path_normalize, bi_path_split, bi_path_stem,
+};
+
 // Fast builtin lookup using hash map
 lazy_static::lazy_static! {
     /// Public accessor for builtin lookup table (used by agent_api for dynamic discovery)
@@ -758,6 +763,15 @@ lazy_static::lazy_static! {
         // Records and number text (1177-1178)
         map.insert("merge", 1177);
         map.insert("format_number", 1178);
+        // Paths: text only, no disk access (1179-1186)
+        map.insert("path_join", 1179);
+        map.insert("path_basename", 1180);
+        map.insert("path_dirname", 1181);
+        map.insert("path_extension", 1182);
+        map.insert("path_stem", 1183);
+        map.insert("path_normalize", 1184);
+        map.insert("path_is_absolute", 1185);
+        map.insert("path_split", 1186);
         // 500-519: Database
         map.insert("db_sqlite_open", 500);
         map.insert("db_sqlite_query", 501);
@@ -3810,6 +3824,15 @@ static BUILTIN_DISPATCH: &[fn(Vec<Value>, Option<Value>, &mut Env) -> Result<Val
     // Records and number text (1177-1178)
     |args, input, _| bi_merge(args, input),         // 1177
     |args, input, _| bi_format_number(args, input), // 1178
+    // Paths (1179-1186), in src/path_builtins.rs
+    |args, input, _| bi_path_join(args, input),     // 1179
+    |args, input, _| bi_path_basename(args, input), // 1180
+    |args, input, _| bi_path_dirname(args, input),  // 1181
+    |args, input, _| bi_path_extension(args, input), // 1182
+    |args, input, _| bi_path_stem(args, input),     // 1183
+    |args, input, _| bi_path_normalize(args, input), // 1184
+    |args, input, _| bi_path_is_absolute(args, input), // 1185
+    |args, input, _| bi_path_split(args, input),    // 1186
 ];
 
 /// The dispatch row that serves `name`, if the fast table has one.
@@ -3978,6 +4001,18 @@ fn mapped_spelling(name: &str) -> Vec<String> {
         // Substrings: slice(s, start, end) takes characters. `str.substring` and
         // `str.substr` are JavaScript's and Python-adjacent spellings of it.
         "substring" | "substr" | "slice" => vec!["slice".to_string()],
+        // Paths: the text-only path_* builtins. `abspath` has no pure form:
+        // path_is_absolute tests it, and fs_realpath resolves it on disk.
+        "basename" | "fs_basename" | "file_basename" => vec!["path_basename".to_string()],
+        "dirname" | "fs_dirname" | "file_dirname" => vec!["path_dirname".to_string()],
+        "extname" | "extension" | "fs_extension" | "file_extension" => {
+            vec!["path_extension".to_string()]
+        }
+        "file_stem" | "fs_stem" => vec!["path_stem".to_string()],
+        "splitext" => vec!["path_stem".to_string(), "path_extension".to_string()],
+        "normpath" => vec!["path_normalize".to_string()],
+        "abspath" => vec!["path_is_absolute".to_string(), "fs_realpath".to_string()],
+        "join_path" | "joinpath" | "path_combine" => vec!["path_join".to_string()],
         _ => Vec::new(),
     }
 }
@@ -4000,10 +4035,11 @@ pub fn mapped_module_spelling(module: &str, member: &str) -> Vec<String> {
         ("regex" | "re", "sub") => &["regex_replace"],
         ("path", "exists" | "isfile" | "isdir") => &["path_exists"],
         ("path", "realpath" | "abspath" | "resolve" | "canonicalize") => &["fs_realpath"],
-        ("path", "normpath" | "normalize") => &["platform_normalize_path"],
-        // Python's and Node's path module has no IronShell counterpart: these
-        // name what does exist, rather than `math`, one edit from `path`.
-        ("path", _) => &["path_exists", "fs_realpath", "platform_normalize_path"],
+        ("path", "normpath") => &["path.normalize"],
+        // The `path` module is pure text (path.join, path.basename); its other
+        // members are Python or Node spellings. These name what does exist,
+        // rather than `math`, one edit from `path`.
+        ("path", _) => &["path_exists", "fs_realpath", "path.normalize"],
         _ => &[],
     };
     names.iter().map(|name| name.to_string()).collect()

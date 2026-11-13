@@ -3764,6 +3764,7 @@ fn module_description(name: &str) -> &str {
         "agent" => "Agent framework — autonomous agents with tools",
         "math" => "Mathematics — sqrt, pow, trig, constants",
         "str" => "String manipulation — upper, lower, split, join, replace",
+        "path" => "Paths — join, basename, dirname, extension, normalize (text only)",
         "arr" => "Array operations — range, flatten, unique, chunk",
         "json" => "JSON — parse, stringify, query, patch",
         "mcp" => "Model Context Protocol — tool discovery and invocation",

@@ -212,6 +212,7 @@ crypto.uuid()         math.sqrt(16)      arr.range(10)
 | `db`         | Database       | `db.sqlite_open("db")`, `db.sqlite_query(c, sql)`     |
 | `math`       | Mathematics    | `math.sqrt(x)`, `math.pow(a, b)`                      |
 | `str`        | Strings        | `str.upper(s)`, `str.split(s, ",")`                   |
+| `path`       | Paths          | `path.join("a", "b")`, `path.basename(p)`             |
 | `arr`        | Arrays         | `arr.range(n)`, `arr.flatten(a)`, `arr.unique(a)`     |
 | `json`       | JSON           | `json.parse(s)`, `json.stringify(v)`                  |
 | `platform`   | Platform       | `platform.arch()`, `platform.cpu()`, `platform.gpus()` |
