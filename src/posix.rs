@@ -4110,15 +4110,11 @@ fn printf(args: &[String], sink: &mut Sink) -> Util {
                     let n = if arg.is_empty() {
                         0
                     } else {
-                        match printf_int_arg(&arg) {
-                            Some((n, complaint)) => {
-                                if let Some(c) = complaint {
-                                    complaints.push(format!("printf: {arg}: {c}"));
-                                }
-                                n
-                            }
-                            None => return Util::Decline,
+                        let (n, complaint) = printf_int_arg(&arg);
+                        if let Some(c) = complaint {
+                            complaints.push(format!("printf: {arg}: {c}"));
                         }
+                        n
                     };
                     match conv {
                         'd' | 'i' => n.to_string(),
@@ -4186,11 +4182,11 @@ fn printf(args: &[String], sink: &mut Sink) -> Util {
 /// integer constant (`strtoimax` in base 0): leading blanks, an optional sign,
 /// `0x` for hex, a leading `0` for octal, decimal otherwise. The value is what
 /// was read before any text that is not part of the number, and the complaint
-/// is bash's words for that text. `None` when the value does not fit in 64
-/// bits, which is left to the real printf.
-fn printf_int_arg(arg: &str) -> Option<(i64, Option<&'static str>)> {
+/// is bash's words for that text. A value past 64 bits is clamped to i64::MAX
+/// or i64::MIN and reported as "Result too large", as bash does.
+fn printf_int_arg(arg: &str) -> (i64, Option<&'static str>) {
     if let Some(rest) = arg.strip_prefix(['\'', '"']) {
-        return Some((rest.chars().next().map_or(0, |c| c as u32 as i64), None));
+        return (rest.chars().next().map_or(0, |c| c as u32 as i64), None);
     }
     let body = arg.trim_start_matches([' ', '\t', '\n', '\r', '\x0b', '\x0c']);
     let (neg, body) = match body.as_bytes().first().copied() {
@@ -4230,13 +4226,21 @@ fn printf_int_arg(arg: &str) -> Option<(i64, Option<&'static str>)> {
     } else {
         Some("invalid number")
     };
-    let mag = if value_digits.is_empty() {
-        0
-    } else {
-        u64::from_str_radix(value_digits, radix).ok()?
-    };
+    // Accumulated saturating and capped at 2^64, so the i128 below cannot wrap.
+    let mut mag: u128 = 0;
+    for c in value_digits.chars() {
+        let digit = c.to_digit(radix).unwrap_or(0);
+        mag = mag
+            .saturating_mul(radix as u128)
+            .saturating_add(u128::from(digit));
+    }
+    let mag = mag.min(1u128 << 64);
     let value = if neg { -(mag as i128) } else { mag as i128 };
-    Some((i64::try_from(value).ok()?, complaint))
+    if value > i64::MAX as i128 || value < i64::MIN as i128 {
+        let clamped = if neg { i64::MIN } else { i64::MAX };
+        return (clamped, Some("Result too large"));
+    }
+    (value as i64, complaint)
 }
 
 /// C's `%e`: one digit, the decimals, then `e`, a sign and at least two
