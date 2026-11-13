@@ -71,22 +71,19 @@ fn the_flagship_listing_contains_the_data_it_was_asked_for() {
 }
 
 #[test]
-fn the_documented_array_summary_is_unchanged() {
-    // `docs/book/src/ai/tools.md` shows `supported_os: [len=5]`, and the book
-    // is checked against the shell. Fixing record rendering must not change
-    // how an array nested in a record prints.
+fn a_nested_array_renders_in_full() {
+    // An array nested in a record used to print as `[len=3]`, which an agent
+    // reads as data. It is shown in full now (see round29_display.rs).
     assert_eq!(
         ae(&["-c", r#"from_json("{\"a\":1,\"b\":[1,2,3]}")"#]),
-        "{a: 1, b: [len=3]}"
+        "{a: 1, b: [1, 2, 3]}"
     );
 }
 
 #[test]
-fn nesting_stays_bounded_at_two_levels() {
-    // Rendering records inline must not make one line of REPL output
-    // unbounded: past depth two, collections summarise again.
-    assert_eq!(ae(&["-c", "[{a: {b: {c: 1}}}]"]), "[{a: {fields=1}}]");
-    assert_eq!(ae(&["-c", "[{a: [1, 2, 3]}]"]), "[{a: [len=3]}]");
+fn nesting_is_shown_in_full_at_any_depth() {
+    assert_eq!(ae(&["-c", "[{a: {b: {c: 1}}}]"]), "[{a: {b: {c: 1}}}]");
+    assert_eq!(ae(&["-c", "[{a: [1, 2, 3]}]"]), "[{a: [1, 2, 3]}]");
 }
 
 #[test]
@@ -104,10 +101,10 @@ fn non_vacuity_the_binary_under_test_is_the_one_that_was_built() {
     let v = ae(&["--version"]);
     assert!(v.starts_with("ish "), "unexpected version banner: {v}");
     assert_eq!(ae(&["-c", "1 + 1"]), "2", "the binary is not evaluating");
-    // And the elision marker must still be producible, or "no … in the output"
+    // And the cap marker must still be producible, or "no … in the output"
     // is not evidence of anything.
     assert!(
-        ae(&["-c", "[{a: {b: 1}}]"]).contains("fields="),
-        "depth-two summarisation is gone; the bound is not being applied"
+        ae(&["-c", "[arr.range(150)]"]).contains("... (50 more)"),
+        "the nested-array cap is gone; the bound is not being applied"
     );
 }
