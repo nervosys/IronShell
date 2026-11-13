@@ -85,7 +85,8 @@ fn no_arm_matching_quotes_a_string_value() {
 fn a_record_literal_scrutinee_matches_a_record_pattern() {
     assert_eq!(
         run(r#"match {name: "x", n: 3} { {name: n} => n, _ => "none" }"#),
-        Value::Int(3)
+        // `{name: n}` binds `n` to the `name` field.
+        Value::Str("x".into())
     );
 }
 

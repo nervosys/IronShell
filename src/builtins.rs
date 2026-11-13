@@ -3835,27 +3835,42 @@ fn fast_builtin_lookup(
 
 // --------------- Public entry points ---------------
 
-/// Levenshtein edit distance, bounded by `max`: returns `None` as soon as the
-/// best remaining possibility exceeds it. The bound is what makes scanning the
-/// whole builtin table on a *failed* call cheap.
+/// Edit distance (optimal string alignment: an insertion, a deletion, a
+/// substitution or a swap of two neighbouring letters each cost 1), bounded by
+/// `max`: returns `None` as soon as no alignment can come within it. The bound
+/// is what makes scanning the whole builtin table on a *failed* call cheap. A
+/// swap counts once because it is the commonest slip: `file.raed` is one edit
+/// from `file.read`, not two.
 fn edit_distance_within(a: &str, b: &str, max: usize) -> Option<usize> {
-    let (la, lb) = (a.chars().count(), b.chars().count());
+    let a: Vec<char> = a.chars().collect();
+    let b: Vec<char> = b.chars().collect();
+    let (la, lb) = (a.len(), b.len());
     if la.abs_diff(lb) > max {
         return None;
     }
+    let mut before: Vec<usize> = vec![0; lb + 1];
     let mut prev: Vec<usize> = (0..=lb).collect();
     let mut cur = vec![0usize; lb + 1];
-    for (i, ca) in a.chars().enumerate() {
+    let mut prev_best = 0;
+    for i in 0..la {
         cur[0] = i + 1;
         let mut row_best = cur[0];
-        for (j, cb) in b.chars().enumerate() {
-            let cost = usize::from(ca != cb);
-            cur[j + 1] = (prev[j] + cost).min(prev[j + 1] + 1).min(cur[j] + 1);
-            row_best = row_best.min(cur[j + 1]);
+        for j in 0..lb {
+            let cost = usize::from(a[i] != b[j]);
+            let mut d = (prev[j] + cost).min(prev[j + 1] + 1).min(cur[j] + 1);
+            if i > 0 && j > 0 && a[i] == b[j - 1] && a[i - 1] == b[j] {
+                d = d.min(before[j - 1] + 1);
+            }
+            cur[j + 1] = d;
+            row_best = row_best.min(d);
         }
-        if row_best > max {
+        // A swap reaches back two rows, so stop only when both of the last two
+        // rows are already over the bound.
+        if row_best > max && prev_best > max {
             return None;
         }
+        prev_best = row_best;
+        std::mem::swap(&mut before, &mut prev);
         std::mem::swap(&mut prev, &mut cur);
     }
     let d = prev[lb];
@@ -15163,14 +15178,14 @@ fn bi_pow(args: Vec<Value>, _input: Option<Value>) -> Result<Value> {
     // IronShell numbers are finite: an overflow (10 ** 400) or a NaN (a negative
     // base to a fractional power) is refused rather than returned as inf or NaN.
     if result.is_infinite() {
-        return Err(crate::safety::bad_value_in(
+        return Err(crate::safety::value_not_representable(
             "pow",
             format!("math_pow: {base} ** {exp} overflows a Float"),
             "use a smaller base or exponent: the largest Float is about 1.8e308",
         ));
     }
     if result.is_nan() {
-        return Err(crate::safety::bad_value_in(
+        return Err(crate::safety::value_not_representable(
             "pow",
             format!("math_pow: {base} ** {exp} is not a real number"),
             "a negative base needs a whole-number exponent",

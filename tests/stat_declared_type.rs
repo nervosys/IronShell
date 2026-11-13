@@ -33,7 +33,8 @@ fn stat_of_a_missing_path_is_null_and_the_ontology_says_so() {
     assert_eq!(run(r#"typeof(stat("nope.txt"))"#), "Null");
     let described = run(r#"ontology_describe("stat")"#);
     assert!(
-        described.contains("return_type: Record | Null"),
+        // Strings inside a record are quoted in `-c` output.
+        described.contains("return_type: \"Record | Null\""),
         "ontology said: {described}"
     );
     let _ = std::fs::remove_dir_all(&root);
