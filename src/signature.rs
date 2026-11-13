@@ -7644,7 +7644,7 @@ pub static SIGNATURES: &[Signature] = &[
         subject_required: false,
         aliases: &[],
         subject: Some(Ty::Sequence),
-        params: &[rest("part", Ty::Sequence, "a path, or an Array of paths; a part with a root replaces the parts before it")],
+        params: &[opt_rest("part", Ty::Sequence, "a path, or an Array of paths; a part with a root replaces the parts before it")],
         returns: "String",
         doc: "Join path parts with / as os.path.join does, on every platform. Text only: the disk is not read. Backslashes in the parts become /.",
         examples: &[

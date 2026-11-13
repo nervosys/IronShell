@@ -960,12 +960,17 @@ fn a_self_contained_example_produces_the_result_it_claims_body() {
                     sig.name
                 )
             });
-            assert_eq!(
-                strip(&format!("{got}")),
-                strip(want),
-                "{}'s example claims the wrong result: {code}",
-                sig.name
-            );
+            // A String result displays quoted and escaped (`"{\"a\":1}"`); an
+            // example may give either that form or the raw text it holds.
+            let raw_matches = matches!(&got, Value::Str(s) if plain(s).trim() == strip(want));
+            if !raw_matches {
+                assert_eq!(
+                    strip(&format!("{got}")),
+                    strip(want),
+                    "{}'s example claims the wrong result: {code}",
+                    sig.name
+                );
+            }
             checked += 1;
         }
     }

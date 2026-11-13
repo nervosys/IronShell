@@ -48,6 +48,9 @@ static CACHE: OnceLock<Mutex<HashMap<PathBuf, Exports>>> = OnceLock::new();
 /// The import hints read it when a name is unknown; nothing else does.
 struct ModuleFacts {
     source: String,
+    /// The resolved file: two modules imported as "a.ish" from different folders
+    /// are different modules.
+    path: std::path::PathBuf,
     /// Top-level names left without `pub`.
     private: Vec<String>,
     /// Names the module exports.
@@ -124,7 +127,7 @@ pub fn import(
         for item in items {
             let value = module
                 .get(&item.name)
-                .ok_or_else(|| missing_export("import", source, &path, &module, &item.name))?;
+                .ok_or_else(|| missing_export("import", &path, &module, &item.name))?;
             let bound = item.alias.as_deref().unwrap_or(&item.name);
             env.set_var_unchecked(bound.to_string(), value.clone());
         }
@@ -167,7 +170,7 @@ pub fn reexport(items: &[ExportItem], source: &str, env: &mut Env) -> Result<()>
     for item in items {
         let value = module
             .get(&item.name)
-            .ok_or_else(|| missing_export("export", source, &path, &module, &item.name))?;
+            .ok_or_else(|| missing_export("export", &path, &module, &item.name))?;
         let name = item.alias.as_deref().unwrap_or(&item.name);
         env.set_var_unchecked(name.to_string(), value.clone());
         env.add_export(name);
@@ -175,11 +178,12 @@ pub fn reexport(items: &[ExportItem], source: &str, env: &mut Env) -> Result<()>
     Ok(())
 }
 
-fn remember_facts(source: &str, private: Vec<String>, exported: Vec<String>) {
+fn remember_facts(source: &str, path: &Path, private: Vec<String>, exported: Vec<String>) {
     let mut facts = FACTS.lock().unwrap_or_else(|e| e.into_inner());
-    facts.retain(|f| f.source != source);
+    facts.retain(|f| f.path != path);
     facts.push(ModuleFacts {
         source: source.to_string(),
+        path: path.to_path_buf(),
         private,
         exported,
     });
@@ -202,15 +206,9 @@ pub(crate) fn unexported_hint(name: &str) -> Option<String> {
 
 /// The refusal for a name that `source` does not export. A name the module defines
 /// without `pub` says so, as the field form does; otherwise the exports are listed.
-fn missing_export(
-    builtin: &str,
-    source: &str,
-    path: &Path,
-    module: &Exports,
-    name: &str,
-) -> anyhow::Error {
+fn missing_export(builtin: &str, path: &Path, module: &Exports, name: &str) -> anyhow::Error {
     let shown = display(path);
-    let hint = if let Some(hint) = private_name_hint(source, name) {
+    let hint = if let Some(hint) = private_name_hint(path, name) {
         hint
     } else if module.is_empty() {
         format!("{shown} exports nothing: mark the definitions you want to use `pub`")
@@ -236,12 +234,12 @@ fn missing_export(
 
 /// The hint for `name` when `source` defines it without `pub`: the same words the
 /// `alias.name` form uses, so both paths say one thing.
-fn private_name_hint(source: &str, name: &str) -> Option<String> {
+fn private_name_hint(path: &Path, name: &str) -> Option<String> {
     let facts = FACTS.lock().unwrap_or_else(|e| e.into_inner());
     facts
         .iter()
         .find(|f| {
-            f.source == source
+            f.path == path
                 && f.private.iter().any(|p| p == name)
                 && !f.exported.iter().any(|e| e == name)
         })
@@ -355,7 +353,7 @@ fn load(source: &str) -> Result<(PathBuf, Exports)> {
         })
         .collect();
     let exports = evaluate(&path, &stmts, &lines).map_err(|e| in_module(&path, e))?;
-    remember_facts(source, private, exports.keys().cloned().collect());
+    remember_facts(source, &path, private, exports.keys().cloned().collect());
 
     cache()
         .lock()

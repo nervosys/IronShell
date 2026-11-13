@@ -320,7 +320,7 @@ fn starts_like_expression(line: &str) -> bool {
 /// quoted text, as an IronShell expression. Division is not translated:
 /// PowerShell's `/` yields a double and IronShell's does not always.
 fn parse_ps_expression(toks: &[Token]) -> Option<String> {
-    if toks.is_empty() || toks.len() % 2 == 0 {
+    if toks.is_empty() || toks.len().is_multiple_of(2) {
         return None;
     }
     let mut out: Vec<String> = Vec::new();
