@@ -26,7 +26,15 @@ fn slash(p: &std::path::Path) -> String {
 
 #[test]
 fn to_csv_refuses_a_nan_inside_a_nested_cell() {
-    let text = eval(r#"[{a: from_toml("v = [1.0, nan]")}] | to_csv"#)
+    // No ish reader makes a NaN any more, so bind one built in Rust.
+    let mut env = Env::new();
+    env.set_var(
+        "v",
+        Value::Array(vec![Value::Float(1.0), Value::Float(f64::NAN)]),
+    )
+    .expect("binds");
+    let stmts = parse_program(r#"[{a: v}] | to_csv"#).expect("parse");
+    let text = eval_program(&stmts, &mut env)
         .expect_err("a NaN in a nested cell")
         .to_string();
     assert!(text.contains("E_BAD_VALUE"), "{text}");
