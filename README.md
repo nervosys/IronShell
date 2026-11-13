@@ -1304,7 +1304,7 @@ src/
   main.rs          # Entry point
   eval.rs          # Expression evaluator
   parser.rs        # IronShell syntax parser
-  builtins.rs      # 1,100+ builtin functions
+  builtins.rs      # 1,200+ builtin functions
   modules.rs       # Module system (file, sys, net, ...)
   ai.rs            # AI provider integration
   agent.rs         # Autonomous agent framework

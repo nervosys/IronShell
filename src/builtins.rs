@@ -37195,6 +37195,7 @@ fn bi_zip_create(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
     refuse_existing("zip_create", &archive)?;
     let members = zip_resolve_members("zip_create", &files)?;
     // The archive is new (refused above if it exists), so rollback removes it.
+    crate::tx::snapshot(&archive);
     let out = create_new_output("zip_create", &archive)?;
     if let Err(e) = zip_write_archive("zip_create", out, None, &members) {
         remove_partial(&archive);

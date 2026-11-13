@@ -76,11 +76,12 @@ fn the_piped_form_is_unchanged() {
 
 #[test]
 fn a_call_that_already_worked_keeps_its_meaning() {
-    // Data "md5" with algorithm "sha256", which is what the one-argument form
-    // of the same text gives.
+    // Data "md5" with algorithm "sha256", as piping the text gives. The lone
+    // form crypto.hash("md5") is refused since round 31: an algorithm name
+    // alone is a missing argument, not data.
     assert_prints(
         "compat",
-        "crypto.hash(\"md5\", \"sha256\") == crypto.hash(\"md5\")\n",
+        "crypto.hash(\"md5\", \"sha256\") == (\"md5\" | crypto.hash(\"sha256\"))\n",
         "true",
     );
 }

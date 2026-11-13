@@ -208,28 +208,36 @@ fn no_openai_description_is_over_1024_characters() {
             truncated += 1;
         }
     }
-    assert!(truncated > 0, "date_diff's description is over the limit");
-    // The cut is at a word boundary: the text before the ellipsis ends in a
-    // whole word of the original.
-    let date_diff = openai["tools"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|t| t["function"]["name"] == "ironshell_date_diff")
-        .expect("date_diff");
-    let cut = date_diff["function"]["description"].as_str().unwrap();
-    let full = describe("date_diff").result.unwrap()["description"]
-        .as_str()
-        .unwrap()
-        .to_string();
-    let head = cut.trim_end_matches('\u{2026}');
-    assert!(full.starts_with(head), "{cut}");
-    assert!(
-        full[head.len()..].starts_with(char::is_whitespace),
-        "cut inside a word: {cut}"
-    );
+    assert!(truncated > 0, "some description is over the limit");
     // The other families are not capped by this rule.
     let claude = schema("claude");
+    // Each cut is at a word boundary: the text before the ellipsis is a
+    // prefix of the full description that ends before whitespace.
+    let mut compared = 0;
+    for tool in openai["tools"].as_array().unwrap() {
+        let cut = tool["function"]["description"].as_str().unwrap();
+        if !cut.ends_with('\u{2026}') {
+            continue;
+        }
+        let name = tool["function"]["name"].as_str().unwrap();
+        let Some(full) = claude["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|t| t["name"].as_str() == Some(name))
+            .and_then(|t| t["description"].as_str())
+        else {
+            continue;
+        };
+        let head = cut.trim_end_matches('\u{2026}');
+        assert!(full.starts_with(head), "{name}: {cut}");
+        assert!(
+            full[head.len()..].starts_with(char::is_whitespace),
+            "{name}: cut inside a word: {cut}"
+        );
+        compared += 1;
+    }
+    assert!(compared > 0, "no truncated description could be compared");
     let long = claude["tools"]
         .as_array()
         .unwrap()

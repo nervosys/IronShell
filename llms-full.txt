@@ -13,7 +13,7 @@ This file contains everything an AI model needs to understand, use, and generate
 
 AI agents today are forced to interact with shells designed decades ago for humans — Bash on Linux, PowerShell on Windows, Zsh on macOS. Their output is unstructured text that varies across OS versions, locales, and tool installations, creating non-deterministic results that make agent workflows fundamentally brittle. An agent that parses `df -h` on Ubuntu will break on Alpine. A script that scrapes `Get-Process` output will fail when column widths change.
 
-IronShell (`ish`) eliminates this entire class of failure. It provides a single cross-platform shell language where every command returns deterministic, typed output. An ontology built into the shell makes commands, their arguments, and their return types machine-discoverable without documentation scraping or prompt engineering. Written in Rust with Hindley-Milner type inference, it provides 1,100+ builtins across 108 modules, native AI agent support, and the MCP/A2A/A2UI/NANDA agentic protocols.
+IronShell (`ish`) eliminates this entire class of failure. It provides a single cross-platform shell language where every command returns deterministic, typed output. An ontology built into the shell makes commands, their arguments, and their return types machine-discoverable without documentation scraping or prompt engineering. Written in Rust with Hindley-Milner type inference, it provides 1,200+ builtins across 108 modules, native AI agent support, and the MCP/A2A/A2UI/NANDA agentic protocols.
 
 **Key differentiators from bash/zsh/PowerShell:**
 - Deterministic: same command produces the same typed structure on every OS, locale, and version
@@ -146,7 +146,7 @@ data = await http.get("https://api.example.com/data")
 
 ---
 
-## 5. Module System (108 Modules, 1,100+ Builtins)
+## 5. Module System (108 Modules, 1,200+ Builtins)
 
 All builtins return structured `Value` types, not raw text.
 
@@ -422,7 +422,7 @@ src/
   value.rs         # Value types (Int, Float, String, Array, Record, Lambda)
   typecheck.rs     # Hindley-Milner type inference
   types.rs         # Type definitions
-  builtins.rs      # 1,100+ builtin functions
+  builtins.rs      # 1,200+ builtin functions
   env.rs           # Environment (variable bindings)
   ai.rs            # AI provider router (2000+ lines)
   agent.rs         # Agent framework
@@ -507,6 +507,6 @@ file               # => {read, write, exists, copy, move, patch, ...}
 - **Categories**: command-line-utilities, development-tools
 - **Tests**: 3,572 passing on Windows, 3,582 on Linux (`cargo test --workspace`, 2026-10-23)
 - **Source**: ~198,000 lines (src/)
-- **Builtins**: 1,190 in the ontology (1,400+ callable names with aliases) across 108 modules
+- **Builtins**: 1,200+ in the ontology (1,400+ callable names with aliases) across 108 modules
 - **File Extension**: `.ish`
 - **MIME Type**: `text/x-ironshell`

@@ -393,7 +393,9 @@ fn the_scanner_finds_the_tools_it_claims_to() {
     // session's guard sites with them. Worth recording rather than quietly
     // editing — some of the option-injection hardening was applied to code no
     // caller could reach, which is a fair description of about a tenth of it.
-    for expected in ["git", "ssh", "scp", "tar", "unzip", "curl", "sqlite3"] {
+    // `unzip` left the list in round 31: zip_extract, zip_create and zip_add
+    // read and write archives in-process with the zip crate.
+    for expected in ["git", "ssh", "scp", "tar", "curl", "sqlite3"] {
         assert!(
             tools.contains(expected),
             "{expected} spawn sites should have been found, got {tools:?}"
