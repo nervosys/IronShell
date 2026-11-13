@@ -624,6 +624,13 @@ fn run(mut cli: Cli) -> Result<()> {
             eprintln!("{e}");
             std::process::exit(iron_shell::repl::exit_status_for(&e));
         }
+        // A file's imports are read relative to the file, as a run reads them.
+        let _entry = match (&cli.command, &file) {
+            (None, Some(f)) => Some(iron_shell::module_loader::enter_entry_file(
+                std::path::Path::new(f),
+            )),
+            _ => None,
+        };
         let report = iron_shell::explain::explain(&code)?;
         println!("{}", serde_json::to_string_pretty(&report.to_json())?);
         return Ok(());
