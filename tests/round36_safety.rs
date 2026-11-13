@@ -137,7 +137,8 @@ fn item4_a_missing_move_source_is_named_as_a_path() {
 #[test]
 fn item5_an_unmapped_powershell_command_is_named_as_a_command() {
     let sb = Sandbox::new("pwsh");
-    for cmd in ["Remove-Item", "Set-Content", "Get-Content", "Copy-Item"] {
+    // Remove-Item, Set-Content and Copy-Item are mapped (PS_MAP); these are not.
+    for cmd in ["Get-Content", "New-Item", "Test-Path", "Select-String"] {
         let out = sb.ish(&["--pwsh", "-c", &format!("{cmd} ../x")]);
         let stderr = text(&out.stderr);
         assert!(!out.status.success(), "{cmd}: {stderr}");
@@ -152,6 +153,20 @@ fn item5_an_unmapped_powershell_command_is_named_as_a_command() {
             "{cmd}: {stderr}"
         );
     }
+    // A mapped cmdlet with a `..` path is translated, not refused as a range
+    // operator. In agent mode the path outside the workspace is then refused
+    // by the jail, so nothing outside the sandbox is touched.
+    let out = sb.ish(&[
+        "--agent",
+        "--workspace",
+        ".",
+        "--pwsh",
+        "-c",
+        "Remove-Item ../x",
+    ]);
+    let stderr = text(&out.stderr);
+    assert!(!stderr.contains("expression or operator"), "{stderr}");
+    assert!(!stderr.contains("has no IronShell mapping"), "{stderr}");
 }
 
 // 6

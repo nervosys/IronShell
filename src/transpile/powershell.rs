@@ -504,7 +504,23 @@ fn contains_complex_construct(s: &str) -> bool {
         || s.contains(" > ")
         || s.contains("[")     // Type casts/attributes
         || s.contains("::")    // Static method calls
-        || s.contains("..") // Range operator
+        || has_range_operator(s) // Range operator
+}
+
+/// True for PowerShell's range operator (`1..10`, `$a..$b`, `(f)..3`): a `..`
+/// with a number, variable or closing parenthesis before it and a number,
+/// variable, sign or opening parenthesis after it. A `..` inside a path such
+/// as `../x` is not a range.
+fn has_range_operator(s: &str) -> bool {
+    let b = s.as_bytes();
+    (1..b.len().saturating_sub(1)).any(|i| {
+        b[i] == b'.'
+            && b[i + 1] == b'.'
+            && (b[i - 1].is_ascii_alphanumeric() || b[i - 1] == b')')
+            && b.get(i + 2)
+                .is_some_and(|c| c.is_ascii_digit() || matches!(*c, b'$' | b'(' | b'-'))
+            && (b[i - 1].is_ascii_digit() || b[i - 1] == b')' || s[..i].contains('$'))
+    })
 }
 
 fn render_fallback_pwsh(line: &str) -> String {
