@@ -51316,6 +51316,14 @@ fn bi_file_insert(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
     }
 
     let file_content = read_text_capped("file_insert", &path)?;
+    // A UTF-8 byte-order mark stays the first bytes of the file. Line numbers
+    // count from the line after it, so line 1 inserts after the BOM, not before.
+    let bom = if file_content.starts_with('\u{FEFF}') {
+        "\u{FEFF}"
+    } else {
+        ""
+    };
+    let file_content = &file_content[bom.len()..];
 
     // Every file line keeps its own bytes, line break included; only the inserted
     // lines are new. Positions count the lines `str::lines` counts.
@@ -51411,9 +51419,11 @@ fn bi_file_insert(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
     // of a file may have no line break: an insert before it leaves it that way,
     // while an insert after it ends that line first, so the new text ends with a
     // line break.
-    let eol = file_line_break(&file_content);
+    let eol = file_line_break(file_content);
     let (before, after) = segments.split_at(insert_pos);
-    let mut out = String::with_capacity(file_content.len() + content.len() + 2 * eol.len());
+    let mut out =
+        String::with_capacity(bom.len() + file_content.len() + content.len() + 2 * eol.len());
+    out.push_str(bom);
     for segment in before {
         out.push_str(segment);
     }

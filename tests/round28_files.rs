@@ -84,6 +84,25 @@ fn text(v: Value) -> String {
 }
 
 #[test]
+fn file_insert_at_line_one_keeps_a_bom_first() {
+    let _guard = LOCK.lock().unwrap_or_else(|p| p.into_inner());
+    let ses = Session::new("bom_insert");
+    let path = ses.path("bom.txt");
+    std::fs::write(&path, b"\xEF\xBB\xBFx=1\r\ny=2\r\n").unwrap();
+    call("file_insert", vec![s(&path), Value::Int(1), s("ins")]).unwrap();
+    assert_eq!(
+        std::fs::read(&path).unwrap(),
+        b"\xEF\xBB\xBFins\r\nx=1\r\ny=2\r\n"
+    );
+    std::fs::write(&path, b"\xEF\xBB\xBFx=1\r\ny=2\r\n").unwrap();
+    call("file_insert", vec![s(&path), Value::Int(2), s("ins")]).unwrap();
+    assert_eq!(
+        std::fs::read(&path).unwrap(),
+        b"\xEF\xBB\xBFx=1\r\nins\r\ny=2\r\n"
+    );
+}
+
+#[test]
 fn to_csv_refuses_a_repeated_column_name() {
     let _guard = LOCK.lock().unwrap_or_else(|p| p.into_inner());
     let rows = Value::Array(vec![record(&[("a", Value::Int(1))])]);
