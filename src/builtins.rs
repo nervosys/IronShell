@@ -37664,7 +37664,7 @@ fn zip_extract_in_process(archive: &str, dest: &str) -> Result<()> {
         }
         if entry.is_dir() || name.ends_with('/') || name.ends_with('\\') {
             std::fs::create_dir_all(&target)
-                .map_err(|e| crate::safety::fs_error(B, &target.to_string_lossy(), &e))?;
+                .map_err(|e| crate::safety::fs_error(B, &target, &e))?;
             written += 1;
             continue;
         }
@@ -37673,8 +37673,7 @@ fn zip_extract_in_process(archive: &str, dest: &str) -> Result<()> {
             continue;
         }
         if let Some(parent) = target.parent() {
-            std::fs::create_dir_all(parent)
-                .map_err(|e| crate::safety::fs_error(B, &parent.to_string_lossy(), &e))?;
+            std::fs::create_dir_all(parent).map_err(|e| crate::safety::fs_error(B, parent, &e))?;
         }
         let shown = target.to_string_lossy().into_owned();
         let mut out = std::fs::OpenOptions::new()
