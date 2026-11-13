@@ -35,7 +35,8 @@ fn run_script(tag: &str, source: &str) -> (String, String, i32) {
     )
 }
 
-const LOOP_HINT: &str = "IronShell has no loop statements; iterate with map/where/reduce";
+const LOOP_HINT: &str =
+    "IronShell has no loop statements; iterate with map / where / reduce / each";
 
 fn assert_loop_refused(err: &str, code: i32, keyword: &str) {
     assert_ne!(code, 0, "ran: {err}");

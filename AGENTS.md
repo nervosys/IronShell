@@ -172,6 +172,7 @@ result = try { risky() } catch e { "fallback" }
 try { error("bad", {field: "age"}) } catch e { e.code }   # "E_USER"; error(message[, extra Record]) raises your own
 
 # Script arguments: `ish script.ish a b` gives the script args() == ["a", "b"] (empty under -c)
+# A script file echoes the value of its last expression only; earlier values are not printed.
 int("42") + 1                  # int(x) / float(x) convert text or numbers; int("1.5") is refused, float("1.5") is 1.5
 now_iso()                      # the current time, e.g. 2026-11-08T14:03:05Z; now_iso("local") carries the offset
 
@@ -182,7 +183,7 @@ from_toml(to_toml({a: 1})).a           # TOML: to_toml(record) -> String; from_t
 merge({a: 1, b: 2}, {b: 3}).b         # merge(a, b): shallow Record merge, b's fields win; `a | merge(b)` pipes
 [1, 2] + [3]   # [1, 2, 3]: + concatenates Arrays
 mut r = {a: 1}
-r.a = 2                                # set a field of a `mut` record (r.a.b = v nests); other copies keep theirs
+r.a = 2                                # set a field of a `mut` record; r.a.b = v needs r.a to exist already; other copies keep theirs
 rows | sql("select * from t where amount > ?", [100])   # a trailing Array binds the ? placeholders
 to_csv(rows, ["id", "customer"])       # column order (Records sort their keys); csv_columns("orders.csv") is the header in file order
 date_add("2024-01-31", 1, "months")    # "2024-02-29": weeks, months and years clamp to the month's end
@@ -191,6 +192,7 @@ format_number(1234567.891, 2, ",")    # "1,234,567.89": exactly `decimals` digit
 
 # String interpolation
 msg = "Hello ${name}, you have ${count} items"
+greet = 'Hello ${name}'                # single-quoted strings interpolate ${...} too
 
 # Module calls
 file.read("path")     sys.hostname()     net.ping("host")

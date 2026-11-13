@@ -149,7 +149,17 @@ pub fn eval_program_statement(s: &Stmt, discard: bool, env: &mut Env) -> Result<
             is_mut,
             visibility,
             ty,
-        } if discard => eval_let(name, value, *is_mut, *visibility, ty.as_deref(), env, false)?,
+            bare,
+        } if discard => eval_let(
+            name,
+            value,
+            *is_mut,
+            *visibility,
+            ty.as_deref(),
+            *bare,
+            env,
+            false,
+        )?,
         _ => eval_stmt(s, env)?,
     };
     note_lambda_binding(s);
@@ -249,8 +259,18 @@ pub fn eval_stream_with_stats(
                 is_mut,
                 visibility,
                 ty,
+                bare,
             } => {
-                eval_let(name, value, *is_mut, *visibility, ty.as_deref(), env, false)?;
+                eval_let(
+                    name,
+                    value,
+                    *is_mut,
+                    *visibility,
+                    ty.as_deref(),
+                    *bare,
+                    env,
+                    false,
+                )?;
             }
             _ => {
                 eval_stmt(s, env)?;
@@ -599,7 +619,17 @@ pub fn eval_stmt(stmt: &Stmt, env: &mut Env) -> Result<Value> {
             is_mut,
             visibility,
             ty,
-        } => eval_let(name, value, *is_mut, *visibility, ty.as_deref(), env, true),
+            bare,
+        } => eval_let(
+            name,
+            value,
+            *is_mut,
+            *visibility,
+            ty.as_deref(),
+            *bare,
+            env,
+            true,
+        ),
         Stmt::Expr(e) => eval_expr(e, env),
         Stmt::SetField { name, path, value } => {
             // The new value is evaluated while `name` is still bound, so
@@ -651,6 +681,7 @@ fn eval_let(
     is_mut: bool,
     visibility: Visibility,
     ty: Option<&str>,
+    bare: bool,
     env: &mut Env,
     keep: bool,
 ) -> Result<Value> {
@@ -672,21 +703,24 @@ fn eval_let(
         // refuses, `name` is left as it was.
         let lhs = env.get_var(name).cloned().unwrap_or(Value::Null);
         let v = binop(&BinOp::Add, lhs, operand)?;
-        return bind_value(name, v, is_mut, visibility, env, keep);
+        return bind_value(name, v, is_mut, visibility, bare, env, keep);
     }
     let v = eval_expr(value, env)?;
     if let Some(declared) = ty {
         check_declared_type(name, declared, &v)?;
     }
-    bind_value(name, v, is_mut, visibility, env, keep)
+    bind_value(name, v, is_mut, visibility, bare, env, keep)
 }
 
 /// Stores `v` as `name`, marks it public when asked, and returns it when `keep`.
+/// A `bare` statement (`name = value`, no `let`) that cannot rebind `name` is
+/// reported as an assignment; a `let` is reported as a `let`.
 fn bind_value(
     name: &str,
     v: Value,
     is_mut: bool,
     visibility: Visibility,
+    bare: bool,
     env: &mut Env,
     keep: bool,
 ) -> Result<Value> {
@@ -694,7 +728,11 @@ fn bind_value(
     env.declare_var(name, v, is_mut).map_err(|e| {
         // `bad_state` would read this as a builtin to call first, which
         // is how "call `use a different name...` first" came about.
-        crate::safety::bad_state_with_hint("let", &e, &env.rebind_hint(name))
+        if bare {
+            crate::safety::bad_state_with_hint("assign", &e, &env.reassign_hint(name))
+        } else {
+            crate::safety::bad_state_with_hint("let", &e, &env.rebind_hint(name))
+        }
     })?;
 
     // Mark as public if visibility is Pub
@@ -1215,12 +1253,27 @@ pub fn eval_expr(expr: &Expr, env: &mut Env) -> Result<Value> {
                 }
             }
 
-            Err(crate::safety::bad_arg(
+            Err(crate::safety::bad_arg_in(
                 "match",
-                "a value one of the arms matches (add `_ => ...` to catch the rest)",
-                "a value no arm matches",
+                format!("match: no arm matches {}", short_value(&value)),
+                "add `_ => ...` as the last arm to catch the rest",
             ))
         }
+    }
+}
+
+/// A value for an error message: its text, quoted when it is a string, on one
+/// line and at most 40 characters.
+fn short_value(value: &Value) -> String {
+    let text = match value {
+        Value::Str(s) => format!("\"{s}\""),
+        other => other.to_display_string(),
+    };
+    let flat = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    if flat.chars().count() <= 40 {
+        flat
+    } else {
+        format!("{}...", flat.chars().take(37).collect::<String>())
     }
 }
 
@@ -1326,14 +1379,9 @@ fn set_field_path(target: &mut Value, label: &str, path: &[String], new: Value) 
         } else {
             "a"
         };
-        let literal = path.iter().rev().fold(
-            match new {
-                Value::Int(_) | Value::Float(_) | Value::Bool(_) => new.to_display_string(),
-                Value::Str(ref s) => format!("\"{s}\""),
-                _ => "...".to_string(),
-            },
-            |inner, field| format!("{{{field}: {inner}}}"),
-        );
+        let literal = path.iter().rev().fold(value_literal(&new), |inner, field| {
+            format!("{{{field}: {inner}}}")
+        });
         return Err(crate::safety::bad_arg_with_hint(
             label,
             "a Record",
@@ -1348,7 +1396,29 @@ fn set_field_path(target: &mut Value, label: &str, path: &[String], new: Value) 
     let child_label = format!("{label}.{field}");
     match map.get_mut(field) {
         Some(child) => set_field_path(child, &child_label, rest, new),
-        None => Err(crate::safety::bad_arg(&child_label, "a Record", "nothing")),
+        None => {
+            // `r.a.b = 1` with no `a` in `r`: the record for `a` has to be
+            // created first, so the hint shows it.
+            let literal = rest
+                .iter()
+                .rev()
+                .fold(value_literal(&new), |inner, f| format!("{{{f}: {inner}}}"));
+            Err(crate::safety::bad_arg_in(
+                label,
+                format!("{label} has no field {field} to assign into"),
+                &format!("create it first: {child_label} = {literal}"),
+            ))
+        }
+    }
+}
+
+/// A value as the record literal a path would need, for a hint: a number or
+/// bool as it is, a string quoted, anything else as `...`.
+fn value_literal(value: &Value) -> String {
+    match value {
+        Value::Int(_) | Value::Float(_) | Value::Bool(_) => value.to_display_string(),
+        Value::Str(s) => format!("\"{s}\""),
+        _ => "...".to_string(),
     }
 }
 
@@ -1647,7 +1717,9 @@ fn match_pattern_impl(
             true
         }
 
-        Pattern::LitInt(n) => matches!(value, Value::Int(v) if v == n),
+        // Numbers match by `==`'s equality, so `1` matches `1.0` and back.
+        Pattern::LitInt(n) => value_eq(&Value::Int(*n), value),
+        Pattern::LitFloat(x) => value_eq(&Value::Float(*x), value),
         Pattern::LitStr(s) => matches!(value, Value::Str(v) if v == s),
         Pattern::LitBool(b) => matches!(value, Value::Bool(v) if v == b),
         Pattern::Null => matches!(value, Value::Null),
@@ -2049,6 +2121,7 @@ fn pattern_bindings(p: &Pattern, bound: &mut Vec<String>) {
     match p {
         Pattern::Wildcard
         | Pattern::LitInt(_)
+        | Pattern::LitFloat(_)
         | Pattern::LitStr(_)
         | Pattern::LitBool(_)
         | Pattern::Null => {}

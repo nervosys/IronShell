@@ -55,7 +55,7 @@ fn sort_of_a_number_array_directly_is_in_order() {
 
 #[test]
 fn sort_of_a_string_array_directly_is_in_order() {
-    assert_prints("direct_str", "sort([\"b\", \"a\"])\n", "[a, b]");
+    assert_prints("direct_str", "sort([\"b\", \"a\"])\n", "[\"a\", \"b\"]");
 }
 
 #[test]

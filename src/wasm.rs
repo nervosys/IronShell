@@ -524,6 +524,10 @@ fn match_pattern(pattern: &Pattern, value: &Value) -> Option<Vec<(String, Value)
         (Pattern::Wildcard, _) => Some(vec![]),
         (Pattern::Ident(name), val) => Some(vec![(name.clone(), val.clone())]),
         (Pattern::LitInt(a), Value::Int(b)) if a == b => Some(vec![]),
+        // A numeric pattern matches by the same equality as `==`.
+        (Pattern::LitInt(a), Value::Float(b)) if (*a as f64) == *b => Some(vec![]),
+        (Pattern::LitFloat(a), Value::Float(b)) if a == b => Some(vec![]),
+        (Pattern::LitFloat(a), Value::Int(b)) if *a == (*b as f64) => Some(vec![]),
         (Pattern::LitStr(a), Value::Str(b)) if a == b => Some(vec![]),
         (Pattern::LitBool(a), Value::Bool(b)) if a == b => Some(vec![]),
         (Pattern::Null, Value::Null) => Some(vec![]),

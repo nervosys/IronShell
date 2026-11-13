@@ -132,6 +132,18 @@ impl Env {
         }
     }
 
+    /// The hint for a bare `name = value` that cannot reassign `name`: the
+    /// binding has to be mutable from its first `let`.
+    pub fn reassign_hint(&self, name: &str) -> String {
+        if self.is_module_binding(name) {
+            self.rebind_hint(name)
+        } else {
+            format!(
+                "bind `{name}` mutable from the start, as `mut {name} = 0` or `let mut {name} = 0`, or use a different name"
+            )
+        }
+    }
+
     /// Set a new variable or reassign if mutable.
     /// Returns error if trying to reassign an immutable variable.
     pub fn set_var<S: Into<String>>(&mut self, name: S, value: Value) -> Result<(), String> {

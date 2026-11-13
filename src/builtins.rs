@@ -3960,6 +3960,9 @@ fn mapped_spelling(name: &str) -> Vec<String> {
         // A bare `get` is an HTTP GET: http_get, which http.get calls. Its
         // nearest name is wget, a program, not a builtin.
         "get" => vec!["http_get".to_string()],
+        // Substrings: slice(s, start, end) takes characters. `str.substring` and
+        // `str.substr` are JavaScript's and Python-adjacent spellings of it.
+        "substring" | "substr" | "slice" => vec!["slice".to_string()],
         _ => Vec::new(),
     }
 }
@@ -4060,6 +4063,11 @@ pub fn module_member_candidates(module: &str, field: &str, members: &[&str]) -> 
         if !out.contains(&spelled) {
             out.push(spelled);
         }
+    }
+    // An explicit mapping is the whole answer, as it is for a bare name: a
+    // nearby member beside it (`str.in` for `str.substring`) is noise.
+    if !out.is_empty() {
+        return out;
     }
     for (_, m) in near {
         if out.len() == 3 {
@@ -10371,7 +10379,7 @@ fn bi_from_json(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
         }
         // The text is wrong, not the call: a corrected call with the same text
         // fails again, so this is E_BAD_ARG and not retryable.
-        let (detail, hint) = json_failure(&e);
+        let (detail, hint) = json_failure(&e, &json_str);
         crate::safety::bad_value_in(
             "from_json",
             format!("from_json: the text is not JSON: {detail}"),
@@ -15129,6 +15137,22 @@ fn bi_pow(args: Vec<Value>, _input: Option<Value>) -> Result<Value> {
     };
 
     let result = base.powf(exp);
+    // IronShell numbers are finite: an overflow (10 ** 400) or a NaN (a negative
+    // base to a fractional power) is refused rather than returned as inf or NaN.
+    if result.is_infinite() {
+        return Err(crate::safety::bad_value_in(
+            "pow",
+            format!("math_pow: {base} ** {exp} overflows a Float"),
+            "use a smaller base or exponent: the largest Float is about 1.8e308",
+        ));
+    }
+    if result.is_nan() {
+        return Err(crate::safety::bad_value_in(
+            "pow",
+            format!("math_pow: {base} ** {exp} is not a real number"),
+            "a negative base needs a whole-number exponent",
+        ));
+    }
 
     // Return Int if result is a whole number and both inputs were Int
     if matches!((&args[0], &args[1]), (Value::Int(_), Value::Int(_))) && result.fract() == 0.0 {
@@ -15279,7 +15303,7 @@ fn bi_int(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
             }
             Err(_) => Err(crate::safety::value_not_representable(
                 "int",
-                format!("int: {text:?} is not a whole number"),
+                format!("int: {text:?} is not a decimal integer (digits with an optional sign)"),
                 NUMBER_TEXT_HINT,
             )),
         },
@@ -15310,6 +15334,12 @@ fn bi_float(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
         Value::Int(n) => Ok(Value::Float(*n as f64)),
         Value::Str(text) => match text.trim().parse::<f64>() {
             Ok(f) if f.is_finite() => Ok(Value::Float(f)),
+            // "inf", "infinity" and "nan" parse as Floats, and are refused here.
+            Ok(_) => Err(crate::safety::value_not_representable(
+                "float",
+                format!("float: IronShell numbers are finite: {text:?} is not accepted"),
+                "write the number itself, such as 1.5 or 1e300; there is no infinity or NaN",
+            )),
             _ => Err(crate::safety::value_not_representable(
                 "float",
                 format!("float: {text:?} is not a number"),
@@ -16371,24 +16401,52 @@ fn bi_format_number(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
                     "pass a finite number; NaN and the infinities cannot be written with decimals",
                 ));
             }
-            // Scale to an integer and round it half away from zero (f64::round).
-            // Within 2^53 the scaled value is exact; the u128 covers the rest.
-            let scale = 10u128.pow(decimals);
-            let scaled = f.abs() * 10f64.powi(decimals as i32);
-            if scaled >= 1.0e38 {
+            // Round the exact binary value, not a scaled copy of it: 2.675 is
+            // stored as 2.67499999..., so it writes "2.67". Every fraction digit
+            // of an f64 is written out (at most 1074), so the digit after the cut
+            // is exact. It decides: 5 or more goes up, which also rounds an exact
+            // tie (0.125, 2.5) away from zero.
+            let magnitude = f.abs();
+            if magnitude * 10f64.powi(decimals as i32) >= 1.0e38 {
                 return Err(crate::safety::bad_arg_in(
                     B,
                     format!("{B}: the number is too large to write with {decimals} decimals"),
                     "pass fewer decimals or a smaller number",
                 ));
             }
-            let rounded = scaled.round() as u128;
-            let frac = if decimals == 0 {
-                String::new()
-            } else {
-                format!("{:0width$}", rounded % scale, width = decimals as usize)
+            let exact = format!("{magnitude:.1100}");
+            let (whole, fraction) = exact.split_once('.').unwrap_or((exact.as_str(), ""));
+            let fraction = fraction.as_bytes();
+            let cut = decimals as usize;
+            let mut digits: Vec<u8> = whole
+                .bytes()
+                .chain((0..cut).map(|k| fraction.get(k).copied().unwrap_or(b'0')))
+                .map(|b| b - b'0')
+                .collect();
+            if fraction.get(cut).copied().unwrap_or(b'0') >= b'5' {
+                // Add one to the last digit, carrying leftwards.
+                let mut k = digits.len();
+                loop {
+                    if k == 0 {
+                        digits.insert(0, 1);
+                        break;
+                    }
+                    k -= 1;
+                    if digits[k] == 9 {
+                        digits[k] = 0;
+                    } else {
+                        digits[k] += 1;
+                        break;
+                    }
+                }
+            }
+            let split = digits.len() - cut;
+            let text: String = digits.iter().map(|d| char::from(d + b'0')).collect();
+            let int_digits = match text[..split].trim_start_matches('0') {
+                "" => "0".to_string(),
+                s => s.to_string(),
             };
-            (f < 0.0, (rounded / scale).to_string(), frac)
+            (f < 0.0, int_digits, text[split..].to_string())
         }
         other => {
             return Err(crate::safety::bad_arg_in(
@@ -16665,7 +16723,7 @@ fn bi_json_parse(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
     let json_str = without_bom(json_str);
 
     let json_val: serde_json::Value = serde_json::from_str(&json_str).map_err(|e| {
-        let (detail, hint) = json_failure(&e);
+        let (detail, hint) = json_failure(&e, &json_str);
         crate::safety::value_not_representable(
             "json_parse",
             format!("json_parse: the text is not JSON: {detail}"),
@@ -30869,22 +30927,68 @@ fn json_message(e: &serde_json::Error) -> String {
 /// recursion limit (128 levels of nesting) is not a position in the text: a
 /// document that nests deeper is well formed, so it is named as such, and the
 /// hint says what to do about it.
-fn json_failure(e: &serde_json::Error) -> (String, String) {
+fn json_failure(e: &serde_json::Error, text: &str) -> (String, String) {
     if e.to_string().starts_with("recursion limit exceeded") {
         return (
             "JSON nested deeper than 128 levels is not read".to_string(),
             "flatten the document, or read it as text".to_string(),
         );
     }
-    (
-        e.to_string(),
-        format!(
-            "fix the JSON at line {}, column {}: {}",
-            e.line(),
-            e.column(),
-            json_message(e)
-        ),
-    )
+    let hint = format!(
+        "fix the JSON at line {}, column {}: {}",
+        e.line(),
+        e.column(),
+        json_message(e)
+    );
+    // serde's "unexpected end of hex escape" is the only word for a surrogate
+    // escape that does not pair up; name the escape instead.
+    let message = e.to_string();
+    if message.contains("hex escape") || message.contains("unicode code point") {
+        if let Some(escape) = lone_surrogate_escape(text) {
+            return (
+                format!(
+                    "a lone UTF-16 surrogate {escape} is not a character; write the pair (\\uD83D\\uDE00) or \\u{{1F600}}"
+                ),
+                hint,
+            );
+        }
+    }
+    (message, hint)
+}
+
+/// The first `\uD800`-`\uDFFF` escape in `text` that does not pair up into a
+/// character (a high surrogate with no low one right after it, or a low one
+/// with no high one before it), as written in the text. None if all pair.
+fn lone_surrogate_escape(text: &str) -> Option<&str> {
+    let bytes = text.as_bytes();
+    let unit_at = |i: usize| -> Option<u32> {
+        if bytes.get(i) != Some(&b'\\') || bytes.get(i + 1) != Some(&b'u') {
+            return None;
+        }
+        let hex = text.get(i + 2..i + 6)?;
+        if !hex.bytes().all(|b| b.is_ascii_hexdigit()) {
+            return None;
+        }
+        u32::from_str_radix(hex, 16).ok()
+    };
+    let mut i = 0;
+    while i < bytes.len() {
+        // An escaped backslash (`\\`) is two bytes and never starts an escape.
+        if bytes[i] == b'\\' && bytes.get(i + 1) == Some(&b'\\') {
+            i += 2;
+            continue;
+        }
+        match unit_at(i) {
+            Some(unit) if (0xD800..=0xDBFF).contains(&unit) => match unit_at(i + 6) {
+                Some(low) if (0xDC00..=0xDFFF).contains(&low) => i += 12,
+                _ => return text.get(i..i + 6),
+            },
+            Some(unit) if (0xDC00..=0xDFFF).contains(&unit) => return text.get(i..i + 6),
+            Some(_) => i += 6,
+            None => i += 1,
+        }
+    }
+    None
 }
 
 fn bi_open(args: Vec<Value>, _input: Option<Value>) -> Result<Value> {
@@ -30915,7 +31019,7 @@ fn bi_open(args: Vec<Value>, _input: Option<Value>) -> Result<Value> {
     match ext.as_str() {
         "json" => {
             let j: serde_json::Value = serde_json::from_str(&text).map_err(|e| {
-                let (detail, hint) = json_failure(&e);
+                let (detail, hint) = json_failure(&e, &text);
                 unparsed_data(&path, "JSON", &detail, hint)
             })?;
             if let Some(refusal) = wide_integer_refusal("open", &text) {
@@ -46441,6 +46545,17 @@ fn bi_crypto_hash(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
                     first,
                     second.as_bytes(),
                 )?));
+            }
+            // Neither order names an algorithm: say so, with both values, rather
+            // than blaming the second one alone.
+            if !is_hash_algorithm(first) && !is_hash_algorithm(second) {
+                return Err(crate::safety::bad_arg_in(
+                    "crypto_hash",
+                    format!(
+                        "crypto_hash: expected algorithm md5, sha1, sha256, sha384 or sha512, got neither {first:?} nor {second:?}"
+                    ),
+                    "put the algorithm first, as crypto.hash(\"sha256\", data), or last, as crypto.hash(data, \"sha256\")",
+                ));
             }
         }
     }
