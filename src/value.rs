@@ -248,7 +248,7 @@ impl Value {
             Value::Str(s) => s.clone(),
             Value::Uri(u) => u.clone(),
             Value::Int(n) => n.to_string(),
-            Value::Float(f) => f.to_string(),
+            Value::Float(f) => float_text(*f),
             Value::Bool(b) => b.to_string(),
             Value::Null => "null".to_string(),
             Value::Array(arr) => {
@@ -363,6 +363,27 @@ pub fn escape_str_body(s: &str) -> String {
     out
 }
 
+/// A Float as text. A Float always shows as a Float: a finite integral value
+/// carries `.0` (`100.0`, `-0.0`), so it cannot be mistaken for an Int. A
+/// magnitude of 1e16 or more, or under 1e-5 (and not zero), uses the exponent
+/// form (`1e21`, `1e-7`), as the JSON writer does. Other values are Rust's
+/// shortest round-trip text. Non-finite values print as `NaN`, `inf`, `-inf`.
+pub fn float_text(x: f64) -> String {
+    if !x.is_finite() {
+        return x.to_string();
+    }
+    let a = x.abs();
+    if a != 0.0 && !(1e-5..1e16).contains(&a) {
+        return format!("{x:e}");
+    }
+    let s = x.to_string();
+    if s.contains('.') {
+        s
+    } else {
+        format!("{s}.0")
+    }
+}
+
 /// `s` as an IronShell string literal: quoted, and escaped by [`escape_str_body`].
 pub fn quote_str(s: &str) -> String {
     format!("\"{}\"", escape_str_body(s))
@@ -377,7 +398,7 @@ pub fn plain_text(v: &Value, nested: bool) -> String {
         Value::Null => "null".into(),
         Value::Bool(b) => b.to_string(),
         Value::Int(n) => n.to_string(),
-        Value::Float(x) => x.to_string(),
+        Value::Float(x) => float_text(*x),
         Value::Str(s) if nested => quote_str(s),
         Value::Str(s) => s.clone(),
         Value::Uri(u) => u.clone(),
@@ -483,7 +504,7 @@ pub mod pretty {
             Value::Null => write!(w, "{}", (theme.null)("null")),
             Value::Bool(b) => write!(w, "{}", (theme.boolean)(&b.to_string())),
             Value::Int(n) => write!(w, "{}", (theme.number)(&n.to_string())),
-            Value::Float(x) => write!(w, "{}", (theme.number)(&x.to_string())),
+            Value::Float(x) => write!(w, "{}", (theme.number)(&float_text(*x))),
             Value::Str(s) => write!(w, "\"{}\"", (theme.string)(&escape_str_body(s))),
             Value::Uri(u) => write!(w, "{}", (theme.uri)(u)),
             Value::Array(a) => {
@@ -566,7 +587,7 @@ pub mod pretty {
             Value::Null => "null".into(),
             Value::Bool(b) => b.to_string(),
             Value::Int(n) => n.to_string(),
-            Value::Float(x) => x.to_string(),
+            Value::Float(x) => float_text(*x),
             Value::Str(s) => truncate(s, 40),
             Value::Uri(u) => truncate(u, 48),
             Value::Array(a) => format!("[{}]", a.len()),
@@ -639,7 +660,7 @@ impl fmt::Display for Value {
             Value::Null => write!(f, "null"),
             Value::Bool(b) => write!(f, "{}", b),
             Value::Int(n) => write!(f, "{}", n),
-            Value::Float(x) => write!(f, "{}", x),
+            Value::Float(x) => write!(f, "{}", float_text(*x)),
             Value::Str(s) => write!(f, "{}", quote_str(s)),
             Value::Uri(u) => write!(f, "{}", u),
             Value::Array(a) => {

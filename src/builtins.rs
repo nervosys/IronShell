@@ -9869,7 +9869,7 @@ fn format_value_one_line(v: &Value) -> String {
         Value::Null => "null".into(),
         Value::Bool(b) => b.to_string(),
         Value::Int(n) => n.to_string(),
-        Value::Float(x) => x.to_string(),
+        Value::Float(x) => crate::value::float_text(*x),
         Value::Str(s) => s.clone(),
         Value::Uri(s) => s.clone(),
         Value::Array(_) => crate::value::plain_text(v, false),
@@ -9888,7 +9888,7 @@ fn value_to_string(value: &Value) -> String {
     match value {
         Value::Str(s) => s.clone(),
         Value::Int(i) => i.to_string(),
-        Value::Float(f) => f.to_string(),
+        Value::Float(f) => crate::value::float_text(*f),
         Value::Bool(b) => b.to_string(),
         Value::Uri(s) => s.clone(),
         Value::Array(_) => crate::value::plain_text(value, false),
@@ -14906,7 +14906,7 @@ fn bi_join(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
         .map(|v| match v {
             Value::Str(s) => Ok(s.clone()),
             Value::Int(i) => Ok(i.to_string()),
-            Value::Float(f) => Ok(f.to_string()),
+            Value::Float(f) => Ok(crate::value::float_text(*f)),
             Value::Bool(b) => Ok(b.to_string()),
             _ => Err(crate::safety::arg_err(
                 "join requires array of strings or numbers",
@@ -16057,8 +16057,10 @@ fn bi_sqrt(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
 ///
 /// Example:
 ///   pow(2, 8)     # Returns 256
-/// A Float in an error message. Rust's `{}` prints a huge or tiny Float in full
-/// (1e300 is 301 digits), so those use the exponent form.
+/// A number in an error message. The operand may have been an Int that the
+/// builtin widened (`pow(0, -1)`), so an integral value stays bare (`0 ** -1`).
+/// Rust's `{}` prints a huge or tiny Float in full (1e300 is 301 digits), so
+/// those use the exponent form.
 fn float_for_message(x: f64) -> String {
     let a = x.abs();
     if a != 0.0 && (a >= 1e16 || a < 1e-4) {
@@ -22896,7 +22898,7 @@ fn aecon_atom(v: &Value) -> String {
         }
         Value::Uri(u) => u.clone(),
         Value::Int(n) => n.to_string(),
-        Value::Float(f) => f.to_string(),
+        Value::Float(f) => crate::value::float_text(*f),
         Value::Bool(b) => b.to_string(),
         Value::Null => "null".to_string(),
         other => serde_json::to_string(&other.to_json()).unwrap_or_else(|_| "null".to_string()),
@@ -54964,7 +54966,7 @@ fn collab_text_arg(builtin: &str, what: &str, v: Option<&Value>, max: usize) -> 
 fn collab_got(v: &Value) -> String {
     match v {
         Value::Int(n) => n.to_string(),
-        Value::Float(x) => x.to_string(),
+        Value::Float(x) => crate::value::float_text(*x),
         other => other.type_name().to_string(),
     }
 }

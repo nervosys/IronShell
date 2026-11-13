@@ -2150,7 +2150,7 @@ pub fn display_value(v: &Value) -> String {
         Value::Null => "null".into(),
         Value::Bool(b) => b.to_string(),
         Value::Int(n) => n.to_string(),
-        Value::Float(x) => x.to_string(),
+        Value::Float(x) => crate::value::float_text(*x),
         Value::Str(s) => s.clone(),
         Value::Uri(u) => u.clone(),
         Value::Array(_) => crate::value::plain_text(v, false),
