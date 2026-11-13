@@ -1602,6 +1602,9 @@ pub enum ErrorCode {
     /// Not retryable: the script decided this call fails, and a retry runs the
     /// same script into the same decision.
     User,
+    /// A condition the script asserted with `assert(condition[, message])` was
+    /// false. Reported as `E_ASSERT`; not retryable for the same reason as `User`.
+    Assert,
     /// A resource governor (op count, files, processes, or wall-clock) was hit.
     BudgetExceeded,
     /// A builtin was called by a name that does not exist. Carries
@@ -1738,6 +1741,7 @@ impl ErrorCode {
             ErrorCode::BadArg | ErrorCode::BadValue => "E_BAD_ARG",
             ErrorCode::Overflow => "E_BAD_VALUE",
             ErrorCode::User => "E_USER",
+            ErrorCode::Assert => "E_ASSERT",
             ErrorCode::BudgetExceeded => "E_BUDGET_EXCEEDED",
             ErrorCode::UnknownBuiltin => "E_UNKNOWN_BUILTIN",
             ErrorCode::UnknownField => "E_UNKNOWN_FIELD",
@@ -1814,7 +1818,7 @@ impl ErrorCode {
             // about the call needs to change.
             ErrorCode::Network => true,
             ErrorCode::PolicyDeny | ErrorCode::BudgetExceeded | ErrorCode::Unknown => false,
-            ErrorCode::User => false,
+            ErrorCode::User | ErrorCode::Assert => false,
         }
     }
 
@@ -1875,7 +1879,7 @@ impl ErrorCode {
             // EX_SOFTWARE -- the library failed on a valid request.
             ErrorCode::CryptoFailed => 70,
             // The script's own failure: the generic failure status, as Unknown's.
-            ErrorCode::User => 1,
+            ErrorCode::User | ErrorCode::Assert => 1,
             ErrorCode::Unknown => 1,
         }
     }
@@ -2874,6 +2878,24 @@ pub fn user_error(
         expected: String::new(),
         got: String::new(),
         extra,
+    })
+}
+
+/// The error a failed `assert(condition[, message])` raises (`E_ASSERT`). It is
+/// raised like `error()`, so `try { } catch e { e.code }` and `e.message` work.
+pub fn assertion_failed(message: String) -> anyhow::Error {
+    anyhow::Error::new(SafetyError {
+        code: ErrorCode::Assert,
+        message,
+        builtin: "assert".to_string(),
+        hint: "raised by assert() in the script; catch it with try { } catch e { ... }, \
+             or fix the condition that failed"
+            .to_string(),
+        approval: None,
+        did_you_mean: Vec::new(),
+        expected: String::new(),
+        got: String::new(),
+        extra: serde_json::Map::new(),
     })
 }
 

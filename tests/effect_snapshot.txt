@@ -170,6 +170,7 @@ check_compliance	ReadLocal
 check_permission	ReadLocal
 chgrp	WriteLocal
 chmod	WriteLocal
+chunk	Pure
 clear	Pure
 clipboard	ReadLocal
 clipboard_clear	WriteLocal

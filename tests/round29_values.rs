@@ -158,7 +158,7 @@ fn math_pow_overflow_message_uses_the_exponent_form_for_huge_operands() {
     );
     assert!(msg.len() < 300, "{msg}");
     // Small operands keep their plain form, which is the one round 28 pins.
-    let msg = try_run("math.pow(10, 400)").expect_err("must be refused");
+    let msg = try_run("math.pow(10.0, 400)").expect_err("must be refused");
     assert!(
         msg.contains("math_pow: 10 ** 400 overflows a Float"),
         "{msg}"

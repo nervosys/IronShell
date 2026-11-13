@@ -33,7 +33,7 @@ let doubled = (numbers | trace("before") | map(fn(x) => x * 2) | trace("after"))
 # assert() - Runtime assertions
 # ==========================================
 
-# Simple assertion (returns true or Error)
+# Simple assertion (returns true, or raises E_ASSERT when falsy)
 assert(true)
 
 # Assertion with custom message
@@ -45,13 +45,13 @@ assert("non-empty string")  # Passes
 assert([1, 2, 3])           # Passes (non-empty array)
 
 # Falsy values fail the assertion
-# assert(false)        # Returns Error("assertion failed")
-# assert(null)         # Returns Error("assertion failed")
-# assert("")           # Returns Error("assertion failed")
-# assert([])           # Returns Error("assertion failed")
+# assert(false)        # Raises E_ASSERT: "assertion failed"
+# assert(null)         # Raises E_ASSERT: "assertion failed"
+# assert("")           # Raises E_ASSERT: "assertion failed"
+# assert([])           # Raises E_ASSERT: "assertion failed"
 
 # Use with try/catch for recoverable assertions
-let assert_result = try { assert(false, "expected failure") } catch e { "caught: " + e }
+let assert_result = try { assert(false, "expected failure") } catch e { "caught: " + e.message }
 print(assert_result)
 
 # ==========================================

@@ -132,12 +132,20 @@ fn json_parse_still_reads_a_surrogate_pair() {
 
 #[test]
 fn math_pow_refuses_an_overflow() {
+    // Two Int operands stay Int (as the `**` operator does), so 10 ** 400 is
+    // refused as an Int overflow rather than as a Float overflow.
     let e = refusal("math.pow(10, 400)");
     assert_eq!(e.code.as_str(), "E_BAD_VALUE");
     assert!(
-        e.message.contains("math_pow: 10 ** 400 overflows a Float"),
+        e.message.contains("10 ** 400 does not fit in a 64-bit Int"),
         "{}",
         e.message
+    );
+    let f = refusal("math.pow(10.0, 400)");
+    assert!(
+        f.message.contains("math_pow: 10 ** 400 overflows a Float"),
+        "{}",
+        f.message
     );
     assert!(!e.hint.is_empty());
 }
