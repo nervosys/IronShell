@@ -15316,6 +15316,20 @@ fn bi_trim(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
 
 /// Whether a character belongs to a word for `title`: a letter, a digit, or an
 /// apostrophe. Every other character separates words.
+/// The titlecase form of a Unicode digraph letter (U+01C4..U+01CC and
+/// U+01F1..U+01F3). Its upper case is the wrong form: `to_uppercase` gives
+/// Ǆ where titlecase is ǅ, as Python's `capitalize` does. `None` for every
+/// other character.
+fn titlecase_digraph(c: char) -> Option<char> {
+    match c {
+        '\u{01C4}'..='\u{01C6}' => Some('\u{01C5}'),
+        '\u{01C7}'..='\u{01C9}' => Some('\u{01C8}'),
+        '\u{01CA}'..='\u{01CC}' => Some('\u{01CB}'),
+        '\u{01F1}'..='\u{01F3}' => Some('\u{01F2}'),
+        _ => None,
+    }
+}
+
 fn is_title_word_char(c: char) -> bool {
     c.is_alphanumeric() || c == '\''
 }
@@ -15348,7 +15362,10 @@ fn bi_title(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
         if is_title_word_char(c) {
             if c.is_alphabetic() {
                 if at_word_start {
-                    out.extend(c.to_uppercase());
+                    match titlecase_digraph(c) {
+                        Some(t) => out.push(t),
+                        None => out.extend(c.to_uppercase()),
+                    }
                 } else {
                     out.extend(c.to_lowercase());
                 }
@@ -15373,6 +15390,7 @@ fn bi_title(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
 /// Example:
 ///   capitalize("hELLO wORLD")   # "Hello world"
 ///   "élan" | capitalize()       # "Élan"
+///   "ǆungla" | capitalize()     # "ǅungla" (titlecase, not Ǆ)
 fn bi_capitalize(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
     let (text, rest) = text_subject("capitalize", args, input)?;
     if !rest.is_empty() {
@@ -15381,7 +15399,10 @@ fn bi_capitalize(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
     let mut out = String::with_capacity(text.len());
     let mut chars = text.chars();
     if let Some(first) = chars.next() {
-        out.extend(first.to_uppercase());
+        match titlecase_digraph(first) {
+            Some(t) => out.push(t),
+            None => out.extend(first.to_uppercase()),
+        }
     }
     for c in chars {
         out.extend(c.to_lowercase());
