@@ -429,7 +429,7 @@ fn agent_decision(effect: Effect) -> &'static str {
 /// not the `approve` its effect would get. `None` for any other builtin, and
 /// for `sh` once the opt-in is set.
 fn refused_outright(builtin: &str) -> Option<String> {
-    if builtin != "sh" {
+    if !matches!(builtin, "sh" | "shell") {
         return None;
     }
     let refusal = crate::security::validate_sh_allowed().err()?;
@@ -451,14 +451,13 @@ fn jail_refusal(effect: Effect, literals: &[String]) -> Option<String> {
     if !matches!(
         effect,
         Effect::ReadLocal | Effect::WriteLocal | Effect::Destructive
-    ) || !crate::safety::jail_enforced(crate::safety::current_mode())
-    {
+    ) {
         return None;
     }
     literals
         .iter()
         .filter(|s| !s.is_empty() && !s.contains('\n'))
-        .find(|s| crate::security::outside_read_jail(s))
+        .find(|s| crate::security::outside_read_jail_as_agent(s))
         .map(|s| format!("'{s}' is outside the workspace root, so the run refuses it with E_OUTSIDE_WORKSPACE"))
 }
 

@@ -106,9 +106,11 @@ pub fn route(src: &str) -> std::result::Result<Route, Refusal> {
     if let Some(n) = nullglob_line {
         // nullglob makes an unmatched glob expand to nothing; the engine passes
         // the pattern through. Only a script with no glob at all is unaffected.
-        let globs = out.iter().enumerate().any(|(i, l)| {
-            i + 1 != n && !l.trim_start().starts_with('#') && l.chars().any(|c| "*?[".contains(c))
-        });
+        // The setopt line itself counts: its converted form is `:` plus whatever
+        // followed the option (`setopt nullglob; echo *.x`).
+        let globs = out
+            .iter()
+            .any(|l| !l.trim_start().starts_with('#') && l.chars().any(|c| "*?[".contains(c)));
         if globs {
             return Err(Refusal {
                 line: n,
@@ -1667,6 +1669,13 @@ mod tests {
             Ok(Route::Posix(p)) => assert_eq!(p, ":; echo hi"),
             other => panic!("got {:?}", other),
         }
+    }
+
+    #[test]
+    fn nullglob_is_refused_when_its_own_line_has_a_glob() {
+        let r = route("setopt nullglob; echo *.nomatch").unwrap_err();
+        assert_eq!(r.line, 1);
+        assert!(r.construct.contains("nullglob"), "got {:?}", r);
     }
 
     #[test]

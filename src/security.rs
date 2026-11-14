@@ -554,11 +554,27 @@ pub fn validate_safe_path(path: &str) -> Result<PathBuf> {
 /// judged where the OS will read it, against the process working directory, not
 /// against the workspace root.
 pub fn outside_read_jail(path: &str) -> bool {
+    outside_jail(path, false)
+}
+
+/// [`outside_read_jail`] as agent mode would judge it: the workspace jail is
+/// taken as enforced whatever the current mode is. `--explain` uses it, so a
+/// path agent mode would refuse is reported `deny` from a human session too.
+/// The workspace is the one agent mode would use (`IRONSHELL_WORKSPACE`, else
+/// the working directory).
+pub fn outside_read_jail_as_agent(path: &str) -> bool {
+    outside_jail(path, true)
+}
+
+fn outside_jail(path: &str, as_agent: bool) -> bool {
     let explicit: Vec<PathBuf> = PATH_CONFIG
         .lock()
         .map(|c| c.allowed_base_dirs.clone())
         .unwrap_or_default();
-    if explicit.is_empty() && !crate::safety::jail_enforced(crate::safety::current_mode()) {
+    if explicit.is_empty()
+        && !as_agent
+        && !crate::safety::jail_enforced(crate::safety::current_mode())
+    {
         return false;
     }
     let given = Path::new(path);
