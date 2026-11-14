@@ -804,6 +804,8 @@ lazy_static::lazy_static! {
         map.insert("index_of", 1209);
         map.insert("last_index_of", 1210);
         map.insert("regex_split", 1211);
+        // The PowerShell transpiler's `+` (1212)
+        map.insert("ps_add", 1212);
         // 500-519: Database
         map.insert("db_sqlite_open", 500);
         map.insert("db_sqlite_query", 501);
@@ -3895,6 +3897,8 @@ static BUILTIN_DISPATCH: &[fn(Vec<Value>, Option<Value>, &mut Env) -> Result<Val
     |args, input, _| bi_index_of(args, input),      // 1209
     |args, input, _| bi_last_index_of(args, input), // 1210
     |args, input, _| bi_regex_split(args, input),   // 1211
+    // The PowerShell transpiler's `+`
+    |args, input, _| bi_ps_add(args, input), // 1212
 ];
 
 /// The dispatch row that serves `name`, if the fast table has one.
@@ -18101,8 +18105,55 @@ fn round_exact_decimal(magnitude: f64, cut: usize) -> (String, String) {
 /// not fit the integer arithmetic it uses.
 const FORMAT_NUMBER_MAX_DECIMALS: i64 = 15;
 
-/// format_number(x, decimals, separator?) - Format a number with fixed decimals.
+/// ps_add(a, b) - PowerShell's `+`: the right operand is converted to the left
+/// operand's type. Added for the PowerShell transpiler, which cannot know the
+/// operand types when it translates `$x + $y`.
 /// Args:
+///   - a, b: any two values (or `a` piped)
+/// Returns: the sum or the concatenation
+///
+/// A String on the left concatenates the text of the right (`'a' + 1` is
+/// "a1"). A number on the left converts a String on the right to a number
+/// (`1 + '2'` is 3, `1 + '2.5'` is 3.5) and refuses text that is not numeric,
+/// as PowerShell does. Anything else adds as `+` does.
+///
+/// Example:
+///   ps_add("a", 1)     # "a1"
+///   ps_add(1, "2")     # 3
+///   ps_add(1, 2.5)     # 3.5
+fn bi_ps_add(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
+    use crate::ast::BinOp;
+    const B: &str = "ps_add";
+    let (a, b) = match (input, args.as_slice()) {
+        (Some(a), [b]) => (a, b.clone()),
+        (None, [a, b]) => (a.clone(), b.clone()),
+        (_, rest) => return Err(arity_error(B, "two values", rest.len())),
+    };
+    let b = match (&a, b) {
+        (Value::Str(_), b) => Value::Str(b.to_display_string()),
+        (Value::Int(_) | Value::Float(_), Value::Str(text)) => {
+            let t = text.trim();
+            if let Ok(n) = t.parse::<i64>() {
+                Value::Int(n)
+            } else {
+                match t.parse::<f64>() {
+                    Ok(f) if f.is_finite() => Value::Float(f),
+                    _ => {
+                        return Err(crate::safety::bad_arg_in(
+                            B,
+                            format!("{B}: cannot convert {text:?} to a number"),
+                            "PowerShell converts the right operand to the left one's type; the text must be numeric",
+                        ))
+                    }
+                }
+            }
+        }
+        (_, b) => b,
+    };
+    crate::eval::binop(&BinOp::Add, a, b)
+}
+
+/// format_number(x, decimals, separator?) - Format a number with fixed decimals./// Args:
 ///   - x: Int or Float (or the piped number)
 ///   - decimals: Int, 0 to 15 - digits after the point; 0 writes no point
 ///   - separator: String (optional) - groups the integer part, such as ","

@@ -289,24 +289,22 @@ impl From<AgentResponseWire> for AgentResponse {
 /// The hint for a failure that has none of its own.
 const DEFAULT_ERROR_HINT: &str = "read error.message; error.code names the class of failure, and error.retryable says whether a corrected call can succeed";
 
-/// Whether a failure with this code can succeed once the call is corrected.
-/// The same classes `ErrorCode::retryable` gives, by wire code, except the
-/// codes `same_request_fails_again` names.
+/// Whether a failure with this code can succeed once the call is corrected or
+/// retried later: the classes `ErrorCode::retryable` gives, by wire code (and
+/// E_PARSE, which a rewritten source clears). A structured error's own
+/// `retryable`, which `SafetyError::is_retryable` narrows, takes precedence.
 fn code_retryable(code: &str) -> bool {
     matches!(
         code,
-        "E_UNKNOWN_FIELD" | "E_NOT_FOUND" | "E_BAD_STATE" | "E_NEEDS_APPROVAL" | "E_NETWORK"
-    )
-}
-
-/// Codes for which the same request fails the same way when it is sent again:
-/// the arguments, the source or the name are what is wrong, and a repeat of the
-/// request is never retryable. The structured error's own `retryable` does not
-/// change that.
-fn same_request_fails_again(code: &str) -> bool {
-    matches!(
-        code,
-        "E_PARSE" | "E_BAD_ARG" | "E_UNKNOWN_BUILTIN" | "E_UNKNOWN_NAME"
+        "E_PARSE"
+            | "E_BAD_ARG"
+            | "E_UNKNOWN_BUILTIN"
+            | "E_UNKNOWN_NAME"
+            | "E_UNKNOWN_FIELD"
+            | "E_NOT_FOUND"
+            | "E_BAD_STATE"
+            | "E_NEEDS_APPROVAL"
+            | "E_NETWORK"
     )
 }
 
@@ -344,11 +342,10 @@ fn error_object(text: &str, code: Option<&str>, hint: Option<&str>) -> JsonValue
         .map(str::to_string)
         .or_else(|| hint.map(str::to_string))
         .unwrap_or_else(|| DEFAULT_ERROR_HINT.to_string());
-    let retryable = !same_request_fails_again(&code)
-        && fields
-            .get("retryable")
-            .and_then(JsonValue::as_bool)
-            .unwrap_or_else(|| code_retryable(&code));
+    let retryable = fields
+        .get("retryable")
+        .and_then(JsonValue::as_bool)
+        .unwrap_or_else(|| code_retryable(&code));
     fields.insert("code".to_string(), json!(code));
     fields.insert("hint".to_string(), json!(hint));
     fields.insert("retryable".to_string(), json!(retryable));

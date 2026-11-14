@@ -396,7 +396,39 @@ fn parse_ps_expression(toks: &[Token]) -> Option<String> {
             }
         }
     }
-    Some(out.join(" "))
+    Some(fold_ps_operators(&out))
+}
+
+/// `operand (op operand)*` as IronShell source, with PowerShell's `+` kept
+/// apart from IronShell's: PowerShell converts the right operand to the left
+/// one's type (`'a' + 1` is `a1`, `1 + '2'` is 3), and the operand types are
+/// known only at run time, so each `+` becomes `ps_add(left, right)`. `*` and
+/// `%` bind tighter than `+` and `-`, as in IronShell, so they stay inline.
+fn fold_ps_operators(parts: &[String]) -> String {
+    let mut terms: Vec<(&str, String)> = Vec::new();
+    let mut sign = "";
+    let mut term = parts[0].clone();
+    for pair in parts[1..].chunks(2) {
+        let (op, operand) = (pair[0].as_str(), &pair[1]);
+        if op == "+" || op == "-" {
+            terms.push((sign, std::mem::take(&mut term)));
+            sign = op;
+            term = operand.clone();
+        } else {
+            term = format!("{} {} {}", term, op, operand);
+        }
+    }
+    terms.push((sign, term));
+    let mut it = terms.into_iter();
+    let mut acc = it.next().map(|(_, t)| t).unwrap_or_default();
+    for (op, t) in it {
+        acc = if op == "+" {
+            format!("ps_add({}, {})", acc, t)
+        } else {
+            format!("{} - {}", acc, t)
+        };
+    }
+    acc
 }
 
 /* =============================================================================
@@ -1736,6 +1768,6 @@ mod tests {
     #[test]
     fn test_expression_statement() {
         let r = transpile_powershell_to_ae("$x = 5; $x + 2").unwrap();
-        assert!(r.contains("print(x + 2);"), "got: {}", r);
+        assert!(r.contains("print(ps_add(x, 2));"), "got: {}", r);
     }
 }

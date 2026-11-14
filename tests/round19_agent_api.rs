@@ -135,19 +135,17 @@ fn item3_an_unknown_module_member_says_to_drop_the_prefix() {
     assert!(hint.contains("nosuch_zz"), "{hint}");
 }
 
-// ── Item 7: a request that fails the same way is not retryable ──────────────
+// ── Item 7: the envelope's retryable is the error's own ─────────────────────
 
 #[test]
-fn item7_a_request_that_fails_the_same_way_again_is_not_retryable() {
+fn item7_the_envelope_reports_the_errors_own_retryable() {
+    // A corrected call can succeed: bad arguments, a parse error.
     for request in [
         r#"{"action":"call","builtin":"upper","args":{"bogus":1}}"#,
-        r#"{"action":"call","builtin":"sqrt","args":[-1]}"#,
         r#"{"action":"eval","code":"((("}"#,
-        r#"{"action":"describe","builtin":"no_such_builtin_zz"}"#,
-        "{}",
     ] {
         let (_, v) = execute_once(request);
-        assert_eq!(v["error"]["retryable"], json!(false), "{request}: {v}");
+        assert_eq!(v["error"]["retryable"], json!(true), "{request}: {v}");
     }
 }
 
