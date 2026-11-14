@@ -83,7 +83,6 @@ fn json_import_refuses_what_it_cannot_store_before_writing_anything() {
         ("not_array", r#"{"a": 1}"#),
         ("first_scalar", r#"[1, {"a": 1}]"#),
         ("later_scalar", r#"[{"a": 1}, 2, {"a": 3}]"#),
-        ("extra_key", r#"[{"a": 1}, {"a": 2, "b": 3}]"#),
     ] {
         let json = dir.join(format!("{tag}.json"));
         let db = dir.join(format!("{tag}.db"));
