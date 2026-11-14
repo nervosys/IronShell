@@ -7,6 +7,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security
+
+- On Windows, a write or create to a name ending in a dot or space (`a.txt.`), or with a `:` after the drive (`f.txt:stream`, an alternate data stream), is refused with E_BAD_ARG by builtins and `ish -b` alike; Windows stripped the dot or space, so `file.write("a.txt.")` overwrote `a.txt` while reporting another path, and `touch` and `echo x > f.txt:s` created hidden streams. A write to `NUL` is refused as a reserved device name, as `CON` is, instead of as outside the workspace.
+- YAML and TOML data holding `inf` or `nan` (`.inf`, `.nan`, `inf`, `nan`) is refused at parse, naming the line or key; such values contradicted IronShell's finite numbers (`x + 1` failed while `x > 5` held and to_yaml wrote them back). `sql()` refuses an infinite result cell, naming the column.
+
+### Changed
+
+- `max` and `min` return the winning element unchanged: `max(3, 2.5)` is `3`, not `3.0`; and they take two or more numbers (`max(1, 7, 3.5)` is `7`), where a third argument was ignored.
+- `ish -b` splits unquoted expansions on `IFS` (non-white delimiters keep empty fields: `IFS=,` splits `a,,b` into `a`, ``, `b`; an empty `IFS` turns splitting off); `IFS` was ignored.
+- `from_json`, `json_parse` and `open` of JSON read a bare `-0` as the Int `0`; it became the Float `-0.0`.
+
+### Added
+
+- `median`, `variance`, `stddev` (sample, as Python's statistics) and `percentile(arr, p)` (linear interpolation, as numpy's default), also under `math.`.
+
+### Fixed
+
+- `floor`, `ceil` and `round` raise `has no Int value` for a result outside the Int range, as `int` does; `floor(1e20)` gave 9223372036854775807.
+- Undo reverses the `tee` builtin, `db_kv_set`, `db_sqlite_to_csv` and `dd_copy` (which journaled its source, not its destination); undo removes a database file a call created instead of leaving an empty one; and undoing a `chmod` that left a file read-only no longer fails with "Access is denied". Each of these reported `complete: true` while leaving the change.
+- `open` of YAML with an integer too wide for an Int says `open: y.yaml: line N: integer overflow at ...` with one hint; the message and hint repeated a whole JSON error.
+- An unknown module member no longer suggests an unrelated short global (`math.variance` suggested `nc`).
+- In `ish -b`, `tr` with a missing operand says `tr: missing operand` and exits 1 as GNU does; `wc` pads its columns to width 7 when an operand is not a regular file (`/dev/null`, stdin); and `cut`, `mkdir`, `touch` and `grep` usage errors end with GNU's `Try '... --help'` line.
+
 ## [14.0.2] - 2026-11-13
 
 ### Security
