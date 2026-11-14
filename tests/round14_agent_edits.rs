@@ -229,3 +229,10 @@ fn delete_lines_refuses_a_selector_that_is_neither_int_string_nor_record() {
     );
     assert_eq!(std::fs::read_to_string(&src).unwrap(), "one\ntwo\n");
 }
+
+#[test]
+fn the_approval_hint_says_a_comma_list_approves_several_calls() {
+    let hint = iron_shell::safety::approval_instruction("apv_0000000000000000");
+    assert!(hint.contains("comma-separated list"), "{hint}");
+    assert!(hint.contains("approves several calls at once"), "{hint}");
+}
