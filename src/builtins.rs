@@ -800,6 +800,10 @@ lazy_static::lazy_static! {
         map.insert("variance", 1206);
         map.insert("stddev", 1207);
         map.insert("percentile", 1208);
+        // Substring position (1209-1210) and regex split (1211)
+        map.insert("index_of", 1209);
+        map.insert("last_index_of", 1210);
+        map.insert("regex_split", 1211);
         // 500-519: Database
         map.insert("db_sqlite_open", 500);
         map.insert("db_sqlite_query", 501);
@@ -3887,6 +3891,10 @@ static BUILTIN_DISPATCH: &[fn(Vec<Value>, Option<Value>, &mut Env) -> Result<Val
     |args, input, _| bi_variance(args, input),   // 1206
     |args, input, _| bi_stddev(args, input),     // 1207
     |args, input, _| bi_percentile(args, input), // 1208
+    // Substring position (1209-1210) and regex split (1211), in the string section
+    |args, input, _| bi_index_of(args, input),      // 1209
+    |args, input, _| bi_last_index_of(args, input), // 1210
+    |args, input, _| bi_regex_split(args, input),   // 1211
 ];
 
 /// The dispatch row that serves `name`, if the fast table has one.
@@ -5939,8 +5947,12 @@ fn sample_variance(name: &str, args: Vec<Value>, input: Option<Value>) -> Result
     }
     let n = v.len() as f64;
     let mean = v.iter().sum::<f64>() / n;
+    // Two passes with a compensation term: the deviations from the rounded mean
+    // do not sum to exactly 0, and sum((x - m)^2) - (sum(x - m))^2 / n removes
+    // that error (the corrected two-pass algorithm).
     let ss: f64 = v.iter().map(|x| (x - mean) * (x - mean)).sum();
-    Ok(ss / (n - 1.0))
+    let drift: f64 = v.iter().map(|x| x - mean).sum();
+    Ok((ss - drift * drift / n) / (n - 1.0))
 }
 
 /// variance(numbers) - the sample variance (n - 1), as Python's
@@ -15059,40 +15071,79 @@ fn is_truthy(val: &Value) -> bool {
 
 // ==================== String Functions ====================
 
-/// split(delimiter) - Split string into array by delimiter
+/// split(delimiter, limit?) - Split string into array by delimiter
 /// Args:
 ///   - delimiter: String - The delimiter to split on
+///   - limit: Int (optional) - the most pieces to answer, 1 or more (Rust's splitn); the last piece keeps the rest of the text
 /// Returns: Array - Array of string parts
 ///
 /// Example:
 ///   "a,b,c" | split(",")     # Returns ["a", "b", "c"]
+///   "a,b,c" | split(",", 2)  # Returns ["a", "b,c"]
 fn bi_split(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
-    let (text_val, delim_arg) = if let Some(inp) = input {
-        // Piped: input is string, args[0] is delimiter
+    let (text_val, delim_arg, limit_arg) = if let Some(inp) = input {
+        // Piped: input is string, args[0] is delimiter, args[1] the limit
         (
             inp,
             args.first()
                 .ok_or_else(|| crate::safety::arg_err("split requires delimiter argument"))?,
+            args.get(1),
         )
     } else {
-        // Not piped: args[0] is string, args[1] is delimiter
+        // Not piped: args[0] is string, args[1] is delimiter, args[2] the limit
         (
             args.first()
                 .ok_or_else(|| crate::safety::arg_err("split requires string input"))?
                 .clone(),
             args.get(1)
                 .ok_or_else(|| crate::safety::arg_err("split requires delimiter argument"))?,
+            args.get(2),
         )
     };
 
     let text = expect_string("split", &text_val)?;
     let delimiter = expect_string("split", delim_arg)?;
+    // limit: the most pieces to answer (Rust's splitn); the last piece holds the
+    // rest of the text unsplit. Absent means no limit.
+    let limit: Option<usize> = match limit_arg {
+        None => None,
+        Some(Value::Int(n)) if *n >= 1 => Some(usize::try_from(*n).unwrap_or(usize::MAX)),
+        Some(Value::Int(n)) => {
+            return Err(crate::safety::bad_arg_in(
+                "split",
+                format!("split: limit {n} is not at least 1: it is the most pieces to answer"),
+                "pass a limit of 1 or more, or leave it out to split on every delimiter",
+            ))
+        }
+        Some(other) => {
+            return Err(crate::safety::bad_arg(
+                "split",
+                "an Int limit, the most pieces",
+                other.type_name(),
+            ))
+        }
+    };
 
     // Rust's `split("")` yields an empty piece at each end and between every
     // character, so `"abc" | split("")` gave ["", "a", "b", "c", ""]. An empty
     // delimiter splits into characters instead, so "café" gives four items.
     let parts: Vec<Value> = if delimiter.is_empty() {
-        text.chars().map(|c| Value::Str(c.to_string())).collect()
+        let chars: Vec<char> = text.chars().collect();
+        match limit {
+            Some(n) if n < chars.len() => {
+                let mut parts: Vec<Value> = chars[..n - 1]
+                    .iter()
+                    .map(|c| Value::Str(c.to_string()))
+                    .collect();
+                parts.push(Value::Str(chars[n - 1..].iter().collect()));
+                parts
+            }
+            _ => chars.iter().map(|c| Value::Str(c.to_string())).collect(),
+        }
+    } else if let Some(n) = limit {
+        text.splitn(n, delimiter)
+            .map(|s| Value::Str(s.to_string()))
+            .collect()
     } else {
         text.split(delimiter)
             .map(|s| Value::Str(s.to_string()))
@@ -16954,6 +17005,76 @@ fn bi_regex_find_all(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
     ))
 }
 
+/// regex_split(text, pattern) - Split a String at every match of a regex.
+/// Args:
+///   - text: String (or the piped text)
+///   - pattern: String - a Rust regex pattern
+/// Returns: Array of String
+///
+/// Rust regex split semantics: a match at the start or end of the text gives an
+/// empty piece there, and text with no match is one piece.
+///
+/// Example:
+///   regex_split("a1b22c", "[0-9]+")    # ["a", "b", "c"]
+///   "a, b;c" | regex_split("[,;] *")   # ["a", "b", "c"]
+fn bi_regex_split(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
+    const B: &str = "regex_split";
+    let (text, rest) = text_subject(B, args, input)?;
+    let [pattern] = rest.as_slice() else {
+        return Err(arity_error(B, "a pattern", rest.len()));
+    };
+    let re = text_regex(B, string_arg(B, "a String pattern", pattern)?)?;
+    Ok(Value::Array(
+        re.split(&text).map(|s| Value::Str(s.to_string())).collect(),
+    ))
+}
+
+/// index_of(text, sub) / last_index_of(text, sub): the character offset of the
+/// first (or last) occurrence of `sub` in `text`, or -1.
+fn index_of_impl(
+    builtin: &str,
+    args: Vec<Value>,
+    input: Option<Value>,
+    last: bool,
+) -> Result<Value> {
+    let (text, rest) = text_subject(builtin, args, input)?;
+    let [sub] = rest.as_slice() else {
+        return Err(arity_error(builtin, "a substring", rest.len()));
+    };
+    let sub = string_arg(builtin, "a String substring", sub)?;
+    let at = if last {
+        text.rfind(sub)
+    } else {
+        text.find(sub)
+    };
+    Ok(Value::Int(match at {
+        Some(byte) => text[..byte].chars().count() as i64,
+        None => -1,
+    }))
+}
+
+/// index_of(text, sub) - The character offset of the first occurrence of sub.
+/// Args:
+///   - text: String (or the piped text)
+///   - sub: String - the text to look for
+/// Returns: Int - the offset in characters (not bytes), or -1 when absent
+///
+/// Example:
+///   index_of("hello", "l")    # 2
+///   index_of("héllo", "l")    # 2
+///   index_of("hello", "z")    # -1
+fn bi_index_of(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
+    index_of_impl("index_of", args, input, false)
+}
+
+/// last_index_of(text, sub) - The character offset of the last occurrence of sub.
+///
+/// Example:
+///   last_index_of("hello", "l")    # 3
+fn bi_last_index_of(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
+    index_of_impl("last_index_of", args, input, true)
+}
+
 /// regex_replace(text, pattern, replacement) - Replace every regex match.
 /// Args:
 ///   - text: String (or the piped text)
@@ -17128,8 +17249,8 @@ fn year_in_range(year: i32) -> bool {
 /// signed or five-digit year (E_BAD_VALUE), a field that is not zero-padded
 /// (`2024-2-9`, `T1:2:3`), or a leap second (`23:59:60`) (E_BAD_ARG). Text that
 /// does not look like a date is left to the parser, which refuses it as not a date.
-fn check_iso_shape(builtin: &str, text: &str) -> Result<()> {
-    let b = text.as_bytes();
+fn check_iso_shape(builtin: &str, text: &str, canon: &str) -> Result<()> {
+    let b = canon.as_bytes();
     let signed = matches!(b.first(), Some(b'+' | b'-')) && b.get(1).is_some_and(u8::is_ascii_digit);
     let start = usize::from(signed);
     let year_len = b[start..].iter().take_while(|c| c.is_ascii_digit()).count();
@@ -17159,17 +17280,17 @@ fn check_iso_shape(builtin: &str, text: &str) -> Result<()> {
     if let Some(&sep) = b.get(10) {
         if sep == b'T' || sep == b' ' {
             let t = &b[11..];
-            let padded_time = t.len() >= 8
-                && digits(&t[0..2])
-                && t[2] == b':'
-                && digits(&t[3..5])
-                && t[5] == b':'
-                && digits(&t[6..8]);
-            if !padded_time {
-                return Err(not_padded("YYYY-MM-DDTHH:MM:SS"));
+            let padded_clock = t.len() >= 5 && digits(&t[0..2]) && t[2] == b':' && digits(&t[3..5]);
+            if !padded_clock {
+                return Err(not_padded("YYYY-MM-DDTHH:MM[:SS]"));
             }
-            if &t[6..8] == b"60" {
-                return Err(leap_second(builtin, text));
+            if t.get(5) == Some(&b':') {
+                if !(t.len() >= 8 && digits(&t[6..8])) {
+                    return Err(not_padded("YYYY-MM-DDTHH:MM:SS"));
+                }
+                if &t[6..8] == b"60" {
+                    return Err(leap_second(builtin, text));
+                }
             }
         }
     }
@@ -17196,9 +17317,96 @@ fn check_instant(builtin: &str, text: &str, instant: chrono::DateTime<chrono::Ut
     Ok(())
 }
 
+/// The extended ISO 8601 spelling of text written in one of the other forms the
+/// date builtins read: the basic date `20240229`, a time without seconds
+/// (`13:05`, `1305`), the basic time `130509`, a `t` or space before the time,
+/// and an offset written `+0530`, `-08` or `z`. Text in none of those forms is
+/// returned as it is, for the checks and the parser to refuse by name.
+fn canonical_iso(text: &str) -> String {
+    if !text.is_ascii() {
+        return text.to_string();
+    }
+    let b = text.as_bytes();
+    let digits = |s: &[u8]| s.iter().all(u8::is_ascii_digit);
+    let (date, rest) = if b.len() >= 10
+        && digits(&b[0..4])
+        && b[4] == b'-'
+        && digits(&b[5..7])
+        && b[7] == b'-'
+        && digits(&b[8..10])
+    {
+        (text[..10].to_string(), &text[10..])
+    } else if b.len() >= 8 && digits(&b[0..8]) {
+        (
+            format!("{}-{}-{}", &text[0..4], &text[4..6], &text[6..8]),
+            &text[8..],
+        )
+    } else {
+        return text.to_string();
+    };
+    if rest.is_empty() {
+        return date;
+    }
+    if !matches!(rest.as_bytes()[0], b'T' | b't' | b' ') {
+        return text.to_string();
+    }
+    let body = &rest[1..];
+    let zone_at = body.find(['Z', 'z', '+', '-']).unwrap_or(body.len());
+    let (time, zone) = body.split_at(zone_at);
+    let (clock, frac) = match time.find('.') {
+        Some(i) => time.split_at(i),
+        None => (time, ""),
+    };
+    let c = clock.as_bytes();
+    let (clock, has_seconds) = if c.len() == 6 && digits(c) {
+        (
+            format!("{}:{}:{}", &clock[0..2], &clock[2..4], &clock[4..6]),
+            true,
+        )
+    } else if c.len() == 4 && digits(c) {
+        (format!("{}:{}:00", &clock[0..2], &clock[2..4]), false)
+    } else if c.len() == 5 && digits(&c[0..2]) && c[2] == b':' && digits(&c[3..5]) {
+        (format!("{clock}:00"), false)
+    } else if c.len() == 8
+        && digits(&c[0..2])
+        && c[2] == b':'
+        && digits(&c[3..5])
+        && c[5] == b':'
+        && digits(&c[6..8])
+    {
+        (clock.to_string(), true)
+    } else {
+        return text.to_string();
+    };
+    if !has_seconds && !frac.is_empty() {
+        return text.to_string();
+    }
+    let z = zone.as_bytes();
+    let zone = if z.is_empty() {
+        String::new()
+    } else if zone == "Z" || zone == "z" {
+        "Z".to_string()
+    } else if matches!(z[0], b'+' | b'-') && digits(&z[1..]) && z.len() == 3 {
+        format!("{zone}:00")
+    } else if matches!(z[0], b'+' | b'-') && digits(&z[1..]) && z.len() == 5 {
+        format!("{}:{}", &zone[..3], &zone[3..])
+    } else if matches!(z[0], b'+' | b'-')
+        && z.len() == 6
+        && digits(&z[1..3])
+        && z[3] == b':'
+        && digits(&z[4..6])
+    {
+        zone.to_string()
+    } else {
+        return text.to_string();
+    };
+    format!("{date}T{clock}{frac}{zone}")
+}
+
 fn parse_iso(builtin: &str, text: &str) -> Result<(chrono::DateTime<chrono::Utc>, bool)> {
-    check_iso_shape(builtin, text)?;
-    let (instant, date_only) = iso_instant(text).ok_or_else(|| not_a_date(builtin, text))?;
+    let canon = canonical_iso(text);
+    check_iso_shape(builtin, text, &canon)?;
+    let (instant, date_only) = iso_instant(&canon).ok_or_else(|| not_a_date(builtin, text))?;
     check_instant(builtin, text, instant)?;
     Ok((instant, date_only))
 }
@@ -17215,12 +17423,44 @@ fn iso_text(instant: chrono::DateTime<chrono::Utc>, date_only: bool) -> String {
 
 /// A strftime layout is refused when chrono cannot read one of its specifiers.
 fn check_strftime(builtin: &str, layout: &str) -> Result<()> {
-    if chrono::format::StrftimeItems::new(layout)
-        .any(|item| matches!(item, chrono::format::Item::Error))
-    {
+    let has_error = |text: &str| {
+        chrono::format::StrftimeItems::new(text)
+            .any(|item| matches!(item, chrono::format::Item::Error))
+    };
+    if has_error(layout) {
+        // Name the first specifier chrono cannot read: each `%` with its flags
+        // and width, up to the letter that ends it, is tried on its own.
+        let mut rest = layout;
+        let mut bad = None;
+        while let Some(i) = rest.find('%') {
+            let tail = &rest[i..];
+            if tail[1..].starts_with('%') {
+                rest = &tail[2..];
+                continue;
+            }
+            let end = match tail[1..]
+                .char_indices()
+                .find(|(_, c)| c.is_alphabetic() || *c == '%')
+            {
+                Some((k, c)) if c == '%' => 1 + k,
+                Some((k, c)) => 1 + k + c.len_utf8(),
+                None => tail.len(),
+            };
+            if has_error(&tail[..end]) {
+                bad = Some(&tail[..end]);
+                break;
+            }
+            rest = &tail[end..];
+        }
+        let message = match bad {
+            Some(spec) => format!(
+                "{builtin}: {layout:?} is not a strftime format: {spec:?} is not a specifier chrono reads"
+            ),
+            None => format!("{builtin}: {layout:?} is not a strftime format"),
+        };
         return Err(crate::safety::bad_arg_in(
             builtin,
-            format!("{builtin}: {layout:?} is not a strftime format"),
+            message,
             "use chrono's strftime specifiers, such as %Y-%m-%d or %d %B %Y",
         ));
     }
@@ -17261,7 +17501,10 @@ fn parse_with_layout(builtin: &str, text: &str, layout: &str) -> Result<Value> {
 ///   - format: String (optional) - a chrono strftime layout, such as "%d/%m/%Y"
 /// Returns: String
 ///
-/// Without a format, RFC 3339 and `YYYY-MM-DD` are read. A datetime is answered
+/// Without a format, RFC 3339 and `YYYY-MM-DD` are read, and so are the other
+/// ISO 8601 spellings: seconds may be left out (`13:05`, read as `13:05:00`), the
+/// date and time may be basic (`20240229T130509Z`), the separator may be `T`,
+/// `t` or a space, and an offset may be `Z`, `+05:30`, `+0530` or `-08`. A datetime is answered
 /// in UTC, ending in Z; an offset in the text is converted. A date is answered
 /// as a date. Text that is not a date is E_BAD_VALUE and the refusal names it.
 ///
@@ -17269,6 +17512,8 @@ fn parse_with_layout(builtin: &str, text: &str, layout: &str) -> Result<Value> {
 ///   date_parse("2024-02-29")                        # "2024-02-29"
 ///   date_parse("2024-02-29T10:00:00+02:00")         # "2024-02-29T08:00:00Z"
 ///   date_parse("29/02/2024", "%d/%m/%Y")            # "2024-02-29"
+///   date_parse("2024-02-29T13:05")                  # "2024-02-29T13:05:00Z"
+///   date_parse("20240229T130509+0530")              # "2024-02-29T07:35:09Z"
 fn bi_date_parse(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
     const B: &str = "date_parse";
     let (text, rest) = text_subject(B, args, input)?;
@@ -17373,11 +17618,13 @@ fn whole_calendar_months(
 /// date_format(iso, format) - Format a date or datetime with a strftime layout.
 /// Args:
 ///   - iso: String (or the piped text) - an ISO date or datetime; a date is midnight UTC
-///   - format: String - a chrono strftime layout
+///   - format: String - a chrono strftime layout; `%f` is the nanoseconds (nine digits), `%6f` or `%.6f` the microseconds, `%3f` or `%.3f` the milliseconds; an unsupported specifier (`%^a`, `%L`) is refused by name
 /// Returns: String
 ///
 /// Example:
 ///   date_format("2024-02-29T10:00:00Z", "%d %B %Y")    # "29 February 2024"
+///   date_format("2024-02-29T10:00:00.123456789Z", "%f")    # "123456789"
+///   date_format("2024-02-29T10:00:00.123456789Z", "%6f")   # "123456"
 fn bi_date_format(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
     use std::fmt::Write as _;
     const B: &str = "date_format";

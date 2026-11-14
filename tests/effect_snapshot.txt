@@ -598,6 +598,7 @@ hyperfine_bench	Exec
 ifconfig	Network
 in	Pure
 index_docs	WriteLocal
+index_of	Pure
 init_sso	WriteLocal
 input_autocomplete	Pure
 input_confirm	Pure
@@ -684,6 +685,7 @@ kubectl_exec	Exec
 kubectl_get	Network
 kubectl_logs	Network
 last	Pure
+last_index_of	Pure
 lazygit	Exec
 lazygit_open	Exec
 len	Pure
@@ -1095,6 +1097,7 @@ regex_find	Pure
 regex_find_all	Pure
 regex_match	Pure
 regex_replace	Pure
+regex_split	Pure
 relations	ReadLocal
 remote_exec	ReadLocal
 remove_lines	Destructive

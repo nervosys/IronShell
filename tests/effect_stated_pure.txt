@@ -124,6 +124,7 @@ help
 hex_decode
 hex_encode
 in
+index_of
 input_autocomplete
 input_confirm
 input_date
@@ -153,6 +154,7 @@ json_parse
 json_stringify
 keys
 last
+last_index_of
 len
 length
 lines
@@ -240,6 +242,7 @@ regex_find
 regex_find_all
 regex_match
 regex_replace
+regex_split
 repeat
 repl_broadcast
 replace
