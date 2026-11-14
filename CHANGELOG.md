@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- MCP (`ish mcp stdio`): every tool result's text is JSON (a String stays plain text) and carries `structuredContent`; a Record no longer prints in IronShell's display form.
+- MCP: a batch request gets one -32600 reply with id null (batches are not part of protocol 2025-06-18); an id of null, a missing or wrong `jsonrpc`, or a non-object message is -32600; params that are not an object or array are -32602. Every malformed line gets a reply.
+- An Int literal too large for 64 bits is E_PARSE, naming the literal; it read as 0. `-9223372036854775808` is accepted, and a size suffix that overflows (`9223372036854775807G`) is refused.
+- `--deterministic` output keeps a Float's decimal point and prints `null`, as the normal output does.
+- The approval hint says `IRONSHELL_APPROVE` takes a comma-separated list of tokens, to approve several calls at once.
+
+### Added
+
+- MCP: module-qualified names (`math.sqrt`, `file.read`) are tools, and run through the `ironshell` meta-tool; errors name the member as the client wrote it.
+- `sql` takes a Record of tables as its first argument (`sql({orders: rows, users: us}, "select ... join ...")`), so a query can join several values.
+- AGENTS.md: a section on reading output, config files and names (the agent output format, `--deterministic`, per-session handles, key sorting and comment loss when a config file is rewritten, names that collide with modules).
+- Python SDK 1.5.2: `IronShellError` (a RuntimeError with `code`, `message`, `hint`, `exit_status`, `stderr`) and `IronShellTimeout`; a `timeout` option enforced from Python; `memory_limit_mb` passed as `--memory-limit` only when set; output decoded as UTF-8; null or empty output is `None`; `py.typed` ships; an empty pipeline is its own source.
+
+### Fixed
+
+- `undo` restores a file's modification time and, on Unix, its mode, as well as its bytes.
+- `sql` help states the rule for empty CSV cells.
+
 ## [14.0.3] - 2026-11-13
 
 ### Changed
