@@ -7,48 +7,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Security
-
-- On Windows, a write or create to a name ending in a dot or space (`a.txt.`), or with a `:` after the drive (`f.txt:stream`, an alternate data stream), is refused with E_BAD_ARG by builtins and `ish -b` alike; Windows stripped the dot or space, so `file.write("a.txt.")` overwrote `a.txt` while reporting another path, and `touch` and `echo x > f.txt:s` created hidden streams. A write to `NUL` is refused as a reserved device name, as `CON` is, instead of as outside the workspace.
-- YAML and TOML data holding `inf` or `nan` (`.inf`, `.nan`, `inf`, `nan`) is refused at parse, naming the line or key; such values contradicted IronShell's finite numbers (`x + 1` failed while `x > 5` held and to_yaml wrote them back). `sql()` refuses an infinite result cell, naming the column.
-- `--explain` and `explain_effects` judge `shell(...)` as agent mode does (deny, like `sh(...)`), and judge a literal path against the workspace agent mode would use: `file.write("../x", ...)` is explained as deny (outside the workspace) instead of allow.
-- A process memory budget turns memory exhaustion into E_BUDGET_EXCEEDED (`eval: memory budget of N MB exceeded`) instead of an aborted process: the smaller of 2048 MB and half of physical memory by default, set with `IRONSHELL_MEMORY_LIMIT_MB` or `--memory-limit MB` (0 for none). String interpolation now obeys the 8 MB string limit and Array `+`, `flatten` and `concat` the 10M-element limit; doubling a string through `"${a}${a}"` or an array through `a + a` aborted the process at the allocator.
-
-### Changed
-
-- `max` and `min` return the winning element unchanged: `max(3, 2.5)` is `3`, not `3.0`; and they take two or more numbers (`max(1, 7, 3.5)` is `7`), where a third argument was ignored.
-- `ish -b` splits unquoted expansions on `IFS` (non-white delimiters keep empty fields: `IFS=,` splits `a,,b` into `a`, ``, `b`; an empty `IFS` turns splitting off); `IFS` was ignored.
-- `from_json`, `json_parse` and `open` of JSON read a bare `-0` as the Int `0`; it became the Float `-0.0`.
-- PowerShell input: every transpile-time refusal exits 77 with E_POLICY_DENY and a hint (some exited 1 as plain text); `Where-Object` and `ForEach-Object` are named in the refusal; variables are mutable, so `$x = 5; $x = 6` works; `Write-Host (1+2)` prints `3` (it printed `(1+2)`); a negative literal (`7 % -3`) and `$b = $a + 1` translate; and a runtime error no longer names a line of the translated script.
-- `date_parse`, `date_add`, `date_diff` and `date_format` read ISO 8601 times without seconds (`2024-02-29T13:05`), the basic forms (`20240229`, `20240229T130509Z`) and `+0530`/`-08` offsets; "not zero-padded" is reported only for a short field (it was the message for a missing seconds field).
-- `split(text, delim, limit?)` takes an optional limit on the number of pieces; a third argument was ignored.
-- `retryable` follows one rule, decided by error code: a corrected or later retry can succeed. An unknown builtin with no suggestion is not retryable; it was retryable when the suggester offered `None`.
-- `db_json_to_sqlite` and `db_csv_to_sqlite` create INTEGER, REAL or TEXT columns as `sql()` infers them (Booleans as 1/0), instead of all TEXT, so `ORDER BY id` no longer sorts `"10"` before `"2"`; `db_json_to_sqlite` accepts rows with differing keys (the union of keys, NULL where one is missing). The `db_sqlite_*` builtins quote every table and column name, so names with spaces, quotes or reserved words work; only empty names and control characters are refused.
-- `db_sqlite_delete` without a where clause, or with a blank one, is refused with E_BAD_ARG (pass `"1=1"` to delete every row); it deleted nothing and returned true.
-- A program with many syntax errors reports the first ten and a count of the rest, and stops after a nesting-limit error instead of listing one error per closing parenthesis.
-
-### Added
-
-- `median`, `variance`, `stddev` (sample, as Python's statistics) and `percentile(arr, p)` (linear interpolation, as numpy's default), also under `math.`.
-- `index_of` and `last_index_of` (also `str.`): the character offset of a substring, or -1. `regex_split` (also `str.regex_split`).
-- `--timeout SECONDS` (or `IRONSHELL_TIMEOUT`) stops an evaluation, a running `sleep` included, with E_BUDGET_EXCEEDED; no timeout could be set from the command line.
-
-### Fixed
-
-- `floor`, `ceil` and `round` raise `has no Int value` for a result outside the Int range, as `int` does; `floor(1e20)` gave 9223372036854775807.
-- Undo reverses the `tee` builtin, `db_kv_set`, `db_sqlite_to_csv` and `dd_copy` (which journaled its source, not its destination); undo removes a database file a call created instead of leaving an empty one; and undoing a `chmod` that left a file read-only no longer fails with "Access is denied". Each of these reported `complete: true` while leaving the change.
-- `open` of YAML with an integer too wide for an Int says `open: y.yaml: line N: integer overflow at ...` with one hint; the message and hint repeated a whole JSON error.
-- An unknown module member no longer suggests an unrelated short global (`math.variance` suggested `nc`).
-- In `ish -b`, `tr` with a missing operand says `tr: missing operand` and exits 1 as GNU does; `wc` pads its columns to width 7 when an operand is not a regular file (`/dev/null`, stdin); and `cut`, `mkdir`, `touch` and `grep` usage errors end with GNU's `Try '... --help'` line.
-- `ish agent schema` states `if cond { a } else { b }` (it showed `if cond then a else b`, which does not parse) and lists the `%`, `^` and `!` operators; a test parses every syntax example in it.
-- The did-you-mean suggester no longer offers `Some`/`None` for a lowercase name (`ontology_describe("nope")` suggested `None`).
-- `ish -c '-7.5 % 2'` runs; the leading `-` was read as a flag. A script file that does not exist is E_NOT_FOUND with exit status 66, as JSON under `--agent`; it exited 1 with plain text.
-- `variance` and `stddev` use a corrected two-pass sum and match Python's statistics module on large, close values.
-- `date_format` names the first specifier it cannot read (`"%L" is not a specifier chrono reads`).
-- zsh input refuses `setopt nullglob` followed by a glob on the same line, as documented; it printed the glob literally. `ls` of an unmatched glob under `ish -b` or `--zsh` says `No such file or directory` on Windows, not the raw "volume label syntax" error.
-- `db_sqlite_to_csv` ends every row with one CRLF on Windows; rows ended `\r\r\n`. `db_sqlite_vacuum` works; it always failed with "cannot run ATTACH in safe mode".
-- `sql` and `sql_value` read `.tsv` files; `sql_value("o.tsv", ...)` said "file is not a database". `sql("")` says the query is empty, a doubled `sql: sql:` prefix is gone, and unknown-column errors from `db_sqlite_insert`/`update` drop the sqlite3 CLI's "Parse error in 3rd command line argument" wrapper.
-
 ## [14.0.2] - 2026-11-13
 
 ### Security
@@ -74,6 +32,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - In agent mode, `try` no longer catches E_NEEDS_APPROVAL, E_OUTSIDE_WORKSPACE or E_POLICY_DENY: the script stops with exit status 75 or 77. `try { rm(x) } catch e { ... }` exited 0, so an agent could take a refusal for success. Human mode still catches them.
 - In agent mode, `fs_tempdir` and `fs_tempfile` create under `<workspace>/.ironshell/tmp/`; they wrote to the system temp directory, outside the workspace.
 - On Windows, a write, create, copy, move, `mkdir`, delete or archive extraction to a path with a reserved device-name component (`CON`, `NUL`, `COM1`, `LPT1`, ...) is refused with E_BAD_ARG; such files could be created but not deleted.
+- On Windows, a write or create to a name ending in a dot or space (`a.txt.`), or with a `:` after the drive (`f.txt:stream`, an alternate data stream), is refused with E_BAD_ARG by builtins and `ish -b` alike; Windows stripped the dot or space, so `file.write("a.txt.")` overwrote `a.txt` while reporting another path, and `touch` and `echo x > f.txt:s` created hidden streams. A write to `NUL` is refused as a reserved device name, as `CON` is, instead of as outside the workspace.
+- YAML and TOML data holding `inf` or `nan` (`.inf`, `.nan`, `inf`, `nan`) is refused at parse, naming the line or key; such values contradicted IronShell's finite numbers (`x + 1` failed while `x > 5` held and to_yaml wrote them back). `sql()` refuses an infinite result cell, naming the column.
+- `--explain` and `explain_effects` judge `shell(...)` as agent mode does (deny, like `sh(...)`), and judge a literal path against the workspace agent mode would use: `file.write("../x", ...)` is explained as deny (outside the workspace) instead of allow.
+- A process memory budget turns memory exhaustion into E_BUDGET_EXCEEDED (`eval: memory budget of N MB exceeded`) instead of an aborted process: the smaller of 2048 MB and half of physical memory by default, set with `IRONSHELL_MEMORY_LIMIT_MB` or `--memory-limit MB` (0 for none). String interpolation now obeys the 8 MB string limit and Array `+`, `flatten` and `concat` the 10M-element limit; doubling a string through `"${a}${a}"` or an array through `a + a` aborted the process at the allocator.
 
 ### Changed
 
@@ -160,6 +122,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - An in-process refusal names the tool and the flag (`the in-process tr does not support -c`) before mentioning a GNU program on PATH, and a bad option to `tr`, `grep`, `sort` or `cut` fails as GNU does (`tr: invalid option -- '_'`, status 1 or 2).
 - The MCP `ironshell` tool accepts `builtin` as an alias of `name`. An unmapped PowerShell cmdlet is refused as `command Remove-Item at line N has no IronShell mapping`.
 - A Float always displays as a Float: `print(100.0)`, `sqrt(16)`, `6 / 2` and `-0.0` show `100.0`, `4.0`, `3.0` and `-0.0` (in print, `ish -c`, the REPL, `"${x}"`, `str()` and `join`); they showed `100`, `4`, `3` and `-0`, so a Float could not be told from an Int and a CSV cell read as `100` displayed differently from what to_csv wrote. A magnitude of 1e16 or more, or under 1e-5, uses exponent form (`1e21`, `1e-7`; to_json writes the same number as `1e+21`); 1e21 printed 22 digits. Int display, the JSON, YAML, TOML and CSV writers, and `format_number` are unchanged.
+- `max` and `min` return the winning element unchanged: `max(3, 2.5)` is `3`, not `3.0`; and they take two or more numbers (`max(1, 7, 3.5)` is `7`), where a third argument was ignored.
+- `ish -b` splits unquoted expansions on `IFS` (non-white delimiters keep empty fields: `IFS=,` splits `a,,b` into `a`, ``, `b`; an empty `IFS` turns splitting off); `IFS` was ignored.
+- `from_json`, `json_parse` and `open` of JSON read a bare `-0` as the Int `0`; it became the Float `-0.0`.
+- PowerShell input: every transpile-time refusal exits 77 with E_POLICY_DENY and a hint (some exited 1 as plain text); `Where-Object` and `ForEach-Object` are named in the refusal; variables are mutable, so `$x = 5; $x = 6` works; `Write-Host (1+2)` prints `3` (it printed `(1+2)`); a negative literal (`7 % -3`) and `$b = $a + 1` translate; and a runtime error no longer names a line of the translated script.
+- `date_parse`, `date_add`, `date_diff` and `date_format` read ISO 8601 times without seconds (`2024-02-29T13:05`), the basic forms (`20240229`, `20240229T130509Z`) and `+0530`/`-08` offsets; "not zero-padded" is reported only for a short field (it was the message for a missing seconds field).
+- `split(text, delim, limit?)` takes an optional limit on the number of pieces; a third argument was ignored.
+- `retryable` follows one rule, decided by error code: a corrected or later retry can succeed. An unknown builtin with no suggestion is not retryable; it was retryable when the suggester offered `None`.
+- `db_json_to_sqlite` and `db_csv_to_sqlite` create INTEGER, REAL or TEXT columns as `sql()` infers them (Booleans as 1/0), instead of all TEXT, so `ORDER BY id` no longer sorts `"10"` before `"2"`; `db_json_to_sqlite` accepts rows with differing keys (the union of keys, NULL where one is missing). The `db_sqlite_*` builtins quote every table and column name, so names with spaces, quotes or reserved words work; only empty names and control characters are refused.
+- `db_sqlite_delete` without a where clause, or with a blank one, is refused with E_BAD_ARG (pass `"1=1"` to delete every row); it deleted nothing and returned true.
+- A program with many syntax errors reports the first ten and a count of the rest, and stops after a nesting-limit error instead of listing one error per closing parenthesis.
 
 ### Added
 
@@ -221,6 +193,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `title`, `capitalize`, `repeat` (refuses a result over 100 MB) and `words` as builtins (also under `str.`); `trim(text, chars)` strips a set of characters from both ends.
 - `from_epoch(seconds)` and `to_epoch(date)` convert between epoch seconds and ISO 8601 UTC, for years 0001 to 9999.
 - `ish -b` runs `${x:offset}` and `${x:offset:length}` (characters, negative offsets and lengths) and `<<<` here-strings in-process; grep takes `--include`, `--exclude` and `--exclude-dir`; printf takes the `+`, space, `#` and `0` flags, `%u` and an integer precision.
+- `median`, `variance`, `stddev` (sample, as Python's statistics) and `percentile(arr, p)` (linear interpolation, as numpy's default), also under `math.`.
+- `index_of` and `last_index_of` (also `str.`): the character offset of a substring, or -1. `regex_split` (also `str.regex_split`).
+- `--timeout SECONDS` (or `IRONSHELL_TIMEOUT`) stops an evaluation, a running `sleep` included, with E_BUDGET_EXCEEDED; no timeout could be set from the command line.
 
 ### Fixed
 
@@ -345,6 +320,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `ish -b` with the journal on in human mode records redirections, `tee`, `sed -i` and its backup as agent mode does, and `mkdir -p` records the directories it creates.
 - `ish -b` reads `/dev/null` as an empty file on Windows, in `<` and as an operand; it said no such file.
 - A missing `file_move` source says `no file or directory at x` with a path hint.
+- `floor`, `ceil` and `round` raise `has no Int value` for a result outside the Int range, as `int` does; `floor(1e20)` gave 9223372036854775807.
+- Undo reverses the `tee` builtin, `db_kv_set`, `db_sqlite_to_csv` and `dd_copy` (which journaled its source, not its destination); undo removes a database file a call created instead of leaving an empty one; and undoing a `chmod` that left a file read-only no longer fails with "Access is denied". Each of these reported `complete: true` while leaving the change.
+- `open` of YAML with an integer too wide for an Int says `open: y.yaml: line N: integer overflow at ...` with one hint; the message and hint repeated a whole JSON error.
+- An unknown module member no longer suggests an unrelated short global (`math.variance` suggested `nc`).
+- In `ish -b`, `tr` with a missing operand says `tr: missing operand` and exits 1 as GNU does; `wc` pads its columns to width 7 when an operand is not a regular file (`/dev/null`, stdin); and `cut`, `mkdir`, `touch` and `grep` usage errors end with GNU's `Try '... --help'` line.
+- `ish agent schema` states `if cond { a } else { b }` (it showed `if cond then a else b`, which does not parse) and lists the `%`, `^` and `!` operators; a test parses every syntax example in it.
+- The did-you-mean suggester no longer offers `Some`/`None` for a lowercase name (`ontology_describe("nope")` suggested `None`).
+- `ish -c '-7.5 % 2'` runs; the leading `-` was read as a flag. A script file that does not exist is E_NOT_FOUND with exit status 66, as JSON under `--agent`; it exited 1 with plain text.
+- `variance` and `stddev` use a corrected two-pass sum and match Python's statistics module on large, close values.
+- `date_format` names the first specifier it cannot read (`"%L" is not a specifier chrono reads`).
+- zsh input refuses `setopt nullglob` followed by a glob on the same line, as documented; it printed the glob literally. `ls` of an unmatched glob under `ish -b` or `--zsh` says `No such file or directory` on Windows, not the raw "volume label syntax" error.
+- `db_sqlite_to_csv` ends every row with one CRLF on Windows; rows ended `\r\r\n`. `db_sqlite_vacuum` works; it always failed with "cannot run ATTACH in safe mode".
+- `sql` and `sql_value` read `.tsv` files; `sql_value("o.tsv", ...)` said "file is not a database". `sql("")` says the query is empty, a doubled `sql: sql:` prefix is gone, and unknown-column errors from `db_sqlite_insert`/`update` drop the sqlite3 CLI's "Parse error in 3rd command line argument" wrapper.
+
 
 
 ## [14.0.1] - 2026-11-08
