@@ -40,7 +40,7 @@ struct Cli {
     agentic: bool,
 
     /// Execute a command string
-    #[arg(long, short = 'c')]
+    #[arg(long, short = 'c', allow_hyphen_values = true)]
     command: Option<String>,
 
     /// Token budget for output: results over N estimated tokens are paged/truncated
@@ -1365,7 +1365,18 @@ fn detect_transpile_mode(path: &str) -> Option<TranspileMode> {
 }
 
 fn run_file(path: &str, explicit_mode: Option<TranspileMode>) -> Result<()> {
-    let mut code = fs::read_to_string(path).with_context(|| format!("failed to read {}", path))?;
+    let mut code = match fs::read_to_string(path) {
+        Ok(code) => code,
+        // A script that does not exist is E_NOT_FOUND (exit 66), as a missing
+        // file is anywhere else in the language; under --agent it is the JSON
+        // error shape.
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            let err = iron_shell::safety::not_found("run", "file", path);
+            iron_shell::repl::report_error(&err);
+            std::process::exit(iron_shell::repl::exit_status_for(&err));
+        }
+        Err(e) => return Err(e).with_context(|| format!("failed to read {}", path)),
+    };
 
     // Explicit flag takes priority; otherwise auto-detect from extension
     let mode = explicit_mode.or_else(|| detect_transpile_mode(path));
