@@ -49431,27 +49431,36 @@ fn bi_crypto_base64_decode(args: Vec<Value>, input: Option<Value>) -> Result<Val
     let data = hex_subject("crypto_base64_decode", &args, input)?;
     // Wrapped input (as `base64` writes it) decodes: whitespace is not data.
     let compact: String = data.chars().filter(|c| !c.is_ascii_whitespace()).collect();
-    let bytes = match STANDARD.decode(compact.as_bytes()) {
-        Ok(b) => b,
-        Err(first) => {
-            // Unpadded input and the URL-safe alphabet (`-` and `_` for `+` and
-            // `/`) are base64 too: JWT segments are written that way. Normalise
-            // and retry; input that is still invalid keeps the first error.
-            use base64::engine::general_purpose::STANDARD_NO_PAD;
-            let normal: String = compact
-                .trim_end_matches('=')
-                .chars()
-                .map(|c| match c {
-                    '-' => '+',
-                    '_' => '/',
-                    other => other,
-                })
-                .collect();
-            STANDARD_NO_PAD.decode(normal.as_bytes()).map_err(|_| {
-                crate::safety::bad_arg("crypto_base64_decode", "valid base64", &first.to_string())
-            })?
-        }
-    };
+    // The URL-safe alphabet is another encoding: `-` and `_` are not base64, and
+    // reading them as `+` and `/` would decode different bytes. It is refused,
+    // with the one-step fix named.
+    if compact.chars().any(|c| c == '-' || c == '_') {
+        return Err(crate::safety::value_not_representable(
+            "crypto_base64_decode",
+            "crypto_base64_decode: expected standard base64, got the URL-safe alphabet (- or _)"
+                .to_string(),
+            "this is URL-safe base64: replace - with + and _ with /",
+        ));
+    }
+    // Padding is part of the encoding, as Python's b64decode(validate=True)
+    // requires: standard-alphabet input whose length is not a multiple of 4 is
+    // refused, not guessed at. Other bad input keeps its error below.
+    let alphabet_only = compact
+        .bytes()
+        .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'+' | b'/' | b'='));
+    if alphabet_only && compact.len() % 4 != 0 {
+        return Err(crate::safety::value_not_representable(
+            "crypto_base64_decode",
+            format!(
+                "crypto_base64_decode: expected base64 padded to a multiple of 4 characters, got {} characters",
+                compact.len()
+            ),
+            "pad with = to a multiple of 4 characters",
+        ));
+    }
+    let bytes = STANDARD.decode(compact.as_bytes()).map_err(|first| {
+        crate::safety::bad_arg("crypto_base64_decode", "valid base64", &first.to_string())
+    })?;
     // Bytes that are not text were replaced with U+FFFD, silently.
     String::from_utf8(bytes).map(Value::Str).map_err(|_| {
         crate::safety::bad_arg(

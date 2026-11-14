@@ -9583,11 +9583,10 @@ pub static SIGNATURES: &[Signature] = &[
         subject: Some(Ty::Str),
         params: &[],
         returns: "String",
-        doc: "Decode base64 to text. Whitespace is ignored, padding is optional, and the URL-safe alphabet (- and _ for + and /) is accepted. Invalid base64 or binary output is refused.",
+        doc: "Decode standard base64 to text. Whitespace is ignored. The input must be padded with = to a multiple of 4 characters; unpadded input and the URL-safe alphabet (- and _) are refused with a hint. Invalid base64 or binary output is refused.",
         examples: &[
             (r#"base64_decode("aGVsbG8=")"#, r#"hello"#),
-            (r#"base64_decode("aGVsbG8")"#, r#"hello"#),
-            (r#"base64_decode("Pz8_")"#, r#"???"#),
+            (r#"base64_decode("Pz8/")"#, r#"???"#),
         ],
     },
     Signature {
