@@ -149,7 +149,9 @@ fn csv_import_infers_types_and_loads_empty_cells_as_null() {
             |r| r.get(0),
         )
         .unwrap();
-    assert_eq!(nulls, 2);
+    // The blank `amt` (a number column) is NULL; the blank `name` (a text
+    // column) stays '' as it does in sql().
+    assert_eq!(nulls, 1);
 }
 
 #[test]
@@ -268,7 +270,7 @@ fn sql_reads_tsv_and_loads_empty_csv_cells_as_null() {
     assert_eq!(
         call(
             "sql_value",
-            vec![p(&csv), s("select count(*) from c where note is null")]
+            vec![p(&csv), s("select count(*) from c where note = ''")]
         )
         .unwrap(),
         Value::Int(1)

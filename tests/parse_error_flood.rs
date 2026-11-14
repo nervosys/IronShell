@@ -2,8 +2,16 @@
 
 use iron_shell::parser::parse_program;
 
+/// Parse on a thread with the stack the ish binary gives its evaluator: the
+/// test harness's 2 MB thread overflows on 512 nested levels in a debug build.
 fn message(src: &str) -> String {
-    format!("{:#}", parse_program(src).expect_err("must not parse"))
+    let src = src.to_string();
+    std::thread::Builder::new()
+        .stack_size(64 * 1024 * 1024)
+        .spawn(move || format!("{:#}", parse_program(&src).expect_err("must not parse")))
+        .unwrap()
+        .join()
+        .unwrap()
 }
 
 #[test]

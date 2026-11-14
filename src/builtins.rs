@@ -11596,15 +11596,10 @@ pub(crate) fn csv_rows_sql(
     headers: &[String],
     records: &[csv::StringRecord],
 ) -> Vec<BTreeMap<String, Value>> {
-    let mut rows = csv_rows(headers, records);
-    for row in &mut rows {
-        for cell in row.values_mut() {
-            if matches!(cell, Value::Str(s) if s.is_empty()) {
-                *cell = Value::Null;
-            }
-        }
-    }
-    rows
+    // csv_rows already reads a blank cell of a numeric column as null; a
+    // blank in a text column stays '' (round 20), so `where note = ''` finds
+    // it.
+    csv_rows(headers, records)
 }
 
 /// The SQLite column type for a column of shell values, inferred as `sql` reads

@@ -54,7 +54,7 @@ fn sql_on_a_toml_file_names_jsonl_among_the_readable_formats() {
     let t = text(&out);
     assert!(!out.status.success(), "should be refused: {t}");
     assert!(
-        t.contains("name a .json, .jsonl or .csv file"),
+        t.contains("name a .json, .jsonl, .csv or .tsv file"),
         "the hint does not name .jsonl: {t}"
     );
 }
