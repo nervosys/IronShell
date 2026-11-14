@@ -3827,6 +3827,13 @@ pub fn ontology_describe_json(query: &str) -> JsonValue {
                 obj.insert("effect_declared".to_string(), json!(false));
             }
         }
+        // A module member described by its qualified name says which builtin
+        // it runs: `file.read` is described as `cat`.
+        if let Some(runs) = resolved.as_deref() {
+            if runs != query.trim() {
+                detail["runs"] = json!(runs);
+            }
+        }
         return detail;
     }
 

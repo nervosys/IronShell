@@ -807,9 +807,9 @@ fn call_builtin_gates_destructive_in_agent_mode() {
 }
 
 #[test]
-fn call_builtin_renders_tabular_as_aecon_in_agent_mode() {
-    // In agent mode an array-of-records result comes back as compact AECON text
-    // (header once) rather than the verbose per-row display — mirroring the CLI.
+fn call_builtin_renders_tabular_as_json_in_agent_mode() {
+    // Every result's text is JSON (a String is its own text); the same value is
+    // `structuredContent`. A small table is sent whole, as a JSON array.
     let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     std::env::set_var("IRONSHELL_MODE", "agent");
     let server = McpServer::new();
@@ -825,9 +825,15 @@ fn call_builtin_renders_tabular_as_aecon_in_agent_mode() {
     std::env::remove_var("IRONSHELL_MODE");
 
     assert_eq!(res.is_error, Some(false), "pick succeeds: {text}");
-    assert!(text.starts_with("name\tsize"), "rendered as AECON: {text}");
-    assert!(
-        text.contains("\na\t1") && text.contains("\nb\t2"),
-        "rows present: {text}"
+    let v: serde_json::Value =
+        serde_json::from_str(&text).unwrap_or_else(|e| panic!("not JSON ({e}): {text}"));
+    assert_eq!(
+        v,
+        serde_json::json!([{"name": "a", "size": 1}, {"name": "b", "size": 2}])
+    );
+    assert_eq!(
+        res.structured_content,
+        Some(serde_json::json!({"result": v})),
+        "a non-object is wrapped"
     );
 }

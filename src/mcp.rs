@@ -209,6 +209,14 @@ pub struct McpToolResult {
     pub content: Vec<McpContent>,
     #[serde(rename = "isError", skip_serializing_if = "Option::is_none")]
     pub is_error: Option<bool>,
+    /// The result as JSON (an object; a non-object value is wrapped as `{"result": value}`),
+    /// beside the text, as protocol 2025-06-18 allows.
+    #[serde(
+        rename = "structuredContent",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub structured_content: Option<JsonValue>,
 }
 
 /// MCP Content block
@@ -574,19 +582,96 @@ impl McpServer {
     /// builtins enforce policy/approval/jail and emit audit entries; a refusal
     /// is returned as an error result carrying the structured `E_*` code.
     pub fn call_builtin(&self, name: &str, args: &JsonValue) -> McpToolResult {
+        self.call_builtin_as(name, name, args)
+    }
+
+    /// [`Self::call_builtin`] for a builtin the caller named `written`: a module
+    /// member (`file.read`) runs the builtin `name` (`cat`), and an error from
+    /// it names what the caller wrote.
+    fn call_builtin_as(&self, name: &str, written: &str, args: &JsonValue) -> McpToolResult {
         let values: Vec<crate::value::Value> = match args {
             JsonValue::Array(a) => a.iter().map(crate::value::Value::from_json).collect(),
             JsonValue::Null => vec![],
             other => vec![crate::value::Value::from_json(other)],
         };
-        self.run_builtin(name, values, None)
+        self.run_builtin(name, written, values, None)
+    }
+
+    /// The builtin a module-qualified name (`math.sqrt`) runs, as the HTTP
+    /// `/call/:builtin` resolves it. `None` for a name with no module prefix or
+    /// that no module member answers to.
+    fn module_member_target(name: &str) -> Option<String> {
+        let (module, member) = name.split_once('.')?;
+        crate::modules::builtin_for_member(module, member)
+    }
+
+    /// An error result whose text is the error as the builtin raised it.
+    fn error_result(text: String) -> McpToolResult {
+        McpToolResult {
+            content: vec![McpContent::Text { text }],
+            is_error: Some(true),
+            structured_content: None,
+        }
+    }
+
+    /// The text of a successful result, and the same value as JSON for
+    /// `structuredContent` (a non-object is wrapped as `{"result": value}`).
+    ///
+    /// The text is JSON for every value but a String, which is its own text.
+    /// Deterministic mode (`--deterministic` / IRONSHELL_DETERMINISTIC) wins, as
+    /// in `ish -c`: the whole value as canonical JSON. In agent mode a result too
+    /// large to send whole stays a server-side handle, and the text is a JSON
+    /// object describing it; with `IRONSHELL_TOKEN_BUDGET` set, a table or array
+    /// is the JSON of one page.
+    fn render_success(v: &crate::value::Value) -> (String, JsonValue) {
+        let json = v.to_json();
+        let wrapped = if json.is_object() {
+            json.clone()
+        } else {
+            json!({ "result": json.clone() })
+        };
+        if crate::agent_api::deterministic_mode() {
+            let text = crate::builtins::render_canonical(v).unwrap_or_else(|| "null".to_string());
+            return (text, wrapped);
+        }
+        if crate::safety::current_mode() == crate::safety::Mode::Agent
+            && matches!(
+                v,
+                crate::value::Value::Array(_) | crate::value::Value::Table(_)
+            )
+        {
+            let budget = std::env::var("IRONSHELL_TOKEN_BUDGET")
+                .ok()
+                .and_then(|s| s.parse::<usize>().ok())
+                .filter(|m| *m > 0);
+            let summary = match budget {
+                Some(max) => Some(crate::builtins::budget_value(v, max, 0)),
+                None => crate::builtins::handle_summary_for_agent(v),
+            };
+            if let Some(summary) = summary {
+                let j = summary.to_json();
+                let text = serde_json::to_string(&j).unwrap_or_else(|_| "{}".to_string());
+                let structured = if j.is_object() {
+                    j
+                } else {
+                    json!({ "result": j })
+                };
+                return (text, structured);
+            }
+        }
+        let text = match v {
+            crate::value::Value::Str(s) => s.clone(),
+            _ => serde_json::to_string(&json).unwrap_or_else(|_| v.to_display_string()),
+        };
+        (text, wrapped)
     }
 
     /// Run a builtin with its values and an optional piped subject, and render
-    /// the outcome as an MCP result.
+    /// the outcome as an MCP result. `written` is the name the caller used.
     fn run_builtin(
         &self,
         name: &str,
+        written: &str,
         values: Vec<crate::value::Value>,
         input: Option<crate::value::Value>,
     ) -> McpToolResult {
@@ -594,44 +679,21 @@ impl McpServer {
         match crate::builtins::call_with_input(name, values, input, &mut env) {
             Ok(v) => {
                 let v = crate::agent_api::redact_for_agent(v);
-                // Agent mode mirrors the CLI/HTTP default: tabular results render
-                // as compact AECON (MCP content is plain text, so no JSON
-                // re-escaping cost). Scalars keep their display form.
-                // Deterministic mode (`--deterministic` / IRONSHELL_DETERMINISTIC)
-                // wins over both, as in `ish -c`: the whole value as canonical JSON,
-                // byte-stable for equal values.
-                let text = if crate::agent_api::deterministic_mode() {
-                    crate::builtins::render_canonical(&v).unwrap_or_else(|| "null".to_string())
-                } else if name == "ontology_describe" {
-                    // The discovery tools speak JSON; the record's display form
-                    // (`{aliases: null, builtin: pick}`) is not.
-                    serde_json::to_string(&v.to_json()).unwrap_or_else(|_| v.to_display_string())
-                } else if crate::safety::current_mode() == crate::safety::Mode::Agent
-                    && matches!(
-                        v,
-                        crate::value::Value::Array(_) | crate::value::Value::Table(_)
-                    )
-                {
-                    let budget = std::env::var("IRONSHELL_TOKEN_BUDGET")
-                        .ok()
-                        .and_then(|s| s.parse::<usize>().ok())
-                        .filter(|m| *m > 0);
-                    crate::builtins::render_agent(&v, budget)
-                        .unwrap_or_else(|| v.to_display_string())
-                } else {
-                    v.to_display_string()
-                };
+                let (text, structured) = Self::render_success(&v);
                 McpToolResult {
                     content: vec![McpContent::Text { text }],
                     is_error: Some(false),
+                    structured_content: Some(structured),
                 }
             }
-            Err(e) => McpToolResult {
-                content: vec![McpContent::Text {
-                    text: format!("{}", e),
-                }],
-                is_error: Some(true),
-            },
+            Err(e) => {
+                let e = if name != written {
+                    crate::safety::rename_builtin(e, name, written)
+                } else {
+                    e
+                };
+                Self::error_result(format!("{}", e))
+            }
         }
     }
 
@@ -663,6 +725,7 @@ impl McpServer {
                         text: "ironshell: missing 'name' (the builtin to invoke)".to_string(),
                     }],
                     is_error: Some(true),
+                    structured_content: None,
                 };
             }
             // With `args`, the builtin's arguments are all in `args`, so a key
@@ -681,9 +744,19 @@ impl McpServer {
             if let Some(map) = rest.as_object_mut() {
                 map.remove(key);
             }
-            return self.route_named(inner, &rest);
+            return self.route_resolved(inner, &rest);
         }
-        self.route_named(name, arguments)
+        self.route_resolved(name, arguments)
+    }
+
+    /// [`Self::route_named`] for a name that may be module-qualified
+    /// (`math.sqrt`): it runs the builtin that member is, and errors name the
+    /// qualified spelling the client used.
+    fn route_resolved(&self, written: &str, arguments: &JsonValue) -> McpToolResult {
+        match Self::module_member_target(written) {
+            Some(target) => self.route_named(&target, written, arguments),
+            None => self.route_named(written, written, arguments),
+        }
     }
 
     /// Run `name` with MCP `arguments`, in one of three forms:
@@ -695,45 +768,43 @@ impl McpServer {
     ///   signature has no names to map, so the object is one argument, as before.
     ///
     /// A bare array or `null` is the positional list itself.
-    fn route_named(&self, name: &str, arguments: &JsonValue) -> McpToolResult {
+    fn route_named(&self, name: &str, written: &str, arguments: &JsonValue) -> McpToolResult {
         let Some(map) = arguments.as_object() else {
-            return self.call_builtin(name, arguments);
+            return self.call_builtin_as(name, written, arguments);
         };
         if let Some(args) = map.get("args") {
             if let Some(extra) = map.keys().find(|k| k.as_str() != "args") {
-                return Self::unknown_argument(name, extra, "args");
+                return Self::unknown_argument(written, extra, "args");
             }
             // An object here is named, as in agent execute: each key is a
             // parameter, mapped by the same conversion that `args` objects use.
             return match args {
                 JsonValue::Object(named) => {
                     match crate::agent_api::named_args_to_positional(name, named) {
-                        Ok(positional) => self.call_builtin(name, &JsonValue::Array(positional)),
-                        Err(e) => McpToolResult {
-                            content: vec![McpContent::Text {
-                                text: format!("{}", e),
-                            }],
-                            is_error: Some(true),
-                        },
+                        Ok(positional) => {
+                            self.call_builtin_as(name, written, &JsonValue::Array(positional))
+                        }
+                        Err(e) => Self::error_result(format!(
+                            "{}",
+                            crate::safety::rename_builtin(e, name, written)
+                        )),
                     }
                 }
-                _ => self.call_builtin(name, args),
+                _ => self.call_builtin_as(name, written, args),
             };
         }
         if map.is_empty() {
-            return self.call_builtin(name, &JsonValue::Array(vec![]));
+            return self.call_builtin_as(name, written, &JsonValue::Array(vec![]));
         }
         let Some(sig) = crate::signature::signature_of(name) else {
-            return self.call_builtin(name, arguments);
+            return self.call_builtin_as(name, written, arguments);
         };
         match Self::named_arguments(sig, map) {
-            Ok((input, values)) => self.run_builtin(name, values, input),
-            Err(e) => McpToolResult {
-                content: vec![McpContent::Text {
-                    text: format!("{}", e),
-                }],
-                is_error: Some(true),
-            },
+            Ok((input, values)) => self.run_builtin(name, written, values, input),
+            Err(e) => Self::error_result(format!(
+                "{}",
+                crate::safety::rename_builtin(e, name, written)
+            )),
         }
     }
 
@@ -744,6 +815,7 @@ impl McpServer {
                 text: format!("unknown argument '{key}' for '{tool}'; valid arguments: {valid}"),
             }],
             is_error: Some(true),
+            structured_content: None,
         }
     }
 
@@ -888,12 +960,67 @@ impl McpServer {
     /// Dispatch one JSON-RPC request, returning the response (or `None` for a
     /// notification, which gets no reply). Pure w.r.t. I/O so it is unit-testable.
     pub fn handle_rpc(&self, req: &JsonValue) -> Option<JsonValue> {
-        // Notifications carry no `id` → no response.
-        let id = match req.get("id") {
-            Some(v) if !v.is_null() => v.clone(),
-            _ => return None,
+        // Only a request object is dispatched. Protocol 2025-06-18 removed
+        // batching, so an array is one error, and any other top-level value is
+        // an invalid request: a message that is not a valid notification is
+        // never left without an answer.
+        let obj = match req {
+            JsonValue::Object(o) => o,
+            JsonValue::Array(_) => {
+                return Some(Self::rpc_error(
+                    JsonValue::Null,
+                    -32600,
+                    "Invalid Request: batch requests are not supported in protocol 2025-06-18",
+                ))
+            }
+            _ => return Some(Self::rpc_error(JsonValue::Null, -32600, "Invalid Request")),
         };
-        let method = req.get("method").and_then(|m| m.as_str()).unwrap_or("");
+        // An `id` of null is not a request id, and is not a notification either.
+        if matches!(obj.get("id"), Some(JsonValue::Null)) {
+            return Some(Self::rpc_error(
+                JsonValue::Null,
+                -32600,
+                "Invalid Request: id must be a string or a number, not null",
+            ));
+        }
+        // No `id`: a notification, which gets no reply when it is valid.
+        let id = obj.get("id").cloned();
+        let reply_id = id.clone().unwrap_or(JsonValue::Null);
+        if id
+            .as_ref()
+            .is_some_and(|v| !matches!(v, JsonValue::String(_) | JsonValue::Number(_)))
+        {
+            return Some(Self::rpc_error(
+                JsonValue::Null,
+                -32600,
+                "Invalid Request: id must be a string or a number",
+            ));
+        }
+        if obj.get("jsonrpc").and_then(JsonValue::as_str) != Some("2.0") {
+            return Some(Self::rpc_error(
+                reply_id,
+                -32600,
+                "Invalid Request: \"jsonrpc\" must be \"2.0\"",
+            ));
+        }
+        let Some(method) = obj.get("method").and_then(JsonValue::as_str) else {
+            return Some(Self::rpc_error(
+                reply_id,
+                -32600,
+                "Invalid Request: \"method\" must be a string",
+            ));
+        };
+        // A valid notification gets no reply.
+        let id = id?;
+        if let Some(params) = obj.get("params") {
+            if !matches!(params, JsonValue::Object(_) | JsonValue::Array(_)) {
+                return Some(Self::rpc_error(
+                    id,
+                    -32602,
+                    "Invalid params: \"params\" must be an object or an array",
+                ));
+            }
+        }
         let response = match method {
             "initialize" => Self::rpc_ok(id, self.stdio_initialize(req.get("params"))),
             "tools/list" => Self::rpc_ok(
@@ -941,7 +1068,10 @@ impl McpServer {
             "missing tool name".to_string(),
             None,
         ))?;
-        if name != Self::META_INVOKE_TOOL && !crate::builtins::is_served(name) {
+        if name != Self::META_INVOKE_TOOL
+            && !crate::builtins::is_served(name)
+            && Self::module_member_target(name).is_none()
+        {
             let suggestions = crate::builtins::did_you_mean(name);
             let data = (!suggestions.is_empty())
                 .then(|| json!({ "code": "E_UNKNOWN_BUILTIN", "did_you_mean": suggestions }));
@@ -1007,6 +1137,7 @@ impl McpServer {
                         text: format!("Tool '{}' not found", call.name),
                     }],
                     is_error: Some(true),
+                    structured_content: None,
                 };
             }
         };
@@ -1021,6 +1152,7 @@ impl McpServer {
                     ),
                 }],
                 is_error: Some(true),
+                structured_content: None,
             };
         }
 
@@ -1029,12 +1161,14 @@ impl McpServer {
             Ok(output) => McpToolResult {
                 content: vec![McpContent::Text { text: output }],
                 is_error: Some(false),
+                structured_content: None,
             },
             Err(e) => McpToolResult {
                 content: vec![McpContent::Text {
                     text: format!("Tool execution failed: {}", e),
                 }],
                 is_error: Some(true),
+                structured_content: None,
             },
         }
     }
@@ -1998,6 +2132,7 @@ pub mod server {
                 text: format!("tool task failed: {e}"),
             }],
             is_error: Some(true),
+            structured_content: None,
         });
 
         if result.is_error.unwrap_or(false) {

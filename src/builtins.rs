@@ -25473,6 +25473,52 @@ fn render_handle(v: Value, full_bytes: usize) -> anyhow::Result<String> {
     Ok(out)
 }
 
+/// The JSON-ready description of a result too large to send whole, for the MCP
+/// surface: the value is kept server-side as a handle (as [`render_agent`] does)
+/// and this record says which, its shape, size and first rows. `None` when the
+/// value is small enough to send, or was marked to show whole. At the handle
+/// cap the record says the result was refused, not shown.
+pub fn handle_summary_for_agent(v: &Value) -> Option<Value> {
+    if crate::handles::take_show_whole() {
+        return None;
+    }
+    let full_bytes = aecon_render(v).len();
+    if !crate::handles::worth_handling(v, full_bytes) {
+        return None;
+    }
+    let mut out = BTreeMap::new();
+    match crate::handles::put(v.clone(), full_bytes) {
+        Ok(h) => {
+            let omitted = crate::handles::omitted(v);
+            out.insert("handle".to_string(), Value::Str(h.id.clone()));
+            out.insert("shape".to_string(), Value::Str(h.shape.clone()));
+            out.insert("items".to_string(), Value::Int(h.items as i64));
+            out.insert("bytes".to_string(), Value::Int(h.bytes as i64));
+            out.insert("preview".to_string(), crate::handles::preview_of(v));
+            out.insert("omitted".to_string(), Value::Int(omitted as i64));
+            out.insert(
+                "hint".to_string(),
+                Value::Str(format!(
+                    "handle(\"{}\") | where(...) | take(5): the full value is kept, nothing is lost",
+                    h.id
+                )),
+            );
+        }
+        Err(e) => {
+            out.insert("handle_refused".to_string(), Value::Str(format!("{e}")));
+            out.insert("bytes".to_string(), Value::Int(full_bytes as i64));
+            out.insert(
+                "hint".to_string(),
+                Value::Str(
+                    "the result is over the output budget and was not shown; release a handle with handle_drop(id) and run it again"
+                        .to_string(),
+                ),
+            );
+        }
+    }
+    Some(Value::Record(out))
+}
+
 /// Recursively redact known secret shapes from a value before it is rendered to
 /// an agent. Scalar strings are shape-scrubbed (API-key prefixes, JWTs, PEM
 /// blocks, URL credentials, `key=secret` assignments) via `safety::redact_str`;
