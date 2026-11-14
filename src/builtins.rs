@@ -4135,6 +4135,15 @@ pub fn nearest_names<'a>(name: &str, candidates: impl Iterator<Item = &'a str>) 
     let mut scored: Vec<(usize, &'a str)> = candidates
         .filter_map(|cand| {
             let cand_lower = cand.to_lowercase();
+            // `Some` and `None` are value constructors, not calls an agent
+            // mistyped: `nope` is not a slip of `None`. A capitalised candidate
+            // is offered only for a capitalised name, or a case-only difference.
+            if cand.chars().next().is_some_and(char::is_uppercase)
+                && !name.chars().next().is_some_and(char::is_uppercase)
+                && cand_lower != lower
+            {
+                return None;
+            }
             // A name of a very different length is not a slip of this one.
             if cand_lower.chars().count().abs_diff(len) > 2 {
                 return None;
