@@ -12,6 +12,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - On Windows, a write or create to a name ending in a dot or space (`a.txt.`), or with a `:` after the drive (`f.txt:stream`, an alternate data stream), is refused with E_BAD_ARG by builtins and `ish -b` alike; Windows stripped the dot or space, so `file.write("a.txt.")` overwrote `a.txt` while reporting another path, and `touch` and `echo x > f.txt:s` created hidden streams. A write to `NUL` is refused as a reserved device name, as `CON` is, instead of as outside the workspace.
 - YAML and TOML data holding `inf` or `nan` (`.inf`, `.nan`, `inf`, `nan`) is refused at parse, naming the line or key; such values contradicted IronShell's finite numbers (`x + 1` failed while `x > 5` held and to_yaml wrote them back). `sql()` refuses an infinite result cell, naming the column.
 - `--explain` and `explain_effects` judge `shell(...)` as agent mode does (deny, like `sh(...)`), and judge a literal path against the workspace agent mode would use: `file.write("../x", ...)` is explained as deny (outside the workspace) instead of allow.
+- A process memory budget turns memory exhaustion into E_BUDGET_EXCEEDED (`eval: memory budget of N MB exceeded`) instead of an aborted process: the smaller of 2048 MB and half of physical memory by default, set with `IRONSHELL_MEMORY_LIMIT_MB` or `--memory-limit MB` (0 for none). String interpolation now obeys the 8 MB string limit and Array `+`, `flatten` and `concat` the 10M-element limit; doubling a string through `"${a}${a}"` or an array through `a + a` aborted the process at the allocator.
 
 ### Changed
 
@@ -22,11 +23,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `date_parse`, `date_add`, `date_diff` and `date_format` read ISO 8601 times without seconds (`2024-02-29T13:05`), the basic forms (`20240229`, `20240229T130509Z`) and `+0530`/`-08` offsets; "not zero-padded" is reported only for a short field (it was the message for a missing seconds field).
 - `split(text, delim, limit?)` takes an optional limit on the number of pieces; a third argument was ignored.
 - `retryable` follows one rule, decided by error code: a corrected or later retry can succeed. An unknown builtin with no suggestion is not retryable; it was retryable when the suggester offered `None`.
+- `db_json_to_sqlite` and `db_csv_to_sqlite` create INTEGER, REAL or TEXT columns as `sql()` infers them (Booleans as 1/0), instead of all TEXT, so `ORDER BY id` no longer sorts `"10"` before `"2"`; `db_json_to_sqlite` accepts rows with differing keys (the union of keys, NULL where one is missing). The `db_sqlite_*` builtins quote every table and column name, so names with spaces, quotes or reserved words work; only empty names and control characters are refused.
+- `db_sqlite_delete` without a where clause, or with a blank one, is refused with E_BAD_ARG (pass `"1=1"` to delete every row); it deleted nothing and returned true.
+- A program with many syntax errors reports the first ten and a count of the rest, and stops after a nesting-limit error instead of listing one error per closing parenthesis.
 
 ### Added
 
 - `median`, `variance`, `stddev` (sample, as Python's statistics) and `percentile(arr, p)` (linear interpolation, as numpy's default), also under `math.`.
 - `index_of` and `last_index_of` (also `str.`): the character offset of a substring, or -1. `regex_split` (also `str.regex_split`).
+- `--timeout SECONDS` (or `IRONSHELL_TIMEOUT`) stops an evaluation, a running `sleep` included, with E_BUDGET_EXCEEDED; no timeout could be set from the command line.
 
 ### Fixed
 
@@ -41,6 +46,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `variance` and `stddev` use a corrected two-pass sum and match Python's statistics module on large, close values.
 - `date_format` names the first specifier it cannot read (`"%L" is not a specifier chrono reads`).
 - zsh input refuses `setopt nullglob` followed by a glob on the same line, as documented; it printed the glob literally. `ls` of an unmatched glob under `ish -b` or `--zsh` says `No such file or directory` on Windows, not the raw "volume label syntax" error.
+- `db_sqlite_to_csv` ends every row with one CRLF on Windows; rows ended `\r\r\n`. `db_sqlite_vacuum` works; it always failed with "cannot run ATTACH in safe mode".
+- `sql` and `sql_value` read `.tsv` files; `sql_value("o.tsv", ...)` said "file is not a database". `sql("")` says the query is empty, a doubled `sql: sql:` prefix is gone, and unknown-column errors from `db_sqlite_insert`/`update` drop the sqlite3 CLI's "Parse error in 3rd command line argument" wrapper.
 
 ## [14.0.2] - 2026-11-13
 
