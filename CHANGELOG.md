@@ -11,16 +11,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - On Windows, a write or create to a name ending in a dot or space (`a.txt.`), or with a `:` after the drive (`f.txt:stream`, an alternate data stream), is refused with E_BAD_ARG by builtins and `ish -b` alike; Windows stripped the dot or space, so `file.write("a.txt.")` overwrote `a.txt` while reporting another path, and `touch` and `echo x > f.txt:s` created hidden streams. A write to `NUL` is refused as a reserved device name, as `CON` is, instead of as outside the workspace.
 - YAML and TOML data holding `inf` or `nan` (`.inf`, `.nan`, `inf`, `nan`) is refused at parse, naming the line or key; such values contradicted IronShell's finite numbers (`x + 1` failed while `x > 5` held and to_yaml wrote them back). `sql()` refuses an infinite result cell, naming the column.
+- `--explain` and `explain_effects` judge `shell(...)` as agent mode does (deny, like `sh(...)`), and judge a literal path against the workspace agent mode would use: `file.write("../x", ...)` is explained as deny (outside the workspace) instead of allow.
 
 ### Changed
 
 - `max` and `min` return the winning element unchanged: `max(3, 2.5)` is `3`, not `3.0`; and they take two or more numbers (`max(1, 7, 3.5)` is `7`), where a third argument was ignored.
 - `ish -b` splits unquoted expansions on `IFS` (non-white delimiters keep empty fields: `IFS=,` splits `a,,b` into `a`, ``, `b`; an empty `IFS` turns splitting off); `IFS` was ignored.
 - `from_json`, `json_parse` and `open` of JSON read a bare `-0` as the Int `0`; it became the Float `-0.0`.
+- PowerShell input: every transpile-time refusal exits 77 with E_POLICY_DENY and a hint (some exited 1 as plain text); `Where-Object` and `ForEach-Object` are named in the refusal; variables are mutable, so `$x = 5; $x = 6` works; `Write-Host (1+2)` prints `3` (it printed `(1+2)`); a negative literal (`7 % -3`) and `$b = $a + 1` translate; and a runtime error no longer names a line of the translated script.
+- `date_parse`, `date_add`, `date_diff` and `date_format` read ISO 8601 times without seconds (`2024-02-29T13:05`), the basic forms (`20240229`, `20240229T130509Z`) and `+0530`/`-08` offsets; "not zero-padded" is reported only for a short field (it was the message for a missing seconds field).
+- `split(text, delim, limit?)` takes an optional limit on the number of pieces; a third argument was ignored.
+- `retryable` follows one rule, decided by error code: a corrected or later retry can succeed. An unknown builtin with no suggestion is not retryable; it was retryable when the suggester offered `None`.
 
 ### Added
 
 - `median`, `variance`, `stddev` (sample, as Python's statistics) and `percentile(arr, p)` (linear interpolation, as numpy's default), also under `math.`.
+- `index_of` and `last_index_of` (also `str.`): the character offset of a substring, or -1. `regex_split` (also `str.regex_split`).
 
 ### Fixed
 
@@ -29,6 +35,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `open` of YAML with an integer too wide for an Int says `open: y.yaml: line N: integer overflow at ...` with one hint; the message and hint repeated a whole JSON error.
 - An unknown module member no longer suggests an unrelated short global (`math.variance` suggested `nc`).
 - In `ish -b`, `tr` with a missing operand says `tr: missing operand` and exits 1 as GNU does; `wc` pads its columns to width 7 when an operand is not a regular file (`/dev/null`, stdin); and `cut`, `mkdir`, `touch` and `grep` usage errors end with GNU's `Try '... --help'` line.
+- `ish agent schema` states `if cond { a } else { b }` (it showed `if cond then a else b`, which does not parse) and lists the `%`, `^` and `!` operators; a test parses every syntax example in it.
+- The did-you-mean suggester no longer offers `Some`/`None` for a lowercase name (`ontology_describe("nope")` suggested `None`).
+- `ish -c '-7.5 % 2'` runs; the leading `-` was read as a flag. A script file that does not exist is E_NOT_FOUND with exit status 66, as JSON under `--agent`; it exited 1 with plain text.
+- `variance` and `stddev` use a corrected two-pass sum and match Python's statistics module on large, close values.
+- `date_format` names the first specifier it cannot read (`"%L" is not a specifier chrono reads`).
+- zsh input refuses `setopt nullglob` followed by a glob on the same line, as documented; it printed the glob literally. `ls` of an unmatched glob under `ish -b` or `--zsh` says `No such file or directory` on Windows, not the raw "volume label syntax" error.
 
 ## [14.0.2] - 2026-11-13
 
