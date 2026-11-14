@@ -142,6 +142,59 @@ pub struct Entry {
     /// both ends) share this id, and undo and redo count them as one step. None
     /// for a call that changed one path.
     pub group: Option<usize>,
+    /// The modification time (and on unix the mode) the file had before the
+    /// step, when its bytes were captured: undo puts them back with the bytes.
+    /// None for a step recorded before this was kept, and for a non-file.
+    pub meta: Option<FileMeta>,
+}
+
+/// What a file's metadata was when the journal captured its bytes.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct FileMeta {
+    /// Modification time as seconds and nanoseconds after the Unix epoch.
+    /// None for a time before the epoch, which is left as undo writes it.
+    pub mtime: Option<(u64, u32)>,
+    /// The unix permission bits; None elsewhere.
+    pub mode: Option<u32>,
+}
+
+impl FileMeta {
+    /// The metadata of the file at `path` now.
+    fn of_path(path: &str) -> Option<FileMeta> {
+        let m = std::fs::metadata(path).ok()?;
+        if !m.is_file() {
+            return None;
+        }
+        let mtime = m
+            .modified()
+            .ok()
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|d| (d.as_secs(), d.subsec_nanos()));
+        #[cfg(unix)]
+        let mode = Some(m.permissions().mode());
+        #[cfg(not(unix))]
+        let mode = None;
+        Some(FileMeta { mtime, mode })
+    }
+
+    /// Put the modification time and mode back on the file at `path`, which
+    /// undo has just written. Best effort: the bytes are the restore, and a
+    /// time or mode that cannot be set does not fail it. The time goes first,
+    /// since a read-only mode would refuse the open for it.
+    fn apply(&self, path: &str) {
+        if let Some((secs, nanos)) = self.mtime {
+            let when = std::time::UNIX_EPOCH + std::time::Duration::new(secs, nanos);
+            if let Ok(f) = std::fs::OpenOptions::new().write(true).open(path) {
+                let _ = f.set_modified(when);
+            }
+        }
+        #[cfg(unix)]
+        {
+            if let Some(mode) = self.mode {
+                let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode));
+            }
+        }
+    }
 }
 
 impl Entry {
@@ -230,6 +283,10 @@ struct StoredEntry {
     /// Set for [`Before::Directory`]: an empty directory was there before.
     #[serde(default, skip_serializing_if = "is_false")]
     directory: bool,
+    /// The file's modification time and mode before the step. Absent from
+    /// entries an earlier version wrote, which restore with the time of the undo.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    meta: Option<FileMeta>,
 }
 
 fn is_false(b: &bool) -> bool {
@@ -254,6 +311,7 @@ impl From<&Entry> for StoredEntry {
             after: e.after.as_ref().map(Fingerprint::encode),
             group: e.group,
             directory,
+            meta: e.meta.clone(),
         }
     }
 }
@@ -274,6 +332,7 @@ impl From<StoredEntry> for Entry {
             before,
             after: s.after.as_deref().map(Fingerprint::decode),
             group: s.group,
+            meta: s.meta,
         }
     }
 }
@@ -424,6 +483,7 @@ fn redo_as_entry(r: &RedoEntry) -> Entry {
         before: r.after.clone(),
         after: None,
         group: r.group,
+        meta: None,
     }
 }
 
@@ -940,6 +1000,10 @@ fn push_capture(s: &mut State, builtin: &str, effect: Effect, path: String, grou
         Err(why) => Before::Irreversible(why),
     };
     let seq = take_seq(s);
+    let meta = match before {
+        Before::Contents(_) => FileMeta::of_path(&path),
+        _ => None,
+    };
     let entry = Entry {
         seq,
         builtin: builtin.to_string(),
@@ -948,6 +1012,7 @@ fn push_capture(s: &mut State, builtin: &str, effect: Effect, path: String, grou
         before,
         after: None,
         group,
+        meta,
     };
     persist(&entry);
     s.journal.push(entry);
@@ -989,6 +1054,7 @@ pub fn record_irreversible(builtin: &str, effect: Effect, why: &str) {
         before: Before::Irreversible(why.to_string()),
         after: None,
         group: None,
+        meta: None,
     };
     persist(&entry);
     s.journal.push(entry);
@@ -1022,6 +1088,7 @@ pub fn record_removed_directory(builtin: &str, effect: Effect, path: &str, tree_
         before,
         after: None,
         group: None,
+        meta: None,
     };
     persist(&entry);
     s.journal.push(entry);
@@ -1292,6 +1359,9 @@ fn undo_at(s: &mut State, index: usize, force: bool, out: &mut Vec<Rewound>) -> 
     let outcome = match &entry.before {
         Before::Contents(bytes) => match write_over(&entry.path, bytes) {
             Ok(()) => {
+                if let Some(meta) = &entry.meta {
+                    meta.apply(&entry.path);
+                }
                 push_redo(s, &entry, after);
                 Outcome::Restored(what)
             }
@@ -1585,6 +1655,7 @@ pub fn redo(n: usize) -> Vec<Outcome> {
                 // checked the same way as any other step.
                 after: Fingerprint::of_before(&r.after),
                 group: r.group,
+                meta: None,
             };
             persist(&entry);
             s.journal.push(entry);
@@ -1819,6 +1890,7 @@ mod tests {
             before: Before::Irreversible("too big".into()),
             after: None,
             group: None,
+            meta: None,
         };
         assert!(!e.reversible());
     }
@@ -1833,6 +1905,7 @@ mod tests {
             before: Before::Irreversible("path is a directory; trees are not captured".into()),
             after: None,
             group: None,
+            meta: None,
         };
         assert!(!e.reversible());
     }
@@ -1871,6 +1944,7 @@ mod tests {
             before: Before::Contents(b"secret".to_vec()),
             after: None,
             group: None,
+            meta: None,
         };
         persist_in(Some(dir.clone()), &e);
 
