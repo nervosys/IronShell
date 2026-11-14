@@ -171,7 +171,7 @@ fn csv_import_validates_before_creating_destination() {
         "",
         "name,age\nAda\n",
         "name,NAME\nAda,42\n",
-        "bad-name\nAda\n",
+        "bad\u{1}name\nAda\n",
     ] {
         std::fs::write(fixture.directory.join("bad.csv"), content).unwrap();
         let error = call(
@@ -501,7 +501,7 @@ fn sqlite_mutation_shapes_refuse_invalid_or_empty_arguments_before_writing() {
 }
 
 #[test]
-fn sqlite_mutations_preserve_scalar_cells_and_default_delete_is_a_noop() {
+fn sqlite_mutations_preserve_scalar_cells_and_an_omitted_delete_condition_is_refused() {
     let fixture = FileFixture::new();
     let mut env = Env::new();
     let created = call(
@@ -556,15 +556,15 @@ fn sqlite_mutations_preserve_scalar_cells_and_default_delete_is_a_noop() {
         .unwrap();
     assert_eq!(row, ("O'Brien 世界".into(), 42, 1.5, 1, None));
     drop(db);
-    assert_eq!(
-        call(
-            "db_sqlite_delete",
-            vec![fixture.path("rows.db"), Value::Str("example".into())],
-            &mut env
-        )
-        .unwrap(),
-        Value::Bool(true)
-    );
+    let refused = call(
+        "db_sqlite_delete",
+        vec![fixture.path("rows.db"), Value::Str("example".into())],
+        &mut env,
+    )
+    .unwrap_err()
+    .to_string();
+    assert!(refused.contains("E_BAD_ARG"), "{refused}");
+    assert!(refused.contains("a where clause is required"), "{refused}");
     let db = rusqlite::Connection::open(fixture.directory.join("rows.db")).unwrap();
     assert_eq!(
         db.query_row("SELECT count(*) FROM example", [], |r| r.get::<_, i64>(0))

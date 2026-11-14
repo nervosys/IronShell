@@ -6146,32 +6146,29 @@ pub fn sql_literal(builtin: &str, value: &str) -> anyhow::Result<String> {
     Ok(format!("'{}'", value.replace('\'', "''")))
 }
 
-/// Validate a table or column name for interpolation.
-///
-/// An identifier cannot be passed as a string literal -- `SELECT * FROM 'kv'`
-/// is not the same statement -- so the only safe move is to refuse anything
-/// that is not plainly an identifier. Deliberately strict: letters, digits and
-/// underscore, not starting with a digit. A caller that needs more can quote it
-/// themselves and own the consequences.
+/// Quote a table or column name for interpolation: `"name"` with any embedded
+/// `"` doubled, which is how SQL writes an identifier that is a reserved word or
+/// holds spaces and quotes, and which cannot close the statement. Any name that
+/// is non-empty and has no control character (NUL and newline included) is
+/// accepted; anything else is refused naming what is allowed. The result is
+/// already quoted: do not wrap it again.
 pub fn sql_identifier(builtin: &str, name: &str) -> anyhow::Result<String> {
-    let ok = !name.is_empty()
-        && !name.starts_with(|c: char| c.is_ascii_digit())
-        && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_');
+    let ok = !name.is_empty() && !name.chars().any(|c| c.is_control());
     if !ok {
         return Err(anyhow::Error::new(SafetyError {
             code: ErrorCode::BadArg,
-            message: format!("{builtin}: {name:?} is not a valid table or column name"),
+            message: format!("{builtin}: {name:?} is not a valid table or column name: a name must be non-empty and hold no control characters"),
             builtin: builtin.to_string(),
-            hint: "identifiers are interpolated into SQL and cannot be quoted as values; use letters, digits and underscore only"
+            hint: "identifiers are interpolated into SQL and cannot be quoted as values; use any non-empty name without control characters (NUL, newline, tab and the like)"
                 .to_string(),
             approval: None,
             did_you_mean: Vec::new(),
-            expected: "an identifier".to_string(),
+            expected: "a non-empty name without control characters".to_string(),
             got: name.to_string(),
             extra: serde_json::Map::new(),
         }));
     }
-    Ok(name.to_string())
+    Ok(format!("\"{}\"", name.replace('"', "\"\"")))
 }
 
 /// Validate a column *type* clause for `CREATE TABLE` — the last unvalidated

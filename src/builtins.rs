@@ -11587,6 +11587,80 @@ pub(crate) fn csv_rows(
         .collect()
 }
 
+/// `csv_rows` for the SQL paths (`sql`, `sql_value` and `db_csv_to_sqlite`): an
+/// empty cell in a text column is NULL, as one in a numeric column already is,
+/// so `where amt is null` finds it and `sum` does not count it as 0. The csv
+/// reader cannot tell an empty cell from a quoted `""`, so both are NULL.
+/// `open` and `from_csv` keep their `""`.
+pub(crate) fn csv_rows_sql(
+    headers: &[String],
+    records: &[csv::StringRecord],
+) -> Vec<BTreeMap<String, Value>> {
+    let mut rows = csv_rows(headers, records);
+    for row in &mut rows {
+        for cell in row.values_mut() {
+            if matches!(cell, Value::Str(s) if s.is_empty()) {
+                *cell = Value::Null;
+            }
+        }
+    }
+    rows
+}
+
+/// The SQLite column type for a column of shell values, inferred as `sql` reads
+/// them: INTEGER when every non-null value is an Int or Bool (a Bool is stored
+/// 1 or 0), REAL when they are numbers and one is a Float, TEXT otherwise and
+/// for a column of nothing but nulls.
+pub(crate) fn sqlite_column_type<'a>(values: impl Iterator<Item = &'a Value>) -> &'static str {
+    let (mut ints, mut reals) = (false, false);
+    for v in values {
+        match v {
+            Value::Null => {}
+            Value::Int(_) | Value::Bool(_) => ints = true,
+            Value::Float(_) => reals = true,
+            _ => return "TEXT",
+        }
+    }
+    if reals {
+        "REAL"
+    } else if ints {
+        "INTEGER"
+    } else {
+        "TEXT"
+    }
+}
+
+/// Line endings of CSV text from the sqlite3 CLI as one RFC 4180 CRLF per row.
+/// The CLI writes CRLF itself and its stdout in text mode (Windows) turns the
+/// LF into CRLF again, giving CR CR LF. A newline inside a quoted cell is left
+/// as it came.
+fn normalize_csv_line_ends(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut in_quotes = false;
+    let mut chars = text.chars().peekable();
+    while let Some(c) = chars.next() {
+        match c {
+            '"' => {
+                in_quotes = !in_quotes;
+                out.push(c);
+            }
+            '\r' | '\n' if !in_quotes => {
+                if c == '\r' {
+                    while chars.peek() == Some(&'\r') {
+                        chars.next();
+                    }
+                    if chars.peek() == Some(&'\n') {
+                        chars.next();
+                    }
+                }
+                out.push_str("\r\n");
+            }
+            _ => out.push(c),
+        }
+    }
+    out
+}
+
 /// to_csv: Convert structured data to CSV
 ///
 /// The columns are the first record's keys, or the `columns` Array when one is
@@ -50231,7 +50305,7 @@ fn bi_db_sqlite_exec(args: Vec<Value>, _input: Option<Value>) -> Result<Value> {
     // makes those mutations reversible inside a transaction. No-op when no
     // transaction is active.
     crate::tx::snapshot(&db_path);
-    sqlite_exec_run(&db_path, &sql, false)
+    sqlite_exec_run("db_sqlite_exec", &db_path, &sql, false)
 }
 
 /// Runs a statement that a builtin of its own built and validated. The sqlite3
@@ -50240,13 +50314,19 @@ fn bi_db_sqlite_exec(args: Vec<Value>, _input: Option<Value>) -> Result<Value> {
 /// `db_sqlite_exec` takes arbitrary SQL, is classed Exec and asks for approval,
 /// so it does not go through here.
 fn sqlite_exec_contained(args: Vec<Value>) -> Result<Value> {
+    sqlite_exec_contained_as("db_sqlite_exec", args)
+}
+
+/// [`sqlite_exec_contained`] for a builtin that names itself in the error a
+/// failed statement raises, in place of `db_sqlite_exec`.
+fn sqlite_exec_contained_as(builtin: &str, args: Vec<Value>) -> Result<Value> {
     let (db_path, sql) = sqlite_exec_prepare(args)?;
     // The undo journal's step for the database: absent before when this call
     // creates it, so undo removes it. One step however many statements the
     // builtin runs.
     crate::journal::record_file_once("db_sqlite_exec", &db_path);
     crate::tx::snapshot(&db_path);
-    sqlite_exec_run(&db_path, &sql, true)
+    sqlite_exec_run(builtin, &db_path, &sql, true)
 }
 
 /// The arguments of a statement run, refused before anything is opened: a
@@ -50278,7 +50358,25 @@ fn sqlite_exec_prepare(args: Vec<Value>) -> Result<(String, String)> {
     Ok((db_path, sql))
 }
 
-fn sqlite_exec_run(db_path: &str, sql: &str, safe: bool) -> Result<Value> {
+/// What sqlite3 said, without its command-line wrapper: the first line of
+/// stderr, minus a leading `Parse error in 3rd command line argument: `,
+/// `Runtime error: ` or `Error: `, and without the echo of the statement and
+/// the caret line that follow it.
+fn sqlite_cli_message(stderr: &str) -> String {
+    let first = stderr.lines().find(|l| !l.trim().is_empty()).unwrap_or("");
+    let first = first.trim();
+    if let Some(i) = first.find("command line argument: ") {
+        return first[i + "command line argument: ".len()..].to_string();
+    }
+    for prefix in ["Runtime error: ", "Parse error: ", "Error: "] {
+        if let Some(rest) = first.strip_prefix(prefix) {
+            return rest.to_string();
+        }
+    }
+    stderr.trim().to_string()
+}
+
+fn sqlite_exec_run(builtin: &str, db_path: &str, sql: &str, safe: bool) -> Result<Value> {
     // Checked again where the path is handed to the CLI, which is where it matters.
     crate::safety::reject_option_like("db_sqlite_exec", &[db_path.to_string()])?;
     sqlite_db_file("db_sqlite_exec", db_path)?;
@@ -50287,28 +50385,34 @@ fn sqlite_exec_run(db_path: &str, sql: &str, safe: bool) -> Result<Value> {
         cmd.arg("-safe");
     }
     cmd.args([db_path, sql]);
-    let output = bounded_cmd_output("db_sqlite_exec", "sqlite3", cmd, TOOL_DEADLINE_SECS)?;
+    let output = bounded_cmd_output(builtin, "sqlite3", cmd, TOOL_DEADLINE_SECS)?;
     // Every mutating sqlite builtin comes through here, and a SQL error was a
     // bare `false` with sqlite3's message discarded.
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
+        let said = sqlite_cli_message(&stderr);
         // A statement that does not parse is the SQL's fault, not the service's:
         // sqlite3 says so in its own words, and the generic hint would send the
         // caller to check a daemon.
         if stderr.contains("syntax error") || stderr.contains("Parse error") {
+            let hint = if said.contains("syntax error") {
+                "the SQL did not parse; check the statement near the quoted token"
+            } else {
+                "the SQL named a table or column the database lacks; db_sqlite_schema(db, table) lists a table's columns"
+            };
             return Err(crate::safety::tool_failed_hinted(
-                "db_sqlite_exec",
+                builtin,
                 "sqlite3",
                 output.status.code(),
-                &stderr,
-                "the SQL did not parse; check the statement near the quoted token",
+                &said,
+                hint,
             ));
         }
         return Err(crate::safety::tool_failed(
-            "db_sqlite_exec",
+            builtin,
             "sqlite3",
             output.status.code(),
-            &stderr,
+            &said,
         ));
     }
     Ok(Value::Bool(true))
@@ -50545,7 +50649,7 @@ fn bi_db_csv_to_sqlite(args: Vec<Value>, _input: Option<Value>) -> Result<Value>
         .map(|v| expect_string(NAME, v))
         .transpose()?
         .unwrap_or("imported");
-    let table = format!("\"{}\"", crate::safety::sql_identifier(NAME, table)?);
+    let table = crate::safety::sql_identifier(NAME, table)?;
     let csv_path = crate::safety::resolve_path_str(csv_path);
     std::fs::metadata(&csv_path).map_err(|e| crate::safety::fs_error(NAME, &csv_path, &e))?;
     let source = crate::security::validate_read_path(&csv_path).map_err(|e| {
@@ -50586,13 +50690,13 @@ fn bi_db_csv_to_sqlite(args: Vec<Value>, _input: Option<Value>) -> Result<Value>
     let columns: Vec<String> = headers
         .iter()
         .map(|name| {
-            let name = crate::safety::sql_identifier(NAME, name)?;
+            let quoted = crate::safety::sql_identifier(NAME, name)?;
             if !names.insert(name.to_ascii_lowercase()) {
                 return Err(crate::safety::arg_err(
                     "db_csv_to_sqlite: duplicate CSV column name",
                 ));
             }
-            Ok(format!("\"{name}\""))
+            Ok(quoted)
         })
         .collect::<Result<_>>()?;
     // Parse all rows before opening the destination; failed validation creates nothing.
@@ -50631,9 +50735,17 @@ fn bi_db_csv_to_sqlite(args: Vec<Value>, _input: Option<Value>) -> Result<Value>
             "{NAME}: SQLite rejected import: {e}; no rows committed"
         ))
     };
+    // Typed as `sql` reads the same file: an empty cell is NULL and a column of
+    // numbers is INTEGER or REAL, so ORDER BY and sum() work on numbers.
+    let header_names: Vec<String> = headers.iter().map(str::to_string).collect();
+    let typed = csv_rows_sql(&header_names, &rows);
     let definitions = columns
         .iter()
-        .map(|name| format!("{name} TEXT"))
+        .zip(&header_names)
+        .map(|(quoted, name)| {
+            let kind = sqlite_column_type(typed.iter().filter_map(|row| row.get(name)));
+            format!("{quoted} {kind}")
+        })
         .collect::<Vec<_>>()
         .join(", ");
     transaction
@@ -50649,9 +50761,17 @@ fn bi_db_csv_to_sqlite(args: Vec<Value>, _input: Option<Value>) -> Result<Value>
                 columns.join(", ")
             ))
             .map_err(sql_error)?;
-        for row in rows {
+        for row in &typed {
+            let params: Vec<rusqlite::types::Value> = header_names
+                .iter()
+                .map(|name| {
+                    row.get(name)
+                        .map(crate::sql::to_sql)
+                        .unwrap_or(rusqlite::types::Value::Null)
+                })
+                .collect();
             statement
-                .execute(rusqlite::params_from_iter(row.iter()))
+                .execute(rusqlite::params_from_iter(params))
                 .map_err(sql_error)?;
         }
     }
@@ -50704,7 +50824,13 @@ fn bi_db_sqlite_to_csv(args: Vec<Value>, _input: Option<Value>) -> Result<Value>
     // table *name*, so it is an identifier and is validated — without this it
     // was interpolated raw, and the sqlite3 CLI runs every `;`-separated
     // statement it is handed.
-    let query = if table_or_query.to_uppercase().starts_with("SELECT") {
+    let upper = table_or_query.trim_start().to_ascii_uppercase();
+    let is_query = upper.starts_with("SELECT")
+        && upper[6..]
+            .chars()
+            .next()
+            .is_some_and(|c| !(c.is_alphanumeric() || c == '_'));
+    let query = if is_query {
         table_or_query
     } else {
         format!(
@@ -50730,7 +50856,7 @@ fn bi_db_sqlite_to_csv(args: Vec<Value>, _input: Option<Value>) -> Result<Value>
     let output = bounded_cmd_output("db_sqlite_to_csv", "sqlite3", cmd, TOOL_DEADLINE_SECS)?;
 
     if output.status.success() {
-        let csv = String::from_utf8_lossy(&output.stdout).to_string();
+        let csv = normalize_csv_line_ends(&String::from_utf8_lossy(&output.stdout));
         if let Some(path) = output_path {
             crate::tx::snapshot(&path);
             // The journal step names the file written, not the database read.
@@ -52592,7 +52718,10 @@ fn bi_db_sqlite_insert(args: Vec<Value>, _input: Option<Value>) -> Result<Value>
         columns.join(", "),
         vals.join(", ")
     );
-    sqlite_exec_contained(vec![Value::Str(db_path), Value::Str(sql)])
+    sqlite_exec_contained_as(
+        "db_sqlite_insert",
+        vec![Value::Str(db_path), Value::Str(sql)],
+    )
 }
 
 fn bi_db_sqlite_update(args: Vec<Value>, _input: Option<Value>) -> Result<Value> {
@@ -52665,7 +52794,10 @@ fn bi_db_sqlite_update(args: Vec<Value>, _input: Option<Value>) -> Result<Value>
         sets.join(", "),
         where_clause
     );
-    sqlite_exec_contained(vec![Value::Str(db_path), Value::Str(sql)])
+    sqlite_exec_contained_as(
+        "db_sqlite_update",
+        vec![Value::Str(db_path), Value::Str(sql)],
+    )
 }
 
 fn bi_db_sqlite_delete(args: Vec<Value>, _input: Option<Value>) -> Result<Value> {
@@ -52689,9 +52821,19 @@ fn bi_db_sqlite_delete(args: Vec<Value>, _input: Option<Value>) -> Result<Value>
             ))
         }
     };
+    // Omitting the condition used to delete nothing and answer true. Neither
+    // that nor deleting every row is what a caller who left it out meant, so a
+    // missing or blank condition is refused, and the way to say "every row" is
+    // written out.
     let where_clause = match args.get(2) {
         Some(Value::Str(s)) if !s.trim().is_empty() => s.clone(),
-        None => "1=0".to_string(), // Safety: don't delete all by default
+        None | Some(Value::Str(_)) => {
+            return Err(crate::safety::bad_arg_in(
+                "db_sqlite_delete",
+                "db_sqlite_delete: a where clause is required; to delete every row pass where \"1=1\"",
+                "pass the condition as the third argument, e.g. db_sqlite_delete(db, table, \"age > 40\"), or \"1=1\" to delete every row",
+            ));
+        }
         Some(other) => {
             return Err(crate::safety::bad_arg(
                 "db_sqlite_delete",
@@ -52722,7 +52864,10 @@ fn bi_db_sqlite_delete(args: Vec<Value>, _input: Option<Value>) -> Result<Value>
         crate::safety::sql_identifier("db_sqlite_delete", &table)?,
         where_clause
     );
-    sqlite_exec_contained(vec![Value::Str(db_path), Value::Str(sql)])
+    sqlite_exec_contained_as(
+        "db_sqlite_delete",
+        vec![Value::Str(db_path), Value::Str(sql)],
+    )
 }
 
 fn bi_db_sqlite_count(args: Vec<Value>, _input: Option<Value>) -> Result<Value> {
@@ -52923,7 +53068,21 @@ fn bi_db_sqlite_vacuum(args: Vec<Value>, _input: Option<Value>) -> Result<Value>
         }
     };
 
-    sqlite_exec_contained(vec![Value::Str(db_path), Value::Str("VACUUM".to_string())])
+    // Run in-process: the sqlite3 CLI's `-safe` mode refuses the ATTACH that
+    // VACUUM runs inside itself ("cannot run ATTACH in safe mode"), so every
+    // call failed. The statement is fixed text and no caller SQL reaches it.
+    crate::safety::reject_option_like("db_sqlite_vacuum", std::slice::from_ref(&db_path))?;
+    let db_path = sqlite_db_in_workspace(&db_path)?;
+    sqlite_db_file("db_sqlite_vacuum", &db_path)?;
+    crate::journal::record_file_once("db_sqlite_exec", &db_path);
+    crate::tx::snapshot(&db_path);
+    let vacuum_error = |e: rusqlite::Error| {
+        crate::safety::tool_failed("db_sqlite_vacuum", "VACUUM", None, &e.to_string())
+    };
+    rusqlite::Connection::open(&db_path)
+        .and_then(|conn| conn.execute_batch("VACUUM;"))
+        .map_err(vacuum_error)?;
+    Ok(Value::Bool(true))
 }
 
 fn bi_db_sqlite_dump(args: Vec<Value>, _input: Option<Value>) -> Result<Value> {
@@ -53058,15 +53217,57 @@ fn bi_db_json_to_sqlite(args: Vec<Value>, _input: Option<Value>) -> Result<Value
     // Column names come from the *file*, so the injection payload does not even
     // have to be an argument: a JSON object key of
     // `x TEXT); DROP TABLE victim; --` closed the statement and the sqlite3 CLI
-    // ran what followed. Identifiers are validated for that reason, which also
-    // means a key that is not a legal column name is refused rather than
-    // producing broken SQL.
-    let columns: Vec<String> = first
-        .keys()
-        .map(|k| {
+    // ran what followed. Every name is therefore quoted as an identifier
+    // (`sql_identifier`), which also lets a key with a space or a reserved word
+    // become a column.
+    //
+    // The columns are the union of the rows' keys, in the order first seen; a row
+    // without a key stores NULL. Each column is typed as `sql` reads the same
+    // file: INTEGER for integers and Booleans (1 or 0), REAL when a number has a
+    // fraction, TEXT for strings, nested values (stored as JSON text) and a column
+    // of nothing but nulls.
+    let mut keys: Vec<&String> = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    for (index, row) in rows.iter().enumerate() {
+        let serde_json::Value::Object(obj) = row else {
+            return Err(crate::safety::bad_arg(
+                "db_json_to_sqlite",
+                "a JSON array of objects",
+                &format!("row {index} is not an object"),
+            ));
+        };
+        for key in obj.keys() {
+            if seen.insert(key) {
+                keys.push(key);
+            }
+        }
+    }
+    let _ = first;
+    let columns: Vec<String> = keys
+        .iter()
+        .map(|key| {
+            let (mut ints, mut reals, mut text) = (false, false, false);
+            for row in &rows {
+                match row.get(key.as_str()) {
+                    None | Some(serde_json::Value::Null) => {}
+                    Some(serde_json::Value::Bool(_)) => ints = true,
+                    Some(serde_json::Value::Number(n)) if n.is_i64() => ints = true,
+                    Some(serde_json::Value::Number(_)) => reals = true,
+                    Some(_) => text = true,
+                }
+            }
+            let kind = if text {
+                "TEXT"
+            } else if reals {
+                "REAL"
+            } else if ints {
+                "INTEGER"
+            } else {
+                "TEXT"
+            };
             Ok(format!(
-                "{} TEXT",
-                crate::safety::sql_identifier("db_json_to_sqlite", k)?
+                "{} {kind}",
+                crate::safety::sql_identifier("db_json_to_sqlite", key)?
             ))
         })
         .collect::<Result<_>>()?;
@@ -53076,37 +53277,25 @@ fn bi_db_json_to_sqlite(args: Vec<Value>, _input: Option<Value>) -> Result<Value
         columns.join(", ")
     );
 
+    let cols: Vec<String> = keys
+        .iter()
+        .map(|key| crate::safety::sql_identifier("db_json_to_sqlite", key))
+        .collect::<Result<_>>()?;
     let mut inserts = Vec::with_capacity(rows.len());
-    for (index, row) in rows.iter().enumerate() {
-        let serde_json::Value::Object(obj) = row else {
-            return Err(crate::safety::bad_arg(
-                "db_json_to_sqlite",
-                "a JSON array of objects",
-                &format!("row {index} is not an object"),
-            ));
-        };
-        if let Some(extra) = obj.keys().find(|k| !first.contains_key(*k)) {
-            return Err(crate::safety::bad_arg(
-                "db_json_to_sqlite",
-                "rows whose keys all appear in the first row, which names the columns",
-                &format!("row {index} has the key {extra:?}"),
-            ));
-        }
-        let cols: Vec<String> = obj
-            .keys()
-            .map(|k| crate::safety::sql_identifier("db_json_to_sqlite", k))
-            .collect::<Result<_>>()?;
-        let vals: Vec<String> = obj
-            .values()
-            .map(|v| {
-                Ok(match v {
-                    serde_json::Value::String(s) => {
+    for row in &rows {
+        let vals: Vec<String> = keys
+            .iter()
+            .map(|key| {
+                Ok(match row.get(key.as_str()) {
+                    None | Some(serde_json::Value::Null) => "NULL".to_string(),
+                    Some(serde_json::Value::String(s)) => {
                         crate::safety::sql_literal("db_json_to_sqlite", s)?
                     }
-                    serde_json::Value::Number(n) => n.to_string(),
-                    serde_json::Value::Bool(b) => if *b { "1" } else { "0" }.to_string(),
-                    serde_json::Value::Null => "NULL".to_string(),
-                    nested => crate::safety::sql_literal("db_json_to_sqlite", &nested.to_string())?,
+                    Some(serde_json::Value::Number(n)) => n.to_string(),
+                    Some(serde_json::Value::Bool(b)) => if *b { "1" } else { "0" }.to_string(),
+                    Some(nested) => {
+                        crate::safety::sql_literal("db_json_to_sqlite", &nested.to_string())?
+                    }
                 })
             })
             .collect::<Result<_>>()?;
@@ -53118,9 +53307,15 @@ fn bi_db_json_to_sqlite(args: Vec<Value>, _input: Option<Value>) -> Result<Value
         ));
     }
 
-    sqlite_exec_contained(vec![Value::Str(db_path.clone()), Value::Str(create_sql)])?;
+    sqlite_exec_contained_as(
+        "db_json_to_sqlite",
+        vec![Value::Str(db_path.clone()), Value::Str(create_sql)],
+    )?;
     for insert_sql in inserts {
-        sqlite_exec_contained(vec![Value::Str(db_path.clone()), Value::Str(insert_sql)])?;
+        sqlite_exec_contained_as(
+            "db_json_to_sqlite",
+            vec![Value::Str(db_path.clone()), Value::Str(insert_sql)],
+        )?;
     }
     Ok(Value::Bool(true))
 }

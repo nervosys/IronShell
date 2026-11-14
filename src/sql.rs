@@ -15,8 +15,8 @@
 //! Sources:
 //! - a piped array of records (or table) is the table `t`;
 //! - a piped record whose fields are arrays is one table per field;
-//! - a `.json`, `.jsonl`/`.ndjson` or `.csv` path is a table named after the
-//!   file's stem, also reachable as `t`;
+//! - a `.json`, `.jsonl`/`.ndjson`, `.csv` or `.tsv` path is a table named after
+//!   the file's stem, also reachable as `t` (an empty CSV/TSV cell is NULL);
 //! - any other path is an existing SQLite database, opened read-only;
 //!   `":memory:"` is an empty one.
 //!
@@ -62,7 +62,12 @@ struct Loaded {
 fn bad(builtin: &str, message: String, hint: String, expected: &str, got: String) -> anyhow::Error {
     anyhow::Error::new(SafetyError {
         code: ErrorCode::BadArg,
-        message: format!("{builtin}: {message}"),
+        // Some callers already begin their message with the builtin's name.
+        message: if message.starts_with(&format!("{builtin}: ")) {
+            message
+        } else {
+            format!("{builtin}: {message}")
+        },
         builtin: builtin.to_string(),
         hint,
         approval: None,
@@ -141,11 +146,12 @@ fn tabular_kind(path: &str) -> Option<&'static str> {
         "json" => Some("json"),
         "jsonl" | "ndjson" => Some("jsonl"),
         "csv" => Some("csv"),
+        "tsv" => Some("tsv"),
         _ => None,
     }
 }
 
-/// Load a JSON, JSONL or CSV file as a table named after its stem.
+/// Load a JSON, JSONL, CSV or TSV file as a table named after its stem.
 fn table_from_file(builtin: &str, path: &str, kind: &str) -> Result<Vec<Loaded>> {
     let text = std::fs::read_to_string(path).map_err(|e| {
         if e.kind() == std::io::ErrorKind::NotFound {
@@ -222,7 +228,12 @@ fn table_from_file(builtin: &str, path: &str, kind: &str) -> Result<Vec<Loaded>>
             }]
         }
         _ => {
-            let mut reader = csv::Reader::from_reader(text.as_bytes());
+            // A TSV is read as `open` reads it: a tab delimiter and no quoting.
+            let mut builder = csv::ReaderBuilder::new();
+            if kind == "tsv" {
+                builder.delimiter(b'\t').quoting(false);
+            }
+            let mut reader = builder.from_reader(text.as_bytes());
             let headers: Vec<String> = reader
                 .headers()
                 .map_err(|e| parse_err(None, &e))?
@@ -235,7 +246,7 @@ fn table_from_file(builtin: &str, path: &str, kind: &str) -> Result<Vec<Loaded>>
             for (i, record) in reader.records().enumerate() {
                 records.push(record.map_err(|e| parse_err(Some(i + 2), &e))?);
             }
-            let rows = crate::builtins::csv_rows(&headers, &records);
+            let rows = crate::builtins::csv_rows_sql(&headers, &records);
             vec![Loaded { name: stem, rows }]
         }
     };
@@ -247,7 +258,7 @@ fn quote_ident(name: &str) -> String {
 }
 
 /// A shell value as the SQLite value it is stored as.
-fn to_sql(v: &Value) -> rusqlite::types::Value {
+pub(crate) fn to_sql(v: &Value) -> rusqlite::types::Value {
     use rusqlite::types::Value as S;
     match v {
         Value::Null => S::Null,
@@ -342,7 +353,7 @@ fn schema_hint(conn: &Connection) -> String {
         })
         .unwrap_or_default();
     if tables.is_empty() {
-        return "there are no tables; pipe rows in, or name a .json, .jsonl or .csv file, or a database"
+        return "there are no tables; pipe rows in, or name a .json, .jsonl, .csv or .tsv file, or a database"
             .to_string();
     }
     let described: Vec<String> = tables
@@ -470,6 +481,15 @@ fn run(
     query: &str,
     params: &[Value],
 ) -> Result<(Vec<String>, Vec<Vec<Value>>)> {
+    if query.trim().is_empty() {
+        return Err(bad(
+            builtin,
+            "the query is empty".to_string(),
+            "pass a SELECT, such as select * from t".to_string(),
+            "a SQL query",
+            "an empty String".to_string(),
+        ));
+    }
     conn.set_limit(Limit::SQLITE_LIMIT_ATTACHED, 0)
         .map_err(|e| internal(builtin, &e))?;
     conn.authorizer(Some(read_only_authorizer))
@@ -748,7 +768,7 @@ fn connect(
                 bad(
                     builtin,
                     format!("{source} could not be opened as a SQLite database: {e}"),
-                    "name a SQLite file, or a .json/.jsonl/.csv file".to_string(),
+                    "name a SQLite file, or a .json/.jsonl/.csv/.tsv file".to_string(),
                     "a SQLite database",
                     e.to_string(),
                 )
