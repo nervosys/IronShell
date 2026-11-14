@@ -782,7 +782,16 @@ fn lex_marked(src: &str) -> Result<(Vec<Spanned>, std::collections::HashSet<usiz
                     if after_ok {
                         if let Ok(n) = acc.parse::<i64>() {
                             advance(chars, pos, line, col); // consume the suffix
-                            return Ok((Tok::Int, n.saturating_mul(m).to_string()));
+                            return match n.checked_mul(m) {
+                                Some(v) => Ok((Tok::Int, v.to_string())),
+                                None => Err(anyhow!(
+                                    "integer literal {}{} does not fit in an Int \
+                                     (-9223372036854775808..=9223372036854775807); \
+                                     write it as a Float (for example 1.2345e29) or a String",
+                                    acc,
+                                    suffix
+                                )),
+                            };
                         }
                     }
                 }
@@ -2432,6 +2441,12 @@ impl Parser {
                 expr: Box::new(e),
             })
         } else if self.match_tok(Tok::Minus) {
+            // `-9223372036854775808`: the magnitude alone does not fit an Int,
+            // the negated literal does.
+            if self.check(Tok::Int) && self.peek().text.as_str() == "9223372036854775808" {
+                self.i += 1;
+                return Ok(Expr::LitInt(i64::MIN));
+            }
             let e = self.parse_unary()?;
             Ok(Expr::Unary {
                 op: UnOp::Neg,
@@ -2718,7 +2733,7 @@ impl Parser {
             return Ok(Expr::LitFloat(x));
         }
         if self.match_tok(Tok::Int) {
-            let n: i64 = self.prev().text.parse().unwrap_or(0);
+            let n = self.int_literal_value(false)?;
             return Ok(Expr::LitInt(n));
         }
         if self.match_tok(Tok::True) {
@@ -3065,8 +3080,8 @@ impl Parser {
             self.i += 1;
         }
         if self.match_tok(Tok::Int) {
-            let n: i64 = self.prev().text.parse().unwrap_or(0);
-            return Ok(Pattern::LitInt(if negative { -n } else { n }));
+            let n = self.int_literal_value(negative)?;
+            return Ok(Pattern::LitInt(n));
         }
         if self.match_tok(Tok::Float) {
             let x: f64 = self.prev().text.parse().unwrap_or(0.0);
@@ -3581,6 +3596,29 @@ impl Parser {
         } else {
             &self.toks[self.i]
         }
+    }
+    /// The value of the Int literal just consumed (`negative` when a `-` came
+    /// before it). A literal that does not fit an Int is E_PARSE, not 0.
+    fn int_literal_value(&self, negative: bool) -> Result<i64> {
+        let t = self.prev();
+        let text = if negative {
+            format!("-{}", t.text)
+        } else {
+            t.text.clone()
+        };
+        text.parse::<i64>().map_err(|_| {
+            anyhow::Error::new(HintedSyntax {
+                msg: format!(
+                    "integer literal {} does not fit in an Int ({}..={}) at line {}, column {}",
+                    text,
+                    i64::MIN,
+                    i64::MAX,
+                    t.line,
+                    t.col
+                ),
+                hint: "write it as a Float (for example 1.2345e29) or a String".to_string(),
+            })
+        })
     }
     fn prev(&self) -> &Spanned {
         // Safety: return first token if i is 0

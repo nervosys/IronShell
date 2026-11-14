@@ -493,8 +493,13 @@ fn deterministic_mode_renders_canonical_json() {
         "byte-stable across calls"
     );
 
-    // Null prints nothing (consistent with the other renderers).
-    assert!(render_canonical(&Value::Null).is_none());
+    // Null prints `null`, and a Float keeps its point (the text to_json writes).
+    assert_eq!(render_canonical(&Value::Null).as_deref(), Some("null"));
+    assert_eq!(render_canonical(&Value::Float(1.0)).as_deref(), Some("1.0"));
+    assert_eq!(
+        render_canonical(&Value::Float(-0.0)).as_deref(),
+        Some("-0.0")
+    );
 
     // Array of records — the lossless counterpart to AECON's compact table.
     let arr = Value::Array(vec![
