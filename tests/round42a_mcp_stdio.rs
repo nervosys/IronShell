@@ -53,10 +53,10 @@ fn an_error_from_a_module_member_names_what_the_client_asked_for() {
 
 #[test]
 fn ontology_describe_of_a_member_says_which_builtin_it_runs() {
+    // `implemented_by` names the builtin the member runs: file.read runs cat.
     let v = iron_shell::agent_api::ontology_describe_json("file.read");
-    assert_eq!(v["runs"], v["builtin"], "{v}");
-    let direct = iron_shell::agent_api::ontology_describe_json("cat");
-    assert!(direct.get("runs").is_none(), "{direct}");
+    let by = v["implemented_by"].as_str().unwrap_or_default();
+    assert!(by.ends_with("cat") || by.contains(" cat"), "{v}");
 }
 
 // 2, 3, 4
