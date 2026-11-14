@@ -3397,6 +3397,25 @@ pub fn code_of(e: &anyhow::Error) -> ErrorCode {
     classify_uncoded(e).map_or(ErrorCode::Unknown, |(code, _)| code)
 }
 
+/// Name an error's builtin as the caller wrote it. A module member such as
+/// `file.read` runs the builtin `cat`, and its errors named `cat`. The error's
+/// `builtin` field and the leading `from:` of its message become `to`; the code
+/// and everything else are unchanged. An error of another builtin, or one that
+/// is not structured, is returned as it is.
+pub fn rename_builtin(e: anyhow::Error, from: &str, to: &str) -> anyhow::Error {
+    match e.downcast_ref::<SafetyError>() {
+        Some(se) if se.builtin == from => {
+            let mut renamed = se.clone();
+            renamed.builtin = to.to_string();
+            if let Some(rest) = renamed.message.strip_prefix(&format!("{from}:")) {
+                renamed.message = format!("{to}:{rest}");
+            }
+            anyhow::Error::new(renamed)
+        }
+        _ => e,
+    }
+}
+
 /// Give an otherwise-uncoded failure a stable code (`E_UNKNOWN`).
 ///
 /// This is the boundary net that makes "every failure is branchable" true

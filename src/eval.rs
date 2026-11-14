@@ -1069,7 +1069,22 @@ pub fn eval_expr(expr: &Expr, env: &mut Env) -> Result<Value> {
                 }
             }
             let f = eval_expr(callee, env)?;
-            call_value_with_pipe(f, pin, vals, env)
+            // A module member (`file.read`) is a reference to its target
+            // builtin (`cat`). An error from it names what the caller wrote.
+            let called_as = match (&**callee, &f) {
+                (Expr::MemberAccess { object, field }, Value::Builtin(r)) => match &**object {
+                    Expr::Ident(module) => Some((r.name.clone(), format!("{module}.{field}"))),
+                    _ => None,
+                },
+                _ => None,
+            };
+            let result = call_value_with_pipe(f, pin, vals, env);
+            match (result, called_as) {
+                (Err(e), Some((target, written))) if target != written => {
+                    Err(crate::safety::rename_builtin(e, &target, &written))
+                }
+                (result, _) => result,
+            }
         }
 
         // ---------- pipeline ----------
