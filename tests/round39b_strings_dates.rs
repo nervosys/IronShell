@@ -160,7 +160,10 @@ fn date_format_names_the_first_unsupported_specifier() {
     for (layout, spec) in [("%Y %L", "%L"), ("%d %^a", "%^a"), ("%#b", "%#b")] {
         let text = refusal(&format!(r#"date_format("2024-02-29", "{layout}")"#));
         assert!(text.contains("E_BAD_ARG"), "{layout}: {text}");
-        assert!(text.contains(&format!("{spec:?}")), "{layout}: {text}");
+        assert!(
+            text.contains(&format!("{spec}\\\" is not a specifier")),
+            "{layout}: {text}"
+        );
     }
     assert_eq!(
         run(r#"date_format("2024-02-29T10:00:00.123456789Z", "%6f")"#),
