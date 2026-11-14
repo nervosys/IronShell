@@ -362,22 +362,23 @@ class TestPipelineLiterals:
     def test_string_data_round_trips_through_the_lexer_rules(self, text):
         code = pipeline(text).to_code()
 
-        assert code.endswith(" | ")
-        assert _lexer_decode(code[: -len(" | ")]) == text
+        # A pipeline with no stages is just its source (no dangling " | ").
+        assert not code.endswith(" | ")
+        assert _lexer_decode(code) == text
 
     def test_reduce_initial_round_trips(self):
         code = pipeline([1]).reduce("fn(a, b) => a", 'q"\\\n🚀').to_code()
 
         assert _lexer_decode(code.split("reduce(fn(a, b) => a, ")[1][:-1]) == 'q"\\\n🚀'
 
-    def test_scalars_and_containers_keep_the_old_spacing(self):
-        assert pipeline([1, 2, 3]).to_code() == "[1, 2, 3] | "
-        assert pipeline(None).to_code() == "null | "
-        assert pipeline([True, False]).to_code() == "[true, false] | "
-        assert pipeline(1.5).to_code() == "1.5 | "
+    def test_scalars_and_containers_are_their_own_source(self):
+        assert pipeline([1, 2, 3]).to_code() == "[1, 2, 3]"
+        assert pipeline(None).to_code() == "null"
+        assert pipeline([True, False]).to_code() == "[true, false]"
+        assert pipeline(1.5).to_code() == "1.5"
 
     def test_record_keys_must_be_identifiers(self):
-        assert pipeline({"name": "ae"}).to_code() == '{name: "ae"} | '
+        assert pipeline({"name": "ae"}).to_code() == '{name: "ae"}'
         with pytest.raises(ValueError, match="identifier"):
             pipeline({"not a name": 1}).to_code()
 
