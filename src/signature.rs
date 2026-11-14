@@ -7794,8 +7794,26 @@ pub static SIGNATURES: &[Signature] = &[
         ],
     },
     Signature {
-        name: "index_of",
-        category: Some("String"),
+        name: "ps_add",
+        category: Some("Math"),
+        subject_required: false,
+        aliases: &[],
+        subject: None,
+        params: &[
+            req("a", Ty::Any, "the left operand, whose type decides the conversion"),
+            req("b", Ty::Any, "the right operand, converted to the left one's type"),
+        ],
+        returns: "Any",
+        doc: "PowerShell's + : the right operand is converted to the left operand's type. A String on the left concatenates the text of the right ('a' + 1 is a1); a number on the left parses a String on the right as a number (1 + '2' is 3) and refuses non-numeric text; otherwise it adds as + does. Added for the PowerShell transpiler, which translates every PowerShell + into ps_add because operand types are known only at run time.",
+        examples: &[
+            (r#"ps_add("a", 1)"#, r#""a1""#),
+            (r#"ps_add(1, "2")"#, "3"),
+            (r#"ps_add(1, 2.5)"#, "3.5"),
+            (r#"ps_add("ab", "cd")"#, r#""abcd""#),
+        ],
+    },
+    Signature {
+        name: "index_of",        category: Some("String"),
         subject_required: false,
         aliases: &[],
         subject: Some(Ty::Str),

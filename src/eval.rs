@@ -2520,7 +2520,7 @@ fn value_eq(a: &Value, b: &Value) -> bool {
 /// of a Float operator are finite too, so a non-finite Float result is an
 /// overflow (`1e308 * 10`) or an undefined power (`(-8) ** 0.5`): refused, as an
 /// Int that does not fit in 64 bits is.
-fn binop(op: &BinOp, a: Value, b: Value) -> Result<Value> {
+pub(crate) fn binop(op: &BinOp, a: Value, b: Value) -> Result<Value> {
     let result = binop_unchecked(op, a, b)?;
     if let Value::Float(f) = &result {
         if !f.is_finite()

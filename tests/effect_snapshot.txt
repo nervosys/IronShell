@@ -1054,6 +1054,7 @@ project_version	ReadLocal
 prompt	Pure
 prompt_user	WriteLocal
 ps	ReadLocal
+ps_add	Pure
 push	Pure
 pwd	ReadLocal
 pytest	Exec

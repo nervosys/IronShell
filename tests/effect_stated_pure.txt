@@ -225,6 +225,7 @@ pow
 print
 product
 prompt
+ps_add
 push
 range
 read_line
