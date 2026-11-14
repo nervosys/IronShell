@@ -405,7 +405,17 @@ pub fn parse_program_with_lines(src: &str) -> Result<(Vec<Stmt>, Vec<usize>)> {
                 lines.push(line);
             }
             Err(e) => {
+                // After a nesting-limit error the closing brackets that follow
+                // only produce a cascade of "unexpected token" noise: stop.
+                let nesting = {
+                    let msg = e.to_string();
+                    msg.contains("expression nested more than")
+                        || msg.contains("expression chain longer than")
+                };
                 errors.push(e);
+                if nesting {
+                    break;
+                }
                 // Try to recover by synchronizing to a safe point
                 p.synchronize();
             }
@@ -447,7 +457,20 @@ pub fn parse_program_with_lines(src: &str) -> Result<(Vec<Stmt>, Vec<usize>)> {
 
     // If we had errors, return them combined
     if !errors.is_empty() {
-        let error_messages: Vec<String> = errors.iter().map(|e| e.to_string()).collect();
+        // At most the first MAX_REPORTED_ERRORS are listed, then a count of the
+        // rest: 5,000 unclosed brackets were 5,000 lines.
+        const MAX_REPORTED_ERRORS: usize = 10;
+        let mut error_messages: Vec<String> = errors
+            .iter()
+            .take(MAX_REPORTED_ERRORS)
+            .map(|e| e.to_string())
+            .collect();
+        if errors.len() > MAX_REPORTED_ERRORS {
+            error_messages.push(format!(
+                "... and {} more",
+                errors.len() - MAX_REPORTED_ERRORS
+            ));
+        }
         let mut parse_error = ParseError::new(format!(
             "found {} error(s):\n  {}",
             errors.len(),
