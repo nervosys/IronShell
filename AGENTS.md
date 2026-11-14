@@ -220,7 +220,7 @@ crypto.uuid()         math.sqrt(16)      arr.range(10)
 | `http`       | HTTP client    | `http.get(url)`, `http.post(url, body)`               |
 | `crypto`     | Cryptography   | `crypto.uuid()`, `crypto.hash("sha256", data)`        |
 | `db`         | Database       | `db.sqlite_open("db")`, `db.sqlite_query(c, sql)`     |
-| `math`       | Mathematics    | `math.sqrt(x)`, `math.pow(a, b)`                      |
+| `math`       | Mathematics    | `math.sqrt(x)`, `math.pow(a, b)`, `math.pi` (3.14159…), `math.e` (2.71828…) constants, read without a call |
 | `str`        | Strings        | `str.upper(s)`, `str.split(s, ",")`                   |
 | `arr`        | Arrays         | `arr.range(n)`, `arr.flatten(a)` (one level), `arr.unique(a)` |
 | `json`       | JSON           | `json.parse(s)`, `json.stringify(v)`                  |

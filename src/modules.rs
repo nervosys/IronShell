@@ -494,7 +494,7 @@ pub fn agent_module() -> Value {
     module(&[("run", "agent"), ("with_mcp", "agent_with_mcp")])
 }
 pub fn math_module() -> Value {
-    module(&[
+    let mut members = module(&[
         ("abs", "abs"),
         ("min", "min"),
         ("max", "max"),
@@ -515,7 +515,13 @@ pub fn math_module() -> Value {
         ("log10", "log10"),
         ("log2", "log2"),
         ("exp", "exp"),
-    ])
+    ]);
+    if let Value::Record(map) = &mut members {
+        // Constants, not builtins: `math.pi` reads as a Float, with no call.
+        map.insert("pi".to_string(), Value::Float(std::f64::consts::PI));
+        map.insert("e".to_string(), Value::Float(std::f64::consts::E));
+    }
+    members
 }
 
 /// String module: str.split(), str.join(), str.trim(), etc.

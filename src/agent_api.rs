@@ -3938,13 +3938,12 @@ fn get_module_definitions() -> Vec<ModuleDefinition> {
     for (name, value) in &all {
         if let Value::Record(map) = value {
             let mut functions = Vec::new();
-            for (method, _builtin_val) in map {
-                // Extract the builtin name from the Value::Builtin
-                let builtin_name = if let Value::Builtin(bref) = _builtin_val {
-                    bref.name.clone()
-                } else {
-                    method.clone()
+            for (method, member) in map {
+                // A constant member (`math.pi`) is a value, not a callable: not listed.
+                let Value::Builtin(bref) = member else {
+                    continue;
                 };
+                let builtin_name = bref.name.clone();
                 functions.push(ModuleFunctionDef {
                     method: method.clone(),
                     builtin: builtin_name.clone(),
