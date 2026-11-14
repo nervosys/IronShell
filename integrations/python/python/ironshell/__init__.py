@@ -47,6 +47,8 @@ def _read_version() -> str:
 __version__ = _read_version()
 __all__ = [
     "IronShellRuntime",
+    "IronShellError",
+    "IronShellTimeout",
     "Agent",
     "AgentConfig",
     "AgentResult",
@@ -59,6 +61,113 @@ __all__ = [
     "evaluate",
     "pipeline",
 ]
+
+
+class IronShellError(RuntimeError):
+    """A failed `ish` run.
+
+    Subclasses RuntimeError, which the SDK raised before 1.5.2, so existing
+    `except RuntimeError` handlers keep working.
+
+    Attributes:
+        code: the error code ("E_PARSE", "E_USER", ...), or None when ish gave none.
+        message: the error text without the "error[CODE]:" prefix.
+        hint: the hint ish printed, or None.
+        exit_status: the process exit status, or None when ish never ran.
+        stderr: the raw standard error text.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        code: Optional[str] = None,
+        hint: Optional[str] = None,
+        exit_status: Optional[int] = None,
+        stderr: str = "",
+    ):
+        self.code = code
+        self.message = message
+        self.hint = hint
+        self.exit_status = exit_status
+        self.stderr = stderr
+        text = f"IronShell error: {message}"
+        if code:
+            text = f"IronShell error[{code}]: {message}"
+        if hint:
+            text += f" (hint: {hint})"
+        super().__init__(text)
+
+
+class IronShellTimeout(IronShellError):
+    """The run exceeded its timeout; the `ish` process was killed."""
+
+
+_ERROR_LINE = re.compile(r"error\[([A-Za-z0-9_]+)\]:\s*(.*)\Z")
+
+
+def _parse_error(stderr: str, exit_status: int) -> IronShellError:
+    """Turn a failed run's stderr into an IronShellError.
+
+    Reads the human form, `error[E_CODE]: message` followed by `  hint: ...`
+    (the form `ish -c` prints), and the agent-mode JSON form
+    `{"error": {"code", "message", "hint"}}`. Anything else is kept verbatim as
+    the message. Empty stderr gives "exited with status N".
+    """
+    text = stderr.strip()
+    if not text:
+        return IronShellError(
+            f"exited with status {exit_status}", exit_status=exit_status, stderr=stderr
+        )
+    lines = text.splitlines()
+    for line in lines:
+        stripped = line.strip()
+        if stripped.startswith("{"):
+            try:
+                err = json.loads(stripped).get("error")
+            except (ValueError, AttributeError):
+                continue
+            if isinstance(err, dict) and "message" in err:
+                return IronShellError(
+                    str(err["message"]),
+                    code=err.get("code"),
+                    hint=err.get("hint") or None,
+                    exit_status=exit_status,
+                    stderr=stderr,
+                )
+    for i, line in enumerate(lines):
+        m = _ERROR_LINE.match(line.strip())
+        if m:
+            hint = None
+            for follow in lines[i + 1:]:
+                follow = follow.strip()
+                if follow.startswith("hint:"):
+                    hint = follow[len("hint:"):].strip() or None
+                    break
+            return IronShellError(
+                m.group(2), code=m.group(1), hint=hint, exit_status=exit_status, stderr=stderr
+            )
+    message = text[len("error:"):].strip() if text.startswith("error:") else text
+    return IronShellError(message, exit_status=exit_status, stderr=stderr)
+
+
+def _as_text(data: Any, errors: str = "strict") -> str:
+    """Decode subprocess output as UTF-8 (never the locale codepage)."""
+    if data is None:
+        return ""
+    if isinstance(data, bytes):
+        return data.decode("utf-8", errors)
+    return data
+
+
+def _parse_output(stdout: str) -> Any:
+    """Parse ish's stdout: JSON if it is, None if empty, else the trimmed text."""
+    text = stdout.strip()
+    if not text:
+        return None
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        return text
 
 
 class NotificationLevel(Enum):
@@ -387,19 +496,38 @@ def _build_swarm_code(
     )
 
 
+_UNSET: Any = object()
+
+
 class IronShellRuntime:
-    """Main runtime for IronShell execution"""
-    
-    def __init__(self, ish_path: Optional[str] = None):
+    """Main runtime for IronShell execution.
+
+    Results come from `ish --deterministic`, which prints canonical JSON, so
+    values arrive as typed Python objects. A failed run raises IronShellError
+    and a run past its timeout raises IronShellTimeout.
+    """
+
+    def __init__(
+        self,
+        ish_path: Optional[str] = None,
+        timeout: Optional[float] = 60,
+        memory_limit_mb: Optional[int] = None,
+    ):
         """
         Initialize the IronShell runtime.
-        
+
         Args:
             ish_path: Path to the ish binary. If None, searches PATH.
+            timeout: Default seconds a call may run; None for no limit. Enforced
+                from Python only (the process is killed); `--timeout` is not passed.
+            memory_limit_mb: Memory budget passed to ish as `--memory-limit`
+                only when set; needs ish >= 14.0.2. None leaves ish's default.
         """
         self._ish_path = ish_path or self._find_ish()
+        self.timeout = timeout
+        self.memory_limit_mb = memory_limit_mb
         self._event_listeners: List[Callable[[A2UIEvent], None]] = []
-    
+
     def _find_ish(self) -> str:
         """Find the ish binary in PATH or common locations"""
         # Check PATH
@@ -407,7 +535,7 @@ class IronShellRuntime:
             ae = os.path.join(path, "ish.exe" if sys.platform == "win32" else "ish")
             if os.path.isfile(ae):
                 return ae
-        
+
         # Check common locations
         common_paths = [
             "/usr/local/bin/ae",
@@ -420,71 +548,97 @@ class IronShellRuntime:
                 r"C:\Program Files\IronShell\ish.exe",
                 os.path.expanduser(r"~\.cargo\bin\ish.exe"),
             ])
-        
+
         for path in common_paths:
             if os.path.isfile(path):
                 return path
-        
-        raise RuntimeError(
+
+        raise IronShellError(
             "Could not find 'ish' binary. Please install IronShell or "
             "provide the path explicitly via ish_path parameter."
         )
-    
-    def eval(self, code: str) -> Any:
+
+    def _run(self, args: List[str], timeout: Any, memory_limit_mb: Any) -> Any:
+        """Run ish with `args` (after the binary) and return the parsed result."""
+        limit = self.timeout if timeout is _UNSET else timeout
+        memory = self.memory_limit_mb if memory_limit_mb is _UNSET else memory_limit_mb
+        cmd = [self._ish_path, *args, "--deterministic"]
+        if memory:
+            cmd += ["--memory-limit", str(int(memory))]
+        try:
+            # Bytes in, bytes out, decoded here as UTF-8: text=True would use
+            # the locale codepage and corrupt non-ASCII output on Windows.
+            result = subprocess.run(cmd, capture_output=True, timeout=limit)
+        except subprocess.TimeoutExpired as exc:
+            # subprocess.run has already killed the process.
+            raise IronShellTimeout(
+                f"timed out after {limit} seconds", stderr=_as_text(exc.stderr, "replace")
+            ) from exc
+        except OSError as exc:
+            raise IronShellError(
+                f"could not run the ish binary {self._ish_path!r}: {exc}; install IronShell "
+                "or pass a correct ish_path"
+            ) from exc
+
+        stderr = _as_text(result.stderr, "replace")
+        if result.returncode != 0:
+            err = _parse_error(stderr, result.returncode)
+            # ish's own deadline (IRONSHELL_TIMEOUT in the environment) is
+            # reported as E_BUDGET_EXCEEDED with "deadline" in the message.
+            if err.code == "E_BUDGET_EXCEEDED" and "deadline" in err.message.lower():
+                raise IronShellTimeout(
+                    err.message, code=err.code, hint=err.hint,
+                    exit_status=err.exit_status, stderr=stderr,
+                )
+            raise err
+        return _parse_output(_as_text(result.stdout))
+
+    def eval(
+        self,
+        code: str,
+        timeout: Any = _UNSET,
+        memory_limit_mb: Any = _UNSET,
+    ) -> Any:
         """
         Evaluate IronShell code and return the result.
-        
+
         Args:
-            code: IronShell code to evaluate
-            
+            code: IronShell code to evaluate (passed to ish as UTF-8)
+            timeout: Seconds for this call, overriding the runtime's; None for no limit
+            memory_limit_mb: Memory budget for this call, overriding the runtime's
+
         Returns:
-            Parsed result (Python object)
+            Parsed result (Python object); None for null or no output
+
+        Raises:
+            IronShellError: ish failed, or could not be started
+            IronShellTimeout: the call ran past its timeout
         """
-        # `-c/--command`, not `-e`, and `--deterministic` for canonical JSON.
-        # The previous flags (`-e ... --json`) are not accepted by the binary:
-        # clap rejected `-e` outright, so every call raised RuntimeError. The
-        # SDK's core entry point could never have worked against a released
-        # build.
-        result = subprocess.run(
-            [self._ish_path, "-c", code, "--deterministic"],
-            capture_output=True,
-            text=True,
-            timeout=60,
-        )
-        
-        if result.returncode != 0:
-            raise RuntimeError(f"IronShell error: {result.stderr}")
-        
-        try:
-            return json.loads(result.stdout)
-        except json.JSONDecodeError:
-            return result.stdout.strip()
-    
-    def eval_file(self, path: str) -> Any:
+        # `-c/--command`, and `--deterministic` for canonical JSON.
+        return self._run(["-c", code], timeout, memory_limit_mb)
+
+    def eval_file(
+        self,
+        path: str,
+        timeout: Any = _UNSET,
+        memory_limit_mb: Any = _UNSET,
+    ) -> Any:
         """
         Evaluate an IronShell file.
-        
+
         Args:
             path: Path to .ish file
-            
+            timeout: Seconds for this call, overriding the runtime's; None for no limit
+            memory_limit_mb: Memory budget for this call, overriding the runtime's
+
         Returns:
             Result of evaluation
+
+        Raises:
+            IronShellError, IronShellTimeout: as for eval
         """
-        result = subprocess.run(
-            [self._ish_path, path, "--deterministic"],
-            capture_output=True,
-            text=True,
-            timeout=300,
-        )
-        
-        if result.returncode != 0:
-            raise RuntimeError(f"IronShell error: {result.stderr}")
-        
-        try:
-            return json.loads(result.stdout)
-        except json.JSONDecodeError:
-            return result.stdout.strip()
-    
+        return self._run([path], timeout, memory_limit_mb)
+
     def create_agent(
         self,
         name: str,
@@ -652,7 +806,11 @@ class PipelineBuilder:
     
     def to_code(self) -> str:
         """Get the pipeline as IronShell code"""
-        return f"{_ironshell_value(self._data)} | {' | '.join(self._ops)}"
+        source = _ironshell_value(self._data)
+        if not self._ops:
+            # No operations: the source value alone ("[1] | " would not parse).
+            return source
+        return f"{source} | {' | '.join(self._ops)}"
     
     def run(self, runtime: Optional[IronShellRuntime] = None) -> Any:
         """Execute the pipeline"""

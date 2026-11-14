@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "ironshell"
-version = "1.5.1"
+version = "1.5.2"
 description = "IronShell - AI-powered typed shell with workflow orchestration and cloud deployment"
 readme = "README.md"
 license = { text = "AGPL-3.0-or-later" }
@@ -73,6 +73,9 @@ Issues = "https://github.com/nervosys/IronShell/issues"
 
 [tool.setuptools.packages.find]
 where = ["python"]
+
+[tool.setuptools.package-data]
+ironshell = ["py.typed"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
