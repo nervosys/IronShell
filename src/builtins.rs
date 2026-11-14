@@ -15320,6 +15320,20 @@ fn bi_trim(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
 
 /// Whether a character belongs to a word for `title`: a letter, a digit, or an
 /// apostrophe. Every other character separates words.
+/// The titlecase form of a Unicode digraph letter (U+01C4..U+01CC and
+/// U+01F1..U+01F3). Its upper case is the wrong form: `to_uppercase` gives
+/// Ǆ where titlecase is ǅ, as Python's `capitalize` does. `None` for every
+/// other character.
+fn titlecase_digraph(c: char) -> Option<char> {
+    match c {
+        '\u{01C4}'..='\u{01C6}' => Some('\u{01C5}'),
+        '\u{01C7}'..='\u{01C9}' => Some('\u{01C8}'),
+        '\u{01CA}'..='\u{01CC}' => Some('\u{01CB}'),
+        '\u{01F1}'..='\u{01F3}' => Some('\u{01F2}'),
+        _ => None,
+    }
+}
+
 fn is_title_word_char(c: char) -> bool {
     c.is_alphanumeric() || c == '\''
 }
@@ -15352,7 +15366,10 @@ fn bi_title(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
         if is_title_word_char(c) {
             if c.is_alphabetic() {
                 if at_word_start {
-                    out.extend(c.to_uppercase());
+                    match titlecase_digraph(c) {
+                        Some(t) => out.push(t),
+                        None => out.extend(c.to_uppercase()),
+                    }
                 } else {
                     out.extend(c.to_lowercase());
                 }
@@ -15377,6 +15394,7 @@ fn bi_title(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
 /// Example:
 ///   capitalize("hELLO wORLD")   # "Hello world"
 ///   "élan" | capitalize()       # "Élan"
+///   "ǆungla" | capitalize()     # "ǅungla" (titlecase, not Ǆ)
 fn bi_capitalize(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
     let (text, rest) = text_subject("capitalize", args, input)?;
     if !rest.is_empty() {
@@ -15385,7 +15403,10 @@ fn bi_capitalize(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
     let mut out = String::with_capacity(text.len());
     let mut chars = text.chars();
     if let Some(first) = chars.next() {
-        out.extend(first.to_uppercase());
+        match titlecase_digraph(first) {
+            Some(t) => out.push(t),
+            None => out.extend(first.to_uppercase()),
+        }
     }
     for c in chars {
         out.extend(c.to_lowercase());
@@ -49461,27 +49482,36 @@ fn bi_crypto_base64_decode(args: Vec<Value>, input: Option<Value>) -> Result<Val
     let data = hex_subject("crypto_base64_decode", &args, input)?;
     // Wrapped input (as `base64` writes it) decodes: whitespace is not data.
     let compact: String = data.chars().filter(|c| !c.is_ascii_whitespace()).collect();
-    let bytes = match STANDARD.decode(compact.as_bytes()) {
-        Ok(b) => b,
-        Err(first) => {
-            // Unpadded input and the URL-safe alphabet (`-` and `_` for `+` and
-            // `/`) are base64 too: JWT segments are written that way. Normalise
-            // and retry; input that is still invalid keeps the first error.
-            use base64::engine::general_purpose::STANDARD_NO_PAD;
-            let normal: String = compact
-                .trim_end_matches('=')
-                .chars()
-                .map(|c| match c {
-                    '-' => '+',
-                    '_' => '/',
-                    other => other,
-                })
-                .collect();
-            STANDARD_NO_PAD.decode(normal.as_bytes()).map_err(|_| {
-                crate::safety::bad_arg("crypto_base64_decode", "valid base64", &first.to_string())
-            })?
-        }
-    };
+    // The URL-safe alphabet is another encoding: `-` and `_` are not base64, and
+    // reading them as `+` and `/` would decode different bytes. It is refused,
+    // with the one-step fix named.
+    if compact.chars().any(|c| c == '-' || c == '_') {
+        return Err(crate::safety::value_not_representable(
+            "crypto_base64_decode",
+            "crypto_base64_decode: expected standard base64, got the URL-safe alphabet (- or _)"
+                .to_string(),
+            "this is URL-safe base64: replace - with + and _ with /",
+        ));
+    }
+    // Padding is part of the encoding, as Python's b64decode(validate=True)
+    // requires: standard-alphabet input whose length is not a multiple of 4 is
+    // refused, not guessed at. Other bad input keeps its error below.
+    let alphabet_only = compact
+        .bytes()
+        .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'+' | b'/' | b'='));
+    if alphabet_only && compact.len() % 4 != 0 {
+        return Err(crate::safety::value_not_representable(
+            "crypto_base64_decode",
+            format!(
+                "crypto_base64_decode: expected base64 padded to a multiple of 4 characters, got {} characters",
+                compact.len()
+            ),
+            "pad with = to a multiple of 4 characters",
+        ));
+    }
+    let bytes = STANDARD.decode(compact.as_bytes()).map_err(|first| {
+        crate::safety::bad_arg("crypto_base64_decode", "valid base64", &first.to_string())
+    })?;
     // Bytes that are not text were replaced with U+FFFD, silently.
     String::from_utf8(bytes).map(Value::Str).map_err(|_| {
         crate::safety::bad_arg(

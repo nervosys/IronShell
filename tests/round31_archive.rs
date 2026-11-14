@@ -277,13 +277,25 @@ fn crypto_module_has_hash_file_checksum_and_random_string() {
 }
 
 #[test]
-fn base64_decode_accepts_unpadded_and_url_safe_input() {
+fn base64_decode_is_strict_about_padding_and_alphabet() {
     let d = Dirs::new("b64");
     assert_eq!(d.value(r#"base64_decode("aGVsbG8=")"#), "hello");
-    assert_eq!(d.value(r#"base64_decode("aGVsbG8")"#), "hello");
-    // "???" is Pz8/ in the standard alphabet and Pz8_ in the URL-safe one.
-    assert_eq!(d.value(r#"base64_decode("Pz8_")"#), "???");
+    // "???" is Pz8/ in the standard alphabet.
     assert_eq!(d.value(r#"base64_decode("Pz8/")"#), "???");
+    // Missing or short padding is refused, as Python's b64decode(validate=True) does.
+    for expr in [
+        r#"base64_decode("aGVsbG8")"#,
+        r#"base64_decode("YQ=")"#,
+        r#"base64_decode("aGk")"#,
+    ] {
+        let text = d.refused(expr);
+        assert!(text.contains("E_BAD_VALUE"), "{expr}: {text}");
+        assert!(text.contains("multiple of 4"), "{expr}: {text}");
+    }
+    // The URL-safe alphabet is refused, and the message names it.
+    let text = d.refused(r#"base64_decode("-_8=")"#);
+    assert!(text.contains("E_BAD_VALUE"), "{text}");
+    assert!(text.contains("URL-safe"), "{text}");
     let text = d.refused(r#"base64_decode("!!!!")"#);
     assert!(text.contains("E_BAD_ARG"), "{text}");
 }
