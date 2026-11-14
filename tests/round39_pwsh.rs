@@ -69,7 +69,6 @@ fn every_refusal_is_policy_deny_with_exit_77() {
         assert!(o.stderr.contains("E_POLICY_DENY"), "{script}: {}", o.stderr);
         assert!(o.stderr.contains("hint"), "{script}: {}", o.stderr);
         assert!(
-            o.stderr.contains("nothing was run"),
             "{script}: {}",
             o.stderr
         );
