@@ -19,6 +19,14 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Callable, Dict, List, Optional, TypeVar
 
+
+def _sdk_version() -> str:
+    """The SDK's own version, for the generated requirements.txt."""
+    from . import __version__
+
+    return __version__.split("+")[0] if __version__[:1].isdigit() else "0"
+
+
 __all__ = [
     "CloudProvider",
     "FunctionConfig",
@@ -243,7 +251,7 @@ capabilities = "CAPABILITY_IAM"
     
     def get_requirements(self) -> List[str]:
         return [
-            "ironshell>=0.3.0",
+            f"ironshell>={_sdk_version()}",
             "boto3>=1.28.0",
         ]
     
@@ -453,7 +461,7 @@ output functionAppUrl string = 'https://${{functionApp.properties.defaultHostNam
     
     def get_requirements(self) -> List[str]:
         return [
-            "ironshell>=0.3.0",
+            f"ironshell>={_sdk_version()}",
             "azure-functions>=1.15.0",
         ]
 
@@ -618,7 +626,7 @@ output "function_url" {{
     
     def get_requirements(self) -> List[str]:
         return [
-            "ironshell>=0.3.0",
+            f"ironshell>={_sdk_version()}",
             "functions-framework>=3.0.0",
             "flask>=2.0.0",
         ]
@@ -873,7 +881,7 @@ deploy:
     
     def get_requirements(self) -> List[str]:
         return [
-            "ironshell>=0.3.0",
+            f"ironshell>={_sdk_version()}",
             "fastapi>=0.100.0",
             "uvicorn>=0.23.0",
             "pydantic>=2.0.0",
