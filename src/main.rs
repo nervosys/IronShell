@@ -11,6 +11,10 @@ fn create_env_with_modules() -> Env {
     modules::env_with_modules()
 }
 
+/// Counts live heap bytes so the evaluator can enforce the memory budget.
+#[global_allocator]
+static ALLOCATOR: iron_shell::memory::CountingAlloc = iron_shell::memory::CountingAlloc;
+
 #[derive(Parser)]
 #[command(name = "ish")]
 #[command(about = "IronShell Shell - A typed functional shell with multi-modal AI")]
@@ -46,6 +50,16 @@ struct Cli {
     /// Token budget for output: results over N estimated tokens are paged/truncated
     #[arg(long, value_name = "N")]
     budget: Option<usize>,
+
+    /// Stop the evaluation after SECONDS (E_BUDGET_EXCEEDED); env IRONSHELL_TIMEOUT.
+    /// No limit by default.
+    #[arg(long, value_name = "SECONDS")]
+    timeout: Option<u64>,
+
+    /// Memory budget in MB (E_BUDGET_EXCEEDED past it, 0 for none); env
+    /// IRONSHELL_MEMORY_LIMIT_MB. Default: the smaller of 2048 and half of memory
+    #[arg(long, value_name = "MB")]
+    memory_limit: Option<usize>,
 
     /// Agent mode: default-deny dangerous effect classes (gate behind approval)
     #[arg(long)]
@@ -315,6 +329,8 @@ impl Cli {
         self.explain |= leading.explain;
         self.deterministic |= leading.deterministic;
         self.budget = leading.budget.or(self.budget);
+        self.timeout = leading.timeout.or(self.timeout);
+        self.memory_limit = leading.memory_limit.or(self.memory_limit);
         self.workspace = leading.workspace.or(self.workspace);
         self.policy = leading.policy.or(self.policy);
         self.command = leading.command.or(self.command);
@@ -338,7 +354,13 @@ const GLOBAL_SWITCHES: &[&str] = &[
 ];
 
 /// Global flags that take a value, as `--flag VALUE` or `--flag=VALUE`.
-const GLOBAL_VALUED: &[&str] = &["--budget", "--workspace", "--policy"];
+const GLOBAL_VALUED: &[&str] = &[
+    "--budget",
+    "--workspace",
+    "--policy",
+    "--timeout",
+    "--memory-limit",
+];
 
 /// The subcommand names and aliases `Commands` declares.
 const SUBCOMMANDS: &[&str] = &[
@@ -434,6 +456,32 @@ fn serves_an_agent(cmd: &Option<Commands>) -> bool {
 }
 
 fn run(mut cli: Cli) -> Result<()> {
+    // The memory budget: `--memory-limit`, else IRONSHELL_MEMORY_LIMIT_MB, else
+    // the default. The allocator that counts is installed below.
+    if let Some(mb) = cli.memory_limit {
+        std::env::set_var("IRONSHELL_MEMORY_LIMIT_MB", mb.to_string());
+    }
+    iron_shell::memory::init_from_env();
+    // The evaluation deadline: `--timeout`, else IRONSHELL_TIMEOUT (seconds).
+    // None by default. The guard bounds this thread until `run` returns.
+    let timeout = match cli.timeout {
+        Some(n) => Some(n),
+        None => match env::var("IRONSHELL_TIMEOUT") {
+            Ok(v) => match v.trim().parse::<u64>() {
+                Ok(n) => Some(n),
+                Err(_) => {
+                    eprintln!(
+                        "ish: IRONSHELL_TIMEOUT must be a whole number of seconds, not {v:?}"
+                    );
+                    std::process::exit(2);
+                }
+            },
+            Err(_) => None,
+        },
+    };
+    let _deadline = timeout
+        .filter(|n| *n > 0)
+        .map(iron_shell::safety::enter_cli_deadline);
     // An output token budget applies to all eval/print paths via the REPL.
     if let Some(n) = cli.budget {
         std::env::set_var("IRONSHELL_TOKEN_BUDGET", n.to_string());

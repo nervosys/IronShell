@@ -179,6 +179,9 @@ pub mod marketplace;
 /// MCP — Model Context Protocol server; compact tool-discovery surface by default.
 #[cfg(feature = "native")]
 pub mod mcp;
+/// Process-wide memory budget: counting allocator and the evaluator's check.
+#[cfg(feature = "native")]
+pub mod memory;
 /// Metrics — Prometheus-compatible metrics, alerting, and dashboards.
 #[cfg(feature = "native")]
 pub mod metrics;

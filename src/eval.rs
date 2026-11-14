@@ -804,7 +804,9 @@ pub(crate) fn eval_body_consuming_params(
                             out.push_str(&b);
                             return Ok(Value::Str(out));
                         }
-                        (Some(Value::Array(a)), Value::Array(b)) => {
+                        (Some(Value::Array(a)), Value::Array(b))
+                            if a.len().saturating_add(b.len()) <= MAX_ARRAY_ELEMENTS =>
+                        {
                             let mut out = std::mem::take(a);
                             out.extend(b);
                             return Ok(Value::Array(out));
@@ -825,7 +827,9 @@ fn append_in_place(env: &mut Env, name: &str, operand: Value) -> std::result::Re
             a.push_str(&b);
             Ok(())
         }
-        (Some(Value::Array(a)), Value::Array(b)) => {
+        (Some(Value::Array(a)), Value::Array(b))
+            if a.len().saturating_add(b.len()) <= MAX_ARRAY_ELEMENTS =>
+        {
             a.extend(b);
             Ok(())
         }
@@ -1979,6 +1983,25 @@ fn is_truthy(v: &Value) -> bool {
 /// against one value running away, not an allocation budget.
 const MAX_STRING_BYTES: usize = 8 * 1024 * 1024;
 
+/// The most elements one Array operation (`+`, `flatten`, `concat`) may
+/// produce, the same bound `range` has.
+pub(crate) const MAX_ARRAY_ELEMENTS: usize = 10_000_000;
+
+/// Refuse an Array of `len` elements that is over [`MAX_ARRAY_ELEMENTS`].
+pub(crate) fn check_array_len(len: usize) -> Result<()> {
+    if len > MAX_ARRAY_ELEMENTS {
+        return Err(crate::safety::budget_exceeded(
+            "array",
+            format!(
+                "array operation would produce {} elements, over the {} element limit",
+                len, MAX_ARRAY_ELEMENTS
+            ),
+            "work on the data in smaller pieces",
+        ));
+    }
+    Ok(())
+}
+
 /// Build a string value, refusing one that exceeds [`MAX_STRING_BYTES`].
 fn checked_string(s: String) -> Result<Value> {
     if s.len() > MAX_STRING_BYTES {
@@ -2539,6 +2562,7 @@ fn binop_unchecked(op: &BinOp, a: Value, b: Value) -> Result<Value> {
         }
         // Array concatenation: `[1, 2] + [3]` is `[1, 2, 3]`, a new Array.
         (Add, Value::Array(mut x), Value::Array(y)) => {
+            check_array_len(x.len().saturating_add(y.len()))?;
             x.extend(y);
             Value::Array(x)
         }
@@ -2920,6 +2944,11 @@ fn interpolate_string(s: &str, env: &mut Env) -> Result<Value> {
                     // `"x: ${r}"` came out as
                     // `x: Record({"a": Int(1)})`.
                     result.push_str(&val.to_display_string());
+                    // Held to the string limit as the hole is added, not only
+                    // at the end, so a doubling hole fails at 8 MB.
+                    if result.len() > MAX_STRING_BYTES {
+                        return checked_string(result);
+                    }
                 }
                 // A name nothing binds is an error of the string, not a
                 // hole to print: `"${nosuch}"` must not come out as text.
@@ -2938,5 +2967,5 @@ fn interpolate_string(s: &str, env: &mut Env) -> Result<Value> {
         }
     }
 
-    Ok(Value::Str(result))
+    checked_string(result)
 }
