@@ -257,6 +257,11 @@ fn a_name_is_pinned_to_its_checked_addresses_and_reached() {
                     }
                     let reply = b"HTTP/1.1 200 OK\r\nContent-Length: 9\r\nConnection: close\r\n\r\npinned-ok";
                     let _ = std::io::Write::write_all(&mut stream, reply);
+                    // Close gracefully: on Windows, dropping a socket with
+                    // unread input sends a reset, and curl then exits 56.
+                    let _ = stream.shutdown(std::net::Shutdown::Write);
+                    let _ = stream.set_read_timeout(Some(Duration::from_millis(500)));
+                    while matches!(stream.read(&mut buf), Ok(n) if n > 0) {}
                     served += 1;
                     if served == 2 {
                         return true;
