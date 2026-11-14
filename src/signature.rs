@@ -3321,7 +3321,7 @@ pub static SIGNATURES: &[Signature] = &[
             req(
                 "source_or_query",
                 Ty::Str,
-                "with rows piped in, the query (they are table `t`); alone, the query over an empty database; otherwise a source: a .json/.jsonl/.csv/.tsv file (a table named after the file, also `t`; an empty CSV or TSV cell is NULL), a SQLite file, or \":memory:\"",
+                "with rows piped in, the query (they are table `t`); alone, the query over an empty database; otherwise a source: a .json/.jsonl/.csv/.tsv file (a table named after the file, also `t`; an empty CSV or TSV cell is NULL in a numeric column and '' in a text column), a SQLite file, or \":memory:\"",
             ),
             opt(
                 "query",
@@ -3335,7 +3335,7 @@ pub static SIGNATURES: &[Signature] = &[
             ),
         ],
         returns: "Array",
-        doc: "Run a read-only SQL query over piped rows, rows given as the first argument, a JSON/CSV file or a SQLite database, returning rows as records. A query with no rows and no source runs over an empty database: sql(\"select 1 as x\") answers [{x: 1}]. A trailing params Array binds its values to the query's ? placeholders in order, so a value is never spliced into the query text. With params and no rows the query runs over the same empty database: sql(\"select ? + 1 as y\", [41]) answers [{y: 42}]. A table in the query needs rows or a source first: sql(source, query, params).",
+        doc: "Run a read-only SQL query over piped rows, rows given as the first argument, a JSON/CSV file or a SQLite database, returning rows as records. A query with no rows and no source runs over an empty database: sql(\"select 1 as x\") answers [{x: 1}]. A trailing params Array binds its values to the query's ? placeholders in order, so a value is never spliced into the query text. With params and no rows the query runs over the same empty database: sql(\"select ? + 1 as y\", [41]) answers [{y: 42}]. A table in the query needs rows or a source first: sql(source, query, params). Several tables: give a Record of tables, one field per table, as the first argument or piped: sql({orders: open(\"orders.csv\"), cust: open(\"cust.csv\")}, \"select cust.name, orders.total from orders join cust on orders.cid = cust.id\"). In a CSV or TSV an empty cell is NULL in a numeric column and '' in a text column.",
         examples: &[
             (
                 r#"sql("select 1 as x") | first | fn(r) => r.x"#,
@@ -3365,6 +3365,14 @@ pub static SIGNATURES: &[Signature] = &[
             (
                 r#"sql("select ? + 1 as y", [41]) | first | fn(r) => r.y"#,
                 "42",
+            ),
+            (
+                r#"sql({a: [{id: 1, n: "x"}], b: [{id: 1, m: 5}]}, "select a.n, b.m from a join b on a.id = b.id") | first | fn(r) => r.m"#,
+                "5",
+            ),
+            (
+                r#"{a: [{id: 1, n: "x"}], b: [{id: 1, m: 5}]} | sql("select b.m from a join b on a.id = b.id") | first | fn(r) => r.m"#,
+                "5",
             ),
         ],
     },

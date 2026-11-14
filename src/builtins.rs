@@ -11592,10 +11592,9 @@ pub(crate) fn csv_rows(
 }
 
 /// `csv_rows` for the SQL paths (`sql`, `sql_value` and `db_csv_to_sqlite`): an
-/// empty cell in a text column is NULL, as one in a numeric column already is,
-/// so `where amt is null` finds it and `sum` does not count it as 0. The csv
-/// reader cannot tell an empty cell from a quoted `""`, so both are NULL.
-/// `open` and `from_csv` keep their `""`.
+/// empty cell is NULL in a numeric column (so `where amt is null` finds it and
+/// `sum` does not count it as 0) and `''` in a text column (so `where note = ''`
+/// finds it).
 pub(crate) fn csv_rows_sql(
     headers: &[String],
     records: &[csv::StringRecord],

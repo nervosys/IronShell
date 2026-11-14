@@ -697,8 +697,11 @@ fn connect(
             load(&conn, builtin, &tables)?;
             Ok((conn, query, None))
         }
-        // Rows given as the first argument are the rows, as if piped: `sql(rows, query)`.
-        2 if subject.is_none() && matches!(args[0], Value::Array(_)) => {
+        // Rows (or a Record of tables) given as the first argument are the rows, as if
+        // piped: `sql(rows, query)`, `sql({a: rows, b: rows}, query)`.
+        2 if subject.is_none()
+            && matches!(args[0], Value::Array(_) | Value::Table(_) | Value::Record(_)) =>
+        {
             let query = str_arg(1, "the query")?;
             let tables = tables_from_subject(builtin, args[0].clone())?;
             let conn = memory()?;
