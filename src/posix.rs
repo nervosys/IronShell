@@ -6886,7 +6886,16 @@ fn ls(args: &[String], sink: &mut Sink) -> Util {
             Ok(m) if m.is_dir() && !dirs_as_files => dirs.push(op.clone()),
             Ok(_) => files.push(op.clone()),
             Err(e) => {
-                sink.eline(&format!("ls: cannot access '{op}': {}", io_reason(&e)));
+                // A glob that matched nothing stays literal; on Windows the OS
+                // rejects `*` in a name with its own text, where bash says the
+                // file is not there.
+                let reason =
+                    if has_glob_meta(op) && e.kind() != std::io::ErrorKind::PermissionDenied {
+                        "No such file or directory".to_string()
+                    } else {
+                        io_reason(&e)
+                    };
+                sink.eline(&format!("ls: cannot access '{op}': {reason}"));
                 status = 2;
             }
         }
