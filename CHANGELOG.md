@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [14.0.4] - 2026-11-14
+
 ### Changed
 
 - MCP (`ish mcp stdio`): every tool result's text is JSON (a String stays plain text) and carries `structuredContent`; a Record no longer prints in IronShell's display form.
@@ -4666,7 +4668,8 @@ N/A - Initial release
 
 See [ROADMAP.md](ROADMAP.md) for upcoming features.
 
-[Unreleased]: https://github.com/nervosys/IronShell/compare/v14.0.3...HEAD
+[Unreleased]: https://github.com/nervosys/IronShell/compare/v14.0.4...HEAD
+[14.0.4]: https://github.com/nervosys/IronShell/compare/v14.0.3...v14.0.4
 [14.0.3]: https://github.com/nervosys/IronShell/compare/v14.0.2...v14.0.3
 [14.0.2]: https://github.com/nervosys/IronShell/compare/v14.0.1...v14.0.2
 [14.0.1]: https://github.com/nervosys/IronShell/compare/v14.0.0...v14.0.1
