@@ -4474,14 +4474,14 @@ fn build_compact_ontology(ontology: &LanguageOntology) -> JsonValue {
         "ver": ontology.language.version,
         "ontology_ver": ontology.ontology_version,
         "types": ["Int", "Float", "String", "Bool", "Array", "Record", "Lambda", "Table", "Option"],
-        "ops": ["|", "+", "-", "*", "/", "==", "!=", ">", "<", ">=", "<=", "&&", "||", "."],
+        "ops": ["|", "+", "-", "*", "/", "%", "^", "==", "!=", ">", "<", ">=", "<=", "&&", "||", "!", "."],
         "syntax": {
             "let": "let x = expr",
             "fn": "fn(x) => expr",
             "pipe": "a | b | c",
             "rec": "{k: v}",
             "arr": "[a, b]",
-            "if": "if cond then a else b",
+            "if": "if cond { a } else { b }",
             "match": "match x { p => r }",
             "import": IMPORT_SYNTAX
         },

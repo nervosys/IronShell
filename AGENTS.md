@@ -174,6 +174,7 @@ match score { s if s >= 90 => "A", s if s >= 80 => "B", _ => "F" }
 # Error handling
 result = try { risky() } catch e { "fallback" }
 try { error("bad", {field: "age"}) } catch e { e.code }   # "E_USER"; error(message[, extra Record]) raises your own
+# error.retryable is true when retrying the same call later, or with the arguments corrected as the hint says, can succeed (bad arguments, an unknown name that has a suggestion, not found, needs approval) and false when the same call can never succeed as asked (policy deny, outside the workspace, a value that is undefined or overflows, an unknown name with no suggestion). The HTTP API's `/execute` envelope narrows it to "a resend of the same request", so it reports false for E_PARSE, E_BAD_ARG, E_UNKNOWN_BUILTIN and E_UNKNOWN_NAME.
 # In agent mode `try` does not catch E_NEEDS_APPROVAL, E_OUTSIDE_WORKSPACE or E_POLICY_DENY: it re-raises them and the script stops with their exit status (75/77). Human mode catches them.
 
 # Script arguments: `ish script.ish a b` gives the script args() == ["a", "b"] (empty under -c)
@@ -194,7 +195,7 @@ rows | sql("select * from t where amount > ?", [100])   # a trailing Array binds
 to_csv(rows, ["id", "customer"])       # column order (Records sort their keys); csv_columns("orders.csv") is the header in file order
 from_csv("v\n1\n2.5\n")          # a CSV column's type is inferred from ALL its cells: any decimal makes the column Float in every row ([1.0, 2.5]), and a "1.0" written by to_csv reads back as the Float 1.0
 date_add("2024-01-31", 1, "months")    # "2024-02-29": weeks, months and years clamp to the month's end
-undo({id: 3})                          # undo one journal step out of order; refused if a later step changed the same file
+undo({id: 3})                          # undo one journal step out of order (needs the journal: agent mode, or IRONSHELL_JOURNAL=on); refused if a later step changed the same file
 format_number(1234567.891, 2, ",")    # "1,234,567.89": exactly `decimals` digits, optional thousands separator
 path_join("src", "main.rs")            # "src/main.rs"; path_basename, path_dirname, path_extension, path_stem, path_normalize: text only, always "/"
 
@@ -220,7 +221,7 @@ crypto.uuid()         math.sqrt(16)      arr.range(10)
 | `db`         | Database       | `db.sqlite_open("db")`, `db.sqlite_query(c, sql)`     |
 | `math`       | Mathematics    | `math.sqrt(x)`, `math.pow(a, b)`                      |
 | `str`        | Strings        | `str.upper(s)`, `str.split(s, ",")`                   |
-| `arr`        | Arrays         | `arr.range(n)`, `arr.flatten(a)`, `arr.unique(a)`     |
+| `arr`        | Arrays         | `arr.range(n)`, `arr.flatten(a)` (one level), `arr.unique(a)` |
 | `json`       | JSON           | `json.parse(s)`, `json.stringify(v)`                  |
 | `platform`   | Platform       | `platform.arch()`, `platform.cpu()`, `platform.gpus()` |
 | `ai`         | AI queries     | `ai("prompt")`, `ai("prompt", {images: ["photo.jpg"]})`          |
