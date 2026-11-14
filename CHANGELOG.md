@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- `base64_decode` refuses unpadded or short-padded input and the URL-safe alphabet with E_BAD_VALUE and a hint (pad with `=` to a multiple of 4; replace `-` with `+` and `_` with `/`), as Python's strict decoder does; it accepted them silently.
+- An error from a module member names the member as written: `file.read("x")` says `file.read: ...` and its `builtin` field is `file.read`, not `cat`. Error codes are unchanged.
+- PowerShell input: `+` converts the right operand to the left operand's type, as pwsh does, through the new `ps_add` builtin: `'a' + 1` is `a1` and `1 + '2'` is `3`; it was an error.
+- The Agent API's `/execute` envelope reports each error's own `retryable`, the rule the CLI uses, so E_PARSE, E_BAD_ARG and E_UNKNOWN_NAME are retryable there too.
+
+### Added
+
+- `math.pi` and `math.e` are Float constants: `math.pi * 2` is 6.283185307179586.
+
+### Fixed
+
+- An `undo` that stops at a step changed since it ran lists every older step in the requested range as skipped ("not reached"), so `steps` and the counts add up; such steps were missing from the report.
+- `capitalize` and `title` give the titlecase form of the Unicode digraph letters (`capitalize("ǆ")` is `ǅ`, not `Ǆ`), as Python does.
+
 ## [14.0.2] - 2026-11-13
 
 ### Security
