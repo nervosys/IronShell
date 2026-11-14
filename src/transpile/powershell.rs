@@ -148,7 +148,28 @@ pub fn transpile_powershell_with_report(src: &str) -> Result<(String, Vec<Fallba
     Ok((out, fb))
 }
 
+/// The pipeline-stage cmdlet that takes a script block, when a statement has
+/// one: `Where-Object { ... }`, `ForEach-Object { ... }` (and `?`, `%`, `where`
+/// after a pipe), named so the refusal says what it is.
+fn script_block_cmdlet(stmt: &str) -> Option<&'static str> {
+    let stages = split_ps_pipes(stmt).ok()?;
+    for (i, stage) in stages.iter().enumerate() {
+        let w = stage.split_whitespace().next().unwrap_or("").to_lowercase();
+        match w.as_str() {
+            "where-object" => return Some("Where-Object"),
+            "foreach-object" => return Some("ForEach-Object"),
+            "?" | "where" if i > 0 => return Some("Where-Object"),
+            "%" | "foreach" if i > 0 => return Some("ForEach-Object"),
+            _ => {}
+        }
+    }
+    None
+}
+
 fn describe_ps_block(first_line: &str) -> String {
+    if let Some(c) = script_block_cmdlet(first_line) {
+        return format!("command `{}`", c);
+    }
     let t = first_line.trim();
     let w = t
         .split(|c: char| c.is_whitespace() || c == '(' || c == '{')
@@ -164,6 +185,9 @@ fn describe_ps_block(first_line: &str) -> String {
 }
 
 fn describe_ps_complex(s: &str) -> String {
+    if let Some(c) = script_block_cmdlet(s) {
+        return format!("command `{}`", c);
+    }
     let w = s
         .split(|c: char| c.is_whitespace() || c == '(' || c == '{')
         .next()
@@ -255,7 +279,7 @@ fn emit_ps_statement(
     fb: &mut Vec<Fallback>,
 ) -> Result<()> {
     // Skip if contains complex constructs that need fallback
-    if contains_complex_construct(line) {
+    if contains_complex_construct(line) || script_block_cmdlet(line).is_some() {
         out.push_str(&render_fallback_pwsh(line));
         out.push('\n');
         fb.push(Fallback {
@@ -328,7 +352,7 @@ fn is_assignment_target(line: &str) -> bool {
 
 fn starts_like_expression(line: &str) -> bool {
     match line.chars().next() {
-        Some(c) => c == '$' || c == '"' || c == '\'' || c.is_ascii_digit(),
+        Some(c) => c == '$' || c == '(' || c == '"' || c == '\'' || c.is_ascii_digit(),
         None => false,
     }
 }
@@ -354,7 +378,7 @@ fn parse_ps_expression(toks: &[Token]) -> Option<String> {
             }
         } else {
             match t {
-                Token::Single(_) => out.push(render_token_expr(t).ok()?),
+                Token::Single(_) | Token::Group(_) => out.push(render_token_expr(t).ok()?),
                 Token::Interp(pcs) => {
                     let ok = match pcs.as_slice() {
                         [Piece::Var(_)] => true,
@@ -395,6 +419,9 @@ enum Token {
     Parameter(String),
     /// Splatted variable @args
     Splat(String),
+    /// A parenthesised expression, already translated to IronShell source
+    /// (without its parentheses): `(1+2)` is `1 + 2`.
+    Group(String),
 }
 
 #[derive(Debug, Clone)]
@@ -532,7 +559,35 @@ fn render_fallback_pwsh(line: &str) -> String {
 Assignment parsing
 ============================================================================= */
 
+/// `$name = <expression>` with `+ - * %` between variables, numbers and text.
+fn parse_ps_expression_assignment(line: &str) -> Option<String> {
+    let trimmed = line.trim();
+    if !trimmed.starts_with('$') {
+        return None;
+    }
+    let eq = trimmed.find('=')?;
+    if trimmed[..eq].ends_with(|c: char| "+-*/%".contains(c)) || trimmed[eq + 1..].starts_with('=')
+    {
+        return None;
+    }
+    let var = trimmed[1..eq].trim();
+    let val = trimmed[eq + 1..].trim();
+    if !is_ps_ident(var) || val.is_empty() || !starts_like_expression(val) {
+        return None;
+    }
+    if split_ps_pipes(val).map(|p| p.len() > 1).unwrap_or(true) {
+        return None;
+    }
+    let toks = split_ps_words(val).ok()?;
+    let expr = parse_ps_expression(&toks)?;
+    Some(format!("let mut {} = {};", vname(var), expr))
+}
+
 fn parse_ps_assignment(line: &str) -> Option<String> {
+    parse_ps_simple_assignment(line).or_else(|| parse_ps_expression_assignment(line))
+}
+
+fn parse_ps_simple_assignment(line: &str) -> Option<String> {
     // Match: $VarName = expression
     let trimmed = line.trim();
 
@@ -569,7 +624,7 @@ fn parse_ps_assignment(line: &str) -> Option<String> {
 
     // Parse the value
     if val_part.is_empty() {
-        return Some(format!("let {} = null;", name));
+        return Some(format!("let mut {} = null;", name));
     }
 
     // Handle different value types
@@ -580,11 +635,11 @@ fn parse_ps_assignment(line: &str) -> Option<String> {
             return None;
         }
         let expr = render_token_expr(&toks[0]).ok()?;
-        return Some(format!("let {} = {};", name, expr));
+        return Some(format!("let mut {} = {};", name, expr));
     } else if val_part.starts_with('$') {
         // Variable reference
         if let Some(var) = parse_ps_var_ref(val_part) {
-            return Some(format!("let {} = {};", name, var));
+            return Some(format!("let mut {} = {};", name, var));
         }
     } else if val_part.starts_with("@(") {
         // Array literal - simplified handling
@@ -592,13 +647,13 @@ fn parse_ps_assignment(line: &str) -> Option<String> {
             let inner = &val_part[2..end];
             let elements: Vec<&str> = inner.split(',').map(|s| s.trim()).collect();
             let ae_elements: Vec<String> = elements.iter().map(|e| parse_simple_value(e)).collect();
-            return Some(format!("let {} = [{}];", name, ae_elements.join(", ")));
+            return Some(format!("let mut {} = [{}];", name, ae_elements.join(", ")));
         }
     } else if val_part.starts_with("@{") {
         // Hashtable - simplified handling
         return None; // Complex, use fallback
     } else if is_ps_number(val_part) {
-        return Some(format!("let {} = {};", name, val_part));
+        return Some(format!("let mut {} = {};", name, val_part));
     }
 
     None
@@ -709,6 +764,22 @@ fn split_ps_words(s: &str) -> Result<Vec<Token>> {
             continue;
         }
 
+        // A parenthesised expression at the start of a word: `(1+2)`.
+        if ch == '(' && !in_dq && !in_sq && cur.is_empty() {
+            let close = matching_paren(&chars, i)
+                .ok_or_else(|| anyhow!("the parenthesis in `{}` is not closed", s.trim()))?;
+            if chars.get(close + 1).is_some_and(|c| !c.is_whitespace()) {
+                return Err(anyhow!(
+                    "the expression `{}` is not translated (only a whole parenthesised `+ - * %` expression is)",
+                    s.trim()
+                ));
+            }
+            let inner: String = chars[i + 1..close].iter().collect();
+            tokens.push(Token::Group(translate_group(&inner)?));
+            i = close + 1;
+            continue;
+        }
+
         if ch == '"' && !in_sq {
             if in_dq {
                 // End of double-quoted string
@@ -756,11 +827,135 @@ fn split_ps_words(s: &str) -> Result<Vec<Token>> {
     Ok(tokens)
 }
 
+/// The index of the `)` that closes the `(` at `open`, outside quotes.
+fn matching_paren(chars: &[char], open: usize) -> Option<usize> {
+    let mut depth = 0usize;
+    let mut quote: Option<char> = None;
+    let mut i = open;
+    while i < chars.len() {
+        let c = chars[i];
+        match quote {
+            Some(q) => {
+                if c == '`' && q == '"' {
+                    i += 1;
+                } else if c == q {
+                    quote = None;
+                }
+            }
+            None => match c {
+                '"' | '\'' => quote = Some(c),
+                '(' => depth += 1,
+                ')' => {
+                    depth = depth.saturating_sub(1);
+                    if depth == 0 {
+                        return Some(i);
+                    }
+                }
+                _ => {}
+            },
+        }
+        i += 1;
+    }
+    None
+}
+
+/// The IronShell source of the expression inside `( ... )`, when it is in the
+/// supported subset; otherwise a refusal that names it.
+fn translate_group(inner: &str) -> Result<String> {
+    tokenize_ps_expr(inner)
+        .and_then(|toks| parse_ps_expression(&toks))
+        .ok_or_else(|| {
+            anyhow!(
+                "the parenthesised expression `({})` is not translated (only `+ - * %` between variables, numbers and strings are)",
+                inner.trim()
+            )
+        })
+}
+
+/// The operands and operators of an expression written with or without
+/// spaces (`1+2`, `$x * -3`), as the tokens [`parse_ps_expression`] reads.
+fn tokenize_ps_expr(s: &str) -> Option<Vec<Token>> {
+    let chars: Vec<char> = s.chars().collect();
+    let mut toks: Vec<Token> = Vec::new();
+    let mut i = 0;
+    let mut want_operand = true;
+    while i < chars.len() {
+        let c = chars[i];
+        if c.is_whitespace() {
+            i += 1;
+            continue;
+        }
+        if !want_operand {
+            if matches!(c, '+' | '-' | '*' | '%') {
+                toks.push(Token::Interp(vec![Piece::Text(c.to_string())]));
+                i += 1;
+                want_operand = true;
+                continue;
+            }
+            return None;
+        }
+        if c == '(' {
+            let close = matching_paren(&chars, i)?;
+            let inner: String = chars[i + 1..close].iter().collect();
+            toks.push(Token::Group(translate_group(&inner).ok()?));
+            i = close + 1;
+        } else if c == '"' || c == '\'' {
+            let mut j = i + 1;
+            while j < chars.len() && chars[j] != c {
+                if chars[j] == '`' {
+                    return None;
+                }
+                j += 1;
+            }
+            if j >= chars.len() || chars.get(j + 1) == Some(&c) {
+                return None;
+            }
+            let text: String = chars[i..=j].iter().collect();
+            toks.push(parse_ps_token(&text).ok()?);
+            i = j + 1;
+        } else if c == '$' {
+            let mut j = i + 1;
+            while j < chars.len() && (chars[j].is_ascii_alphanumeric() || chars[j] == '_') {
+                j += 1;
+            }
+            let text: String = chars[i..j].iter().collect();
+            toks.push(parse_ps_token(&text).ok()?);
+            i = j;
+        } else if c.is_ascii_digit()
+            || (c == '-' && chars.get(i + 1).is_some_and(|d| d.is_ascii_digit()))
+        {
+            let mut j = i + 1;
+            while j < chars.len() && (chars[j].is_ascii_digit() || chars[j] == '.') {
+                j += 1;
+            }
+            let text: String = chars[i..j].iter().collect();
+            if !is_ps_number(&text) {
+                return None;
+            }
+            toks.push(Token::Interp(vec![Piece::Text(text)]));
+            i = j;
+        } else {
+            return None;
+        }
+        want_operand = false;
+    }
+    if want_operand {
+        None
+    } else {
+        Some(toks)
+    }
+}
+
 fn parse_ps_token(s: &str) -> Result<Token> {
     let s = s.trim();
 
     if s.is_empty() {
         return Ok(Token::Single(String::new()));
+    }
+
+    // A negative number is a number, not a parameter.
+    if s.starts_with('-') && is_ps_number(s) {
+        return Ok(Token::Interp(vec![Piece::Text(s.to_string())]));
     }
 
     // Parameter (starts with -)
@@ -1127,6 +1322,17 @@ fn ps_joined(args: &[Token], line_no: usize) -> Result<String> {
                     }
                 }
             }
+            Token::Group(e) => {
+                if e.contains('"') {
+                    return Err(anyhow!(
+                        "powershell line {}: a parenthesised expression with text in it, among several words, is not translated; nothing was run",
+                        line_no
+                    ));
+                }
+                s.push_str("${");
+                s.push_str(e);
+                s.push('}');
+            }
             _ => {}
         }
     }
@@ -1147,6 +1353,7 @@ fn render_token_expr(tok: &Token) -> Result<String> {
         }
         Token::Parameter(p) => Ok(format!("\"-{}\"", p)),
         Token::Splat(s) => Ok(vname(s)), // Pass as variable
+        Token::Group(e) => Ok(format!("({})", e)),
         Token::Interp(pieces) => {
             if pieces.len() == 1 {
                 match &pieces[0] {
@@ -1180,6 +1387,7 @@ fn render_token_as_sh_arg(tok: &Token) -> String {
         Token::Single(s) => json_string_literal(s),
         Token::Parameter(p) => json_string_literal(&format!("-{}", p)),
         Token::Splat(_) => "\"@args\"".to_string(), // Simplified
+        Token::Group(e) => format!("({})", e),
         Token::Interp(pieces) => {
             if pieces.len() == 1 {
                 match &pieces[0] {
@@ -1418,13 +1626,13 @@ mod tests {
     #[test]
     fn test_simple_assignment() {
         let result = transpile_powershell_to_ae("$x = 42").unwrap();
-        assert!(result.contains("let x = 42;"));
+        assert!(result.contains("let mut x = 42;"));
     }
 
     #[test]
     fn test_string_assignment() {
         let result = transpile_powershell_to_ae("$name = \"hello\"").unwrap();
-        assert!(result.contains("let name = \"hello\";"));
+        assert!(result.contains("let mut name = \"hello\";"));
     }
 
     #[test]

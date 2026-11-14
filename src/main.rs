@@ -1505,8 +1505,24 @@ fn transpile_zsh_checked(src: &str) -> Result<String> {
 
 /// [`transpile_zsh_checked`] for PowerShell.
 fn transpile_pwsh_checked(src: &str) -> Result<String> {
-    let (code, fallbacks) = transpile::powershell::transpile_powershell_with_report(src)?;
+    let (code, fallbacks) = match transpile::powershell::transpile_powershell_with_report(src) {
+        Ok(r) => r,
+        // Every transpile-time refusal has one shape: E_POLICY_DENY, exit 77,
+        // with a hint, as a construct handed to `sh` is refused below.
+        Err(why) => {
+            let e = iron_shell::safety::policy_deny(
+                "powershell",
+                why.to_string(),
+                "rewrite it with commands and expressions the powershell transpiler translates, or write it in ish",
+            );
+            iron_shell::repl::report_error(&e);
+            std::process::exit(iron_shell::repl::exit_status_for(&e));
+        }
+    };
     refuse_sh_fallbacks("powershell", &fallbacks);
+    // The translation has no line map: a runtime error would name its line, not
+    // the PowerShell source's.
+    iron_shell::repl::set_source_lines_unknown();
     Ok(code)
 }
 

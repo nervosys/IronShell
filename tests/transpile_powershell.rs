@@ -10,42 +10,42 @@ fn strip_ws(s: &str) -> String {
 fn simple_assignment() {
     let ps = "$x = 42";
     let ae = transpile_powershell_to_ae(ps).expect("transpile ok");
-    assert!(ae.contains("let x = 42;"), "got:\n{}", ae);
+    assert!(ae.contains("let mut x = 42;"), "got:\n{}", ae);
 }
 
 #[test]
 fn string_assignment() {
     let ps = "$name = \"hello\"";
     let ae = transpile_powershell_to_ae(ps).expect("transpile ok");
-    assert!(ae.contains("let name = \"hello\";"), "got:\n{}", ae);
+    assert!(ae.contains("let mut name = \"hello\";"), "got:\n{}", ae);
 }
 
 #[test]
 fn bool_true_assignment() {
     let ps = "$flag = $true";
     let ae = transpile_powershell_to_ae(ps).expect("transpile ok");
-    assert!(ae.contains("let flag = true;"), "got:\n{}", ae);
+    assert!(ae.contains("let mut flag = true;"), "got:\n{}", ae);
 }
 
 #[test]
 fn bool_false_assignment() {
     let ps = "$flag = $false";
     let ae = transpile_powershell_to_ae(ps).expect("transpile ok");
-    assert!(ae.contains("let flag = false;"), "got:\n{}", ae);
+    assert!(ae.contains("let mut flag = false;"), "got:\n{}", ae);
 }
 
 #[test]
 fn null_assignment() {
     let ps = "$x = $null";
     let ae = transpile_powershell_to_ae(ps).expect("transpile ok");
-    assert!(ae.contains("let x = null;"), "got:\n{}", ae);
+    assert!(ae.contains("let mut x = null;"), "got:\n{}", ae);
 }
 
 #[test]
 fn array_assignment() {
     let ps = "$items = @(1, 2, 3)";
     let ae = transpile_powershell_to_ae(ps).expect("transpile ok");
-    assert!(ae.contains("let items = ["), "got:\n{}", ae);
+    assert!(ae.contains("let mut items = ["), "got:\n{}", ae);
 }
 
 #[test]

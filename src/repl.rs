@@ -238,6 +238,17 @@ fn print_result(out: &str) {
     );
 }
 
+/// Set when the code being run was transpiled from another shell without a line
+/// map: its line numbers are the translation's, not the source's, so an error
+/// names no line rather than a wrong one.
+static SOURCE_LINES_UNKNOWN: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+/// Declare that the code about to run has no line map back to its source.
+pub fn set_source_lines_unknown() {
+    SOURCE_LINES_UNKNOWN.store(true, std::sync::atomic::Ordering::Relaxed);
+}
+
 /// One-liner (e.g. `ish -c 'code'`)
 pub fn run_one(env: &mut Env, code: &str) -> Result<i32> {
     run_one_as(env, code, crate::record::Surface::C)
@@ -307,7 +318,10 @@ pub fn run_one_as(env: &mut Env, code: &str, surface: crate::record::Surface) ->
         Err(e) => {
             // A one-line `-c` has no line to name: its only line is the one the
             // user typed.
-            let failed_line = failed_line.filter(|_| code.contains('\n'));
+            let failed_line = failed_line.filter(|_| {
+                code.contains('\n')
+                    && !SOURCE_LINES_UNKNOWN.load(std::sync::atomic::Ordering::Relaxed)
+            });
             let failed_in = failed_in.filter(|_| failed_line.is_some());
             print_eval_error(&e, colors_enabled_stderr(), failed_line, failed_in);
             Ok(exit_status_for(&e))
