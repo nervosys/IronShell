@@ -9039,6 +9039,17 @@ thread_local! {
     static STEPS: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
 }
 
+/// The limit, in seconds, the command line (`--timeout`, `IRONSHELL_TIMEOUT`)
+/// put on this process; 0 when none. Only used to word the expiry message.
+static CLI_TIMEOUT_SECS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Bound the whole run of this thread to `secs` seconds, until the guard drops.
+/// The expiry message names `secs`.
+pub fn enter_cli_deadline(secs: u64) -> DeadlineGuard {
+    CLI_TIMEOUT_SECS.store(secs, std::sync::atomic::Ordering::Relaxed);
+    enter_deadline(std::time::Duration::from_secs(secs))
+}
+
 /// How many `eval_expr` entries pass between clock reads.
 const DEADLINE_CHECK_INTERVAL: u32 = 1024;
 
@@ -9109,6 +9120,9 @@ pub(crate) fn remaining_deadline() -> Option<std::time::Duration> {
 /// scripts, every test — this is one thread-local read and a `None` check.
 #[inline]
 pub fn check_deadline() -> anyhow::Result<()> {
+    // The memory budget is read at every step: one allocation can double the
+    // live bytes, so the amortized clock interval below would be too coarse.
+    crate::memory::check()?;
     let n = STEPS.with(|s| {
         let n = s.get().wrapping_add(1);
         s.set(n);
@@ -9120,8 +9134,11 @@ pub fn check_deadline() -> anyhow::Result<()> {
     DEADLINE.with(|d| match d.get() {
         Some(at) if std::time::Instant::now() >= at => Err(budget_exceeded(
             "eval",
-            "evaluation exceeded its time limit and was cancelled".to_string(),
-            "make the evaluation shorter, or give it a longer time limit",
+            match CLI_TIMEOUT_SECS.load(std::sync::atomic::Ordering::Relaxed) {
+                0 => "evaluation exceeded its time limit and was cancelled".to_string(),
+                n => format!("evaluation exceeded the {n} s deadline"),
+            },
+            "make the evaluation shorter, or give it a longer time limit (--timeout SECONDS)",
         )),
         _ => Ok(()),
     })

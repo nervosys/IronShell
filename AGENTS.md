@@ -176,6 +176,7 @@ result = try { risky() } catch e { "fallback" }
 try { error("bad", {field: "age"}) } catch e { e.code }   # "E_USER"; error(message[, extra Record]) raises your own
 # error.retryable is true when retrying the same call later, or with the arguments corrected as the hint says, can succeed (bad arguments, an unknown name that has a suggestion, not found, needs approval) and false when the same call can never succeed as asked (policy deny, outside the workspace, a value that is undefined or overflows, an unknown name with no suggestion). The HTTP API's `/execute` envelope narrows it to "a resend of the same request", so it reports false for E_PARSE, E_BAD_ARG, E_UNKNOWN_BUILTIN and E_UNKNOWN_NAME.
 # In agent mode `try` does not catch E_NEEDS_APPROVAL, E_OUTSIDE_WORKSPACE or E_POLICY_DENY: it re-raises them and the script stops with their exit status (75/77). Human mode catches them.
+# Limits: memory past IRONSHELL_MEMORY_LIMIT_MB (or `--memory-limit MB`; default the smaller of 2048 and half of RAM, 0 = none) and a run past `--timeout SECONDS` (or IRONSHELL_TIMEOUT; no default) stop with E_BUDGET_EXCEEDED, as do strings over 8 MB and Arrays over 10M elements; `sleep` is cut at the deadline
 
 # Script arguments: `ish script.ish a b` gives the script args() == ["a", "b"] (empty under -c)
 # A script file echoes the value of its last expression only; earlier values are not printed.

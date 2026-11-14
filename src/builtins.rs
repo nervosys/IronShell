@@ -15655,7 +15655,10 @@ fn bi_flatten(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
     let mut result = Vec::new();
     for val in arr {
         match val {
-            Value::Array(inner) => result.extend(inner.clone()),
+            Value::Array(inner) => {
+                crate::eval::check_array_len(result.len().saturating_add(inner.len()))?;
+                result.extend(inner.clone())
+            }
             other => result.push(other.clone()),
         }
     }
@@ -15943,6 +15946,7 @@ fn bi_concat(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
 
     let mut arr1 = expect_array("concat", &arr1_val)?.to_vec();
     let arr2 = expect_array("concat", &arr2_val)?;
+    crate::eval::check_array_len(arr1.len().saturating_add(arr2.len()))?;
     arr1.extend(arr2.iter().cloned());
 
     Ok(Value::Array(arr1))
