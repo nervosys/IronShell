@@ -1769,6 +1769,11 @@ impl ErrorCode {
     /// conservative: a refusal (`PolicyDeny`), an exhausted envelope
     /// (`BudgetExceeded`), and an unidentified fault (`Unknown`) all report
     /// `false`, because retrying them burns budget without changing the outcome.
+    ///
+    /// The rule: `true` when the same call, retried later or with its arguments
+    /// corrected as the hint says, can succeed (bad arguments, an unknown name
+    /// with a suggestion, not found, needs approval); `false` when it can never
+    /// succeed as asked. It is decided here, by code, and nowhere else.
     pub fn retryable(&self) -> bool {
         match self {
             ErrorCode::BadArg | ErrorCode::UnknownField => true,
