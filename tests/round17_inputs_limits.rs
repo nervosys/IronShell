@@ -164,7 +164,8 @@ fn file_read_of_a_latin1_file_is_refused_at_the_bad_byte() {
     let proj = dir.join("proj");
     std::fs::write(proj.join("latin1.txt"), b"caf\xE9\n").unwrap();
     let out = ish_in(&proj, r#"file.read("latin1.txt")"#);
-    assert_not_utf8_refusal(&out, "cat", "byte offset 3");
+    // Round 41: a module member names itself, not the builtin it runs.
+    assert_not_utf8_refusal(&out, "file.read", "byte offset 3");
 }
 
 #[test]

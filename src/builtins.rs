@@ -49499,7 +49499,7 @@ fn bi_crypto_base64_decode(args: Vec<Value>, input: Option<Value>) -> Result<Val
     let alphabet_only = compact
         .bytes()
         .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'+' | b'/' | b'='));
-    if alphabet_only && compact.len() % 4 != 0 {
+    if alphabet_only && !compact.len().is_multiple_of(4) {
         return Err(crate::safety::value_not_representable(
             "crypto_base64_decode",
             format!(
