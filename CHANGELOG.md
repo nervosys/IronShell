@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [14.0.3] - 2026-11-13
+
 ### Changed
 
 - `base64_decode` refuses unpadded or short-padded input and the URL-safe alphabet with E_BAD_VALUE and a hint (pad with `=` to a multiple of 4; replace `-` with `+` and `_` with `/`), as Python's strict decoder does; it accepted them silently.
@@ -4644,7 +4646,8 @@ N/A - Initial release
 
 See [ROADMAP.md](ROADMAP.md) for upcoming features.
 
-[Unreleased]: https://github.com/nervosys/IronShell/compare/v14.0.2...HEAD
+[Unreleased]: https://github.com/nervosys/IronShell/compare/v14.0.3...HEAD
+[14.0.3]: https://github.com/nervosys/IronShell/compare/v14.0.2...v14.0.3
 [14.0.2]: https://github.com/nervosys/IronShell/compare/v14.0.1...v14.0.2
 [14.0.1]: https://github.com/nervosys/IronShell/compare/v14.0.0...v14.0.1
 [14.0.0]: https://github.com/nervosys/AetherShell/compare/v12.0.2...v14.0.0
