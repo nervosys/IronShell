@@ -252,8 +252,9 @@ result = await runtime.run_swarm(
 ```python
 from ironshell import IronShellRuntime, IronShellError, IronShellTimeout
 
-# timeout: seconds per call (default 60; None for no limit), also passed to
-# `ish --timeout`. memory_limit_mb is passed to `ish --memory-limit` (ish 14.0.2+).
+# timeout: seconds per call (default 60; None for no limit), enforced from
+# Python by killing the process. memory_limit_mb is passed to `ish --memory-limit`
+# only when set, and needs ish >= 14.0.2.
 runtime = IronShellRuntime(timeout=30, memory_limit_mb=512)
 runtime.eval("sys.hostname()", timeout=5)   # per-call override
 

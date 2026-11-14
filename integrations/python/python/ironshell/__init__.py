@@ -18,7 +18,6 @@ from importlib.metadata import PackageNotFoundError
 from importlib.metadata import version as _distribution_version
 from typing import Any, Callable, Dict, List, Optional, Union
 import json
-import math
 import re
 import subprocess
 import sys
@@ -519,10 +518,10 @@ class IronShellRuntime:
 
         Args:
             ish_path: Path to the ish binary. If None, searches PATH.
-            timeout: Default seconds a call may run; None for no limit. Also
-                passed to ish as `--timeout` (rounded up to whole seconds).
+            timeout: Default seconds a call may run; None for no limit. Enforced
+                from Python only (the process is killed); `--timeout` is not passed.
             memory_limit_mb: Memory budget passed to ish as `--memory-limit`
-                (ish 14.0.2+); 0 or None leaves ish's default.
+                only when set; needs ish >= 14.0.2. None leaves ish's default.
         """
         self._ish_path = ish_path or self._find_ish()
         self.timeout = timeout
@@ -564,8 +563,6 @@ class IronShellRuntime:
         limit = self.timeout if timeout is _UNSET else timeout
         memory = self.memory_limit_mb if memory_limit_mb is _UNSET else memory_limit_mb
         cmd = [self._ish_path, *args, "--deterministic"]
-        if limit is not None:
-            cmd += ["--timeout", str(max(1, math.ceil(limit)))]
         if memory:
             cmd += ["--memory-limit", str(int(memory))]
         try:
@@ -586,7 +583,9 @@ class IronShellRuntime:
         stderr = _as_text(result.stderr, "replace")
         if result.returncode != 0:
             err = _parse_error(stderr, result.returncode)
-            if err.code in ("E_TIMEOUT", "E_DEADLINE"):
+            # ish's own deadline (IRONSHELL_TIMEOUT in the environment) is
+            # reported as E_BUDGET_EXCEEDED with "deadline" in the message.
+            if err.code == "E_BUDGET_EXCEEDED" and "deadline" in err.message.lower():
                 raise IronShellTimeout(
                     err.message, code=err.code, hint=err.hint,
                     exit_status=err.exit_status, stderr=stderr,

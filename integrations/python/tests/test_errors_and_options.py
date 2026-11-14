@@ -99,11 +99,14 @@ class TestRun:
             rt.eval("1")
             cmd = run.call_args.args[0]
             assert run.call_args.kwargs["timeout"] == 7
-            assert cmd[cmd.index("--timeout") + 1] == "7"
+            assert "--timeout" not in cmd
             assert cmd[cmd.index("--memory-limit") + 1] == "256"
             rt.eval("1", timeout=None)
             assert run.call_args.kwargs["timeout"] is None
-            assert "--timeout" not in run.call_args.args[0]
+            assert "--memory-limit" in run.call_args.args[0]
+            rt2 = _runtime()
+            rt2.eval("1")
+            assert "--memory-limit" not in run.call_args.args[0]
 
     def test_timeout_raises_ironshelltimeout(self):
         with patch(
@@ -113,6 +116,14 @@ class TestRun:
             with pytest.raises(IronShellTimeout) as info:
                 _runtime(timeout=1).eval("loop()")
         assert isinstance(info.value, IronShellError)
+
+    def test_ish_deadline_error_is_timeout(self):
+        with patch("ironshell.subprocess.run") as run:
+            run.return_value = _completed(
+                returncode=1, stderr=b"error[E_BUDGET_EXCEEDED]: evaluation deadline exceeded\n"
+            )
+            with pytest.raises(IronShellTimeout):
+                _runtime().eval("loop()")
 
     def test_missing_binary(self):
         rt = IronShellRuntime(ish_path="/nonexistent/dir/ish-not-here")
