@@ -1136,11 +1136,53 @@ pub fn undo(n: usize, force: bool) -> Result<Vec<Rewound>, (String, bool)> {
         let index = s.journal.len() - 1;
         match undo_at(&mut s, index, force, &mut out) {
             Step::Next => {}
-            Step::Stop => break,
+            Step::Stop => {
+                report_not_reached(&s, index, n, steps, group, &mut out);
+                break;
+            }
             Step::Refused(refusal) => return Err(refusal),
         }
     }
     Ok(out)
+}
+
+/// An undo that stopped at `index` did not touch the older steps it was asked
+/// for. Each is listed as skipped, so the record accounts for every step in the
+/// range: one that is missing from `steps` reads as one that was undone.
+/// `steps` and `group` are the undo's own count so far, as in [`undo`].
+fn report_not_reached(
+    s: &State,
+    index: usize,
+    n: usize,
+    mut steps: usize,
+    mut group: Option<usize>,
+    out: &mut Vec<Rewound>,
+) {
+    let blocker = s.journal.get(index).map(|e| e.seq);
+    for e in s.journal[..index.min(s.journal.len())].iter().rev() {
+        if group.is_none() || e.group != group {
+            if steps == n {
+                break;
+            }
+            steps += 1;
+            group = e.group;
+        }
+        let what = if e.path.is_empty() {
+            e.builtin.clone()
+        } else {
+            e.path.clone()
+        };
+        let why = match blocker {
+            Some(b) => format!(
+                "not reached: the undo stopped at step {b} and does not go past it; this step is still in the journal"
+            ),
+            None => "not reached: the undo stopped at a newer step and does not go past it; this step is still in the journal".to_string(),
+        };
+        out.push(Rewound {
+            seq: Some(e.seq),
+            outcome: Outcome::Skipped { what, why },
+        });
+    }
 }
 
 /// What one call to [`undo_at`] did, and what the caller does next.

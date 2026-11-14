@@ -192,3 +192,32 @@ fn created_files_already_deleted_by_hand_are_all_reported_alike() {
     std::fs::remove_file(d2.ws.join("t.txt")).unwrap();
     assert_eq!(d2.value("undo(2).skipped"), "2");
 }
+
+/// The tester's report: a step that was changed by hand stops the undo, and the
+/// older steps it never reached were missing from `steps`, so the counts did not
+/// add up to the steps asked for.
+#[test]
+fn an_undo_that_stops_lists_every_step_it_did_not_reach() {
+    let d = Dirs::new("notreached");
+    std::fs::write(d.ws.join("k.txt"), "orig").unwrap();
+    d.run(r#"file.write("new.txt", "a")"#);
+    d.run(r#"file.write("k.txt", "b")"#);
+    d.run(r#"mkdir("dd")"#);
+    d.run(r#"file.write("big.bin", "x")"#);
+    std::fs::remove_file(d.ws.join("new.txt")).unwrap();
+    std::fs::remove_file(d.ws.join("k.txt")).unwrap();
+    std::fs::remove_dir(d.ws.join("dd")).unwrap();
+    // Four steps, four rows: big.bin removed, dd skipped, k.txt skipped (it was
+    // removed since), new.txt skipped as not reached.
+    assert_eq!(d.value("undo(10).steps | len"), "4");
+    let d2 = Dirs::new("notreached2");
+    std::fs::write(d2.ws.join("k.txt"), "orig").unwrap();
+    d2.run(r#"file.write("new.txt", "a")"#);
+    d2.run(r#"file.write("k.txt", "b")"#);
+    d2.run(r#"mkdir("dd")"#);
+    d2.run(r#"file.write("big.bin", "x")"#);
+    std::fs::remove_file(d2.ws.join("new.txt")).unwrap();
+    std::fs::remove_file(d2.ws.join("k.txt")).unwrap();
+    std::fs::remove_dir(d2.ws.join("dd")).unwrap();
+    assert_eq!(d2.value("undo(10).skipped"), "3");
+}
