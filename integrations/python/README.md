@@ -29,7 +29,7 @@ Requires the `ish` binary on `PATH`. Install it with
 [releases page](https://github.com/nervosys/IronShell/releases).
 
 > **Versioning:** this SDK versions independently of the `ish` shell. The SDK in
-> this repository is 1.5.1; PyPI carries 1.5.0, a manual upload, because CI has
+> this repository is 1.5.2; PyPI carries 1.5.0, a manual upload, because CI has
 > never published it. `pip install ./integrations/python` installs the current one.
 
 ## Quick Start
@@ -223,8 +223,10 @@ agent.run("Process this data with MapReduce: [1,2,3,4,5]")
 ```python
 runtime = IronShellRuntime()
 
-# Evaluate code
-result = runtime.eval(code: str) -> Any
+# Evaluate code. Results come from `ish --deterministic` (canonical JSON), so
+# they are typed Python values; null, or no output, is None. Code and output are
+# UTF-8 on every platform.
+result = runtime.eval(code: str, timeout=..., memory_limit_mb=...) -> Any
 
 # Create agent
 agent = runtime.create_agent(
@@ -244,6 +246,29 @@ result = await runtime.run_swarm(
     max_iterations: int = 10
 ) -> SwarmResult   # result.result is the builtin's combined answer
 ```
+
+### Errors, timeouts and limits
+
+```python
+from ironshell import IronShellRuntime, IronShellError, IronShellTimeout
+
+# timeout: seconds per call (default 60; None for no limit), also passed to
+# `ish --timeout`. memory_limit_mb is passed to `ish --memory-limit` (ish 14.0.2+).
+runtime = IronShellRuntime(timeout=30, memory_limit_mb=512)
+runtime.eval("sys.hostname()", timeout=5)   # per-call override
+
+try:
+    runtime.eval('error("bad", {field: "age"})')
+except IronShellTimeout:
+    ...                                      # the ish process was killed
+except IronShellError as e:                  # subclasses RuntimeError
+    print(e.code, e.message, e.hint, e.exit_status, e.stderr)
+```
+
+`IronShellError` carries `code`, `message`, `hint`, `exit_status` and `stderr`,
+parsed from ish's `error[E_CODE]: message` / `hint:` output. `exit(3)` with no
+message gives `exit_status == 3` and "exited with status 3". A missing `ish`
+binary raises `IronShellError` too. `IronShellTimeout` subclasses `IronShellError`.
 
 ### Agent
 
