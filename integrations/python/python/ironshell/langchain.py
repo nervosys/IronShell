@@ -953,6 +953,50 @@ if LANGCHAIN_AVAILABLE:
             return self._run(category)
 
 # ============================================================================
+# Stubs when langchain is absent
+# ============================================================================
+
+_TOOL_NAMES = (
+    "IronShellTool",
+    "IronShellPipelineTool",
+    "IronShellAgentTool",
+    "IronShellWorkflowTool",
+    "IronShellMapReduceTool",
+    "IronShellSagaTool",
+    "IronShellMetricsTool",
+    "IronShellTracingTool",
+    "IronShellDistributedAgentTool",
+    "IronShellServiceRegistryTool",
+    "IronShellAgentAPIEvalTool",
+    "IronShellAgentAPITool",
+    "IronShellAgentAPIBuiltinsTool",
+)
+
+
+def _make_stub(name: str) -> type:
+    def __init__(self, *args, **kwargs):
+        _check_langchain()
+
+    return type(
+        name,
+        (),
+        {
+            "__init__": __init__,
+            "__doc__": f"{name} needs langchain: pip install ironshell[langchain]",
+            "__module__": __name__,
+        },
+    )
+
+
+# The classes above exist only with langchain installed. Without it they are
+# stubs, so `from ironshell.langchain import IronShellWorkflowTool` succeeds
+# and using one raises the clear ImportError.
+for _tool_name in _TOOL_NAMES:
+    if _tool_name not in globals():
+        globals()[_tool_name] = _make_stub(_tool_name)
+
+
+# ============================================================================
 # Factory Functions
 # ============================================================================
 
