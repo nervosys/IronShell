@@ -11592,10 +11592,9 @@ pub(crate) fn csv_rows(
 }
 
 /// `csv_rows` for the SQL paths (`sql`, `sql_value` and `db_csv_to_sqlite`): an
-/// empty cell in a text column is NULL, as one in a numeric column already is,
-/// so `where amt is null` finds it and `sum` does not count it as 0. The csv
-/// reader cannot tell an empty cell from a quoted `""`, so both are NULL.
-/// `open` and `from_csv` keep their `""`.
+/// empty cell is NULL in a numeric column (so `where amt is null` finds it and
+/// `sum` does not count it as 0) and `''` in a text column (so `where note = ''`
+/// finds it).
 pub(crate) fn csv_rows_sql(
     headers: &[String],
     records: &[csv::StringRecord],
@@ -24793,7 +24792,12 @@ fn canonical_write(v: &Value, out: &mut String) {
         Value::Int(n) => out.push_str(&n.to_string()),
         Value::Float(f) => {
             if f.is_finite() {
-                out.push_str(&format!("{}", f));
+                // The text to_json writes: 1.0 stays 1.0, -0.0 stays -0.0, so a
+                // Float is never mistaken for an Int.
+                match serde_json::Number::from_f64(*f) {
+                    Some(n) => out.push_str(&n.to_string()),
+                    None => out.push_str(&format!("{:?}", f)),
+                }
             } else {
                 out.push_str("null"); // NaN/Inf are not representable in JSON
             }
@@ -25597,12 +25601,10 @@ fn redactable_by_name(v: &Value) -> bool {
 /// canonical JSON — byte-identical for equal values across OS/locale (sorted keys,
 /// shortest round-trip floats), for snapshot tests, content-addressable caching,
 /// and cross-tool diffs. The whole value is emitted (no budget truncation, which
-/// would break reproducibility of the full result). `Null` prints nothing.
+/// would break reproducibility of the full result). `Null` prints `null`, as
+/// every other value prints its JSON.
 pub fn render_canonical(v: &Value) -> Option<String> {
-    match v {
-        Value::Null => None,
-        _ => Some(canonical_render(v)),
-    }
+    Some(canonical_render(v))
 }
 
 /// Format a `budget_value`/`budget_string_record` envelope as AECON page text plus

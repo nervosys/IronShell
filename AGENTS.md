@@ -135,6 +135,13 @@ this file, because measured it costs more than it saves:
 Write the standard syntax below. The reference, for maintaining old scripts,
 is `docs/AGENTIC_SYNTAX.md` and `ish agent schema`.
 
+### Reading Output, Config Files and Names (for AI agents)
+
+- **Agent-mode output** (`--agent`, `IRONSHELL_MODE=agent`) is compact AECON text, not JSON: a Record prints as `{k=v k2=v2}` (a string inside is JSON-quoted, nested values are inline), and an Array of Records prints as a TSV table whose header may be followed by compression directives, `@const` (a column that is the same in every row, stated once), `@prefix` (a shared leading run), `@same` (an empty cell repeats the row above) and `@delta` (a running sum), plus `@dict` and `@suffix`. A value too large to send whole prints as an `@handle` summary (`@handle`, `@shape`, `@items`, `@bytes`, a preview, `@omitted`); narrow it with `handle("h1") | where(...) | take(5)`. A handle is kept in a session directory (keyed by `IRONSHELL_SESSION_DIR`, `IRONSHELL_SESSION`, or the working directory), so a later `ish` process in the same session can read it, but another session cannot, and a session holds at most 4096.
+- **Parse `--deterministic` output.** `ish --deterministic ...` (or `IRONSHELL_DETERMINISTIC=1`) prints every result as canonical JSON, with sorted keys, no whitespace, a Float that keeps its point (`1.0`, not `1`) and `null` for null. It takes precedence over the AECON form above, is never summarised as a handle, and is the form to parse.
+- **Config round trips lose comments.** `to_toml`, `to_yaml` and `to_json` write a Record's keys sorted and keep no comments, no flow style and no original key order, so `from_toml(text) | to_toml` on a hand-written file drops its comments and reorders it. Edit config text with `file.replace` when comments matter.
+- **Module names are not variable names.** The names of the built-in modules (`file`, `user`, `net`, `sys`, `perm`, `proc`, `http`, ...) are bound to the modules, so `user = 1` or `let file = 2` fails with "is the name of a built-in module and cannot be used as a variable name"; pick another name (`owner`, `path`).
+
 ## IronShell Syntax Quick Reference
 
 ```
