@@ -2605,15 +2605,16 @@ pub static SIGNATURES: &[Signature] = &[
         subject_required: false,
         aliases: &[],
         subject: Some(Ty::Any),
-        params: &[req("needle", Ty::Any, "substring or element to look for")],
+        params: &[req("needle", Ty::Any, "a substring (String subject), an element (Array subject) or a key name (Record subject)")],
         returns: "Bool",
-        // Strings only. This said "or an array an element" until
-        // `contains([1, 2, 3], 2)` was actually run: it answers
-        // `E_BAD_ARG: expected a string, got Array`. Exactly the kind of
-        // plausible-but-wrong sentence that name-derived documentation
-        // produces, written here by hand instead.
-        doc: "Whether a string contains a substring. Strings only.",
-        examples: &[(r#"contains("security fix", "security")"#, "true")],
+        doc: "Whether the subject holds the needle. A String holds a substring; an Array holds an element equal to the needle under == (so 1 and 1.0 match); a Record holds a key of that name (the needle must be a String). Anything else is E_BAD_ARG. The same test as `in`, with the collection first: contains(list, x) is x | in(list).",
+        examples: &[
+            (r#"contains("security fix", "security")"#, "true"),
+            ("contains([1, 2], 1.0)", "true"),
+            ("[1, 2] | contains(3)", "false"),
+            (r#"contains({a: 1}, "a")"#, "true"),
+            (r#"{a: 1} | contains("b")"#, "false"),
+        ],
     },
     Signature {
         name: "lower",

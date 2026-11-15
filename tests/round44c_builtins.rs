@@ -43,3 +43,14 @@ fn sort_by_declares_its_key_required_and_a_missing_key_is_refused() {
     let text = err.to_string();
     assert!(text.contains("field name") && text.contains("lambda"), "{text}");
 }
+
+#[test]
+fn contains_tests_array_membership_and_record_keys() {
+    assert_eq!(run("contains([1, 2], 1)"), Value::Bool(true));
+    assert_eq!(run("contains([1, 2], 1.0)"), Value::Bool(true));
+    assert_eq!(run("[1, 2] | contains(3)"), Value::Bool(false));
+    assert_eq!(run(r#"contains({a: 1}, "a")"#), Value::Bool(true));
+    assert_eq!(run(r#"{a: 1} | contains("b")"#), Value::Bool(false));
+    assert_eq!(run(r#"contains("hello", "ell")"#), Value::Bool(true));
+    assert!(try_run("contains({a: 1}, 1)").is_err());
+}

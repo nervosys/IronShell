@@ -65,15 +65,11 @@ fn a_double_star_names_the_power_function() {
 }
 
 #[test]
-fn contains_given_an_array_names_the_membership_builtin() {
-    let (_, err, code) = run_script("contains", "contains([1, 2], 1)\n");
-    assert_ne!(code, 0);
-    assert!(err.contains("E_BAD_ARG"), "{err}");
-    assert!(
-        err.contains("contains searches a string for a substring"),
-        "{err}"
-    );
-    assert!(err.contains("`value | in(array)`"), "{err}");
+fn contains_given_an_array_tests_membership() {
+    // The `in` parse hint says "use contains(list, x)", so it must work.
+    let (out, err, code) = run_script("contains", "contains([1, 2], 1)\n");
+    assert_eq!(code, 0, "{err}");
+    assert_eq!(out, "true");
 }
 
 #[test]

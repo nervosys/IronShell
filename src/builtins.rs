@@ -15631,15 +15631,26 @@ fn bi_contains(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
         )
     };
 
-    // An array is the usual reason for this error: `contains` searches a string,
-    // and array membership is `in`.
-    if let Value::Array(_) = input_val {
-        return Err(crate::safety::bad_arg_with_hint(
-            "contains",
-            "a string",
-            "Array",
-            "contains searches a string for a substring; to test whether an array holds a value, pipe the value to in: `value | in(array)`",
-        ));
+    // An Array holds the needle when one of its elements equals it (`==`, so 1
+    // and 1.0 match), as `in` tests it; a Record holds it when it has that key.
+    match &input_val {
+        Value::Array(items) => {
+            return Ok(Value::Bool(
+                items.iter().any(|v| values_equal(substring_arg, v)),
+            ))
+        }
+        Value::Record(rec) => {
+            return match substring_arg {
+                Value::Str(key) => Ok(Value::Bool(rec.contains_key(key))),
+                other => Err(crate::safety::bad_arg_with_hint(
+                    "contains",
+                    "a String key to look for in a Record",
+                    other.type_name(),
+                    "a Record is searched by key name: contains(record, \"key\")",
+                )),
+            }
+        }
+        _ => {}
     }
     let text = expect_string("contains", &input_val)?;
     let substring = expect_string("contains", substring_arg)?;
