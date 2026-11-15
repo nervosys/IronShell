@@ -611,7 +611,7 @@ pub fn audit_read_refusal(builtin: &str, path: &str) {
 }
 
 /// Whether a declared parameter's name says its value is a file-system path.
-fn names_a_path_param(name: &str) -> bool {
+pub(crate) fn names_a_path_param(name: &str) -> bool {
     matches!(
         name,
         "path"

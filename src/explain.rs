@@ -37,6 +37,11 @@ struct Walk<'a> {
     /// The literal String arguments of each call in `calls`, by index: the
     /// paths the jail would judge, when they are written out.
     literals: Vec<Vec<String>>,
+    /// For a call that names its arguments in order, the plain String literal
+    /// at each position (`None` for any other argument), by index into `calls`.
+    /// A name check must know which argument is a path, and `literals` has
+    /// lost the positions.
+    positional: HashMap<usize, Vec<Option<String>>>,
     /// Names bound once, immutably, to a string literal: `name = "rm"`, so that
     /// `call(name, ...)` can be read as a call to that builtin.
     consts: HashMap<String, String>,
@@ -51,6 +56,17 @@ fn plain_literal(s: &str) -> Option<String> {
     } else {
         Some(s.replace(crate::parser::ESCAPED_DOLLAR, "$"))
     }
+}
+
+/// The plain String literal at each position of `args`, `None` for any other
+/// argument (a variable, a computed value, a string with an interpolation hole).
+fn positional_literals(args: &[Expr]) -> Vec<Option<String>> {
+    args.iter()
+        .map(|a| match a {
+            Expr::LitStr(s) => plain_literal(s),
+            _ => None,
+        })
+        .collect()
 }
 
 /// The names a match pattern binds.
@@ -144,6 +160,8 @@ impl Walk<'_> {
                     || crate::plugins::is_manifest_builtin(&n) =>
             {
                 self.calls.push((n.clone(), Some(n.clone())));
+                self.positional
+                    .insert(self.calls.len() - 1, positional_literals(rest));
                 self.literals.push(
                     rest.iter()
                         .filter_map(|a| match a {
@@ -310,6 +328,8 @@ impl Walk<'_> {
                 let r = self.resolve(callee);
                 let target = r.1.clone();
                 self.calls.push(r);
+                self.positional
+                    .insert(self.calls.len() - 1, positional_literals(args));
                 self.literals.push(
                     args.iter()
                         .chain(named.iter().map(|(_, a)| a))
@@ -461,6 +481,57 @@ fn jail_refusal(effect: Effect, literals: &[String]) -> Option<String> {
         .map(|s| format!("'{s}' is outside the workspace root, so the run refuses it with E_OUTSIDE_WORKSPACE"))
 }
 
+/// The refusal of a path argument whose name Windows would not keep as written
+/// (a device name, a trailing dot or space, a forbidden character, and for a
+/// write a `:stream`), worded as the run words it. The run refuses it with
+/// E_BAD_ARG before it consults the jail, so `a<b` is that and not an
+/// outside-the-workspace path. Only on Windows, and only for an argument
+/// written out as a literal in a position the builtin's signature calls a path;
+/// a builtin that takes a piped subject is not predicted, as its arguments shift.
+fn name_refusal(
+    builtin: &str,
+    effect: Effect,
+    positional: Option<&Vec<Option<String>>>,
+) -> Option<String> {
+    if !cfg!(windows) {
+        return None;
+    }
+    let writes = matches!(effect, Effect::WriteLocal | Effect::Destructive);
+    if !writes && !matches!(effect, Effect::ReadLocal | Effect::Exec) {
+        return None;
+    }
+    let sig = crate::signature::signature_of(builtin)?;
+    if sig.subject.is_some() {
+        return None;
+    }
+    for (i, literal) in positional?.iter().enumerate() {
+        let Some(s) = literal else { continue };
+        let param = sig
+            .params
+            .get(i)
+            .or_else(|| sig.params.last().filter(|p| p.variadic));
+        let Some(param) = param else { break };
+        if !crate::security::names_a_path_param(param.name)
+            || s.is_empty()
+            || s.len() > 4096
+            || s.contains('\n')
+            || s.contains('\0')
+        {
+            continue;
+        }
+        if let Some(e) = crate::safety::windows_param_name_refusal(builtin, s, writes) {
+            return Some(e.message);
+        }
+        // The write guard judges the path a write goes to, `:stream` included.
+        if writes && !matches!(param.name, "src" | "source" | "source_dir") {
+            if let Some(e) = crate::safety::windows_name_refusal(builtin, s) {
+                return Some(e.message);
+            }
+        }
+    }
+    None
+}
+
 /// The refusal of an archive extraction whose archive is named by a literal and
 /// can be read here: an entry that lands outside the destination or the
 /// workspace, through a link already on disk or by its name. The archive is read
@@ -500,6 +571,7 @@ pub fn explain(code: &str) -> Result<Value> {
         locals: HashSet::new(),
         calls: Vec::new(),
         literals: Vec::new(),
+        positional: HashMap::new(),
         consts: HashMap::new(),
         visited: HashSet::new(),
     };
@@ -519,6 +591,7 @@ pub fn explain(code: &str) -> Result<Value> {
                 let effect = effect_of(b);
                 let literals = w.literals.get(i).map(Vec::as_slice).unwrap_or(&[]);
                 let refused = refused_outright(b)
+                    .or_else(|| name_refusal(b, effect, w.positional.get(&i)))
                     .or_else(|| jail_refusal(effect, literals))
                     .or_else(|| extraction_refusal(b, literals));
                 let decision = if refused.is_some() {

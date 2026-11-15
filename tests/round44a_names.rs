@@ -79,6 +79,53 @@ mod archive_names {
     }
 }
 
+#[cfg(windows)]
+mod explain_names {
+    //! `--explain` predicts the Windows name refusals the run gives (E_BAD_ARG)
+    //! and reports the run's own message, not an outside-the-workspace hint.
+
+    use std::process::Command;
+
+    fn explain(code: &str) -> serde_json::Value {
+        let dir =
+            std::env::temp_dir().join(format!("ae-r44a-explain-names-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let out = Command::new(env!("CARGO_BIN_EXE_ish"))
+            .args(["--explain", "-c", code])
+            .current_dir(&dir)
+            .env("IRONSHELL_SESSION_DIR", dir.join("session"))
+            .env_remove("IRONSHELL_ALLOW_SH")
+            .env_remove("IRONSHELL_WORKSPACE")
+            .output()
+            .unwrap();
+        serde_json::from_slice(&out.stdout).expect("explain prints JSON")
+    }
+
+    #[test]
+    fn a_name_the_run_refuses_is_deny_with_the_runs_message() {
+        for (code, word) in [
+            (r#"file.write("a.txt.", "x")"#, "strip"),
+            (r#"file.write("b.txt ", "x")"#, "strip"),
+            (r#"file.write("f.txt:s", "x")"#, "alternate data stream"),
+            (r#"file.write("CON", "x")"#, "reserved device name"),
+            (r#"file.write("a<b", "x")"#, "`<`"),
+            (r#"file.read("a.txt.")"#, "strip"),
+        ] {
+            let e = explain(code);
+            assert_eq!(e["decision"], "deny", "{code}: {e}");
+            let hint = e["calls"][0]["hint"].as_str().unwrap_or_default();
+            assert!(hint.contains(word), "{code}: {e}");
+            assert!(!hint.contains("outside the workspace"), "{code}: {e}");
+        }
+    }
+
+    #[test]
+    fn content_that_reads_like_a_bad_name_is_not_judged_as_a_path() {
+        let e = explain(r#"file.write("ok.txt", "a<b.")"#);
+        assert_eq!(e["decision"], "allow", "{e}");
+    }
+}
+
 #[test]
 fn a_stream_name_is_left_to_the_write_guard() {
     // The dispatcher lets `name:stream` through for a read and a write alike;
