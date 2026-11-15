@@ -153,14 +153,14 @@ fn a_backslash_u_with_fewer_than_four_digits_stays_literal() {
 fn math_pow_overflow_message_uses_the_exponent_form_for_huge_operands() {
     let msg = try_run("math.pow(-2, 1e300)").expect_err("must be refused");
     assert!(
-        msg.contains("math_pow: -2 ** 1e300 overflows a Float"),
+        msg.contains("math.pow: -2 ** 1e300 overflows a Float"),
         "{msg}"
     );
     assert!(msg.len() < 300, "{msg}");
     // Small operands keep their plain form, which is the one round 28 pins.
     let msg = try_run("math.pow(10.0, 400)").expect_err("must be refused");
     assert!(
-        msg.contains("math_pow: 10 ** 400 overflows a Float"),
+        msg.contains("math.pow: 10 ** 400 overflows a Float"),
         "{msg}"
     );
 }
@@ -169,7 +169,7 @@ fn math_pow_overflow_message_uses_the_exponent_form_for_huge_operands() {
 fn math_pow_nan_message_names_its_operands() {
     let msg = try_run("math.pow(-2, 0.5)").expect_err("must be refused");
     assert!(
-        msg.contains("math_pow: -2 ** 0.5 is not a real number"),
+        msg.contains("math.pow: -2 ** 0.5 is not a real number"),
         "{msg}"
     );
 }

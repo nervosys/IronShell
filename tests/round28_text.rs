@@ -143,7 +143,7 @@ fn math_pow_refuses_an_overflow() {
     );
     let f = refusal("math.pow(10.0, 400)");
     assert!(
-        f.message.contains("math_pow: 10 ** 400 overflows a Float"),
+        f.message.contains("math.pow: 10 ** 400 overflows a Float"),
         "{}",
         f.message
     );

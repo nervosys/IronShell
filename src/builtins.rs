@@ -16625,7 +16625,7 @@ fn bi_pow(mut args: Vec<Value>, input: Option<Value>) -> Result<Value> {
         return Err(crate::safety::value_not_representable(
             "pow",
             format!(
-                "math_pow: {} ** {} overflows a Float",
+                "pow: {} ** {} overflows a Float",
                 float_for_message(base),
                 float_for_message(exp)
             ),
@@ -16636,7 +16636,7 @@ fn bi_pow(mut args: Vec<Value>, input: Option<Value>) -> Result<Value> {
         return Err(crate::safety::value_not_representable(
             "pow",
             format!(
-                "math_pow: {} ** {} is not a real number",
+                "pow: {} ** {} is not a real number",
                 float_for_message(base),
                 float_for_message(exp)
             ),
