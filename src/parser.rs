@@ -2840,7 +2840,7 @@ impl Parser {
             return Ok(Expr::LitStr(s));
         }
         if self.match_tok(Tok::Float) {
-            let x: f64 = self.prev().text.parse().unwrap_or(0.0);
+            let x = self.float_literal_value()?;
             return Ok(Expr::LitFloat(x));
         }
         if self.match_tok(Tok::Int) {
@@ -3240,7 +3240,7 @@ impl Parser {
             return Ok(Pattern::LitInt(n));
         }
         if self.match_tok(Tok::Float) {
-            let x: f64 = self.prev().text.parse().unwrap_or(0.0);
+            let x = self.float_literal_value()?;
             return Ok(Pattern::LitFloat(if negative { -x } else { x }));
         }
         if self.match_tok(Tok::String) {
@@ -3899,6 +3899,24 @@ impl Parser {
                 hint: "write it as a Float (for example 1.2345e29) or a String".to_string(),
             })
         })
+    }
+    /// The value of the Float literal just consumed. A literal that overflows
+    /// to infinity (`1e400`) is E_PARSE: numbers are finite.
+    fn float_literal_value(&self) -> Result<f64> {
+        let t = self.prev();
+        let x: f64 = t.text.parse().unwrap_or(0.0);
+        if x.is_finite() {
+            Ok(x)
+        } else {
+            Err(anyhow::Error::new(HintedSyntax {
+                msg: format!(
+                    "float literal {} is too large for a Float (it would be infinity) at line {}, column {}",
+                    t.text, t.line, t.col
+                ),
+                hint: "numbers are finite; use a smaller exponent (the largest Float is about 1.8e308)"
+                    .to_string(),
+            }))
+        }
     }
     fn prev(&self) -> &Spanned {
         // Safety: return first token if i is 0

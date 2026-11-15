@@ -112,6 +112,7 @@ from-yaml
 from_csv
 from_entries
 from_epoch
+from_jsonl
 from_toml
 from_yaml
 get
@@ -305,6 +306,7 @@ to_csv
 to_entries
 to_epoch
 to_json
+to_jsonl
 to_string
 to_toml
 to_yaml

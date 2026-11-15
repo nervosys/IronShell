@@ -2226,7 +2226,18 @@ pub fn not_found(builtin: &str, kind: &str, name: &str) -> anyhow::Error {
     // where a relative path was resolved and how to look, not a list to choose
     // an identifier from.
     let is_path = matches!(kind, "source" | "destination" | "path");
-    let hint = if is_path || matches!(kind, "file" | "directory" | "archive") {
+    let is_fs_name = is_path || matches!(kind, "file" | "directory" | "archive");
+    // An empty name is not a missing file: the caller passed nothing (an unset
+    // variable, a value cut off), and "no file named ''" would hide that.
+    if is_fs_name && name.is_empty() {
+        let what = if is_path { "path" } else { kind };
+        return bad_arg_in(
+            builtin,
+            format!("{builtin}: the {what} is an empty string"),
+            "pass a non-empty path; an empty one usually means a variable that was never set or a value that was cut off",
+        );
+    }
+    let hint = if is_fs_name {
         let here = std::env::current_dir()
             .map(|d| d.display().to_string())
             .unwrap_or_else(|_| "the current directory".to_string());
@@ -2254,6 +2265,10 @@ pub fn not_found(builtin: &str, kind: &str, name: &str) -> anyhow::Error {
         code: ErrorCode::NotFound,
         message: if is_path {
             format!("{builtin}: no file or directory at `{name}`")
+        } else if is_fs_name {
+            // Worded as `no_file_at` words it, so one missing file reads alike
+            // from every builtin.
+            format!("{builtin}: no {kind} at {name}")
         } else {
             format!("{builtin}: no {kind} named '{name}'")
         },
