@@ -341,10 +341,7 @@ pub fn user_module() -> Value {
 
 /// Permission module: perm.get(), perm.set(), etc.
 pub fn perm_module() -> Value {
-    module(&[
-        ("get", "perm_get"),
-        ("set", "perm_set"),
-    ])
+    module(&[("get", "perm_get"), ("set", "perm_set")])
 }
 
 /// Package manager module: pkg.list(), pkg.install(), etc.
