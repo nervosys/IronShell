@@ -7,9 +7,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security
+
+- Windows: a drive-relative path (`C:..\x`, `C:../outside/f`) could write outside the workspace jail in agent mode or with a workspace set (file.write, append, replace, copy, `ish -b` redirection, tee, touch, mkdir) and read outside it under `ish -b` (cat, ls). Such a path now resolves against the drive's current directory, as Windows does, and the jail, `--explain` and the undo journal all judge that one absolute path.
+
 ### Changed
 
+- Two expressions on one line with no `;` between them are E_PARSE ("separate statements with a newline or `;`"); the first value was silently dropped (`x = 5 6` set x to 5; `let r = ai "hi"` set r to the `ai` function).
+- `x | f(a)[i]`, `x | f[i]` and `x | f(a).field` index the pipeline's result; the pipeline value was dropped and `[i]` became its own statement.
+- `'it''s'` and triple-quoted strings are E_PARSE with hints; they were silently truncated or empty.
+- A Float literal that overflows (`1e400`) is E_PARSE; `from_yaml` refuses `1e400`; `to_yaml` and `to_toml` refuse a non-finite Float, as `to_json` does.
+- On Windows, with the jail enforced, a read refuses a name ending in a dot or space as a write does; a name with `<`, `>`, `|`, `"` or a control character, and a reserved device name, is E_BAD_ARG naming the character, not E_OUTSIDE_WORKSPACE or E_NOT_FOUND.
+- `unique` (and `arr.unique`) treats `1` and `1.0` as duplicates, as `==` does.
+- `archive_test` answers false for a zip or tar holding an entry that extraction would refuse (`../x`, an absolute or drive path).
+- A missing file reads "no file at X" from every builtin, and an empty path is named as empty.
 - The published crate leaves out `tests/`, `examples/` and `benches/` (161 files, 2.2 MiB compressed, down from 857 files and 3.5 MiB). The 14.0.4 crate was published this way from the v14.0.4 tag plus this change.
+
+### Added
+
+- `from_jsonl(text)` and `to_jsonl(array)`, matching what `open()` does for `.jsonl`.
+- `from_yaml` reads a block sequence at its key's indent (PyYAML's default output) and plain scalars in flow collections (`a: {b: 1, c: [x, y]}`).
+- Trailing commas in Array and Record literals (`[1, 2,]`, `{a: 1,}`).
+- Parse hints for a comparison right after a pipeline stage (parenthesize the pipe), `/* */` comments, `finally`, or-patterns, range and rest patterns in `match`, and `.5`.
+
+### Fixed
+
+- `from_yaml` refuses `a: x: y` and tab indentation, and ignores a leading BOM; `from_toml` names a table defined twice.
+- A duplicate key in a Record literal (`{a: 1, a: 2}`) is E_PARSE; the last value silently won.
+- The undo journal records each step's resolved absolute path, and a step whose recorded path cannot be found says so instead of "absent now".
+- `tar_create` gives a hint (use zip_create) when the system tar crashes on a non-ASCII name; refusal messages redact `cd("..")` as `[...]/..` like every other path.
 
 ## [14.0.4] - 2026-11-14
 
