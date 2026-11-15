@@ -49566,7 +49566,7 @@ fn bi_crypto_hash(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
                 return Err(crate::safety::bad_arg_in(
                     "crypto_hash",
                     format!(
-                        "crypto.hash: `{only}` is an algorithm name; pass the data too: crypto.hash(\"{only}\", data) or data | crypto.hash(\"{only}\")"
+                        "crypto_hash: `{only}` is an algorithm name; pass the data too: crypto.hash(\"{only}\", data) or data | crypto.hash(\"{only}\")"
                     ),
                     "put the algorithm first and the data after it, or pipe the data in; to hash the text itself, spell the algorithm: crypto.hash(\"sha256\", \"sha256\")",
                 ));
@@ -49602,6 +49602,29 @@ fn bi_crypto_hash(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
                     "put the algorithm first, as crypto.hash(\"sha256\", data), or last, as crypto.hash(data, \"sha256\")",
                 ));
             }
+        }
+    }
+    // Piped, the data is the input, so one argument (the algorithm) is all that
+    // can follow. A second one was ignored, and `"abc" | crypto_hash("sha256",
+    // "abc")` hashed "abc" without complaint.
+    if input.is_some() && args.len() > 1 {
+        return Err(crate::safety::bad_arg_in(
+            "crypto_hash",
+            format!(
+                "crypto_hash: a piped value takes one argument, the algorithm; got {} arguments",
+                args.len()
+            ),
+            "pipe the data and pass only the algorithm: data | crypto.hash(\"sha256\")",
+        ));
+    }
+    // Called directly with an algorithm first, the second argument is the data.
+    if let [Value::Str(first), second] = args.as_slice() {
+        if input.is_none() && is_hash_algorithm(first) && !matches!(second, Value::Str(_)) {
+            return Err(crate::safety::bad_arg(
+                "crypto_hash",
+                "data: String",
+                second.type_name(),
+            ));
         }
     }
     let (data, params) = subject_and_params("crypto_hash", &args, input)?;
