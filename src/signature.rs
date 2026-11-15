@@ -1867,10 +1867,10 @@ pub static SIGNATURES: &[Signature] = &[
             Ty::Int,
             0,
             17,
-            "decimal places; 0 returns an Int",
+            "decimal places, 0 to 17 (a value outside that range is E_BAD_ARG); 0 returns an Int",
         )],
         returns: "Number",
-        doc: "Round a number, optionally to a number of decimal places. The tie rule is half away from zero, applied to the exact binary value of a Float, as format_number does: 2.675 is stored as 2.67499999..., so round(2.675, 2) is 2.67, while an exact tie such as 0.125 or 2.5 goes up (round(0.125, 2) is 0.13, round(2.5) is 3, round(-2.5) is -3).",
+        doc: "Round a number, optionally to 0 to 17 decimal places (digits outside that range are refused with E_BAD_ARG, never clamped). The tie rule is half away from zero, applied to the exact binary value of a Float, as format_number does: 2.675 is stored as 2.67499999..., so round(2.675, 2) is 2.67, while an exact tie such as 0.125 or 2.5 goes up (round(0.125, 2) is 0.13, round(2.5) is 3, round(-2.5) is -3).",
         examples: &[
             ("round(4.966, 2)", "4.97"),
             ("4.966 | round(2)", "4.97"),

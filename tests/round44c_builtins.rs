@@ -71,3 +71,12 @@ fn errors_name_the_builtin_as_called() {
     let text = error_text(r#"hash("md5", "sha256")"#);
     assert!(text.starts_with("hash:"), "{text}");
 }
+
+#[test]
+fn the_round_help_states_the_digits_range() {
+    let sig = iron_shell::signature::signature_of("round").expect("declared");
+    assert!(sig.doc.contains("0 to 17"), "{}", sig.doc);
+    assert!(sig.params[0].doc.contains("0 to 17"), "{}", sig.params[0].doc);
+    assert!(try_run("round(1.5, 18)").is_err());
+    assert!(try_run("round(1.5, 17)").is_ok());
+}
