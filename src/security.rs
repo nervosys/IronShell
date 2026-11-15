@@ -668,6 +668,11 @@ pub fn read_jail_dispatch(builtin: &str, args: &[crate::value::Value], piped: bo
     ) {
         return Ok(());
     }
+    // A builtin that writes says "write" when it refuses a name, not "read".
+    let writes = matches!(
+        crate::safety::effect_of(builtin),
+        Effect::WriteLocal | Effect::Destructive
+    );
     let judge = |s: &str| -> Result<()> {
         // No file is named by these: the builtin refuses a NUL itself.
         if s.is_empty() || s.len() > 4096 || s.contains('\n') || s.contains('\0') {
@@ -687,7 +692,7 @@ pub fn read_jail_dispatch(builtin: &str, args: &[crate::value::Value], piped: bo
         // that makes `a.txt.` open `a.txt`. A `:` stream name is left to the
         // write guard, which refuses it for a write and lets a read name one.
         if cfg!(windows) {
-            if let Some(e) = crate::safety::windows_read_name_refusal(builtin, s) {
+            if let Some(e) = crate::safety::windows_param_name_refusal(builtin, s, writes) {
                 return Err(e.into());
             }
         }

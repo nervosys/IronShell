@@ -7980,7 +7980,7 @@ pub fn reserved_device_error(builtin: &str, name: &str) -> SafetyError {
 /// forbids in a name (`<`, `>`, `"`, `|` or a control character) is refused too,
 /// naming the character.
 pub fn windows_name_refusal(builtin: &str, path: &str) -> Option<SafetyError> {
-    windows_name_problem(builtin, path, true)
+    windows_name_problem(builtin, path, true, "write")
 }
 
 /// [`windows_name_refusal`] for a read: the same device names, forbidden
@@ -7988,11 +7988,18 @@ pub fn windows_name_refusal(builtin: &str, path: &str) -> Option<SafetyError> {
 /// it is refused as a write to it is), but a `:` is let through, since
 /// `name:stream` is a stream a read may name.
 pub fn windows_read_name_refusal(builtin: &str, path: &str) -> Option<SafetyError> {
-    windows_name_problem(builtin, path, false)
+    windows_name_problem(builtin, path, false, "read")
 }
 
-fn windows_name_problem(builtin: &str, path: &str, write: bool) -> Option<SafetyError> {
-    let verb = if write { "write" } else { "read" };
+/// [`windows_read_name_refusal`] as the dispatcher applies it to a path
+/// parameter of a builtin: a `:` stream name is let through (the write guard
+/// judges that), but the message says "write" when the builtin writes, so
+/// `file.write("a.txt.")` is not told its read would land on another name.
+pub fn windows_param_name_refusal(builtin: &str, path: &str, writes: bool) -> Option<SafetyError> {
+    windows_name_problem(builtin, path, false, if writes { "write" } else { "read" })
+}
+
+fn windows_name_problem(builtin: &str, path: &str, write: bool, verb: &str) -> Option<SafetyError> {
     if let Some(name) = reserved_device_name(path) {
         return Some(reserved_device_error(builtin, &name));
     }
