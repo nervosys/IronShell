@@ -2607,7 +2607,7 @@ pub static SIGNATURES: &[Signature] = &[
         subject: Some(Ty::Any),
         params: &[req("needle", Ty::Any, "a substring (String subject), an element (Array subject) or a key name (Record subject)")],
         returns: "Bool",
-        doc: "Whether the subject holds the needle. A String holds a substring; an Array holds an element equal to the needle under == (so 1 and 1.0 match); a Record holds a key of that name (the needle must be a String). Anything else is E_BAD_ARG. The same test as `in`, with the collection first: contains(list, x) is x | in(list).",
+        doc: "Whether the subject holds the needle. The subject is a String, an Array or a Record. A String holds a substring; an Array holds an element equal to the needle under == (so 1 and 1.0 match); a Record holds a key of that name (the needle must be a String). Anything else is E_BAD_ARG. The same test as `in`, with the collection first: contains(list, x) is x | in(list).",
         examples: &[
             (r#"contains("security fix", "security")"#, "true"),
             ("contains([1, 2], 1.0)", "true"),

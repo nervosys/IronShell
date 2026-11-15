@@ -15652,7 +15652,15 @@ fn bi_contains(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
         }
         _ => {}
     }
-    let text = expect_string("contains", &input_val)?;
+    // Only a String, an Array or a Record has a `contains`; the message names all
+    // three, as the subject is what the caller got wrong.
+    let Value::Str(text) = &input_val else {
+        return Err(crate::safety::bad_arg(
+            "contains",
+            "a String, Array or Record",
+            input_val.type_name(),
+        ));
+    };
     let substring = expect_string("contains", substring_arg)?;
     Ok(Value::Bool(text.contains(substring)))
 }

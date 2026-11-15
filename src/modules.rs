@@ -515,6 +515,7 @@ pub fn arr_module() -> Value {
         ("sort", "sort"),
         ("sort_by", "sort_by"),
         ("unique", "unique"),
+        ("contains", "contains"),
         ("chunk", "chunk"),
         ("len", "len"),
         ("keys", "keys"),
