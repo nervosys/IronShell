@@ -10,7 +10,7 @@ fn run(src: &str) -> Value {
 }
 
 fn decision(code: &str) -> String {
-    let escaped = code.replace('\', "\\\\").replace('"', "\\\"");
+    let escaped = code.replace('\\', "\\\\").replace('"', "\\\"");
     let v = run(&format!("explain_effects(\"{escaped}\").decision"));
     match v {
         Value::Str(s) => s,
