@@ -58,8 +58,14 @@ fn contains_tests_array_membership_and_record_keys() {
     assert!(try_run("contains({a: 1}, 1)").is_err());
 }
 
+/// The error's message. A coded error renders as one line of JSON, so the
+/// message is read out of it; any other error is its own text.
 fn error_text(src: &str) -> String {
-    try_run(src).expect_err("fails").to_string()
+    let text = try_run(src).expect_err("fails").to_string();
+    serde_json::from_str::<serde_json::Value>(&text)
+        .ok()
+        .and_then(|j| j["error"]["message"].as_str().map(str::to_string))
+        .unwrap_or(text)
 }
 
 #[test]

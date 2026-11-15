@@ -2618,6 +2618,10 @@ impl Parser {
                         let a = self.parse_expr()?;
                         args.push(a);
                         if self.match_tok(Tok::Comma) {
+                            // A trailing comma: `len([1, 2],)`.
+                            if self.check(Tok::RParen) {
+                                break;
+                            }
                             continue;
                         }
                         break;
@@ -3590,7 +3594,31 @@ impl Parser {
                     | Tok::Null
                     | Tok::Fn
             );
-        let hint = if assigns_bare_name {
+        // A stray `[` after a name is most likely a spaced index (`x [0]`): that
+        // hint wins over the word-call one. A bracket that holds a list (a comma
+        // at its top level, as in `len [1, 2, 3]`) is an argument, not an index.
+        let spaced_index = cur.kind == Tok::LBracket && {
+            let mut depth = 0usize;
+            let mut comma = false;
+            for t in &self.toks[self.i..] {
+                match t.kind {
+                    Tok::LBracket | Tok::LParen | Tok::LBrace => depth += 1,
+                    Tok::RBracket | Tok::RParen | Tok::RBrace => {
+                        depth -= 1;
+                        if depth == 0 {
+                            break;
+                        }
+                    }
+                    Tok::Comma if depth == 1 => comma = true,
+                    Tok::Eof => break,
+                    _ => {}
+                }
+            }
+            !comma
+        };
+        let hint = if spaced_index {
+            INDEX_SPACING_HINT.to_string()
+        } else if assigns_bare_name {
             format!(
                 "a word-call cannot be an assignment's value; write {}(args) with parentheses, e.g. {}(\".\")",
                 prev.text, prev.text

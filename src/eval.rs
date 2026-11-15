@@ -3002,7 +3002,7 @@ fn named_as_written(name: &str, result: Result<Value>) -> Result<Value> {
             };
             let same_impl = builtins::alias_groups()
                 .iter()
-                .any(|g| g.iter().any(|n| *n == name) && g.iter().any(|n| *n == from));
+                .any(|g| g.contains(&name) && g.contains(&from.as_str()));
             if same_impl {
                 Err(crate::safety::rename_builtin(e, &from, name))
             } else {

@@ -83,5 +83,5 @@ fn a_block_closing_brace_followed_by_an_array_is_not_an_index() {
     // parse error (it would silently drop the block's value).
     let (_, err, code) = run_script("block", "if true { 5 }[1, 2]\n");
     assert_ne!(code, 0, "{err}");
-    assert!(err.contains("separate statements"), "{err}");
+    assert!(err.contains("no space"), "{err}");
 }

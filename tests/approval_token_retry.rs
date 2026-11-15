@@ -49,7 +49,7 @@ fn the_token_from_the_refusal_approves_the_retry() {
     assert!(!first.status.success(), "the first call must be refused");
     let json = first_error(&first);
     assert_eq!(json["error"]["code"], "E_NEEDS_APPROVAL", "{json}");
-    assert_eq!(json["error"]["builtin"], "file_delete_lines", "{json}");
+    assert_eq!(json["error"]["builtin"], "delete_lines", "{json}");
     let approval = &json["error"]["approval"];
     assert_eq!(approval["builtin"], "file_delete_lines", "{json}");
     assert_eq!(approval["reversible"], true, "{json}");

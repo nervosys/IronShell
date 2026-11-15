@@ -964,7 +964,7 @@ mod tests {
             Value::Str("deny".into())
         );
         assert_eq!(
-            decision_of(r#"file_read("../x")"#),
+            decision_of(r#"read_text("../x")"#),
             Value::Str("deny".into())
         );
     }
