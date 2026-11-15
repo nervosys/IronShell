@@ -263,6 +263,17 @@ fn read_tar(stdout: impl Read, cap_hit: &AtomicBool) -> std::io::Result<()> {
         let mut ar = tar::Archive::new(&mut capped);
         for entry in ar.entries()? {
             let mut entry = entry?;
+            // An entry the extractor refuses: the archive does not test clean.
+            let name = entry.path()?.to_string_lossy().into_owned();
+            let ty = entry.header().entry_type();
+            let target = if ty.is_symlink() || ty.is_hard_link() {
+                entry.link_name()?.map(|p| p.to_string_lossy().into_owned())
+            } else {
+                None
+            };
+            if super::archive_entry_refusal("archive_test", &name, target.as_deref()).is_some() {
+                return Err(std::io::Error::other("an entry the extractor refuses"));
+            }
             std::io::copy(&mut entry, &mut std::io::sink())?;
         }
     }

@@ -39221,10 +39221,8 @@ fn archive_entry_refusal(builtin: &str, name: &str, target: Option<&str>) -> Opt
     // A member named like a Windows device would be written as a file that
     // cannot be deleted; a trailing dot or space is stripped onto another name.
     if cfg!(windows) {
-        if let Some(device) = crate::safety::reserved_device_name(name) {
-            return Some(anyhow::Error::new(crate::safety::reserved_device_error(
-                builtin, &device,
-            )));
+        if let Some(e) = crate::safety::windows_name_refusal(builtin, name) {
+            return Some(anyhow::Error::new(e));
         }
     }
     if let Some(t) = target {
@@ -40455,16 +40453,15 @@ fn archive_test_local(path: &str, kind: LocalArchive, cap: u64) -> Result<bool> 
                 return Ok(false);
             };
             // An entry extraction would refuse (`../x`, an absolute or drive
-            // name) makes the archive unsafe, so it does not test clean.
-            let unsafe_name = (0..z.len()).any(|i| {
-                z.by_index_raw(i).is_ok_and(|f| {
-                    let name = f
-                        .name()
-                        .map(|n| n.into_owned())
-                        .unwrap_or_else(|_| String::from_utf8_lossy(f.name_raw()).into_owned());
-                    archive_entry_escapes(&name)
-                })
-            });
+            // name, and on Windows a name it would not keep as written) makes
+            // the archive unsafe, so it does not test clean: the same
+            // per-entry check, over the same listing, as `zip_extract`.
+            let unsafe_name = match zip_archive_entries("archive_test", path) {
+                Ok((entries, _)) => entries
+                    .iter()
+                    .any(|(n, t)| archive_entry_refusal("archive_test", n, t.as_deref()).is_some()),
+                Err(_) => true,
+            };
             if unsafe_name {
                 return Ok(false);
             }
@@ -40481,11 +40478,23 @@ fn archive_test_local(path: &str, kind: LocalArchive, cap: u64) -> Result<bool> 
             match ar.entries() {
                 Ok(entries) => entries.into_iter().all(|e| {
                     e.map(|mut e| {
-                        let escapes = e
+                        let name = e
                             .path()
-                            .map(|p| archive_entry_escapes(&p.to_string_lossy()))
-                            .unwrap_or(false);
-                        !escapes && sink(&mut e)
+                            .map(|p| p.to_string_lossy().into_owned())
+                            .unwrap_or_default();
+                        let ty = e.header().entry_type();
+                        let target = if ty.is_symlink() || ty.is_hard_link() {
+                            e.link_name()
+                                .ok()
+                                .flatten()
+                                .map(|p| p.to_string_lossy().into_owned())
+                        } else {
+                            None
+                        };
+                        let refused =
+                            archive_entry_refusal("archive_test", &name, target.as_deref())
+                                .is_some();
+                        !refused && sink(&mut e)
                     })
                     .unwrap_or(false)
                 }),
