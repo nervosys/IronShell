@@ -25,3 +25,12 @@ fn the_uniq_help_does_not_promise_a_flag_the_call_refuses() {
     let sig = iron_shell::signature::signature_of("uniq").expect("declared");
     assert!(!sig.doc.contains("accepted and ignored"), "{}", sig.doc);
 }
+
+#[test]
+fn hash_refuses_two_algorithm_names_and_takes_the_algorithm_first() {
+    assert!(try_run(r#"hash("md5", "sha256")"#).is_err());
+    assert_eq!(
+        run(r#"crypto_hash("md5", "hello")"#),
+        Value::Str("5d41402abc4b2a76b9719d911017c592".into())
+    );
+}

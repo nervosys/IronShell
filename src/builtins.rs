@@ -49387,8 +49387,8 @@ fn bi_crypto_hash(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
     // `crypto.hash("sha256", data)`, the algorithm first, as AGENTS.md writes it.
     // Read as (data, algorithm) it was E_BAD_ARG "expected algorithm ..., got
     // \"abc\"". It is taken this way only when the first argument names an
-    // algorithm and the second does not, so a call that already worked keeps
-    // its meaning: `crypto_hash("md5", "sha256")` still hashes the text "md5".
+    // algorithm and the second does not. When both name one, which is the data
+    // cannot be told, so the call is refused rather than guessed.
     if input.is_none() {
         // A lone algorithm name is not data: `crypto.hash("sha256")` hashed the
         // text "sha256" and answered as if the caller's data had been hashed.
@@ -49410,6 +49410,17 @@ fn bi_crypto_hash(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
                     first,
                     second.as_bytes(),
                 )?));
+            }
+            if is_hash_algorithm(first) && is_hash_algorithm(second) {
+                return Err(crate::safety::bad_arg_in(
+                    "crypto_hash",
+                    format!(
+                        "crypto_hash: both {first:?} and {second:?} are algorithm names, so which is the data is ambiguous"
+                    ),
+                    &format!(
+                        "pipe the data in to hash an algorithm name: {first:?} | crypto_hash({second:?})"
+                    ),
+                ));
             }
             // Neither order names an algorithm: say so, with both values, rather
             // than blaming the second one alone.
