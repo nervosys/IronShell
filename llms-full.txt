@@ -80,7 +80,7 @@ items = [1, 2, 3]              # Array<Int>
 config = {host: "localhost"}   # Record
 
 # Explicit annotation
-config: Record = {host: "localhost", port: 8080}
+let config: Record = {host: "localhost", port: 8080}
 
 # Mutable
 mut counter = 0
@@ -158,7 +158,7 @@ file.exists("path")                         # => {exists: bool, is_file: bool, i
 file.copy("src", "dst")                     # Copy file or directory
 file.move("old", "new")                     # Move/rename
 file.backup("file.txt")                     # Create .bak
-file.patch("file", 10, 20, "new content")   # Replace lines 10-20
+file.patch("file", {find: "old", replace: "new"})   # Find/replace patches, all or nothing
 file.replace("file", "old str", "new str")  # String replacement
 file.insert("file", {after: "line"}, "new") # Insert after match
 file.mkdir("path/to/dir")                   # Create directories
@@ -167,9 +167,9 @@ file.mkdir("path/to/dir")                   # Create directories
 ### 5.2 System (`sys`, `proc`, `platform`)
 ```ish
 sys.hostname()          # => "my-machine"
-sys.uptime()            # => {days: 5, hours: 3, minutes: 42}
-sys.cpu_info()          # => {cores: 8, model: "...", ...}
-sys.mem_info()          # => {total: 16384, used: 8192, free: 8192}
+sys.uptime()            # => 475320 (whole seconds since boot, an Int)
+sys.cpu_info()          # => {cores: 8, name: "...", ...}
+sys.mem_info()          # => {total, free, available}, each an Int in bytes
 proc.list()             # => [{pid, name, cpu, memory}, ...]
 proc.kill(1234)         # Kill process
 sys.os()                # => "windows" | "linux" | "macos"
@@ -472,7 +472,7 @@ sys.hostname()       # No command differences
 ```ish
 # Returns typed records, not text to parse
 ls(".")     # => [{name: "file.rs", size: 1234, modified: "...", type: "file"}, ...]
-sys.cpu_info()  # => {cores: 8, model: "...", ...}
+sys.cpu_info()  # => {cores: 8, name: "...", ...}
 ```
 
 ### 10.3 Safe File Editing
