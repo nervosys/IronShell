@@ -806,6 +806,9 @@ lazy_static::lazy_static! {
         map.insert("regex_split", 1211);
         // The PowerShell transpiler's `+` (1212)
         map.insert("ps_add", 1212);
+        // JSON lines (1213-1214)
+        map.insert("from_jsonl", 1213);
+        map.insert("to_jsonl", 1214);
         // 500-519: Database
         map.insert("db_sqlite_open", 500);
         map.insert("db_sqlite_query", 501);
@@ -3899,6 +3902,9 @@ static BUILTIN_DISPATCH: &[fn(Vec<Value>, Option<Value>, &mut Env) -> Result<Val
     |args, input, _| bi_regex_split(args, input),   // 1211
     // The PowerShell transpiler's `+`
     |args, input, _| bi_ps_add(args, input), // 1212
+    // JSON lines
+    |args, input, _| bi_from_jsonl(args, input), // 1213
+    |args, input, _| bi_to_jsonl(args, input),   // 1214
 ];
 
 /// The dispatch row that serves `name`, if the fast table has one.
@@ -5808,13 +5814,53 @@ fn bi_unique(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
     let mut unique = Vec::new();
 
     for item in array {
-        let key = format!("{:?}", item);
+        let mut key = String::new();
+        unique_key(&item, &mut key);
         if seen.insert(key) {
             unique.push(item);
         }
     }
 
     Ok(Value::Array(unique))
+}
+
+/// A text key that is equal for two values exactly when `==` calls them equal:
+/// an Int and a Float of the same value share one (1 and 1.0), at any depth.
+fn unique_key(value: &Value, out: &mut String) {
+    use std::fmt::Write as _;
+    match value {
+        Value::Int(i) => {
+            let _ = write!(out, "n:{i}");
+        }
+        Value::Float(f) => {
+            // A whole Float inside the Int range is the Int of that value.
+            if f.fract() == 0.0 && *f >= -9223372036854775808.0 && *f < 9223372036854775808.0 {
+                let _ = write!(out, "n:{}", *f as i64);
+            } else {
+                let _ = write!(out, "f:{f:?}");
+            }
+        }
+        Value::Array(items) => {
+            out.push('[');
+            for item in items {
+                unique_key(item, out);
+                out.push(',');
+            }
+            out.push(']');
+        }
+        Value::Record(map) => {
+            out.push('{');
+            for (k, v) in map {
+                let _ = write!(out, "{k:?}:");
+                unique_key(v, out);
+                out.push(',');
+            }
+            out.push('}');
+        }
+        other => {
+            let _ = write!(out, "{other:?}");
+        }
+    }
 }
 
 fn bi_avg(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
@@ -11879,7 +11925,7 @@ fn bi_csv_columns(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
     if names_a_file && !subject.contains(['\n', '\r']) {
         return Err(crate::safety::not_found_with(
             "csv_columns",
-            format!("csv_columns: no file named '{subject}'"),
+            format!("csv_columns: no file at {subject}"),
             "pass CSV text with a newline, or an existing file",
         ));
     }
@@ -11969,7 +12015,7 @@ fn yaml_unsupported_construct(message: &str) -> Option<&'static str> {
     }
     if message.contains("flow collection") {
         return Some(
-            "a flow collection that is not valid JSON (YAML flow maps need quoted keys and values)",
+            "a flow collection that is not well formed (flow style is read with quoted or plain scalars; a mapping inside needs `key: value` pairs)",
         );
     }
     None
@@ -11987,6 +12033,7 @@ fn bi_to_yaml(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
             .next()
             .ok_or_else(|| crate::safety::arg_err("to-yaml: requires pipeline input"))?,
     };
+    nonfinite_in_value("to_yaml", &value, "value", "YAML")?;
     Ok(Value::Str(crate::yaml::emit(&value)))
 }
 
@@ -17848,6 +17895,47 @@ fn path_key(path: &str, key: &str) -> String {
     }
 }
 
+/// The refusal for writing a NaN or an infinity as `format` text (to_yaml,
+/// to_toml): IronShell numbers are finite, and the readers refuse the spelling.
+fn nonfinite_write_refusal(builtin: &str, f: f64, path: &str, format: &str) -> anyhow::Error {
+    let what = if f.is_nan() {
+        "NaN"
+    } else if f > 0.0 {
+        "infinity"
+    } else {
+        "negative infinity"
+    };
+    let at = if path.is_empty() { "value" } else { path };
+    crate::safety::value_not_representable(
+        builtin,
+        format!("{builtin}: {at} is {what}, which is not a finite number; IronShell numbers are finite and {format} text holding it would not read back"),
+        "replace it with a finite number or null, or keep it as text",
+    )
+}
+
+/// The first NaN or infinity inside `value`, as the refusal `builtin` gives
+/// when writing `format` text.
+fn nonfinite_in_value(builtin: &str, value: &Value, path: &str, format: &str) -> Result<()> {
+    match value {
+        Value::Float(f) if !f.is_finite() => {
+            Err(nonfinite_write_refusal(builtin, *f, path, format))
+        }
+        Value::Array(items) => {
+            for (i, item) in items.iter().enumerate() {
+                nonfinite_in_value(builtin, item, &format!("{path}[{i}]"), format)?;
+            }
+            Ok(())
+        }
+        Value::Record(map) => {
+            for (k, v) in map {
+                nonfinite_in_value(builtin, v, &path_key(path, k), format)?;
+            }
+            Ok(())
+        }
+        _ => Ok(()),
+    }
+}
+
 /// A Record as a TOML table. A null, or a value TOML has no form for, is
 /// refused with the path to it.
 fn toml_table(
@@ -17869,6 +17957,9 @@ fn toml_value(builtin: &str, value: &Value, path: &str) -> Result<toml::Value> {
     Ok(match value {
         Value::Bool(b) => toml::Value::Boolean(*b),
         Value::Int(i) => toml::Value::Integer(*i),
+        Value::Float(f) if !f.is_finite() => {
+            return Err(nonfinite_write_refusal(builtin, *f, path, "TOML"));
+        }
         Value::Float(f) => toml::Value::Float(*f),
         Value::Str(s) | Value::Uri(s) => toml::Value::String(s.clone()),
         Value::Array(items) => toml::Value::Array(
@@ -17981,6 +18072,80 @@ fn bi_from_toml(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
         return Err(refusal);
     }
     Ok(crate::plugins::toml_to_value(parsed))
+}
+
+/// from_jsonl(text) - Read JSON lines as an Array, as `open` reads a .jsonl file.
+/// Args:
+///   - text: String (or the piped text)
+/// Returns: Array
+///
+/// One JSON value per line; blank lines are skipped. A line that is not JSON is
+/// E_BAD_VALUE and the refusal names its line (counting blank lines) and column.
+///
+/// Example:
+///   from_jsonl("{\"a\": 1}\n{\"a\": 2}\n") | len    # 2
+fn bi_from_jsonl(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
+    const B: &str = "from_jsonl";
+    let (text, rest) = text_subject(B, args, input)?;
+    if !rest.is_empty() {
+        return Err(arity_error(B, "the JSON lines text alone", rest.len()));
+    }
+    let text = without_bom(text);
+    let mut rows = Vec::new();
+    for (index, line) in text.lines().enumerate() {
+        if line.trim().is_empty() {
+            continue;
+        }
+        let j: serde_json::Value = serde_json::from_str(line).map_err(|e| {
+            let (number, column) = (index + 1, e.column());
+            crate::safety::value_not_representable(
+                B,
+                format!("{B}: line {number}, column {column}: {}", json_message(&e)),
+                &format!(
+                    "fix the JSON at line {number}, column {column}: {}",
+                    json_message(&e)
+                ),
+            )
+        })?;
+        if let Some(refusal) = wide_integer_refusal(B, line) {
+            return Err(refusal);
+        }
+        rows.push(Value::from_json(&with_integer_negative_zeros(j, line)));
+    }
+    Ok(Value::Array(rows))
+}
+
+/// to_jsonl(array) - Write an Array as JSON lines: one compact JSON value per
+/// line, each ending in a newline, as `from_jsonl` and `open` read them.
+/// Args:
+///   - array: Array (or the piped Array)
+/// Returns: String
+///
+/// A NaN or an infinity is refused, as to_json refuses it, with its path.
+///
+/// Example:
+///   to_jsonl([{a: 1}, {a: 2}]) | lines | len    # 2
+fn bi_to_jsonl(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
+    const B: &str = "to_jsonl";
+    let value = match (input, args.as_slice()) {
+        (Some(value), []) => value,
+        (None, [value]) => value.clone(),
+        _ => return Err(arity_error(B, "one Array to convert", args.len())),
+    };
+    let Value::Array(items) = &value else {
+        return Err(crate::safety::bad_arg_in(
+            B,
+            format!("{B}: the subject is {}, not an Array", value.type_name()),
+            "JSON lines is one value per line: pass an Array, or use to_json for a single value",
+        ));
+    };
+    let mut out = String::new();
+    for (i, item) in items.iter().enumerate() {
+        let j = value_to_json_strict(B, item, &format!("value[{i}]"))?;
+        out.push_str(&serde_json::to_string(&j)?);
+        out.push('\n');
+    }
+    Ok(Value::Str(out))
 }
 
 /// The first `inf` or `nan` in a parsed TOML document, as a refusal naming its
@@ -33044,6 +33209,35 @@ fn oversized_toml_integer(text: &str) -> Option<(usize, String)> {
     None
 }
 
+/// The first `[table]` header of a TOML text that repeats an earlier one: its
+/// line (from 1) and its dotted name. Array-of-tables headers (`[[x]]`) repeat
+/// legitimately and are skipped.
+fn duplicate_toml_table(text: &str) -> Option<(usize, String)> {
+    let mut seen: Vec<String> = Vec::new();
+    for (index, raw) in text.lines().enumerate() {
+        let line = raw.trim();
+        if !line.starts_with('[') || line.starts_with("[[") {
+            continue;
+        }
+        let Some(close) = line.match_indices(']').map(|(i, _)| i).find(|i| {
+            let rest = line[i + 1..].trim();
+            rest.is_empty() || rest.starts_with('#')
+        }) else {
+            continue;
+        };
+        let name = line[1..close]
+            .split('.')
+            .map(str::trim)
+            .collect::<Vec<_>>()
+            .join(".");
+        if seen.contains(&name) {
+            return Some((index + 1, name));
+        }
+        seen.push(name);
+    }
+    None
+}
+
 /// Why a TOML text will not read, as a refusal gives it. For an integer past 64
 /// bits the parser says only "number too large to fit in target type", which
 /// names no value, so the literal and its line are given instead. Some errors
@@ -33052,6 +33246,12 @@ fn toml_reason(text: &str, err: &toml::de::Error) -> String {
     if err.message().contains("too large") {
         if let Some((line, literal)) = oversized_toml_integer(text) {
             return format!("the integer {literal} at line {line} is out of the 64-bit Int range");
+        }
+    }
+    // The parser says "invalid table header" for a table written twice; name it.
+    if err.message().contains("table header") || err.message().contains("duplicate") {
+        if let Some((line, name)) = duplicate_toml_table(text) {
+            return format!("duplicate table `{name}` (it is defined again at line {line})");
         }
     }
     let message = err.message().trim();
@@ -39745,10 +39945,25 @@ fn bi_tar_create(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
     }
     // A .tar.gz or .tgz name gets a gzipped stream, which tar_list and
     // tar_extract read back. The plain tar stream was written under that name.
-    if archive_kind(&archive) == Some("tar.gz") {
-        tool_to_new_gzip_file("tar_create", "tar", &argv, &out)?;
+    let written = if archive_kind(&archive) == Some("tar.gz") {
+        tool_to_new_gzip_file("tar_create", "tar", &argv, &out)
     } else {
-        tool_to_new_file("tar_create", "tar", &argv, &out)?;
+        tool_to_new_file("tar_create", "tar", &argv, &out)
+    };
+    if let Err(mut e) = written {
+        // Windows bsdtar crashes (exit -1073741819) on some non-ASCII names.
+        let non_ascii = placed.iter().any(|(d, n)| !d.is_ascii() || !n.is_ascii());
+        if let Some(se) = e.downcast_mut::<crate::safety::SafetyError>() {
+            let crashed = se
+                .got
+                .strip_prefix("exited ")
+                .and_then(|c| c.parse::<i64>().ok())
+                .is_some_and(|c| !(0..=255).contains(&c));
+            if crashed && non_ascii {
+                se.hint = "tar crashed on a member name with non-ASCII characters; use zip_create(archive, members) for an archive of such names, or rename the files".to_string();
+            }
+        }
+        return Err(e);
     }
     Ok(Value::Bool(true))
 }
@@ -40118,6 +40333,20 @@ fn archive_test_local(path: &str, kind: LocalArchive, cap: u64) -> Result<bool> 
             let Ok(mut z) = zip::ZipArchive::new(archive_open("archive_test", path)?) else {
                 return Ok(false);
             };
+            // An entry extraction would refuse (`../x`, an absolute or drive
+            // name) makes the archive unsafe, so it does not test clean.
+            let unsafe_name = (0..z.len()).any(|i| {
+                z.by_index_raw(i).is_ok_and(|f| {
+                    let name = f
+                        .name()
+                        .map(|n| n.into_owned())
+                        .unwrap_or_else(|_| String::from_utf8_lossy(f.name_raw()).into_owned());
+                    archive_entry_escapes(&name)
+                })
+            });
+            if unsafe_name {
+                return Ok(false);
+            }
             (0..z.len()).all(|i| z.by_index(i).map(|mut f| sink(&mut f)).unwrap_or(false))
         }
         LocalArchive::Tar | LocalArchive::TarGz => {
@@ -40129,9 +40358,16 @@ fn archive_test_local(path: &str, kind: LocalArchive, cap: u64) -> Result<bool> 
             };
             let mut ar = tar::Archive::new(reader);
             match ar.entries() {
-                Ok(entries) => entries
-                    .into_iter()
-                    .all(|e| e.map(|mut e| sink(&mut e)).unwrap_or(false)),
+                Ok(entries) => entries.into_iter().all(|e| {
+                    e.map(|mut e| {
+                        let escapes = e
+                            .path()
+                            .map(|p| archive_entry_escapes(&p.to_string_lossy()))
+                            .unwrap_or(false);
+                        !escapes && sink(&mut e)
+                    })
+                    .unwrap_or(false)
+                }),
                 Err(_) => false,
             }
         }

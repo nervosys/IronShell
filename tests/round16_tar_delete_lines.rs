@@ -67,7 +67,7 @@ fn tar_create_refuses_a_missing_member_before_running_tar() {
     assert_eq!(json["error"]["code"], "E_NOT_FOUND", "{json}");
     let message = json["error"]["message"].as_str().unwrap_or_default();
     assert!(
-        message.contains("no file named 'work/nope.txt'"),
+        message.contains("no file at work/nope.txt"),
         "the message names the member as written: {message}"
     );
     let stderr = String::from_utf8_lossy(&out.stderr);

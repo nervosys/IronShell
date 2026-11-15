@@ -1792,14 +1792,34 @@ pub static SIGNATURES: &[Signature] = &[
     Signature {
         name: "from_yaml", category: None, subject_required: false, aliases: &["from-yaml"],
         subject: Some(Ty::Str), params: &[], returns: "Any",
-        doc: "Parse the supported YAML subset into a typed value. Double-quoted escapes decode per YAML 1.2.",
-        examples: &[(r#"from_yaml("n: 7").n"#, "7"), (r#"("n: 7" | from_yaml).n"#, "7"), (r#"(try { from_yaml("n: 9223372036854775808") } catch e { e.error.code })"#, "E_BAD_VALUE")],
+        doc: "Parse the supported YAML subset into a typed value. Double-quoted escapes decode per YAML 1.2. A block sequence may sit at its key's indentation (`a:\\n- 1`), and flow collections may hold plain scalars (`{b: 1, c: [x, y]}`). Refused: a mapping value that starts a mapping (`a: x: y`), a tab used to indent, anchors, aliases, tags, block scalars, several documents, and a number that is not finite (`.inf`, `1e400`). A leading byte order mark is ignored.",
+        examples: &[(r#"from_yaml("n: 7").n"#, "7"), (r#"("n: 7" | from_yaml).n"#, "7"), (r#"(try { from_yaml("n: 9223372036854775808") } catch e { e.error.code })"#, "E_BAD_VALUE"), (r#"from_yaml("a:\n- 1\n- 2\n").a | len"#, "2"), (r#"from_yaml("a: {b: 1, c: [x, y]}").a.c | last"#, r#""y""#), (r#"(try { from_yaml("a: 1e400") } catch e { e.error.code })"#, "E_BAD_VALUE")],
     },
     Signature {
         name: "to_yaml", category: None, subject_required: false, aliases: &["to-yaml"],
         subject: Some(Ty::Any), params: &[], returns: "String",
-        doc: "Serialize a typed value as YAML with round-trip-safe quoting.",
+        doc: "Serialize a typed value as YAML with round-trip-safe quoting. A NaN or an infinity is E_BAD_VALUE, as in to_json, since from_yaml refuses it.",
         examples: &[("({n: 7} | to_yaml | from_yaml).n", "7"), ("from_yaml(to_yaml({n: 7})).n", "7")],
+    },
+    Signature {
+        name: "from_jsonl", category: None, subject_required: false, aliases: &[],
+        subject: Some(Ty::Str), params: &[], returns: "Array",
+        doc: "Read JSON lines text as an Array: one JSON value per line, blank lines skipped, as open reads a .jsonl file. A line that is not JSON is E_BAD_VALUE and the refusal names its line and column; an integer past the 64-bit Int range is refused as in from_json. The text is piped in or passed as the argument: from_jsonl(text).",
+        examples: &[
+            (r#"from_jsonl("{\"a\": 1}\n{\"a\": 2}\n") | len"#, "2"),
+            (r#"("[1]\n\n[2]\n" | from_jsonl) | last"#, "[2]"),
+            (r#"(try { from_jsonl("{\"a\": 1}\n{oops}\n") } catch e { e.message | contains("line 2") })"#, "true"),
+        ],
+    },
+    Signature {
+        name: "to_jsonl", category: None, subject_required: false, aliases: &[],
+        subject: Some(Ty::Array), params: &[], returns: "String",
+        doc: "Write an Array as JSON lines: one compact JSON value per line, each line ending in a newline, so from_jsonl reads it back. A NaN or an infinity is E_BAD_VALUE naming its path, as in to_json; a subject that is not an Array is E_BAD_ARG. The Array is piped in or passed as the argument: to_jsonl(rows).",
+        examples: &[
+            (r#"to_jsonl([{a: 1}, {a: 2}]) | lines | len"#, "2"),
+            (r#"to_jsonl([1, 2])"#, r#""1\n2\n""#),
+            (r#"[{a: 1}] | to_jsonl | from_jsonl | first | fn(r) => r.a"#, "1"),
+        ],
     },
     Signature {
         name: "columns", category: None, subject_required: true, aliases: &[],
@@ -2456,10 +2476,12 @@ pub static SIGNATURES: &[Signature] = &[
         subject: Some(Ty::Array),
         params: &[],
         returns: "Array",
-        doc: "Remove every duplicate element, keeping the first of each in order. The subject is an Array, piped or as the argument; a String is refused: pipe it through lines for lines, or through split(\"\") for characters, first.",
+        doc: "Remove every duplicate element, keeping the first of each in order. Elements are compared as == compares them, so 1 and 1.0 are duplicates and the first is kept. The subject is an Array, piped or as the argument; a String is refused: pipe it through lines for lines, or through split(\"\") for characters, first.",
         examples: &[
             ("[1, 2, 1, 3] | unique", "[1, 2, 3]"),
             (r#"unique(["b", "a", "b"])"#, r#"["b", "a"]"#),
+            ("[1, 1.0, 2] | unique | len", "2"),
+            ("[1.0, 1] | unique | first", "1.0"),
         ],
     },
     Signature {
@@ -7994,9 +8016,10 @@ pub static SIGNATURES: &[Signature] = &[
         subject: Some(Ty::Str),
         params: &[],
         returns: "Record",
-        doc: "Read a TOML document as a Record. Datetimes come back as their text. Text that is not TOML is E_BAD_VALUE, and the refusal says why.",
+        doc: "Read a TOML document as a Record. Datetimes come back as their text. Text that is not TOML is E_BAD_VALUE, and the refusal says why; a table written twice is named as `duplicate table`.",
         examples: &[
             (r#"from_toml("a = 1").a"#, "1"),
+            (r#"(try { from_toml("[a]\n[a]\n") } catch e { e.message | contains("duplicate table") })"#, "true"),
             (r#"(try { from_toml("a = ") } catch e { e.error.code })"#, "E_BAD_VALUE"),
             (r#"(try { from_toml("n = 9223372036854775808") } catch e { e.error.code })"#, "E_BAD_VALUE"),
         ],
@@ -11345,7 +11368,7 @@ pub static SIGNATURES: &[Signature] = &[
         subject: None,
         params: &[req("path", Ty::Str, "a .zip, .tar, .tar.gz/.tgz, .gz, .bz2, .xz, .zst, .tar.bz2, .tar.xz or .tar.zst file")],
         returns: "Bool",
-        doc: "Whether every entry decompresses (and, for zip, matches its CRC). bzip2, xz and zstd files, and the tar archives inside them, are tested with bzip2 -t, xz -t and zstd -t (tar: decompressed and read to the end); the file's magic bytes must match its extension or the call is refused. Corrupt data answers false; a missing tool is E_TOOL_MISSING.",
+        doc: "Whether every entry decompresses (and, for zip, matches its CRC). bzip2, xz and zstd files, and the tar archives inside them, are tested with bzip2 -t, xz -t and zstd -t (tar: decompressed and read to the end); the file's magic bytes must match its extension or the call is refused. Corrupt data answers false; a missing tool is E_TOOL_MISSING. A zip, tar or tar.gz that holds an entry extraction would refuse (a `..` component, an absolute or drive name) is unsafe and answers false too, though every entry decompresses.",
         examples: &[
             (r#"archive_test("tests/fixtures/archives/sample.zip")"#, r#"true"#),
             (r#"archive_test("tests/fixtures/archives/damaged.zip")"#, r#"false"#),

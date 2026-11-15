@@ -90,6 +90,8 @@ pub fn parse(src: &str) -> Result<Value> {
 fn significant_lines(src: &str) -> Result<Vec<Line>> {
     let mut out = Vec::new();
     let mut seen_doc_start = false;
+    // A leading byte order mark is not part of the first key.
+    let src = src.strip_prefix('\u{feff}').unwrap_or(src);
 
     for (i, raw) in src.lines().enumerate() {
         let number = i + 1;
@@ -98,6 +100,12 @@ fn significant_lines(src: &str) -> Result<Vec<Line>> {
 
         if trimmed.is_empty() || trimmed.starts_with('#') {
             continue;
+        }
+        if raw[..indent].contains('\t') {
+            return Err(anyhow!(
+                "line {number}: a tab cannot indent YAML (the specification forbids it); \
+                 indent with spaces instead"
+            ));
         }
         if trimmed == "..." {
             break; // explicit end of document
@@ -166,7 +174,8 @@ fn parse_block(lines: &[Line], pos: &mut usize, indent: usize) -> Result<Value> 
     if content.starts_with("- ") || content == "-" {
         parse_sequence(lines, pos, indent)
     } else if content.starts_with(['{', '['])
-        && serde_json::from_str::<serde_json::Value>(content).is_ok()
+        && (serde_json::from_str::<serde_json::Value>(content).is_ok()
+            || parse_flow(content, lines[*pos].number).is_ok())
     {
         // A whole JSON-style flow collection on its own line: the `{}` or `[]`
         // that `to-yaml` writes for an empty top-level value.
@@ -244,7 +253,16 @@ fn insert_entry(
 ) -> Result<()> {
     let key = key_name(&key, number)?;
     let parsed = if value.trim().is_empty() {
-        parse_nested(lines, pos, indent)?
+        // A block sequence may sit at the key's own indentation (`a:\n- 1`),
+        // as PyYAML writes it.
+        if *pos < lines.len()
+            && lines[*pos].indent == indent
+            && (lines[*pos].content.starts_with("- ") || lines[*pos].content == "-")
+        {
+            parse_sequence(lines, pos, indent)?
+        } else {
+            parse_nested(lines, pos, indent)?
+        }
     } else {
         parse_scalar(value.trim(), number)?
     };
@@ -371,7 +389,8 @@ fn parse_scalar(raw: &str, number: usize) -> Result<Value> {
     }
 
     // Flow collections: JSON is a subset of YAML flow style, so anything that
-    // parses as JSON is correct here. Anything else in flow style is rejected
+    // parses as JSON is correct here. Other flow text (plain scalars, bare
+    // keys) goes through the flow reader; what neither accepts is rejected
     // rather than guessed at.
     if s.starts_with('[') || s.starts_with('{') {
         return match serde_json::from_str::<serde_json::Value>(s) {
@@ -379,10 +398,16 @@ fn parse_scalar(raw: &str, number: usize) -> Result<Value> {
                 Some(refusal) => Err(refusal),
                 None => Ok(json_to_value(j)),
             },
-            Err(e) => Err(anyhow!(
-                "line {number}: flow collection {s:?} is not valid JSON ({e}); \
-                 IronShell's YAML subset supports JSON-compatible flow style only"
-            )),
+            Err(e) => match parse_flow(s, number) {
+                Ok(v) => Ok(v),
+                // A refusal of a value (overflow, not finite) is the answer itself.
+                Err(flow_err) if flow_err.downcast_ref::<FlowSyntax>().is_none() => Err(flow_err),
+                Err(_) => Err(anyhow!(
+                    "line {number}: flow collection {s:?} is not valid JSON ({e}); \
+                     IronShell's YAML subset supports JSON-compatible flow style \
+                     and plain scalars in flow collections only"
+                )),
+            },
         };
     }
 
@@ -392,6 +417,200 @@ fn parse_scalar(raw: &str, number: usize) -> Result<Value> {
         None => s,
     };
 
+    // `a: x: y` is an error in YAML: a mapping value cannot start a mapping.
+    if split_key(s).is_some() {
+        return Err(anyhow!(
+            "line {number}: a mapping value is not allowed here ({s:?} contains `: `); \
+             quote the value, such as \"{}\", or put the nested mapping on its own indented lines",
+            s.replace('"', "\\\"")
+        ));
+    }
+    plain_typed(s, number)
+}
+
+/// Marker for a flow collection that is not well formed (as against a value
+/// inside it that is refused), so the caller can name the JSON error instead.
+#[derive(Debug)]
+struct FlowSyntax;
+
+impl std::fmt::Display for FlowSyntax {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "malformed flow collection")
+    }
+}
+
+impl std::error::Error for FlowSyntax {}
+
+/// Parse a flow collection (`[a, 1]`, `{b: 1, c: [x, y]}`) whose scalars may be
+/// plain, as well as quoted. A trailing ` # comment` is allowed.
+fn parse_flow(s: &str, number: usize) -> Result<Value> {
+    let chars: Vec<char> = s.chars().collect();
+    let mut i = 0usize;
+    let v = flow_value(&chars, &mut i, number, 0)?;
+    flow_skip_ws(&chars, &mut i);
+    if i < chars.len() && chars[i] != '#' {
+        return Err(anyhow::Error::new(FlowSyntax));
+    }
+    Ok(v)
+}
+
+fn flow_skip_ws(c: &[char], i: &mut usize) {
+    while *i < c.len() && c[*i].is_whitespace() {
+        *i += 1;
+    }
+}
+
+fn flow_value(c: &[char], i: &mut usize, number: usize, depth: usize) -> Result<Value> {
+    if depth > 100 {
+        return Err(anyhow!(
+            "line {number}: flow collections are nested more than 100 deep"
+        ));
+    }
+    flow_skip_ws(c, i);
+    match c.get(*i) {
+        Some('[') => {
+            *i += 1;
+            let mut items = Vec::new();
+            loop {
+                flow_skip_ws(c, i);
+                match c.get(*i) {
+                    Some(']') => {
+                        *i += 1;
+                        return Ok(Value::Array(items));
+                    }
+                    None => return Err(anyhow::Error::new(FlowSyntax)),
+                    _ => {}
+                }
+                items.push(flow_value(c, i, number, depth + 1)?);
+                flow_skip_ws(c, i);
+                match c.get(*i) {
+                    Some(',') => *i += 1,
+                    Some(']') => {}
+                    _ => return Err(anyhow::Error::new(FlowSyntax)),
+                }
+            }
+        }
+        Some('{') => {
+            *i += 1;
+            let mut map = BTreeMap::new();
+            loop {
+                flow_skip_ws(c, i);
+                match c.get(*i) {
+                    Some('}') => {
+                        *i += 1;
+                        return Ok(Value::Record(map));
+                    }
+                    None => return Err(anyhow::Error::new(FlowSyntax)),
+                    _ => {}
+                }
+                let key = match c.get(*i) {
+                    Some('"') | Some('\'') => match flow_quoted(c, i, number)? {
+                        Value::Str(k) => k,
+                        _ => return Err(anyhow::Error::new(FlowSyntax)),
+                    },
+                    _ => flow_plain_text(c, i, true).trim().to_string(),
+                };
+                flow_skip_ws(c, i);
+                if c.get(*i) != Some(&':') {
+                    return Err(anyhow::Error::new(FlowSyntax));
+                }
+                *i += 1;
+                flow_skip_ws(c, i);
+                let value = match c.get(*i) {
+                    Some(',') | Some('}') => Value::Null,
+                    _ => flow_value(c, i, number, depth + 1)?,
+                };
+                if map.insert(key.clone(), value).is_some() {
+                    return Err(anyhow!("line {number}: duplicate key {key:?}"));
+                }
+                flow_skip_ws(c, i);
+                match c.get(*i) {
+                    Some(',') => *i += 1,
+                    Some('}') => {}
+                    _ => return Err(anyhow::Error::new(FlowSyntax)),
+                }
+            }
+        }
+        Some('"') | Some('\'') => flow_quoted(c, i, number),
+        Some(_) => {
+            let text = flow_plain_text(c, i, false);
+            let text = text.trim();
+            if text.is_empty() {
+                return Err(anyhow::Error::new(FlowSyntax));
+            }
+            if text.starts_with(['&', '*', '!', '|', '>']) {
+                return Err(anyhow!(
+                    "line {number}: anchors, aliases, tags and block scalars are not \
+                     supported by IronShell's YAML subset. Convert the document to JSON, or simplify it."
+                ));
+            }
+            if split_key(text).is_some() {
+                // `[a: b]` and `{k: v: w}`: a mapping value cannot start here.
+                return Err(anyhow::Error::new(FlowSyntax));
+            }
+            plain_typed(text, number)
+        }
+        None => Err(anyhow::Error::new(FlowSyntax)),
+    }
+}
+
+/// A quoted scalar inside a flow collection, starting at the opening quote.
+fn flow_quoted(c: &[char], i: &mut usize, number: usize) -> Result<Value> {
+    let quote = c[*i];
+    let start = *i + 1;
+    let mut j = start;
+    loop {
+        match c.get(j) {
+            None => return Err(anyhow::Error::new(FlowSyntax)),
+            Some('\\') if quote == '"' => j += 2,
+            Some(&q) if q == quote => {
+                if quote == '\'' && c.get(j + 1) == Some(&'\'') {
+                    j += 2;
+                    continue;
+                }
+                break;
+            }
+            Some(_) => j += 1,
+        }
+    }
+    let inner: String = c[start..j].iter().collect();
+    *i = j + 1;
+    if quote == '"' {
+        Ok(Value::Str(unescape_double(&inner, number)?))
+    } else {
+        Ok(Value::Str(inner.replace("''", "'")))
+    }
+}
+
+/// The text of a plain scalar inside a flow collection: up to a `,`, `]` or `}`
+/// (and, for a key, up to the `:` that ends it).
+fn flow_plain_text(c: &[char], i: &mut usize, key: bool) -> String {
+    let start = *i;
+    while *i < c.len() {
+        let ch = c[*i];
+        if matches!(ch, ',' | ']' | '}') {
+            break;
+        }
+        if key && ch == ':' {
+            let next = c.get(*i + 1);
+            if next.is_none()
+                || next.is_some_and(|n| n.is_whitespace() || matches!(n, ',' | ']' | '}'))
+            {
+                break;
+            }
+        }
+        if ch == '#' && *i > start && c[*i - 1].is_whitespace() {
+            break;
+        }
+        *i += 1;
+    }
+    c[start..*i].iter().collect()
+}
+
+/// Type a plain scalar (comment already removed): integer overflow, the
+/// non-finite spellings and an overflowing float are refused, then the YAML 1.2
+/// core typing applies.
+fn plain_typed(s: &str, number: usize) -> Result<Value> {
     // An integer past the 64-bit range would read as a Float and lose its digits.
     // A 0o or 0x integer past it is refused the same way.
     let overflow = || {
@@ -432,7 +651,17 @@ fn parse_scalar(raw: &str, number: usize) -> Result<Value> {
             &format!("quote it as a string to keep the text, such as \"{s}\""),
         ));
     }
-    Ok(plain_scalar(s))
+    let v = plain_scalar(s);
+    // `1e400` overflows to infinity: a number that is not finite is refused
+    // however it is spelled.
+    if matches!(&v, Value::Float(f) if !f.is_finite()) {
+        return Err(crate::safety::value_not_representable(
+            "from_yaml",
+            format!("from_yaml: line {number}: {s} is not a finite number; IronShell numbers are finite"),
+            &format!("quote it as a string to keep the text, such as \"{s}\""),
+        ));
+    }
+    Ok(v)
 }
 
 /// The digits and radix of a YAML 1.2 core octal (`0o17`) or hex (`0x1F`)

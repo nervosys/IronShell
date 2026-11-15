@@ -443,6 +443,7 @@ from_csv	Pure
 from_entries	Pure
 from_epoch	Pure
 from_json	ReadLocal
+from_jsonl	Pure
 from_toml	Pure
 from_yaml	Pure
 fs_chmod	WriteLocal
@@ -1355,6 +1356,7 @@ to_csv	Pure
 to_entries	Pure
 to_epoch	Pure
 to_json	Pure
+to_jsonl	Pure
 to_string	Pure
 to_toml	Pure
 to_yaml	Pure
