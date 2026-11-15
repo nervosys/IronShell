@@ -21,6 +21,7 @@
 
 use crate::ast::{Expr, Stmt};
 use crate::safety::{effect_of, effective_decision, Decision, Effect, Mode};
+use crate::security::LiteralSlot;
 use crate::value::Value;
 use anyhow::Result;
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -34,9 +35,13 @@ struct Walk<'a> {
     /// Names bound by `let`, which shadow builtins of the same name.
     locals: HashSet<String>,
     calls: Vec<(String, Option<String>)>,
-    /// The literal String arguments of each call in `calls`, by index: the
-    /// paths the jail would judge, when they are written out.
-    literals: Vec<Vec<String>>,
+    /// The literal String arguments of each call in `calls`, by index, with
+    /// where each sits, and whether the call is a pipeline stage (its subject
+    /// comes from the left): the paths the jail would judge, when they are
+    /// written out.
+    literals: Vec<(bool, Vec<(LiteralSlot, String)>)>,
+    /// Set by a pipe for the call on its right.
+    piped_next: bool,
     /// Names bound once, immutably, to a string literal: `name = "rm"`, so that
     /// `call(name, ...)` can be read as a call to that builtin.
     consts: HashMap<String, String>,
@@ -51,6 +56,31 @@ fn plain_literal(s: &str) -> Option<String> {
     } else {
         Some(s.replace(crate::parser::ESCAPED_DOLLAR, "$"))
     }
+}
+
+/// The literal Strings among a call's arguments (and among the elements of an
+/// Array argument), each with its slot.
+fn literal_args(args: &[Expr], named: &[(String, Expr)]) -> Vec<(LiteralSlot, String)> {
+    let mut out = Vec::new();
+    for (i, a) in args.iter().enumerate() {
+        match a {
+            Expr::LitStr(s) => out.push((LiteralSlot::Position(i), s.clone())),
+            Expr::Array(items) => {
+                for it in items {
+                    if let Expr::LitStr(s) = it {
+                        out.push((LiteralSlot::Position(i), s.clone()));
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    for (n, a) in named {
+        if let Expr::LitStr(s) = a {
+            out.push((LiteralSlot::Named(n.clone()), s.clone()));
+        }
+    }
+    out
 }
 
 /// The names a match pattern binds.
@@ -73,7 +103,7 @@ impl Walk<'_> {
     /// verdict is at least `unknown`.
     fn unknown(&mut self, what: String) {
         self.calls.push((what, None));
-        self.literals.push(Vec::new());
+        self.literals.push((false, Vec::new()));
     }
 
     /// Run `f` with `names` bound as parameters: they shadow builtins and
@@ -144,14 +174,7 @@ impl Walk<'_> {
                     || crate::plugins::is_manifest_builtin(&n) =>
             {
                 self.calls.push((n.clone(), Some(n.clone())));
-                self.literals.push(
-                    rest.iter()
-                        .filter_map(|a| match a {
-                            Expr::LitStr(s) => Some(s.clone()),
-                            _ => None,
-                        })
-                        .collect(),
-                );
+                self.literals.push((false, literal_args(rest, &[])));
                 if n == "call" {
                     self.call_by_name(rest);
                 } else {
@@ -307,18 +330,11 @@ impl Walk<'_> {
                 args,
                 named,
             } => {
+                let piped = std::mem::take(&mut self.piped_next);
                 let r = self.resolve(callee);
                 let target = r.1.clone();
                 self.calls.push(r);
-                self.literals.push(
-                    args.iter()
-                        .chain(named.iter().map(|(_, a)| a))
-                        .filter_map(|a| match a {
-                            Expr::LitStr(s) => Some(s.clone()),
-                            _ => None,
-                        })
-                        .collect(),
-                );
+                self.literals.push((piped, literal_args(args, named)));
                 if !matches!(callee.as_ref(), Expr::Ident(_) | Expr::MemberAccess { .. }) {
                     self.expr(callee);
                 }
@@ -343,12 +359,16 @@ impl Walk<'_> {
                         let r = self.resolve(right);
                         let target = r.1.clone();
                         self.calls.push(r);
-                        self.literals.push(Vec::new());
+                        self.literals.push((true, Vec::new()));
                         if let Some(b) = target.as_deref() {
                             self.code_arg(b, &[]);
                         }
                     }
-                    other => self.expr(other),
+                    other => {
+                        self.piped_next = matches!(other, Expr::Call { .. });
+                        self.expr(other);
+                        self.piped_next = false;
+                    }
                 }
             }
             Expr::Array(xs) => xs.iter().for_each(|x| self.expr(x)),
@@ -377,7 +397,7 @@ impl Walk<'_> {
                 let r = self.resolve(e);
                 if r.1.is_some() {
                     self.calls.push(r);
-                    self.literals.push(Vec::new());
+                    self.literals.push((false, Vec::new()));
                 }
                 self.expr(object)
             }
@@ -405,7 +425,7 @@ impl Walk<'_> {
                 let r = self.resolve(e);
                 if r.1.is_some() {
                     self.calls.push(r);
-                    self.literals.push(Vec::new());
+                    self.literals.push((false, Vec::new()));
                 }
             }
             Expr::LitInt(_) | Expr::LitFloat(_) | Expr::LitBool(_) | Expr::Null => {}
@@ -447,18 +467,23 @@ fn refused_outright(builtin: &str) -> Option<String> {
 /// `approve` would misstate it. Only paths written out are seen; an argument
 /// that is not a path but reads as one outside (`"../x"` as a search pattern)
 /// is judged as a path, which errs toward `deny`.
-fn jail_refusal(effect: Effect, literals: &[String]) -> Option<String> {
+fn jail_refusal(
+    builtin: &str,
+    effect: Effect,
+    literals: &[(LiteralSlot, String)],
+    piped: bool,
+) -> Option<String> {
     if !matches!(
         effect,
         Effect::ReadLocal | Effect::WriteLocal | Effect::Destructive
     ) {
         return None;
     }
-    literals
-        .iter()
-        .filter(|s| !s.is_empty() && !s.contains('\n'))
-        .find(|s| crate::security::outside_read_jail_as_agent(s))
-        .map(|s| format!("'{s}' is outside the workspace root, so the run refuses it with E_OUTSIDE_WORKSPACE"))
+    crate::security::outside_path_literal(builtin, literals, piped).map(|s| {
+        format!(
+            "'{s}' is outside the workspace root, so the run refuses it with E_OUTSIDE_WORKSPACE"
+        )
+    })
 }
 
 fn rank(decision: &str) -> u8 {
@@ -486,6 +511,7 @@ pub fn explain(code: &str) -> Result<Value> {
         locals: HashSet::new(),
         calls: Vec::new(),
         literals: Vec::new(),
+        piped_next: false,
         consts: HashMap::new(),
         visited: HashSet::new(),
     };
@@ -503,8 +529,12 @@ pub fn explain(code: &str) -> Result<Value> {
         match builtin {
             Some(b) => {
                 let effect = effect_of(b);
-                let literals = w.literals.get(i).map(Vec::as_slice).unwrap_or(&[]);
-                let refused = refused_outright(b).or_else(|| jail_refusal(effect, literals));
+                let (piped, literals) = match w.literals.get(i) {
+                    Some((p, l)) => (*p, l.as_slice()),
+                    None => (false, &[][..]),
+                };
+                let refused =
+                    refused_outright(b).or_else(|| jail_refusal(b, effect, literals, piped));
                 let decision = if refused.is_some() {
                     "deny"
                 } else {
@@ -819,6 +849,35 @@ mod tests {
     fn a_call_through_a_variable_is_unknown_not_allowed() {
         let v = explain("let f = fn(x) => x\nf(1)").unwrap();
         assert_eq!(field(&v, "decision"), &Value::Str("unknown".into()));
+    }
+
+    fn decision_of(code: &str) -> Value {
+        field(&explain(code).unwrap(), "decision").clone()
+    }
+
+    #[test]
+    fn text_that_reads_like_a_path_is_not_judged_as_one() {
+        // The run reads no file for any of these, so none is denied.
+        for code in [
+            r#"from_json("{\"a\":1}")"#,
+            r#"from_json("../x")"#,
+            r#"sql_value([{n: 1}], "select count(*) from t")"#,
+            r#"[{n: 1}] | sql("select * from t where s = '../x'")"#,
+        ] {
+            assert_ne!(decision_of(code), Value::Str("deny".into()), "{code}");
+        }
+    }
+
+    #[test]
+    fn a_path_argument_outside_the_workspace_is_still_denied() {
+        assert_eq!(
+            decision_of(r#"file.read("../x")"#),
+            Value::Str("deny".into())
+        );
+        assert_eq!(
+            decision_of(r#"file_read("../x")"#),
+            Value::Str("deny".into())
+        );
     }
 
     #[test]
