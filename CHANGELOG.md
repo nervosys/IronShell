@@ -48,7 +48,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `from_yaml` refuses `a: x: y` and tab indentation, and ignores a leading BOM; `from_toml` names a table defined twice.
 - A duplicate key in a Record literal (`{a: 1, a: 2}`) is E_PARSE; the last value silently won.
 - The undo journal records each step's resolved absolute path, and a step whose recorded path cannot be found says so instead of "absent now".
-- `tar_create` gives a hint (use zip_create) when the system tar crashes on a non-ASCII name; refusal messages redact `cd("..")` as `[...]/..` like every other path.
+- `tar_create` gives a hint (use zip_create) when the system tar crashes on a non-ASCII name; refusal messages redact `cd("..")` as `[...]/..` like every other path.
 - A script that starts with a UTF-8 byte order mark parses (PowerShell 5 writes one by default).
 - A piped number is `pow`'s base (`2 | pow(3)` is 8); the `uniq` help no longer claims `-c`; the `round` help states digits 0 to 17; truncated provider tool descriptions end at a whole sentence.
 - Better parse hints: a word-call as an assignment's value, a spaced `x [0]`, `fn name(...)` and a braced lambda body.
