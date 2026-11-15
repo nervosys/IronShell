@@ -2392,7 +2392,7 @@ impl OSOperationRegistry {
                 },
             },
             examples: vec![],
-            related: vec!["ai.chat".to_string(), "ai.embed".to_string()],
+            related: vec!["ai.chat".to_string()],
             tags: vec![
                 "ai".to_string(),
                 "llm".to_string(),

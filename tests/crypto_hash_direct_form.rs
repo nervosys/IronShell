@@ -5,8 +5,8 @@
 //! "expected algorithm md5, sha1, sha256, sha384 or sha512, got \"abc\"",
 //! because the first argument was read as the data. The forms that already
 //! worked are pinned here too: `crypto.hash("abc")` (SHA-256 by default), the
-//! piped `"abc" | crypto_hash("sha256")`, and `crypto_hash("md5", "sha256")`,
-//! which still hashes the text "md5". A script echoes its last value, so each
+//! piped `"abc" | crypto_hash("sha256")`; `crypto_hash("md5", "sha256")` is now
+//! refused as ambiguous. A script echoes its last value, so each
 //! one ends in a bare expression.
 
 use std::path::PathBuf;
@@ -75,13 +75,16 @@ fn the_piped_form_is_unchanged() {
 }
 
 #[test]
-fn a_call_that_already_worked_keeps_its_meaning() {
-    // Data "md5" with algorithm "sha256", as piping the text gives. The lone
-    // form crypto.hash("md5") is refused since round 31: an algorithm name
-    // alone is a missing argument, not data.
+fn two_algorithm_names_are_ambiguous_and_refused() {
+    // Which is the data cannot be told, so it is an error, not a guess (it
+    // used to hash the text "md5" with sha256). Piping says which is which.
+    let (_, err, code) = run_script("ambiguous", "crypto.hash(\"md5\", \"sha256\")\n");
+    assert_ne!(code, 0);
+    assert!(err.contains("E_BAD_ARG"), "{err}");
+    assert!(err.contains("ambiguous"), "{err}");
     assert_prints(
-        "compat",
-        "crypto.hash(\"md5\", \"sha256\") == (\"md5\" | crypto.hash(\"sha256\"))\n",
+        "piped_algo_name",
+        "(\"md5\" | crypto.hash(\"sha256\")) == (\"md5\" | crypto_hash(\"sha256\"))\n",
         "true",
     );
 }
@@ -108,7 +111,7 @@ fn an_unknown_algorithm_in_either_position_is_still_refused() {
 }
 
 #[test]
-fn the_signature_lists_the_data_parameter_first() {
+fn the_signature_lists_the_algorithm_before_the_data() {
     let v = iron_shell::agent_api::ontology_describe_json("crypto_hash");
     let names: Vec<String> = v["parameters"]
         .as_array()
@@ -117,6 +120,7 @@ fn the_signature_lists_the_data_parameter_first() {
         .map(|p| p["name"].as_str().unwrap_or_default().to_string())
         .collect();
     // The piped text is the subject, and it comes first; the direct form's
-    // data and algorithm follow it.
-    assert_eq!(names, vec!["subject", "data", "algorithm"], "{v}");
+    // algorithm and data follow it, in the order the canonical call writes
+    // them: crypto.hash("sha256", data).
+    assert_eq!(names, vec!["subject", "algorithm", "data"], "{v}");
 }

@@ -3,7 +3,7 @@
 //! This module provides namespaced access to builtin functions:
 //! - `sys.info()`, `sys.hostname()`, `sys.uptime()`
 //! - `net.interfaces()`, `net.ping()`, `net.dns_lookup()`
-//! - `gui.screenshot()`, `gui.click()`, `gui.type_text()`
+//! - `gui.screenshot()`, `gui.type_text()`
 //! - `crypto.hash()`, `crypto.encrypt()`, `crypto.sign()`
 //! - etc.
 
@@ -185,24 +185,15 @@ pub fn http_module() -> Value {
     ])
 }
 
-/// GUI Automation module: gui.screenshot(), gui.click(), gui.type_text(), etc.
+/// GUI Automation module: gui.screenshot(), gui.type_text(), etc.
 pub fn gui_module() -> Value {
     module(&[
         ("screenshot", "gui_screenshot"),
         ("screen_size", "gui_screen_size"),
         ("mouse_position", "gui_mouse_position"),
         ("mouse_move", "gui_mouse_move"),
-        ("click", "gui_click"),
-        ("double_click", "gui_double_click"),
-        ("right_click", "gui_right_click"),
-        ("drag", "gui_drag"),
-        ("scroll", "gui_scroll"),
         ("type_text", "gui_type_text"),
         ("key_press", "gui_key_press"),
-        ("key_down", "gui_key_down"),
-        ("key_up", "gui_key_up"),
-        ("hotkey", "gui_hotkey"),
-        ("window_list", "gui_window_list"),
         ("window_focus", "gui_focus_window"),
         ("window_close", "gui_close_window"),
         ("window_minimize", "gui_minimize_window"),
@@ -210,17 +201,13 @@ pub fn gui_module() -> Value {
         ("window_resize", "gui_resize_window"),
         ("window_move", "gui_move_window"),
         ("find_image", "gui_find_image"),
-        ("wait_image", "gui_wait_image"),
         ("ocr", "gui_ocr"),
-        ("ocr_region", "gui_ocr_region"),
-        ("color_at", "gui_color_at"),
-        ("pixel_search", "gui_pixel_search"),
         ("clipboard_get", "clipboard_get"),
         ("clipboard_set", "clipboard_set"),
     ])
 }
 
-/// Web Automation module: web.fetch(), web.screenshot(), web.navigate(), etc.
+/// Web Automation module: web.fetch(), web.get(), etc.
 pub fn web_module() -> Value {
     module(&[
         ("fetch", "web_fetch"),
@@ -229,26 +216,9 @@ pub fn web_module() -> Value {
         ("json_get", "web_json_get"),
         ("json_post", "web_json_post"),
         ("download", "web_download"),
-        ("screenshot", "web_screenshot"),
-        ("navigate", "web_navigate"),
-        ("click", "web_click"),
-        ("type_text", "web_type"),
-        ("select", "web_select"),
-        ("extract", "web_extract"),
-        ("extract_all", "web_extract_all"),
-        ("wait", "web_wait"),
-        ("eval_js", "web_eval"),
         ("cookies", "web_cookies"),
         ("headers", "web_headers"),
-        ("form_fill", "web_form_fill"),
         ("form_submit", "web_form_submit"),
-        ("scroll", "web_scroll"),
-        ("back", "web_back"),
-        ("forward", "web_forward"),
-        ("refresh", "web_refresh"),
-        ("pdf", "web_pdf"),
-        ("links", "web_links"),
-        ("table_extract", "web_table_extract"),
     ])
 }
 
@@ -264,7 +234,6 @@ pub fn crypto_module() -> Value {
         ("sign", "crypto_sign"),
         ("verify", "crypto_verify_signature"),
         ("key_generate", "crypto_generate_key"),
-        ("key_derive", "crypto_key_derive"),
         ("base64_encode", "crypto_base64_encode"),
         ("base64_decode", "crypto_base64_decode"),
         ("hex_encode", "crypto_hex_encode"),
@@ -273,7 +242,6 @@ pub fn crypto_module() -> Value {
         ("password_verify", "crypto_password_verify"),
         ("cert_info", "crypto_cert_info"),
         ("cert_verify", "crypto_cert_verify"),
-        ("jwt_encode", "crypto_jwt_encode"),
         ("jwt_decode", "crypto_jwt_decode"),
         ("hash_file", "crypto_hash_file"),
         ("checksum", "crypto_checksum"),
@@ -285,7 +253,6 @@ pub fn crypto_module() -> Value {
 pub fn db_module() -> Value {
     module(&[
         ("sqlite_open", "db_sqlite_open"),
-        ("sqlite_close", "db_sqlite_close"),
         ("sqlite_query", "db_sqlite_query"),
         ("sqlite_exec", "db_sqlite_exec"),
         ("sqlite_insert", "db_sqlite_insert"),
@@ -293,17 +260,9 @@ pub fn db_module() -> Value {
         ("sqlite_delete", "db_sqlite_delete"),
         ("sqlite_tables", "db_sqlite_tables"),
         ("sqlite_schema", "db_sqlite_schema"),
-        ("sqlite_transaction", "db_sqlite_transaction"),
-        ("sqlite_commit", "db_sqlite_commit"),
-        ("sqlite_rollback", "db_sqlite_rollback"),
-        ("kv_open", "db_kv_open"),
         ("kv_get", "db_kv_get"),
         ("kv_set", "db_kv_set"),
         ("kv_delete", "db_kv_delete"),
-        ("kv_list", "db_kv_list"),
-        ("kv_close", "db_kv_close"),
-        ("redis_connect", "db_redis_connect"),
-        ("redis_cmd", "db_redis_cmd"),
     ])
 }
 
@@ -382,14 +341,7 @@ pub fn user_module() -> Value {
 
 /// Permission module: perm.get(), perm.set(), etc.
 pub fn perm_module() -> Value {
-    module(&[
-        ("get", "perm_get"),
-        ("set", "perm_set"),
-        ("acl_get", "perm_acl_get"),
-        ("acl_set", "perm_acl_set"),
-        ("owner_get", "perm_owner_get"),
-        ("owner_set", "perm_owner_set"),
-    ])
+    module(&[("get", "perm_get"), ("set", "perm_set")])
 }
 
 /// Package manager module: pkg.list(), pkg.install(), etc.
@@ -397,24 +349,17 @@ pub fn pkg_module() -> Value {
     module(&[
         ("list", "pkg_list"),
         ("install", "pkg_install"),
-        ("uninstall", "pkg_uninstall"),
         ("update", "pkg_update"),
         ("upgrade", "pkg_upgrade"),
         ("search", "pkg_search"),
         ("info", "pkg_info"),
-        ("outdated", "pkg_outdated"),
         ("clean", "pkg_clean"),
-        ("repos", "pkg_repos"),
-        ("repo_add", "pkg_repo_add"),
-        ("repo_remove", "pkg_repo_remove"),
         ("files", "pkg_files"),
         ("owner", "pkg_owner"),
         ("verify", "pkg_verify"),
         ("changelog", "pkg_changelog"),
         ("deps", "pkg_deps"),
         ("rdeps", "pkg_rdeps"),
-        ("lock", "pkg_lock"),
-        ("unlock", "pkg_unlock"),
     ])
 }
 
@@ -441,11 +386,9 @@ pub fn clip_module() -> Value {
         ("set", "clipboard_set"),
         ("clear", "clipboard_clear"),
         ("has_text", "clipboard_has_text"),
-        ("has_image", "clipboard_has_image"),
         ("get_image", "clipboard_get_image"),
         ("set_image", "clipboard_set_image"),
         ("history", "clipboard_history"),
-        ("watch", "clipboard_watch"),
     ])
 }
 
@@ -457,22 +400,18 @@ pub fn input_module() -> Value {
         ("confirm", "input_confirm"),
         ("select", "input_select"),
         ("multi_select", "input_multiselect"),
-        ("text", "input_text"),
         ("number", "input_number"),
-        ("path", "input_path"),
         ("editor", "input_editor"),
     ])
 }
 
-/// AI module: ai.chat(), ai.embed(), ai.agent(), etc.
+/// AI module: ai.chat(), ai.agent(), etc.
 pub fn ai_module() -> Value {
     module(&[
         ("chat", "ai"),
-        ("embed", "embed"),
         ("agent", "agent"),
         ("swarm", "swarm"),
         ("backends", "ai_backends"),
-        ("detect", "ai_detect"),
         // RAG functions
         ("rag_index", "rag_index"),
         ("rag_search", "rag_search"),
@@ -844,8 +783,6 @@ pub fn audit_module() -> Value {
         ("log", "audit_log"),
         ("query", "audit_query"),
         ("export", "audit_export"),
-        ("retention", "audit_retention"),
-        ("stream", "audit_stream"),
     ])
 }
 
@@ -854,11 +791,8 @@ pub fn sso_module() -> Value {
     module(&[
         ("init", "sso_init"),
         ("auth", "sso_auth"),
-        ("refresh", "sso_refresh"),
         ("logout", "sso_logout"),
         ("validate", "sso_validate"),
-        ("user_info", "sso_user_info"),
-        ("providers", "sso_providers"),
     ])
 }
 

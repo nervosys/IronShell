@@ -1867,10 +1867,10 @@ pub static SIGNATURES: &[Signature] = &[
             Ty::Int,
             0,
             17,
-            "decimal places; 0 returns an Int",
+            "decimal places, 0 to 17 (a value outside that range is E_BAD_ARG); 0 returns an Int",
         )],
         returns: "Number",
-        doc: "Round a number, optionally to a number of decimal places. The tie rule is half away from zero, applied to the exact binary value of a Float, as format_number does: 2.675 is stored as 2.67499999..., so round(2.675, 2) is 2.67, while an exact tie such as 0.125 or 2.5 goes up (round(0.125, 2) is 0.13, round(2.5) is 3, round(-2.5) is -3).",
+        doc: "Round a number, optionally to 0 to 17 decimal places (digits outside that range are refused with E_BAD_ARG, never clamped). The tie rule is half away from zero, applied to the exact binary value of a Float, as format_number does: 2.675 is stored as 2.67499999..., so round(2.675, 2) is 2.67, while an exact tie such as 0.125 or 2.5 goes up (round(0.125, 2) is 0.13, round(2.5) is 3, round(-2.5) is -3).",
         examples: &[
             ("round(4.966, 2)", "4.97"),
             ("4.966 | round(2)", "4.97"),
@@ -2363,14 +2363,12 @@ pub static SIGNATURES: &[Signature] = &[
         subject_required: false,
         aliases: &[],
         subject: Some(Ty::Array),
-        // `key` is deliberately `Any` and optional. It takes a field name or a
-        // lambda, `"desc"` may follow it, and calling it with no key at all
-        // must reach the builtin's own error, which names both accepted forms
-        // -- a better message than a declaration can give, and one
-        // `tests/sort_by_key.rs` asserts. Declaring `key: String, required`
-        // rejected the lambda form and replaced that message with a worse one.
+        // `key` is `Any` and required. It takes a field name or a lambda, and
+        // `"desc"` may follow it. Declaring `key: String` rejected the lambda
+        // form; a call with no key is refused by the arity check with a message
+        // that names both accepted forms (`tests/sort_by_key.rs` asserts it).
         params: &[
-            opt(
+            req(
                 "key",
                 Ty::Any,
                 "field name (String), or fn(record) -> Any",
@@ -2385,6 +2383,7 @@ pub static SIGNATURES: &[Signature] = &[
             ("[{n: 2}, {n: 1}] | sort_by(fn(r) => r.n)", "[{n: 1}, {n: 2}]"),
             (r#"(try { [{n: 1}, {m: 2}] | sort_by("n") } catch e { e.error.code })"#, "E_UNKNOWN_FIELD"),
             (r#"(try { [{n: 1}, {n: 2}] | sort_by("n", "sideways") } catch e { e.error.code })"#, "E_BAD_ARG"),
+            (r#"(try { [{n: 1}, {n: 2}] | sort_by } catch e { e.error.code })"#, "E_BAD_ARG"),
         ],
     },
     Signature {
@@ -2606,15 +2605,16 @@ pub static SIGNATURES: &[Signature] = &[
         subject_required: false,
         aliases: &[],
         subject: Some(Ty::Any),
-        params: &[req("needle", Ty::Any, "substring or element to look for")],
+        params: &[req("needle", Ty::Any, "a substring (String subject), an element (Array subject) or a key name (Record subject)")],
         returns: "Bool",
-        // Strings only. This said "or an array an element" until
-        // `contains([1, 2, 3], 2)` was actually run: it answers
-        // `E_BAD_ARG: expected a string, got Array`. Exactly the kind of
-        // plausible-but-wrong sentence that name-derived documentation
-        // produces, written here by hand instead.
-        doc: "Whether a string contains a substring. Strings only.",
-        examples: &[(r#"contains("security fix", "security")"#, "true")],
+        doc: "Whether the subject holds the needle. A String holds a substring; an Array holds an element equal to the needle under == (so 1 and 1.0 match); a Record holds a key of that name (the needle must be a String). Anything else is E_BAD_ARG. The same test as `in`, with the collection first: contains(list, x) is x | in(list).",
+        examples: &[
+            (r#"contains("security fix", "security")"#, "true"),
+            ("contains([1, 2], 1.0)", "true"),
+            ("[1, 2] | contains(3)", "false"),
+            (r#"contains({a: 1}, "a")"#, "true"),
+            (r#"{a: 1} | contains("b")"#, "false"),
+        ],
     },
     Signature {
         name: "lower",
@@ -3177,7 +3177,7 @@ pub static SIGNATURES: &[Signature] = &[
         subject: Some(Ty::Sequence),
         params: &[],
         returns: "Array",
-        doc: "Remove ADJACENT duplicate elements, like Unix uniq: [1, 1, 2, 1] keeps the second 1. The subject is an Array, piped or as the argument. A String is split into lines first (one element per line, as lines does), then its adjacent duplicates are dropped: \"a\\na\\nb\" gives [\"a\", \"b\"]. Only adjacent duplicates go, as in Unix uniq; for every duplicate, not only neighbours, use unique or arr.unique. The -c flag is accepted and ignored.",
+        doc: "Remove ADJACENT duplicate elements, like Unix uniq: [1, 1, 2, 1] keeps the second 1. The subject is an Array, piped or as the argument. A String is split into lines first (one element per line, as lines does), then its adjacent duplicates are dropped: \"a\\na\\nb\" gives [\"a\", \"b\"]. Only adjacent duplicates go, as in Unix uniq; for every duplicate, not only neighbours, use unique or arr.unique. It takes no flags: uniq(xs, \"-c\") is refused.",
         examples: &[
             ("[1, 1, 2] | uniq | len", "2"),
             ("uniq([1, 1, 2, 1])", "[1, 2, 1]"),
@@ -3215,7 +3215,7 @@ pub static SIGNATURES: &[Signature] = &[
         params: &[req("exponent", Ty::Numeric, "the power to raise to")],
         returns: "Number",
         doc: "Raise a number to a power.",
-        examples: &[("pow(2, 3)", "8")],
+        examples: &[("pow(2, 3)", "8"), ("2 | pow(3)", "8"), ("2 | math.pow(3)", "8")],
     },
     Signature {
         name: "pre_commit_run",
@@ -9545,15 +9545,17 @@ pub static SIGNATURES: &[Signature] = &[
         subject_required: false,
         aliases: &["hash"],
         subject: Some(Ty::Str),
-        params: &[opt("data", Ty::Str, "text to hash; omit when piping it in"), opt("algorithm", Ty::Str, "md5, sha1, sha256 (default), sha384 or sha512")],
+        params: &[opt("algorithm", Ty::Str, "md5, sha1, sha256 (default), sha384 or sha512; written first when the data follows it"), opt("data", Ty::Str, "text to hash; omit when piping it in")],
         returns: "String",
-        doc: "Hex digest of a string. An unknown algorithm is refused, never substituted. Called with two arguments, `crypto.hash(\"sha256\", data)` names the algorithm first. A lone algorithm name with nothing piped in (`crypto.hash(\"sha256\")`) is E_BAD_ARG, not the hash of that word.",
+        doc: "Hex digest of a string. An unknown algorithm is refused, never substituted. The canonical call is `crypto.hash(\"sha256\", data)`, the algorithm first, or `data | crypto.hash(\"sha256\")` piped; `crypto.hash(data, \"sha256\")` also works when only the second argument names an algorithm. When both arguments are algorithm names the call is E_BAD_ARG (which is the data?): pipe the data in to hash an algorithm name. A lone algorithm name with nothing piped in (`crypto.hash(\"sha256\")`) is E_BAD_ARG, not the hash of that word.",
         examples: &[
-            (r#"(try { crypto_hash("sha256") } catch e { e.error.code })"#, "E_BAD_ARG"),
+            (r#"crypto_hash("sha256", "hello")"#, r#"2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"#),
+            (r#"crypto_hash("md5", "hello")"#, r#"5d41402abc4b2a76b9719d911017c592"#),
             (r#"("hello" | crypto_hash("md5"))"#, r#"5d41402abc4b2a76b9719d911017c592"#),
             (r#"crypto_hash("hello")"#, r#"2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"#),
             (r#"crypto_hash("hello", "md5")"#, r#"5d41402abc4b2a76b9719d911017c592"#),
-            (r#"crypto_hash("sha256", "hello")"#, r#"2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"#),
+            (r#"(try { crypto_hash("sha256") } catch e { e.error.code })"#, "E_BAD_ARG"),
+            (r#"(try { crypto_hash("md5", "sha256") } catch e { e.error.code })"#, "E_BAD_ARG"),
         ],
     },
     Signature {
@@ -15652,6 +15654,15 @@ pub fn validate(name: &str, args: &[Value], input: Option<&Value>) -> anyhow::Re
                 &sig.render(),
                 &format!("{supplied} of {required} required"),
                 "to test membership, pipe the value to in: `\"bug\" | in([\"bug\", \"x\"])`",
+            ));
+        }
+        // `[3, 1, 2] | sort_by` lacks a key: say what a key may be.
+        if name == "sort_by" {
+            return Err(crate::safety::bad_arg_with_hint(
+                name,
+                "a key: a field name (String) or a lambda, then an optional \"asc\" or \"desc\"",
+                "no key",
+                "sort_by(\"size\"), sort_by(fn(r) => r.size) or sort_by(\"size\", \"desc\")",
             ));
         }
         // `sql("select 1")` reads as complete; what it lacks is rows.

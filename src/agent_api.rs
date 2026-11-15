@@ -4346,11 +4346,36 @@ fn gemini_schema(schema: &JsonValue) -> JsonValue {
 }
 
 /// OpenAI refuses a function description over 1,024 characters. A longer one
-/// is cut at a word boundary and ends in an ellipsis, and the result fits the
-/// limit.
+/// is cut after its last whole sentence that fits, so it still reads as
+/// complete; when no sentence ends past the half of the limit, it is cut at a
+/// word boundary and ends in an ellipsis. The result fits the limit.
 fn truncate_description(text: &str, max: usize) -> String {
     if text.chars().count() <= max {
         return text.to_string();
+    }
+    // The last sentence end within the limit: `.`, `!` or `?` followed by
+    // whitespace or the end of the text, and not an abbreviation's dot.
+    let window: String = text.chars().take(max).collect();
+    let mut sentence_end = None;
+    for (i, c) in window.char_indices() {
+        if !matches!(c, '.' | '!' | '?') {
+            continue;
+        }
+        let end = i + c.len_utf8();
+        if !text[end..].chars().next().map_or(true, char::is_whitespace) {
+            continue;
+        }
+        let word_start = window[..i].rfind(char::is_whitespace).map_or(0, |w| w + 1);
+        let word = window[word_start..i].to_ascii_lowercase();
+        if c == '.' && matches!(word.as_str(), "e.g" | "i.e" | "etc" | "vs" | "cf") {
+            continue;
+        }
+        sentence_end = Some(end);
+    }
+    if let Some(end) = sentence_end {
+        if end * 2 > window.len() {
+            return text[..end].to_string();
+        }
     }
     let kept: String = text.chars().take(max.saturating_sub(1)).collect();
     let cut = match kept.rfind(char::is_whitespace) {
@@ -7892,5 +7917,40 @@ pub fn generate_schema_filtered(
             "Failed to generate schema: {}",
             response.error.unwrap_or_default()
         ))
+    }
+}
+
+#[cfg(test)]
+mod truncate_description_tests {
+    use super::truncate_description;
+
+    #[test]
+    fn a_short_description_is_unchanged() {
+        assert_eq!(truncate_description("Short one.", 1024), "Short one.");
+    }
+
+    #[test]
+    fn a_long_description_is_cut_after_a_whole_sentence() {
+        let sentence = "This sentence is exactly forty-nine chars long. ";
+        let text = sentence.repeat(30);
+        let cut = truncate_description(&text, 1024);
+        assert!(cut.chars().count() <= 1024);
+        assert!(cut.ends_with("long."), "{cut:?}");
+        assert!(!cut.contains('\u{2026}'));
+    }
+
+    #[test]
+    fn with_no_late_sentence_end_it_cuts_at_a_word_with_an_ellipsis() {
+        let text = "word ".repeat(400);
+        let cut = truncate_description(&text, 1024);
+        assert!(cut.chars().count() <= 1024);
+        assert!(cut.ends_with('\u{2026}'), "{cut:?}");
+    }
+
+    #[test]
+    fn an_abbreviation_is_not_a_sentence_end() {
+        let text = format!("{} e.g. {}", "a".repeat(600), "b ".repeat(300));
+        let cut = truncate_description(&text, 1024);
+        assert!(!cut.ends_with("e.g."), "{cut:?}");
     }
 }

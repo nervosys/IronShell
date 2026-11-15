@@ -11045,7 +11045,7 @@ fn bi_from_json(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
             Value::Str(s) => s,
             _ => {
                 return Err(crate::safety::arg_err(
-                    "from-json: input must be a JSON string",
+                    "from_json: input must be a JSON string",
                 ))
             }
         }
@@ -11054,12 +11054,12 @@ fn bi_from_json(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
             Value::Str(s) => s.clone(),
             _ => {
                 return Err(crate::safety::arg_err(
-                    "from-json: argument must be a JSON string",
+                    "from_json: argument must be a JSON string",
                 ))
             }
         }
     } else {
-        return Err(crate::safety::arg_err("from-json: no JSON input provided"));
+        return Err(crate::safety::arg_err("from_json: no JSON input provided"));
     };
     let json_str = without_bom(json_str);
 
@@ -11442,14 +11442,14 @@ fn bi_from_csv(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
         Some(Value::Str(s)) => s,
         Some(_) => {
             return Err(crate::safety::arg_err(
-                "from-csv: input must be a CSV string",
+                "from_csv: input must be a CSV string",
             ))
         }
         None => return Err(subject_refusal("from_csv", "CSV text")),
     };
 
     parse_delimited(
-        "from-csv",
+        "from_csv",
         &csv_str,
         csv::ReaderBuilder::new().delimiter(b','),
     )
@@ -11963,17 +11963,17 @@ fn bi_from_yaml(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
         Some(Value::Str(s)) => s,
         Some(_) => {
             return Err(crate::safety::arg_err(
-                "from-yaml: input must be a YAML string",
+                "from_yaml: input must be a YAML string",
             ))
         }
         None => match args.first() {
             Some(Value::Str(s)) => s.clone(),
             Some(_) => {
                 return Err(crate::safety::arg_err(
-                    "from-yaml: argument must be a YAML string",
+                    "from_yaml: argument must be a YAML string",
                 ))
             }
-            None => return Err(crate::safety::arg_err("from-yaml: requires YAML input")),
+            None => return Err(crate::safety::arg_err("from_yaml: requires YAML input")),
         },
     };
     crate::yaml::parse(&yaml_str).map_err(|e| {
@@ -11981,7 +11981,7 @@ fn bi_from_yaml(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
         if e.downcast_ref::<crate::safety::SafetyError>().is_some() {
             e
         } else {
-            let message = format!("from-yaml: {e}");
+            let message = format!("from_yaml: {e}");
             match yaml_unsupported_construct(&message) {
                 Some(construct) => crate::safety::bad_arg_in(
                     "from_yaml",
@@ -12031,7 +12031,7 @@ fn bi_to_yaml(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
         None => args
             .into_iter()
             .next()
-            .ok_or_else(|| crate::safety::arg_err("to-yaml: requires pipeline input"))?,
+            .ok_or_else(|| crate::safety::arg_err("to_yaml: requires pipeline input"))?,
     };
     nonfinite_in_value("to_yaml", &value, "value", "YAML")?;
     Ok(Value::Str(crate::yaml::emit(&value)))
@@ -15631,15 +15631,26 @@ fn bi_contains(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
         )
     };
 
-    // An array is the usual reason for this error: `contains` searches a string,
-    // and array membership is `in`.
-    if let Value::Array(_) = input_val {
-        return Err(crate::safety::bad_arg_with_hint(
-            "contains",
-            "a string",
-            "Array",
-            "contains searches a string for a substring; to test whether an array holds a value, pipe the value to in: `value | in(array)`",
-        ));
+    // An Array holds the needle when one of its elements equals it (`==`, so 1
+    // and 1.0 match), as `in` tests it; a Record holds it when it has that key.
+    match &input_val {
+        Value::Array(items) => {
+            return Ok(Value::Bool(
+                items.iter().any(|v| values_equal(substring_arg, v)),
+            ))
+        }
+        Value::Record(rec) => {
+            return match substring_arg {
+                Value::Str(key) => Ok(Value::Bool(rec.contains_key(key))),
+                other => Err(crate::safety::bad_arg_with_hint(
+                    "contains",
+                    "a String key to look for in a Record",
+                    other.type_name(),
+                    "a Record is searched by key name: contains(record, \"key\")",
+                )),
+            }
+        }
+        _ => {}
     }
     let text = expect_string("contains", &input_val)?;
     let substring = expect_string("contains", substring_arg)?;
@@ -16550,7 +16561,14 @@ fn float_for_message(x: f64) -> String {
     }
 }
 
-fn bi_pow(args: Vec<Value>, _input: Option<Value>) -> Result<Value> {
+fn bi_pow(mut args: Vec<Value>, input: Option<Value>) -> Result<Value> {
+    // Piped, the base is the subject and the argument is the exponent:
+    // `2 | pow(3)`.
+    if args.len() == 1 {
+        if let Some(base) = input {
+            args.insert(0, base);
+        }
+    }
     if args.len() < 2 {
         return Err(crate::safety::arg_err(
             "pow requires two arguments: base and exponent",
@@ -49538,8 +49556,8 @@ fn bi_crypto_hash(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
     // `crypto.hash("sha256", data)`, the algorithm first, as AGENTS.md writes it.
     // Read as (data, algorithm) it was E_BAD_ARG "expected algorithm ..., got
     // \"abc\"". It is taken this way only when the first argument names an
-    // algorithm and the second does not, so a call that already worked keeps
-    // its meaning: `crypto_hash("md5", "sha256")` still hashes the text "md5".
+    // algorithm and the second does not. When both name one, which is the data
+    // cannot be told, so the call is refused rather than guessed.
     if input.is_none() {
         // A lone algorithm name is not data: `crypto.hash("sha256")` hashed the
         // text "sha256" and answered as if the caller's data had been hashed.
@@ -49561,6 +49579,17 @@ fn bi_crypto_hash(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
                     first,
                     second.as_bytes(),
                 )?));
+            }
+            if is_hash_algorithm(first) && is_hash_algorithm(second) {
+                return Err(crate::safety::bad_arg_in(
+                    "crypto_hash",
+                    format!(
+                        "crypto_hash: both {first:?} and {second:?} are algorithm names, so which is the data is ambiguous"
+                    ),
+                    &format!(
+                        "pipe the data in to hash an algorithm name: {first:?} | crypto_hash({second:?})"
+                    ),
+                ));
             }
             // Neither order names an algorithm: say so, with both values, rather
             // than blaming the second one alone.

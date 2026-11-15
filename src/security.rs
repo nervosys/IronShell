@@ -748,6 +748,84 @@ pub fn read_jail_dispatch(builtin: &str, args: &[crate::value::Value], piped: bo
     Ok(())
 }
 
+/// How `--explain` names where a literal String argument sits in a call.
+#[derive(Clone, Debug)]
+pub enum LiteralSlot {
+    /// The nth positional argument as written (the piped subject is not counted).
+    Position(usize),
+    /// A `name = value` argument.
+    Named(String),
+}
+
+/// Whether `--explain` should judge a call's literal String arguments as paths
+/// outside the workspace: the ones `read_jail_dispatch` would judge when the
+/// call runs, and no others. `literals` are the call's literal strings with
+/// their slots; `piped` is true when the call is a stage that receives its
+/// subject from the left. Returns the first one outside the jail, as agent mode
+/// judges it.
+pub fn outside_path_literal(
+    builtin: &str,
+    literals: &[(LiteralSlot, String)],
+    piped: bool,
+) -> Option<String> {
+    // `sql` and `sql_value` take a source file first only when a query follows
+    // it; with one argument that argument is the query.
+    let sql_source = !piped
+        && matches!(
+            builtin,
+            "sql" | "sql_value" | "sqlite_query" | "db_sqlite_query"
+        )
+        && literals
+            .iter()
+            .any(|(slot, _)| matches!(slot, LiteralSlot::Position(1)));
+    let candidates: Vec<&String> = match crate::signature::signature_of(builtin) {
+        Some(sig) => {
+            let offset = usize::from(sig.subject.is_some() && !piped);
+            literals
+                .iter()
+                .filter(|(slot, _)| {
+                    if sql_source && matches!(slot, LiteralSlot::Position(0)) {
+                        return true;
+                    }
+                    let name = match slot {
+                        LiteralSlot::Position(n) => {
+                            let Some(i) = n.checked_sub(offset) else {
+                                return false;
+                            };
+                            match sig.params.get(i) {
+                                Some(p) => p.name,
+                                None => return false,
+                            }
+                        }
+                        LiteralSlot::Named(n) => n.as_str(),
+                    };
+                    names_a_path_param(name) && !NOT_A_PATH.contains(&(builtin, name))
+                })
+                .map(|(_, s)| s)
+                .collect()
+        }
+        // No signature: the run judges only an argument that names an existing path.
+        None => literals
+            .iter()
+            .map(|(_, s)| s)
+            .filter(|s| {
+                !crate::safety::names_a_remote_share(s)
+                    && !crate::safety::existing_paths(&[s.to_string()]).is_empty()
+            })
+            .collect(),
+    };
+    candidates
+        .into_iter()
+        .filter(|s| !s.is_empty() && s.len() <= 4096 && !s.contains(['\n', '\0']))
+        .filter(|s| !(TAKES_REMOTE.contains(&builtin) && (is_url(s) || is_remote_spec(s))))
+        .find(|s| {
+            let exists = !crate::safety::names_a_remote_share(s) && Path::new(s.as_str()).exists();
+            let judged = if exists { s.as_str() } else { glob_base(s) };
+            outside_read_jail_as_agent(judged)
+        })
+        .cloned()
+}
+
 /// Parameters whose name reads like a path but whose value is not one.
 const NOT_A_PATH: &[(&str, &str)] = &[
     // An integration test target's name, refused as E_BAD_ARG if it is a path.
