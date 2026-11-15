@@ -16550,7 +16550,14 @@ fn float_for_message(x: f64) -> String {
     }
 }
 
-fn bi_pow(args: Vec<Value>, _input: Option<Value>) -> Result<Value> {
+fn bi_pow(mut args: Vec<Value>, input: Option<Value>) -> Result<Value> {
+    // Piped, the base is the subject and the argument is the exponent:
+    // `2 | pow(3)`.
+    if args.len() == 1 {
+        if let Some(base) = input {
+            args.insert(0, base);
+        }
+    }
     if args.len() < 2 {
         return Err(crate::safety::arg_err(
             "pow requires two arguments: base and exponent",

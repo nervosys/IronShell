@@ -3215,7 +3215,7 @@ pub static SIGNATURES: &[Signature] = &[
         params: &[req("exponent", Ty::Numeric, "the power to raise to")],
         returns: "Number",
         doc: "Raise a number to a power.",
-        examples: &[("pow(2, 3)", "8")],
+        examples: &[("pow(2, 3)", "8"), ("2 | pow(3)", "8"), ("2 | math.pow(3)", "8")],
     },
     Signature {
         name: "pre_commit_run",
