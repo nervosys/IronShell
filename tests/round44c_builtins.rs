@@ -41,7 +41,10 @@ fn sort_by_declares_its_key_required_and_a_missing_key_is_refused() {
     assert!(sig.params[0].required, "key must be declared required");
     let err = try_run("[3, 1, 2] | sort_by").expect_err("no key");
     let text = err.to_string();
-    assert!(text.contains("field name") && text.contains("lambda"), "{text}");
+    assert!(
+        text.contains("field name") && text.contains("lambda"),
+        "{text}"
+    );
 }
 
 #[test]
@@ -62,7 +65,10 @@ fn error_text(src: &str) -> String {
 #[test]
 fn errors_name_the_builtin_as_called() {
     // Real names, not the hyphenated spellings that are not builtins.
-    assert!(error_text("from_json()").starts_with("from_json:"), "from_json");
+    assert!(
+        error_text("from_json()").starts_with("from_json:"),
+        "from_json"
+    );
     assert!(error_text("from_yaml()").contains("from_yaml"), "from_yaml");
     assert!(!error_text("from_yaml()").contains("from-yaml"));
     assert!(!error_text("to_yaml()").contains("to-yaml"));
@@ -76,7 +82,11 @@ fn errors_name_the_builtin_as_called() {
 fn the_round_help_states_the_digits_range() {
     let sig = iron_shell::signature::signature_of("round").expect("declared");
     assert!(sig.doc.contains("0 to 17"), "{}", sig.doc);
-    assert!(sig.params[0].doc.contains("0 to 17"), "{}", sig.params[0].doc);
+    assert!(
+        sig.params[0].doc.contains("0 to 17"),
+        "{}",
+        sig.params[0].doc
+    );
     assert!(try_run("round(1.5, 18)").is_err());
     assert!(try_run("round(1.5, 17)").is_ok());
 }
