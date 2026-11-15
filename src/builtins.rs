@@ -33520,6 +33520,20 @@ fn path_is_absent(e: &std::io::Error) -> bool {
     )
 }
 
+/// Whether a recursive walk may descend into `entry`: a real directory, not a
+/// symbolic link or Windows junction to one. A link is listed as an entry and
+/// not opened, as `find` lists it, so a walk of the workspace cannot name or
+/// count what lies behind a link that points outside it. The type is the
+/// entry's own (`DirEntry::file_type` does not follow a link), so no extra
+/// stat is made and a link whose target is gone is not an error.
+fn entry_is_walkable_dir(builtin: &str, entry: &std::fs::DirEntry) -> Result<bool> {
+    match entry.file_type() {
+        Ok(t) => Ok(t.is_dir() && !t.is_symlink()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(e) => Err(crate::safety::fs_error(builtin, entry.path(), &e)),
+    }
+}
+
 /// Whether `path` is a regular file. Same rule as `entry_is_dir`: only a
 /// missing entry answers `false`; any other failure to stat it is an error.
 fn entry_is_file(builtin: &str, path: &std::path::Path) -> Result<bool> {
@@ -33586,7 +33600,7 @@ fn walk_entries_capped(dir: &std::path::Path, max_depth: usize, max: usize) -> R
             push_capped("fs_walk", results, shown, max)?;
             // Only a directory the walk would descend into needs its type
             // checked; one at the depth limit is listed and not opened.
-            if depth < max_depth && entry_is_dir("fs_walk", &path)? {
+            if depth < max_depth && entry_is_walkable_dir("fs_walk", &entry)? {
                 walk_recursive(&path, depth + 1, max_depth, max, results)?;
             }
         }
@@ -33656,7 +33670,7 @@ fn bi_fs_tree(args: Vec<Value>, _input: Option<Value>) -> Result<Value> {
             lines.push(format!("{}{}{}", prefix, connector, name));
 
             let path = entry.path();
-            if depth < max_depth && entry_is_dir("fs_tree", &path)? {
+            if depth < max_depth && entry_is_walkable_dir("fs_tree", &entry)? {
                 let new_prefix = format!("{}{}", prefix, if is_last { "    " } else { "│   " });
                 tree_recursive(&path, &new_prefix, depth + 1, max_depth, max, lines)?;
             }
@@ -33696,9 +33710,19 @@ fn bi_fs_du(args: Vec<Value>, _input: Option<Value>) -> Result<Value> {
         let entries =
             std::fs::read_dir(path).map_err(|e| crate::safety::fs_error("fs_du", path, &e))?;
         for entry in entries {
-            let entry_path = entry
-                .map_err(|e| crate::safety::fs_error("fs_du", path, &e))?
-                .path();
+            let entry = entry.map_err(|e| crate::safety::fs_error("fs_du", path, &e))?;
+            let entry_path = entry.path();
+            // A symbolic link or junction counts as itself and is not followed,
+            // as `du` counts it: what lies behind it may be outside the
+            // workspace, and is not this folder's size.
+            if entry.file_type().is_ok_and(|t| t.is_symlink()) {
+                match std::fs::symlink_metadata(&entry_path) {
+                    Ok(m) => size += m.len(),
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                    Err(e) => return Err(crate::safety::fs_error("fs_du", &entry_path, &e)),
+                }
+                continue;
+            }
             match std::fs::metadata(&entry_path) {
                 Ok(m) if m.is_file() => size += m.len(),
                 Ok(m) if m.is_dir() => size += dir_size(&entry_path)?,
