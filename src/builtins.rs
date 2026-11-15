@@ -39130,6 +39130,18 @@ fn zip_write_archive(
     Ok(())
 }
 
+/// The refusal of an archive member (a file to put into a zip or tar) that lies
+/// outside the workspace: `E_OUTSIDE_WORKSPACE`, with the path shown redacted
+/// (`[...]/name`) as every other builtin shows it. The resolved path is the
+/// absolute one, which would name the workspace's parent folders.
+fn archive_member_outside(builtin: &str, resolved: &str) -> anyhow::Error {
+    crate::safety::outside_workspace_shown(
+        builtin,
+        &crate::security::sanitize_path_in_error(resolved),
+        resolved,
+    )
+}
+
 /// The members of a zip call, resolved. Under an enforced workspace each must
 /// lie inside it, and each must exist.
 fn zip_resolve_members(builtin: &str, files: &[String]) -> Result<Vec<String>> {
@@ -39139,11 +39151,7 @@ fn zip_resolve_members(builtin: &str, files: &[String]) -> Result<Vec<String>> {
     for f in files {
         let m = crate::safety::resolve_path_str(f);
         if enforce && !crate::safety::within_workspace(&m) {
-            return Err(crate::safety::policy_deny(
-                builtin,
-                format!("member '{m}' is outside the workspace"),
-                "archive only paths inside the workspace",
-            ));
+            return Err(archive_member_outside(builtin, &m));
         }
         if std::fs::metadata(&m).is_err() {
             return Err(crate::safety::not_found(builtin, "file", f));
@@ -40052,11 +40060,7 @@ fn bi_tar_create(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
         .collect();
     for m in &members {
         if enforce && !crate::safety::within_workspace(m) {
-            return Err(crate::safety::policy_deny(
-                "tar_create",
-                format!("member '{m}' is outside the workspace"),
-                "archive only paths inside the workspace",
-            ));
+            return Err(archive_member_outside("tar_create", m));
         }
     }
     // tar is run on the resolved paths, and on Windows a missing one comes back

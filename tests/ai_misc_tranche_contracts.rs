@@ -593,7 +593,7 @@ fn tar_create_refuses_a_member_outside_the_workspace() {
         vec![s(&ws.path("out.tar")), s(&outside.to_string_lossy())],
     );
     let _ = std::fs::remove_file(&outside);
-    assert_eq!(outcome(r), "E_POLICY_DENY");
+    assert_eq!(outcome(r), "E_OUTSIDE_WORKSPACE");
     assert!(!Path::new(&ws.path("out.tar")).exists());
 }
 
