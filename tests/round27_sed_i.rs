@@ -192,3 +192,22 @@ fn undo_restores_a_file_edited_in_place() {
     assert!(undone.status.success(), "{undone:?}");
     assert_eq!(d.get("u.txt"), "before\n", "{undone:?}");
 }
+
+#[test]
+fn undo_of_a_sed_i_with_a_backup_is_one_step_that_removes_the_backup_too() {
+    let d = Dirs::new("undo_bak");
+    d.put("u.txt", "before\n");
+    let out = d.bash("sed -i.bak 's/before/after/' u.txt\n");
+    assert!(out.status.success(), "{out:?}");
+    assert_eq!(d.get("u.txt"), "after\n");
+    assert_eq!(d.get("u.txt.bak"), "before\n");
+
+    // One step: `undo(1)` puts the file back and takes the backup away with it.
+    let undone = d.ish(&["-c", "undo(1)"]);
+    assert!(undone.status.success(), "{undone:?}");
+    assert_eq!(d.get("u.txt"), "before\n", "{undone:?}");
+    assert!(
+        !d.ws.join("u.txt.bak").exists(),
+        "the backup was left behind: {undone:?}"
+    );
+}

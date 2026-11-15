@@ -3443,14 +3443,21 @@ fn write_file(path: &str, data: &[u8], append: bool) -> Result<(), String> {
         crate::safety::Effect::WriteLocal,
         vec![path.to_string()],
     );
-    // The handle is judged for hard links and truncated only after that check.
-    let res = crate::safety::open_in_place("posix", Path::new(path), append)
-        .and_then(|mut f| f.write_all(data).map_err(anyhow::Error::from));
+    let res = write_file_unrecorded(path, data, append);
     crate::journal::settle(mark, res.is_ok());
-    res.map_err(|e| match e.downcast_ref::<std::io::Error>() {
-        Some(io) => format!("{SHELL_NAME}: {path}: {}", io_reason(io)),
-        None => e.to_string(),
-    })
+    res
+}
+
+/// [`write_file`] without the journal: for a caller that has recorded the paths
+/// itself, as one step (`sed -i.bak` records the edit and its backup together).
+fn write_file_unrecorded(path: &str, data: &[u8], append: bool) -> Result<(), String> {
+    // The handle is judged for hard links and truncated only after that check.
+    crate::safety::open_in_place("posix", Path::new(path), append)
+        .and_then(|mut f| f.write_all(data).map_err(anyhow::Error::from))
+        .map_err(|e| match e.downcast_ref::<std::io::Error>() {
+            Some(io) => format!("{SHELL_NAME}: {path}: {}", io_reason(io)),
+            None => e.to_string(),
+        })
 }
 
 /// The message GNU tools print for an I/O error.
@@ -6538,11 +6545,27 @@ fn sed_in_place(
                     continue;
                 }
             };
-            if let Err(msg) = write_file(&backup, &data, false) {
+            // The edit and its backup are one journal step, so `undo(1)` puts
+            // the file back and removes the backup together. The step is kept
+            // once the backup is written, even if the edit then fails: the
+            // backup exists and undo is what removes it.
+            let mark = crate::journal::mark();
+            crate::journal::record_group(
+                "posix",
+                crate::safety::Effect::WriteLocal,
+                vec![backup.clone(), resolved.clone()],
+            );
+            let made = write_file_unrecorded(&backup, &data, false);
+            let edited = match &made {
+                Ok(()) => write_file_unrecorded(&resolved, &out, false),
+                Err(_) => Ok(()),
+            };
+            crate::journal::settle(mark, made.is_ok());
+            if let Err(msg) = made.and(edited) {
                 sink.eline(&msg);
                 status = 1;
-                continue;
             }
+            continue;
         }
         if let Err(msg) = write_file(&resolved, &out, false) {
             sink.eline(&msg);
