@@ -10,6 +10,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Security
 
 - Windows: a drive-relative path (`C:..\x`, `C:../outside/f`) could write outside the workspace jail in agent mode or with a workspace set (file.write, append, replace, copy, `ish -b` redirection, tee, touch, mkdir) and read outside it under `ish -b` (cat, ls). Such a path now resolves against the drive's current directory, as Windows does, and the jail, `--explain` and the undo journal all judge that one absolute path.
+- `zip_extract`, `unzip` and `tar_extract` (tar, tar.gz, bz2, xz, zst) refuse an entry that would land outside the destination, or outside the workspace when the jail is enforced, through a link or junction that already exists inside it (E_OUTSIDE_WORKSPACE under the jail, E_POLICY_DENY otherwise); such an entry could overwrite a file outside the workspace. Nothing is written before the refusal, and `--explain` predicts it.
 
 ### Changed
 
@@ -22,6 +23,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `archive_test` answers false for a zip or tar holding an entry that extraction would refuse (`../x`, an absolute or drive path).
 - A missing file reads "no file at X" from every builtin, and an empty path is named as empty.
 - The published crate leaves out `tests/`, `examples/` and `benches/` (161 files, 2.2 MiB compressed, down from 857 files and 3.5 MiB). The 14.0.4 crate was published this way from the v14.0.4 tag plus this change.
+- Under `--workspace`, relative paths resolve against the working directory for writes as for reads, so `cd("sub"); file.write("x", ...)` writes `sub/x` and `cd("sub"); file.read("../a")` reads inside the workspace; both were wrong after a `cd`.
+- `fs_walk`, `fs_tree` and `fs_du` list a link as an entry and do not follow it.
+- On Windows, extraction and `archive_test` refuse the same entries (`a.txt:ads`, `nul.txt`, a name ending in a dot or space), and `ish -b` readers refuse a name Windows would rename and a separator after a file name, as `file.read` does. A refused write name says "write".
+- An archive member outside the workspace is E_OUTSIDE_WORKSPACE with the redacted path (it was E_POLICY_DENY with the full path); `sed -i.bak` records the edit and its backup as one journal step.
+- A word-call's argument is a whole expression: `print x + 1` prints the sum and `print -1` prints -1 (the operator applied to print's result).
+- `--explain` judges only a builtin's path arguments as paths, so `from_json("{...}")` and `sql(...)` are no longer denied; it also predicts the Windows name refusals.
+- `crypto_hash` takes the algorithm first, as documented, and refuses two algorithm names as ambiguous; `sort_by` declares its key required.
+- `contains` works on an Array (membership, with `==`) and a Record (key present), as the `in` hint suggests.
+- Errors name the builtin as written (`hash:`, `from_json:`), not an internal alias or a hyphenated spelling.
+- `schema.modules` lists only callable members: 63 entries that named no builtin (among them `crypto.jwt_encode`, `crypto.key_derive`) were withdrawn.
 
 ### Added
 
@@ -29,13 +40,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `from_yaml` reads a block sequence at its key's indent (PyYAML's default output) and plain scalars in flow collections (`a: {b: 1, c: [x, y]}`).
 - Trailing commas in Array and Record literals (`[1, 2,]`, `{a: 1,}`).
 - Parse hints for a comparison right after a pipeline stage (parenthesize the pipe), `/* */` comments, `finally`, or-patterns, range and rest patterns in `match`, and `.5`.
+- `help("file")` (any module name) lists the module's members with a one-line description each.
+- Trailing commas in call arguments and lambda parameters; indexing and `.field` after a `|.field` projection (`xs |.n[0]`).
 
 ### Fixed
 
 - `from_yaml` refuses `a: x: y` and tab indentation, and ignores a leading BOM; `from_toml` names a table defined twice.
 - A duplicate key in a Record literal (`{a: 1, a: 2}`) is E_PARSE; the last value silently won.
 - The undo journal records each step's resolved absolute path, and a step whose recorded path cannot be found says so instead of "absent now".
-- `tar_create` gives a hint (use zip_create) when the system tar crashes on a non-ASCII name; refusal messages redact `cd("..")` as `[...]/..` like every other path.
+- `tar_create` gives a hint (use zip_create) when the system tar crashes on a non-ASCII name; refusal messages redact `cd("..")` as `[...]/..` like every other path.
+- A script that starts with a UTF-8 byte order mark parses (PowerShell 5 writes one by default).
+- A piped number is `pow`'s base (`2 | pow(3)` is 8); the `uniq` help no longer claims `-c`; the `round` help states digits 0 to 17; truncated provider tool descriptions end at a whole sentence.
+- Better parse hints: a word-call as an assignment's value, a spaced `x [0]`, `fn name(...)` and a braced lambda body.
+- Docs: the AGENTS.md quick reference runs as written; llms-full.txt matches `sys.uptime`, `sys.mem_info`, `sys.cpu_info` and `file.patch`.
 
 ## [14.0.4] - 2026-11-14
 
