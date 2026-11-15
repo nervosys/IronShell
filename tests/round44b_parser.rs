@@ -89,3 +89,19 @@ fn named_function_and_braced_lambda_bodies_have_hints() {
     let e = parse_err("f = fn(x) => { x }");
     assert!(e.contains("one expression"), "{e}");
 }
+
+#[test]
+fn help_with_a_module_name_lists_its_members() {
+    let v = run("help(\"file\")");
+    let Value::Record(r) = v else {
+        panic!("help(\"file\") should be a Record")
+    };
+    assert_eq!(r.get("module"), Some(&Value::Str("file".into())));
+    let Some(Value::Array(members)) = r.get("members") else {
+        panic!("members should be an Array")
+    };
+    assert!(members.iter().any(|m| match m {
+        Value::Record(m) => m.get("name") == Some(&Value::Str("patch".into())),
+        _ => false,
+    }));
+}

@@ -3841,6 +3841,34 @@ pub fn ontology_describe_json(query: &str) -> JsonValue {
         return json!({ "category": q, "builtins": in_cat });
     }
 
+    // A module name, `file` or `sys`: its members, each with the first
+    // sentence of the description of the builtin it runs.
+    if crate::modules::is_module_name(q) {
+        let members: Vec<JsonValue> = crate::modules::module_member_names(q)
+            .into_iter()
+            .map(|member| {
+                let builtin = crate::modules::builtin_for_member(q, member);
+                let description = builtin
+                    .as_deref()
+                    .and_then(|b| defs.iter().find(|d| d.name == b))
+                    .map(|d| {
+                        let first = d
+                            .description
+                            .split_once(". ")
+                            .map_or(d.description.as_str(), |(a, _)| a);
+                        first.trim_end_matches('.').to_string()
+                    })
+                    .unwrap_or_default();
+                json!({ "name": member, "builtin": builtin, "description": description })
+            })
+            .collect();
+        return json!({
+            "module": q,
+            "description": module_description(q),
+            "members": members,
+        });
+    }
+
     // Name the nearest real builtins, so a typo is one step from the answer
     // whichever surface (builtin, MCP, Agent API) asked.
     let near = crate::builtins::did_you_mean(q);
