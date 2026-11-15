@@ -461,6 +461,20 @@ fn jail_refusal(effect: Effect, literals: &[String]) -> Option<String> {
         .map(|s| format!("'{s}' is outside the workspace root, so the run refuses it with E_OUTSIDE_WORKSPACE"))
 }
 
+/// The refusal of an archive extraction whose archive is named by a literal and
+/// can be read here: an entry that lands outside the destination or the
+/// workspace, through a link already on disk or by its name. The archive is read
+/// and nothing is written. `None` for any other builtin, or an archive that
+/// cannot be read.
+fn extraction_refusal(builtin: &str, literals: &[String]) -> Option<String> {
+    if !matches!(builtin, "zip_extract" | "unzip" | "tar_extract") {
+        return None;
+    }
+    let archive = literals.first().filter(|a| !a.is_empty())?;
+    let dest = literals.get(1).map(String::as_str).unwrap_or(".");
+    crate::builtins::explain_extraction_refusal(builtin, archive, dest)
+}
+
 fn rank(decision: &str) -> u8 {
     match decision {
         "allow" => 0,
@@ -504,7 +518,9 @@ pub fn explain(code: &str) -> Result<Value> {
             Some(b) => {
                 let effect = effect_of(b);
                 let literals = w.literals.get(i).map(Vec::as_slice).unwrap_or(&[]);
-                let refused = refused_outright(b).or_else(|| jail_refusal(effect, literals));
+                let refused = refused_outright(b)
+                    .or_else(|| jail_refusal(effect, literals))
+                    .or_else(|| extraction_refusal(b, literals));
                 let decision = if refused.is_some() {
                     "deny"
                 } else {

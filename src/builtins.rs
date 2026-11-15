@@ -39200,25 +39200,39 @@ fn check_archive_entries(
         if n >= WALK_MAX_ENTRIES {
             return Err(walk_over(builtin, WALK_MAX_ENTRIES));
         }
-        if archive_entry_escapes(&name) {
-            return Err(refuse_archive_entry(builtin, &name));
-        }
-        // A member named like a Windows device would be written as a file
-        // that cannot be deleted.
-        if cfg!(windows) {
-            if let Some(device) = crate::safety::reserved_device_name(&name) {
-                return Err(anyhow::Error::new(crate::safety::reserved_device_error(
-                    builtin, &device,
-                )));
-            }
-        }
-        if let Some(t) = target {
-            if archive_entry_escapes(&t) {
-                return Err(refuse_archive_entry(builtin, &name));
-            }
+        if let Some(refusal) = archive_entry_refusal(builtin, &name, target.as_deref()) {
+            return Err(refusal);
         }
     }
     Ok(())
+}
+
+/// The one per-entry check, shared by extraction and `archive_test`: why an
+/// entry (and the link target it carries, if any) may not be extracted, or
+/// `None`. A name or target that climbs out of the destination is
+/// `E_POLICY_DENY`. On Windows a name the OS would not keep as written is
+/// `E_BAD_ARG`, as `file.write` refuses it: a device name (`nul.txt`), a
+/// component ending in a dot or a space (`x.txt.`, which would be written as
+/// `x.txt`), an alternate data stream (`a.txt:ads`) and a forbidden character.
+fn archive_entry_refusal(builtin: &str, name: &str, target: Option<&str>) -> Option<anyhow::Error> {
+    if archive_entry_escapes(name) {
+        return Some(refuse_archive_entry(builtin, name));
+    }
+    // A member named like a Windows device would be written as a file that
+    // cannot be deleted; a trailing dot or space is stripped onto another name.
+    if cfg!(windows) {
+        if let Some(device) = crate::safety::reserved_device_name(name) {
+            return Some(anyhow::Error::new(crate::safety::reserved_device_error(
+                builtin, &device,
+            )));
+        }
+    }
+    if let Some(t) = target {
+        if archive_entry_escapes(t) {
+            return Some(refuse_archive_entry(builtin, name));
+        }
+    }
+    None
 }
 
 /// The most an archive may declare as uncompressed content before
@@ -39273,6 +39287,110 @@ fn check_archive_protected(
         }
     }
     Ok(())
+}
+
+/// Refuse an archive any of whose members, or link targets, would land outside
+/// the destination, or outside the workspace, once the links and junctions
+/// already on disk are followed.
+///
+/// The name checks (`archive_entry_refusal`) are lexical, so `jout/secret.txt`
+/// passes them, and an extractor writes it through a link `jout` that points
+/// elsewhere. Each landing place is resolved as the jail resolves a write
+/// (`within_workspace`, `within_root`: every link in the parent chain is
+/// followed, and so is a link at the leaf, which opening the file would follow).
+/// Under the jail a place outside the workspace is `E_OUTSIDE_WORKSPACE`, shown
+/// redacted as every other builtin shows it. Jail or no jail, a place outside
+/// `dest` is `E_POLICY_DENY`, which protects a human session too. A link entry's
+/// target is judged the same way, since a later member could be written through
+/// the link once it exists: a tar hard link's target is relative to the
+/// destination, a symlink's to the link's folder, and both readings are judged.
+/// Nothing is written: this runs before the extractor starts.
+///
+/// `enforce_jail` is whether the workspace jail applies (`--explain` passes true,
+/// as agent mode would judge it).
+fn check_archive_landing(
+    builtin: &str,
+    dest: &str,
+    entries: &[(String, Option<String>)],
+    enforce_jail: bool,
+) -> Result<()> {
+    let root = std::path::absolute(dest).unwrap_or_else(|_| std::path::PathBuf::from(dest));
+    // A destination that does not exist yet has no link under it: only the jail
+    // can refuse a landing place then. A share is not probed (see safety).
+    let root_text = root.to_string_lossy().into_owned();
+    let root_exists = !crate::safety::names_a_remote_share(&root_text) && root.exists();
+    for (name, target) in entries {
+        let mut landing = root.clone();
+        let mut any = false;
+        for part in name
+            .split(['/', '\\'])
+            .filter(|p| !p.is_empty() && *p != ".")
+        {
+            landing.push(part);
+            any = true;
+        }
+        if !any {
+            continue;
+        }
+        let mut places = vec![landing.clone()];
+        if let Some(t) = target {
+            places.push(landing.parent().unwrap_or(root.as_path()).join(t));
+            places.push(root.join(t));
+        }
+        for place in places {
+            let text = place.to_string_lossy().into_owned();
+            if enforce_jail && !crate::safety::within_workspace(&text) {
+                return Err(crate::safety::outside_workspace_shown(
+                    builtin,
+                    &crate::security::sanitize_path_in_error(&text),
+                    &text,
+                ));
+            }
+            if root_exists && !crate::safety::within_root(&text, &root) {
+                return Err(crate::safety::policy_deny(
+                    builtin,
+                    format!(
+                        "{builtin}: entry `{name}` would land outside the destination, through a link already on disk"
+                    ),
+                    "the archive was refused before anything was written; extract it somewhere that holds no link or junction out of the destination, or remove the entry",
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Whether the workspace jail is enforced for this call: agent mode, or an
+/// explicit workspace.
+fn archive_jail_enforced() -> bool {
+    crate::safety::jail_enforced(crate::safety::current_mode())
+}
+
+/// What `--explain` says about extracting `archive` into `dest` (`.` when the
+/// call names none), judged as agent mode's run would judge it: the reason the
+/// run refuses, or `None` when it would not refuse, or the archive cannot be
+/// read here. Nothing is written. The archive is read where it is, as an import:
+/// the run lets an archive come from outside the workspace too.
+pub fn explain_extraction_refusal(builtin: &str, archive: &str, dest: &str) -> Option<String> {
+    let listed = match builtin {
+        "zip_extract" | "unzip" => zip_archive_entries("zip_extract", archive),
+        "tar_extract" => tar_archive_listing("tar_extract", archive),
+        _ => return None,
+    };
+    let (members, _) = listed.ok()?;
+    let canonical = if builtin == "tar_extract" {
+        "tar_extract"
+    } else {
+        "zip_extract"
+    };
+    let dest = crate::safety::resolve_path_str(dest);
+    check_archive_entries(canonical, members.iter().cloned())
+        .and_then(|_| check_archive_landing(canonical, &dest, &members, true))
+        .err()
+        .map(|e| match e.downcast_ref::<crate::safety::SafetyError>() {
+            Some(s) => s.message.clone(),
+            None => e.to_string(),
+        })
 }
 
 /// The directories under `dir`'s first existing ancestor that do not exist yet,
@@ -39658,6 +39776,7 @@ fn bi_zip_extract(args: Vec<Value>, _input: Option<Value>) -> Result<Value> {
     crate::safety::reject_option_like("zip_extract", std::slice::from_ref(&dest))?;
     let dest = guard_local_write("zip_extract", &dest)?;
     check_archive_protected("zip_extract", &dest, &members)?;
+    check_archive_landing("zip_extract", &dest, &members, archive_jail_enforced())?;
     zip_extract_in_process(&archive, &dest)?;
     Ok(Value::Bool(true))
 }
@@ -40061,6 +40180,7 @@ fn bi_tar_extract(args: Vec<Value>, _input: Option<Value>) -> Result<Value> {
         // here where its meaning is known.
         let d = guard_local_write("tar_extract", &d)?;
         check_archive_protected("tar_extract", &d, &members)?;
+        check_archive_landing("tar_extract", &d, &members, archive_jail_enforced())?;
         // unzip and Expand-Archive create a missing destination; `tar -C` fails
         // on one ("could not chdir"), so it is created here, after the jail.
         journal_step(&d);
@@ -40068,6 +40188,7 @@ fn bi_tar_extract(args: Vec<Value>, _input: Option<Value>) -> Result<Value> {
         cmd.args(["-C", &d]);
     } else {
         check_archive_protected("tar_extract", ".", &members)?;
+        check_archive_landing("tar_extract", ".", &members, archive_jail_enforced())?;
         journal_step(".");
     }
     // Archives can be large; extraction is bounded by the long deadline.

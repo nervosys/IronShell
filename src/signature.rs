@@ -12076,7 +12076,7 @@ pub static SIGNATURES: &[Signature] = &[
         subject: None,
         params: &[req("archive", Ty::Str, "a tar archive"), opt("dest", Ty::Str, "directory to extract into; default the current one")],
         returns: "Bool",
-        doc: "Extract a tar archive. Entries that would land outside the destination (absolute names, `..` components, and symlinks or hard links with such targets) are refused with E_POLICY_DENY before anything is written. A bzip2, xz or zstd archive has its member names checked through tar -tf; its link targets are left to tar's own protection. A failure is E_TOOL_FAILED with the reason.",
+        doc: "Extract a tar archive. Entries that would land outside the destination (absolute names, `..` components, and symlinks or hard links with such targets) are refused with E_POLICY_DENY before anything is written, and so is an entry that would land outside the destination through a link or junction already there (E_OUTSIDE_WORKSPACE when it also leaves the workspace). A bzip2, xz or zstd archive has its member names checked through tar -tf; its link targets are left to tar's own protection. A failure is E_TOOL_FAILED with the reason.",
         examples: &[
             (r#"tar_extract("tests/fixtures/archives/sample.tar.gz", fs_tempdir("ae_tar"))"#, r#"true"#),
             (r#"tar_extract("no-such.tar")"#, r#"error: E_TOOL_FAILED"#),
@@ -12125,7 +12125,7 @@ pub static SIGNATURES: &[Signature] = &[
         subject: None,
         params: &[req("archive", Ty::Str, "a .zip file"), opt("dest", Ty::Str, "directory to extract into; default the current one")],
         returns: "Bool",
-        doc: "Extract a zip archive. Entries that would land outside the destination (absolute names, drive or UNC paths, `..` components) are refused with E_POLICY_DENY before anything is written. Extracted in-process: files and empty folders are written under the destination (created if missing), symbolic-link entries are not created, and true is returned only after the entries were written. A file that is not a zip is E_BAD_ARG; a missing one is E_NOT_FOUND.",
+        doc: "Extract a zip archive. Entries that would land outside the destination (absolute names, drive or UNC paths, `..` components) are refused with E_POLICY_DENY before anything is written, and so is an entry that would land outside the destination through a link or junction already there (E_OUTSIDE_WORKSPACE when it also leaves the workspace). Extracted in-process: files and empty folders are written under the destination (created if missing), symbolic-link entries are not created, and true is returned only after the entries were written. A file that is not a zip is E_BAD_ARG; a missing one is E_NOT_FOUND.",
         examples: &[
             (r#"unzip("tests/fixtures/archives/sample.zip", fs_tempdir("ae_zip"))"#, r#"true"#),
             (r#"unzip("no-such.zip")"#, r#"error: E_TOOL_FAILED"#),
