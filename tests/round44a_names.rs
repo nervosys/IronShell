@@ -79,6 +79,93 @@ mod archive_names {
     }
 }
 
+#[test]
+fn a_separator_after_a_file_name_is_refused_only_for_a_file() {
+    let dir = std::env::temp_dir().join(format!("ae-r44a-sep-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("d")).unwrap();
+    std::fs::write(dir.join("a.txt"), "x").unwrap();
+    let file = dir.join("a.txt").to_string_lossy().into_owned();
+    let folder = dir.join("d").to_string_lossy().into_owned();
+    for tail in ["\\", "/", "\\.", "/."] {
+        let e =
+            iron_shell::safety::windows_trailing_separator_refusal("cat", &format!("{file}{tail}"))
+                .unwrap_or_else(|| panic!("a.txt{tail} must be refused"));
+        assert!(e.message.contains("separator"), "{}", e.message);
+        assert!(
+            iron_shell::safety::windows_trailing_separator_refusal(
+                "cat",
+                &format!("{folder}{tail}")
+            )
+            .is_none(),
+            "a folder may end in {tail}"
+        );
+    }
+    assert!(iron_shell::safety::windows_trailing_separator_refusal("cat", &file).is_none());
+    let missing = dir.join("none").to_string_lossy().into_owned();
+    assert!(
+        iron_shell::safety::windows_trailing_separator_refusal("cat", &format!("{missing}\\"))
+            .is_none(),
+        "a missing name is left to the open"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[cfg(windows)]
+mod posix_readers {
+    //! `ish -b` readers make the name check the builtins make, under the jail.
+
+    use std::process::{Command, Output};
+
+    fn said(out: &Output) -> String {
+        format!(
+            "{}{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        )
+    }
+
+    #[test]
+    fn cat_refuses_a_renamed_file_as_file_read_does() {
+        let root = std::env::temp_dir().join(format!("ae-r44a-cat-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let ws = root.join("ws");
+        std::fs::create_dir_all(ws.join("sub dir")).unwrap();
+        std::fs::create_dir_all(root.join("session")).unwrap();
+        std::fs::write(ws.join("a.txt"), "secret-a").unwrap();
+        std::fs::write(ws.join("sub dir").join("x"), "secret-x").unwrap();
+        let run = |args: &[&str]| -> Output {
+            Command::new(env!("CARGO_BIN_EXE_ish"))
+                .args(["--agent", "--workspace"])
+                .arg(&ws)
+                .args(args)
+                .current_dir(&root)
+                .env("NO_COLOR", "1")
+                .env("IRONSHELL_SESSION_DIR", root.join("session"))
+                .output()
+                .expect("run ish")
+        };
+        for script in [
+            "cat 'a.txt.'",
+            "cat 'sub dir./x'",
+            "cat 'a.txt\\'",
+            "cat 'a.txt\\.'",
+        ] {
+            let out = run(&["-b", "-c", script]);
+            let text = said(&out);
+            assert!(!text.contains("secret-"), "{script} read the file: {text}");
+            assert!(text.contains("E_BAD_ARG"), "{script}: {text}");
+        }
+        let out = run(&["-c", r#"file.read("a.txt\\")"#]);
+        let text = said(&out);
+        assert!(!text.contains("secret-a"), "{text}");
+        assert!(text.contains("E_BAD_ARG"), "{text}");
+        let out = run(&["-b", "-c", "cat a.txt"]);
+        assert!(said(&out).contains("secret-a"), "{}", said(&out));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+}
+
 #[cfg(windows)]
 mod explain_names {
     //! `--explain` predicts the Windows name refusals the run gives (E_BAD_ARG)

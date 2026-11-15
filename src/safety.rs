@@ -8015,6 +8015,45 @@ pub fn windows_param_name_refusal(builtin: &str, path: &str, writes: bool) -> Op
     windows_name_problem(builtin, path, false, if writes { "write" } else { "read" })
 }
 
+/// `E_BAD_ARG` for a path that names an existing file and then carries a
+/// separator, or a `.` component, after its name: `a.txt\`, `a.txt/` and
+/// `a.txt\.`. Windows opens `a.txt` for those, so a read through such a spelling
+/// reads a file the name does not say. A directory may end in a separator, so
+/// only a path whose name is a file (not a directory) is refused; a name that
+/// does not exist is left to the open, which fails on it. Platform-independent;
+/// callers decide whether it applies. A share (`\\host\share`) is not probed.
+pub fn windows_trailing_separator_refusal(builtin: &str, path: &str) -> Option<SafetyError> {
+    let mut base = path;
+    let mut changed = false;
+    loop {
+        if base.ends_with(['/', '\\']) {
+            base = &base[..base.len() - 1];
+        } else if base.ends_with("/.") || base.ends_with("\\.") {
+            base = &base[..base.len() - 1];
+        } else {
+            break;
+        }
+        changed = true;
+    }
+    if !changed || base.is_empty() || names_a_remote_share(base) || !Path::new(base).is_file() {
+        return None;
+    }
+    Some(SafetyError {
+        code: ErrorCode::BadArg,
+        message: format!(
+            "{builtin}: `{}` puts a separator after the file name `{base}`, which Windows would read as `{base}`",
+            path.escape_debug()
+        ),
+        builtin: builtin.to_string(),
+        hint: "Windows opens `a.txt` for `a.txt\\` and `a.txt\\.`; write the file's name without the trailing separator".to_string(),
+        approval: None,
+        did_you_mean: Vec::new(),
+        expected: "a file name with no separator after it".to_string(),
+        got: path.escape_debug().to_string(),
+        extra: serde_json::Map::new(),
+    })
+}
+
 fn windows_name_problem(builtin: &str, path: &str, write: bool, verb: &str) -> Option<SafetyError> {
     if let Some(name) = reserved_device_name(path) {
         return Some(reserved_device_error(builtin, &name));

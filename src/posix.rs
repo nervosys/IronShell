@@ -3955,6 +3955,18 @@ fn jail_refusal(tool: &str, path: &str) -> Option<String> {
     if path == "/dev/null" {
         return None;
     }
+    // Under the jail, a name Windows would not keep as written is refused as
+    // the builtins refuse it (E_BAD_ARG), before the jail: `cat 'a.txt.'` read
+    // `a.txt`, and so did `a.txt\` and `a.txt\.`, while `file.read` refused the
+    // first. A device name, a forbidden character, a trailing dot or space, or a
+    // separator after a file name.
+    if cfg!(windows) && crate::safety::jail_enforced(crate::safety::current_mode()) {
+        if let Some(e) = crate::safety::windows_read_name_refusal(tool, path)
+            .or_else(|| crate::safety::windows_trailing_separator_refusal(tool, path))
+        {
+            return Some(e.to_string());
+        }
+    }
     if crate::security::outside_read_jail(path) {
         crate::security::audit_read_refusal(tool, path);
         return Some(crate::safety::outside_workspace(tool, path).to_string());

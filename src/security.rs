@@ -692,7 +692,9 @@ pub fn read_jail_dispatch(builtin: &str, args: &[crate::value::Value], piped: bo
         // that makes `a.txt.` open `a.txt`. A `:` stream name is left to the
         // write guard, which refuses it for a write and lets a read name one.
         if cfg!(windows) {
-            if let Some(e) = crate::safety::windows_param_name_refusal(builtin, s, writes) {
+            if let Some(e) = crate::safety::windows_param_name_refusal(builtin, s, writes)
+                .or_else(|| crate::safety::windows_trailing_separator_refusal(builtin, s))
+            {
                 return Err(e.into());
             }
         }
