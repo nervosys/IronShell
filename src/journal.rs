@@ -695,6 +695,11 @@ pub fn normalized_path(path: &str) -> String {
     let p = Path::new(path);
     let absolute: PathBuf = if p.is_absolute() {
         p.to_path_buf()
+    } else if let Some(absolute) = crate::safety::drive_relative_absolute(p) {
+        // `C:..\x` is the current directory of drive C plus the rest. Joined to
+        // the working directory it kept the bare `C:` prefix and lost the `..`,
+        // so the entry named `C:x`, a file that is not the one written.
+        absolute
     } else {
         match std::env::current_dir() {
             Ok(cwd) => cwd.join(p),
@@ -1498,6 +1503,17 @@ fn remove_created(path: &str, what: String, absent_why: &str) -> Outcome {
                 what,
                 why: e.to_string(),
             },
+        };
+    }
+    // A path that is not absolute was recorded as a spelling, not a place (an
+    // entry written before drive-relative paths were resolved). Nothing there
+    // does not mean nothing was written, so say that the file was not found.
+    if !p.is_absolute() {
+        return Outcome::Skipped {
+            what,
+            why: format!(
+                "recorded as `{path}`, which is not an absolute path, so the file this step wrote cannot be found; it was not undone"
+            ),
         };
     }
     // Never created, or already gone: there is nothing to take back.

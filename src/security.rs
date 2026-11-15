@@ -679,17 +679,16 @@ pub fn read_jail_dispatch(builtin: &str, args: &[crate::value::Value], piped: bo
         if TAKES_REMOTE.contains(&builtin) && (is_url(s) || is_remote_spec(s)) {
             return Ok(());
         }
-        // A write to a Windows device name (`NUL`) is refused as such, before the
-        // jail: the name resolves to `\\.\NUL`, which the jail would call
-        // outside the workspace, and `CON` already answers E_BAD_ARG.
-        if cfg!(windows)
-            && matches!(
-                crate::safety::effect_of(builtin),
-                Effect::WriteLocal | Effect::Destructive
-            )
-        {
-            if let Some(name) = crate::safety::reserved_device_name(s) {
-                return Err(crate::safety::reserved_device_error(builtin, &name).into());
+        // A name Windows would not keep as written is refused as such, before
+        // the jail: `NUL` resolves to `\\.\NUL` and `bad<name` cannot be
+        // resolved at all, so the jail would call both outside the workspace,
+        // while `CON` and `aux.txt` already answer E_BAD_ARG. Reads and writes
+        // alike: a device name, a forbidden character, a trailing dot or space
+        // that makes `a.txt.` open `a.txt`. A `:` stream name is left to the
+        // write guard, which refuses it for a write and lets a read name one.
+        if cfg!(windows) {
+            if let Some(e) = crate::safety::windows_read_name_refusal(builtin, s) {
+                return Err(e.into());
             }
         }
         // A glob reads the files under its literal directory, so that
@@ -1985,7 +1984,20 @@ pub fn sanitize_path_in_error(path: &str) -> String {
         .file_name()
         .and_then(|f| f.to_str())
         .map(|f| format!("[...]/{}", f))
-        .unwrap_or_else(|| "[REDACTED_PATH]".to_string())
+        .unwrap_or_else(|| {
+            // `..` and a bare root have no file name. `..` names nothing, so it
+            // is shown in the same `[...]/` form; a root is just `[...]`.
+            let last = path
+                .trim_end_matches(['/', '\\'])
+                .rsplit(['/', '\\'])
+                .next()
+                .unwrap_or("");
+            if last == ".." {
+                "[...]/..".to_string()
+            } else {
+                "[...]".to_string()
+            }
+        })
 }
 
 // ===================== TUI CONTENT SANITIZATION (MED-006) =====================

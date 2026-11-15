@@ -3909,6 +3909,8 @@ fn audit_forms(path: &Path) -> Vec<String> {
 fn resolve_existing_prefix(path: &Path) -> Option<PathBuf> {
     let absolute = if path.is_absolute() {
         path.to_path_buf()
+    } else if let Some(absolute) = drive_relative_absolute(path) {
+        absolute
     } else {
         std::env::current_dir().ok()?.join(path)
     };
@@ -4325,6 +4327,12 @@ pub fn write_jail_refusal(path: &str) -> Option<String> {
 /// it against the current directory like any normal shell.
 pub fn resolve_path_str(path: &str) -> String {
     let p = std::path::Path::new(path);
+    // A Windows drive-relative path (`C:foo`, `C:..`) is the drive's current
+    // directory plus the rest, whatever the mode: the OS reads it that way, so
+    // the jail, the journal and the write must all be told that one place.
+    if let Some(absolute) = drive_relative_absolute(p) {
+        return keep_trailing_separator(absolute, path);
+    }
     if p.is_absolute() || !jail_enforced(current_mode()) {
         path.to_string()
     } else if std::env::var_os("IRONSHELL_WORKSPACE").is_some() {
@@ -4351,11 +4359,59 @@ fn join_native(mut base: std::path::PathBuf, path: &str) -> String {
             base.push(part.as_os_str());
         }
     }
-    let mut text = base.to_string_lossy().into_owned();
-    if (path.ends_with('/') || path.ends_with('\\')) && !text.ends_with(std::path::MAIN_SEPARATOR) {
+    keep_trailing_separator(base, path)
+}
+
+/// `resolved` as text, with the trailing separator `given` ended in.
+fn keep_trailing_separator(resolved: std::path::PathBuf, given: &str) -> String {
+    let mut text = resolved.to_string_lossy().into_owned();
+    if (given.ends_with('/') || given.ends_with('\\')) && !text.ends_with(std::path::MAIN_SEPARATOR)
+    {
         text.push(std::path::MAIN_SEPARATOR);
     }
     text
+}
+
+/// Whether `path` is a Windows drive-relative path: a drive prefix with no
+/// root after it (`C:foo`, `C:..`, `C:`). The OS reads it against the current
+/// directory of that drive, not the one the path appears to name. Always false
+/// off Windows, where `C:..` is an ordinary relative name.
+pub fn is_drive_relative(path: &str) -> bool {
+    drive_relative_absolute(std::path::Path::new(path)).is_some()
+}
+
+/// The absolute form of a drive-relative path, `None` for any other path (and
+/// always off Windows): the drive's current directory, as the OS keeps it, with
+/// the remaining components appended. `..` is kept for the jail to judge, so
+/// `C:../x` is the parent of that directory plus `x`, which is where Win32
+/// puts it.
+#[cfg(windows)]
+pub(crate) fn drive_relative_absolute(path: &Path) -> Option<PathBuf> {
+    use std::path::Component;
+    if path.has_root() {
+        return None;
+    }
+    let mut parts = path.components();
+    let Some(Component::Prefix(prefix)) = parts.next() else {
+        return None;
+    };
+    let mut base = std::path::absolute(prefix.as_os_str()).ok()?;
+    // Only a drive's own directory is a base: a verbatim or UNC prefix with no
+    // root has no current directory to name.
+    if !base.has_root() {
+        return None;
+    }
+    for part in parts {
+        if part != Component::CurDir {
+            base.push(part.as_os_str());
+        }
+    }
+    Some(base)
+}
+
+#[cfg(not(windows))]
+pub(crate) fn drive_relative_absolute(_path: &Path) -> Option<PathBuf> {
+    None
 }
 
 /// Test whether a (possibly non-existent) path is contained in the workspace
@@ -4435,6 +4491,13 @@ fn absolute_form(path: &str) -> PathBuf {
     let given = Path::new(path);
     if given.is_absolute() {
         return given.to_path_buf();
+    }
+    // `C:..\x` is not relative to the workspace: it is relative to the current
+    // directory of drive `C`. Joined to the root it replaced the whole path,
+    // and the walk then dropped the `..` against the bare prefix, so the jail
+    // judged a file outside the workspace as inside it.
+    if let Some(absolute) = drive_relative_absolute(given) {
+        return absolute;
     }
     let root = workspace_root();
     let root = if root.is_absolute() {
@@ -7898,8 +7961,23 @@ pub fn reserved_device_error(builtin: &str, name: &str) -> SafetyError {
 /// in a component after the drive prefix (`f.txt:stream` is an alternate data
 /// stream, not a file of that name). Platform-independent; callers decide
 /// whether it applies. `/` and `\` both separate components, and a `\\?\`,
-/// `\\.\` or drive prefix is skipped.
+/// `\\.\` or drive prefix is skipped. A component with a character Windows
+/// forbids in a name (`<`, `>`, `"`, `|` or a control character) is refused too,
+/// naming the character.
 pub fn windows_name_refusal(builtin: &str, path: &str) -> Option<SafetyError> {
+    windows_name_problem(builtin, path, true)
+}
+
+/// [`windows_name_refusal`] for a read: the same device names, forbidden
+/// characters and trailing dot or space (a read of `a.txt.` opens `a.txt`, so
+/// it is refused as a write to it is), but a `:` is let through, since
+/// `name:stream` is a stream a read may name.
+pub fn windows_read_name_refusal(builtin: &str, path: &str) -> Option<SafetyError> {
+    windows_name_problem(builtin, path, false)
+}
+
+fn windows_name_problem(builtin: &str, path: &str, write: bool) -> Option<SafetyError> {
+    let verb = if write { "write" } else { "read" };
     if let Some(name) = reserved_device_name(path) {
         return Some(reserved_device_error(builtin, &name));
     }
@@ -7918,7 +7996,31 @@ pub fn windows_name_refusal(builtin: &str, path: &str) -> Option<SafetyError> {
         if part.is_empty() || part == "." || part == ".." {
             continue;
         }
-        if part.contains(':') {
+        if let Some(c) = part
+            .chars()
+            .find(|c| matches!(*c, '<' | '>' | '"' | '|') || c.is_control())
+        {
+            let shown = if c.is_control() {
+                format!("U+{:04X}", c as u32)
+            } else {
+                format!("`{c}`")
+            };
+            return Some(SafetyError {
+                code: ErrorCode::BadArg,
+                message: format!(
+                    "{builtin}: `{}` has the character {shown}, which Windows does not allow in a name",
+                    part.escape_debug()
+                ),
+                builtin: builtin.to_string(),
+                hint: "Windows forbids the characters < > | and a double quote, and control characters, in file names; choose a name without them".to_string(),
+                approval: None,
+                did_you_mean: Vec::new(),
+                expected: "a name without < > | a double quote or control characters".to_string(),
+                got: part.escape_debug().to_string(),
+                extra: serde_json::Map::new(),
+            });
+        }
+        if write && part.contains(':') {
             return Some(SafetyError {
                 code: ErrorCode::BadArg,
                 message: format!(
@@ -7937,10 +8039,10 @@ pub fn windows_name_refusal(builtin: &str, path: &str) -> Option<SafetyError> {
             return Some(SafetyError {
                 code: ErrorCode::BadArg,
                 message: format!(
-                    "{builtin}: `{part}` ends in a dot or a space, which Windows would strip, so the write would land on a different name"
+                    "{builtin}: `{part}` ends in a dot or a space, which Windows would strip, so the {verb} would land on a different name"
                 ),
                 builtin: builtin.to_string(),
-                hint: "Windows silently drops a trailing dot or space from a name, so `a.txt.` writes `a.txt`; remove it from the name".to_string(),
+                hint: "Windows silently drops a trailing dot or space from a name, so `a.txt.` is `a.txt`; remove it from the name".to_string(),
                 approval: None,
                 did_you_mean: Vec::new(),
                 expected: "a name that does not end in a dot or a space".to_string(),

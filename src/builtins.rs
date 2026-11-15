@@ -65997,7 +65997,11 @@ fn workspace_path(
     } else {
         base.join(given)
     };
-    if !crate::safety::within_workspace(&path.to_string_lossy()) {
+    // `C:x` means the current directory of drive `C`, which is not `base`, and
+    // the tool would resolve it from its own working directory: refused.
+    if crate::safety::is_drive_relative(value)
+        || !crate::safety::within_workspace(&path.to_string_lossy())
+    {
         return Err(crate::safety::outside_workspace(builtin, value));
     }
     Ok(path)
