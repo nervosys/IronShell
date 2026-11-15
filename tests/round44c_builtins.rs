@@ -54,3 +54,20 @@ fn contains_tests_array_membership_and_record_keys() {
     assert_eq!(run(r#"contains("hello", "ell")"#), Value::Bool(true));
     assert!(try_run("contains({a: 1}, 1)").is_err());
 }
+
+fn error_text(src: &str) -> String {
+    try_run(src).expect_err("fails").to_string()
+}
+
+#[test]
+fn errors_name_the_builtin_as_called() {
+    // Real names, not the hyphenated spellings that are not builtins.
+    assert!(error_text("from_json()").starts_with("from_json:"), "from_json");
+    assert!(error_text("from_yaml()").contains("from_yaml"), "from_yaml");
+    assert!(!error_text("from_yaml()").contains("from-yaml"));
+    assert!(!error_text("to_yaml()").contains("to-yaml"));
+    assert!(!error_text("from_csv(1)").contains("from-csv"));
+    // An alias spelling names itself, not the internal crypto_ name.
+    let text = error_text(r#"hash("md5", "sha256")"#);
+    assert!(text.starts_with("hash:"), "{text}");
+}

@@ -1053,12 +1053,15 @@ pub fn eval_expr(expr: &Expr, env: &mut Env) -> Result<Value> {
                             ));
                         }
                         _ => {
-                            return builtins::call_with_input(name, vals, pin, env);
+                            return named_as_written(
+                                name,
+                                builtins::call_with_input(name, vals, pin, env),
+                            );
                         }
                     }
                 } else {
                     // Not a bound var → treat as builtin name
-                    return builtins::call_with_input(name, vals, pin, env);
+                    return named_as_written(name, builtins::call_with_input(name, vals, pin, env));
                 }
             }
 
@@ -2983,4 +2986,29 @@ fn interpolate_string(s: &str, env: &mut Env) -> Result<Value> {
     }
 
     checked_string(result)
+}
+
+/// An error from a builtin called by one of its alias spellings names that
+/// spelling: `hash(...)` fails as `hash:`, not as the internal `crypto_hash:`.
+/// Only a name that shares its implementation with the error's builtin is
+/// renamed, so an error from a builtin a call runs on the way (`map` calling a
+/// lambda that calls `rm`) keeps its own name.
+fn named_as_written(name: &str, result: Result<Value>) -> Result<Value> {
+    match result {
+        Err(e) => {
+            let from = match e.downcast_ref::<crate::safety::SafetyError>() {
+                Some(se) if !se.builtin.is_empty() && se.builtin != name => se.builtin.clone(),
+                _ => return Err(e),
+            };
+            let same_impl = builtins::alias_groups()
+                .iter()
+                .any(|g| g.iter().any(|n| *n == name) && g.iter().any(|n| *n == from));
+            if same_impl {
+                Err(crate::safety::rename_builtin(e, &from, name))
+            } else {
+                Err(e)
+            }
+        }
+        ok => ok,
+    }
 }

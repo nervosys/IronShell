@@ -11045,7 +11045,7 @@ fn bi_from_json(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
             Value::Str(s) => s,
             _ => {
                 return Err(crate::safety::arg_err(
-                    "from-json: input must be a JSON string",
+                    "from_json: input must be a JSON string",
                 ))
             }
         }
@@ -11054,12 +11054,12 @@ fn bi_from_json(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
             Value::Str(s) => s.clone(),
             _ => {
                 return Err(crate::safety::arg_err(
-                    "from-json: argument must be a JSON string",
+                    "from_json: argument must be a JSON string",
                 ))
             }
         }
     } else {
-        return Err(crate::safety::arg_err("from-json: no JSON input provided"));
+        return Err(crate::safety::arg_err("from_json: no JSON input provided"));
     };
     let json_str = without_bom(json_str);
 
@@ -11442,14 +11442,14 @@ fn bi_from_csv(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
         Some(Value::Str(s)) => s,
         Some(_) => {
             return Err(crate::safety::arg_err(
-                "from-csv: input must be a CSV string",
+                "from_csv: input must be a CSV string",
             ))
         }
         None => return Err(subject_refusal("from_csv", "CSV text")),
     };
 
     parse_delimited(
-        "from-csv",
+        "from_csv",
         &csv_str,
         csv::ReaderBuilder::new().delimiter(b','),
     )
@@ -11963,17 +11963,17 @@ fn bi_from_yaml(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
         Some(Value::Str(s)) => s,
         Some(_) => {
             return Err(crate::safety::arg_err(
-                "from-yaml: input must be a YAML string",
+                "from_yaml: input must be a YAML string",
             ))
         }
         None => match args.first() {
             Some(Value::Str(s)) => s.clone(),
             Some(_) => {
                 return Err(crate::safety::arg_err(
-                    "from-yaml: argument must be a YAML string",
+                    "from_yaml: argument must be a YAML string",
                 ))
             }
-            None => return Err(crate::safety::arg_err("from-yaml: requires YAML input")),
+            None => return Err(crate::safety::arg_err("from_yaml: requires YAML input")),
         },
     };
     crate::yaml::parse(&yaml_str).map_err(|e| {
@@ -11981,7 +11981,7 @@ fn bi_from_yaml(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
         if e.downcast_ref::<crate::safety::SafetyError>().is_some() {
             e
         } else {
-            let message = format!("from-yaml: {e}");
+            let message = format!("from_yaml: {e}");
             match yaml_unsupported_construct(&message) {
                 Some(construct) => crate::safety::bad_arg_in(
                     "from_yaml",
@@ -12031,7 +12031,7 @@ fn bi_to_yaml(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
         None => args
             .into_iter()
             .next()
-            .ok_or_else(|| crate::safety::arg_err("to-yaml: requires pipeline input"))?,
+            .ok_or_else(|| crate::safety::arg_err("to_yaml: requires pipeline input"))?,
     };
     nonfinite_in_value("to_yaml", &value, "value", "YAML")?;
     Ok(Value::Str(crate::yaml::emit(&value)))
