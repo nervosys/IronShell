@@ -34,3 +34,12 @@ fn hash_refuses_two_algorithm_names_and_takes_the_algorithm_first() {
         Value::Str("5d41402abc4b2a76b9719d911017c592".into())
     );
 }
+
+#[test]
+fn sort_by_declares_its_key_required_and_a_missing_key_is_refused() {
+    let sig = iron_shell::signature::signature_of("sort_by").expect("declared");
+    assert!(sig.params[0].required, "key must be declared required");
+    let err = try_run("[3, 1, 2] | sort_by").expect_err("no key");
+    let text = err.to_string();
+    assert!(text.contains("field name") && text.contains("lambda"), "{text}");
+}

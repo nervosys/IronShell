@@ -2363,14 +2363,12 @@ pub static SIGNATURES: &[Signature] = &[
         subject_required: false,
         aliases: &[],
         subject: Some(Ty::Array),
-        // `key` is deliberately `Any` and optional. It takes a field name or a
-        // lambda, `"desc"` may follow it, and calling it with no key at all
-        // must reach the builtin's own error, which names both accepted forms
-        // -- a better message than a declaration can give, and one
-        // `tests/sort_by_key.rs` asserts. Declaring `key: String, required`
-        // rejected the lambda form and replaced that message with a worse one.
+        // `key` is `Any` and required. It takes a field name or a lambda, and
+        // `"desc"` may follow it. Declaring `key: String` rejected the lambda
+        // form; a call with no key is refused by the arity check with a message
+        // that names both accepted forms (`tests/sort_by_key.rs` asserts it).
         params: &[
-            opt(
+            req(
                 "key",
                 Ty::Any,
                 "field name (String), or fn(record) -> Any",
@@ -2385,6 +2383,7 @@ pub static SIGNATURES: &[Signature] = &[
             ("[{n: 2}, {n: 1}] | sort_by(fn(r) => r.n)", "[{n: 1}, {n: 2}]"),
             (r#"(try { [{n: 1}, {m: 2}] | sort_by("n") } catch e { e.error.code })"#, "E_UNKNOWN_FIELD"),
             (r#"(try { [{n: 1}, {n: 2}] | sort_by("n", "sideways") } catch e { e.error.code })"#, "E_BAD_ARG"),
+            (r#"(try { [{n: 1}, {n: 2}] | sort_by } catch e { e.error.code })"#, "E_BAD_ARG"),
         ],
     },
     Signature {
@@ -15654,6 +15653,15 @@ pub fn validate(name: &str, args: &[Value], input: Option<&Value>) -> anyhow::Re
                 &sig.render(),
                 &format!("{supplied} of {required} required"),
                 "to test membership, pipe the value to in: `\"bug\" | in([\"bug\", \"x\"])`",
+            ));
+        }
+        // `[3, 1, 2] | sort_by` lacks a key: say what a key may be.
+        if name == "sort_by" {
+            return Err(crate::safety::bad_arg_with_hint(
+                name,
+                "a key: a field name (String) or a lambda, then an optional \"asc\" or \"desc\"",
+                "no key",
+                "sort_by(\"size\"), sort_by(fn(r) => r.size) or sort_by(\"size\", \"desc\")",
             ));
         }
         // `sql("select 1")` reads as complete; what it lacks is rows.
