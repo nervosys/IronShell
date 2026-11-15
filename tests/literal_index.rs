@@ -78,7 +78,10 @@ fn a_parenthesised_record_literal_still_indexes() {
 
 #[test]
 fn a_block_closing_brace_followed_by_an_array_is_not_an_index() {
-    // The `}` ends an `if` block, not a record literal, so `[1, 2]` is the
-    // array that follows it and the statement's value is that array.
-    assert_prints("block", "if true { 5 }[1, 2]\n", "[1, 2]");
+    // The `}` ends an `if` block, not a record literal, so `[1, 2]` is not an
+    // index into it: it is a second expression on the same line, which is a
+    // parse error (it would silently drop the block's value).
+    let (_, err, code) = run_script("block", "if true { 5 }[1, 2]\n");
+    assert_ne!(code, 0, "{err}");
+    assert!(err.contains("separate statements"), "{err}");
 }

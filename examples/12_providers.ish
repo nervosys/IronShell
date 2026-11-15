@@ -25,7 +25,7 @@ print "=== IronShell Universal Provider System ==="
 print ""
 
 # Simple chat with any provider (using environment's default)
-let response = ai "Hello, what is 2+2?" 
+let response = ai("Hello, what is 2+2?")
 print response
 
 # One prompt; the provider is set by IRONSHELL_AI

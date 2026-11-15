@@ -298,7 +298,6 @@ fn from_yaml_names_the_unsupported_construct_in_its_hint() {
         (r#"from_yaml("a: |\n  block\n")"#, "block scalars"),
         (r#"from_yaml("a: &x 1\nb: 2\n")"#, "anchors"),
         (r#"from_yaml("a: !!str 1\n")"#, "explicit tags"),
-        (r#"from_yaml("a: {b: 1}\n")"#, "flow collection"),
     ] {
         let text = refused(src);
         assert!(

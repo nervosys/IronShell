@@ -187,7 +187,11 @@ mod windows {
             let text = said(&out);
             assert!(!out.status.success(), "{script}: {text}");
             assert!(!text.contains("TOPSECRET"), "{script}: {text}");
-            assert!(!text.contains("secret.txt"), "{script}: {text}");
+            // The refusal echoes the operand it refused, so only `ls` (whose
+            // operand is the folder) must not mention the file inside it.
+            if script.starts_with("ls ") {
+                assert!(!text.contains("secret.txt"), "{script}: {text}");
+            }
         }
         let _ = std::fs::remove_dir_all(&root);
     }

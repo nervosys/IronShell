@@ -80,11 +80,9 @@ fn contains_given_an_array_names_the_membership_builtin() {
 fn in_without_its_piped_value_shows_the_piped_form() {
     let (_, err, code) = run_script("in", "\"bug\" in [\"bug\", \"x\"]\n");
     assert_ne!(code, 0);
-    assert!(err.contains("E_BAD_ARG"), "{err}");
-    assert!(
-        err.contains("\"bug\" | in([\"bug\", \"x\"])"),
-        "no piped form: {err}"
-    );
+    // Refused at parse time now, before anything runs, with the piped form.
+    assert!(err.contains("E_PARSE"), "{err}");
+    assert!(err.contains("x | in(list)"), "no piped form: {err}");
 }
 
 #[test]

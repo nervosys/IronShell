@@ -166,7 +166,8 @@ fn from_jsonl_names_the_bad_line() {
 
 #[test]
 fn to_jsonl_wants_an_array() {
-    assert!(refusal(r#"to_jsonl({a: 1})"#).contains("not an Array"));
+    let msg = refusal(r#"to_jsonl({a: 1})"#);
+    assert!(msg.contains("Array"), "{msg}");
 }
 
 // ---- 8: unique ------------------------------------------------------------

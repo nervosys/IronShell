@@ -8027,7 +8027,11 @@ fn windows_name_problem(builtin: &str, path: &str, write: bool) -> Option<Safety
                     part.escape_debug()
                 ),
                 builtin: builtin.to_string(),
-                hint: "Windows forbids the characters < > | and a double quote, and control characters, in file names; choose a name without them".to_string(),
+                // A tab, newline or carriage return is most often a backslash
+                // escape the writer did not mean (`"..\proj\r11b"`): say so.
+                hint: control_char_path_hint(part)
+                    .unwrap_or("Windows forbids the characters < > | and a double quote, and control characters, in file names; choose a name without them")
+                    .to_string(),
                 approval: None,
                 did_you_mean: Vec::new(),
                 expected: "a name without < > | a double quote or control characters".to_string(),

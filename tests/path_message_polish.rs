@@ -91,7 +91,14 @@ fn a_carriage_return_in_an_outside_workspace_path_gets_the_hint() {
     let line = err.lines().next().unwrap_or("");
     let json: serde_json::Value =
         serde_json::from_str(line).unwrap_or_else(|e| panic!("not JSON ({e}): {err:?}"));
-    assert_eq!(json["error"]["code"], "E_OUTSIDE_WORKSPACE", "{json}");
+    // Windows refuses the control character in the name first (E_BAD_ARG);
+    // elsewhere the name is legal and the path is outside the workspace.
+    let want = if cfg!(windows) {
+        "E_BAD_ARG"
+    } else {
+        "E_OUTSIDE_WORKSPACE"
+    };
+    assert_eq!(json["error"]["code"], want, "{json}");
     let hint = json["error"]["hint"].as_str().unwrap_or("");
     assert!(hint.contains("carriage return"), "{hint}");
     assert!(hint.contains("forward slashes"), "{hint}");
