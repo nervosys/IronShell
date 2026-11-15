@@ -3177,7 +3177,7 @@ pub static SIGNATURES: &[Signature] = &[
         subject: Some(Ty::Sequence),
         params: &[],
         returns: "Array",
-        doc: "Remove ADJACENT duplicate elements, like Unix uniq: [1, 1, 2, 1] keeps the second 1. The subject is an Array, piped or as the argument. A String is split into lines first (one element per line, as lines does), then its adjacent duplicates are dropped: \"a\\na\\nb\" gives [\"a\", \"b\"]. Only adjacent duplicates go, as in Unix uniq; for every duplicate, not only neighbours, use unique or arr.unique. The -c flag is accepted and ignored.",
+        doc: "Remove ADJACENT duplicate elements, like Unix uniq: [1, 1, 2, 1] keeps the second 1. The subject is an Array, piped or as the argument. A String is split into lines first (one element per line, as lines does), then its adjacent duplicates are dropped: \"a\\na\\nb\" gives [\"a\", \"b\"]. Only adjacent duplicates go, as in Unix uniq; for every duplicate, not only neighbours, use unique or arr.unique. It takes no flags: uniq(xs, \"-c\") is refused.",
         examples: &[
             ("[1, 1, 2] | uniq | len", "2"),
             ("uniq([1, 1, 2, 1])", "[1, 2, 1]"),
