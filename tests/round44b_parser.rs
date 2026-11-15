@@ -25,16 +25,19 @@ fn a_leading_bom_is_skipped_and_a_later_one_is_named() {
 }
 
 #[test]
-fn a_word_call_argument_is_a_whole_expression() {
-    assert_eq!(run("x = 4\nabs x - 10"), Value::Int(6));
+fn a_word_call_argument_is_one_atom() {
     assert_eq!(run("abs -3"), Value::Int(3));
-    assert_eq!(run("abs 1 - 5"), Value::Int(4));
     assert_eq!(run("len [1, 2, 3]"), Value::Int(3));
     assert_eq!(run("[1, 2, 3] | len"), Value::Int(3));
-    assert!(iron_shell::parser::parse_program("x = 4\nprint x + 1").is_ok());
     assert!(iron_shell::parser::parse_program("print -1").is_ok());
     assert!(iron_shell::parser::parse_program("print {a: 1}").is_ok());
     assert!(iron_shell::parser::parse_program("print (1+2)").is_ok());
+    // An operator after the argument is ambiguous: `print x + 1` could be
+    // print(x + 1), and `len x - 1` could be (len x) - 1.
+    let e = parse_err("x = 4\nprint x + 1");
+    assert!(e.contains("ambiguous word-call"), "{e}");
+    assert!(e.contains("print(x) + 1"), "{e}");
+    assert!(e.contains("print(x + 1)"), "{e}");
 }
 
 #[test]

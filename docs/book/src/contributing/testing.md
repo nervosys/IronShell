@@ -166,13 +166,13 @@ For complex scenarios, use `.ish` test scripts in `test-scripts/`:
 # Each line is a self-contained assertion
 
 let x = 42
-assert x == 42
+assert(x == 42)
 
 let arr = [1, 2, 3]
-assert (len arr) == 3
+assert(len(arr) == 3)
 
-let s = upper "hello"
-assert s == "HELLO"
+let s = upper("hello")
+assert(s == "HELLO")
 ```
 
 ### AI Tests

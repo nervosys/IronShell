@@ -2290,6 +2290,7 @@ impl Parser {
         };
         // Remember the line where the primary expression ended (for word-call line tracking)
         let primary_line = self.prev().line;
+        let callee_idx = self.i.saturating_sub(1);
         if let Expr::Ident(_) = primary {
             let callee = primary;
             // If the next token is a parenthesis, parse a normal call with
@@ -2306,6 +2307,7 @@ impl Parser {
             // Otherwise support word-call style: space-separated atoms and lambdas
             // Only continue if tokens are on the same line (newlines act as statement separators)
             let mut args: Vec<Expr> = Vec::new();
+            let mut spans: Vec<(usize, usize)> = Vec::new();
             while self.peek().line == primary_line
                 && !self.at_index_bracket()
                 && (self.check_any(&[
@@ -2321,16 +2323,20 @@ impl Parser {
                     Tok::True,
                     Tok::False,
                     Tok::Null,
+                    Tok::Bang,
                 ]) || (args.is_empty() && self.at_flaglike_minus()))
             {
+                let arg_start = self.i;
                 if self.check(Tok::Fn) {
                     let lam = self.parse_lambda()?;
                     args.push(lam);
+                    spans.push((arg_start, self.i));
                     continue;
                 }
                 if self.check(Tok::Async) {
                     let lam = self.parse_async_lambda()?;
                     args.push(lam);
+                    spans.push((arg_start, self.i));
                     continue;
                 }
                 if self.check_any(&[
@@ -2344,7 +2350,9 @@ impl Parser {
                 }
                 let a = self.parse_word_call_arg()?;
                 args.push(a);
+                spans.push((arg_start, self.i));
             }
+            self.reject_ambiguous_word_call(callee_idx, &spans)?;
             if args.is_empty() {
                 Ok(callee)
             } else {
@@ -2609,6 +2617,11 @@ impl Parser {
             self.chain_guard(links)?;
             // A `(` that starts a new line starts a new statement, not a call
             // on the line before: `x = 5` then `(x + 1) * 2` called `5(...)`.
+            let spaced_word_call = self.allow_word_call
+                && matches!(e, Expr::Ident(_))
+                && self.check(Tok::LParen)
+                && !self.glued_to_operand();
+            let paren_idx = self.i;
             if self.check(Tok::LParen) && self.continues_line() && self.match_tok(Tok::LParen) {
                 let mut args = Vec::new();
                 let mut arg_start = self.i;
@@ -2628,6 +2641,14 @@ impl Parser {
                     }
                 }
                 self.need_call_close(arg_start)?;
+                // `print (1 + 2) * 3`: a spaced `(` is a word call's argument,
+                // so an operator after it is ambiguous like any other.
+                if spaced_word_call {
+                    self.reject_ambiguous_word_call(
+                        paren_idx.saturating_sub(1),
+                        &[(paren_idx, self.i)],
+                    )?;
+                }
                 e = Expr::Call {
                     callee: Box::new(e),
                     args,
@@ -2662,8 +2683,10 @@ impl Parser {
                 // The sibling word-call loop in `parse_call_like` has always
                 // had this check; this one did not.
                 let call_line = self.prev().line;
+                let callee_idx = self.i.saturating_sub(1);
                 let starts_statement = self.word_starts_statement();
                 let mut args: Vec<Expr> = Vec::new();
+                let mut spans: Vec<(usize, usize)> = Vec::new();
                 while self.peek().line == call_line
                     && (self.check_any(&[
                         Tok::Fn,
@@ -2678,16 +2701,20 @@ impl Parser {
                         Tok::True,
                         Tok::False,
                         Tok::Null,
+                        Tok::Bang,
                     ]) || (starts_statement && args.is_empty() && self.at_flaglike_minus()))
                 {
+                    let arg_start = self.i;
                     if self.check(Tok::Fn) {
                         let lam = self.parse_lambda()?;
                         args.push(lam);
+                        spans.push((arg_start, self.i));
                         continue;
                     }
                     if self.check(Tok::Async) {
                         let lam = self.parse_async_lambda()?;
                         args.push(lam);
+                        spans.push((arg_start, self.i));
                         continue;
                     }
                     if self.check_any(&[Tok::Pipe, Tok::RBrace, Tok::RParen, Tok::Eof]) {
@@ -2695,7 +2722,9 @@ impl Parser {
                     }
                     let a = self.parse_word_call_arg()?;
                     args.push(a);
+                    spans.push((arg_start, self.i));
                 }
+                self.reject_ambiguous_word_call(callee_idx, &spans)?;
                 if !args.is_empty() {
                     e = Expr::Call {
                         callee: Box::new(e),
@@ -2753,44 +2782,203 @@ impl Parser {
         !bound_earlier
     }
 
-    /// One argument of a word call. An atom, unless an operator follows it on
-    /// the same line, in which case the argument is the whole expression up to
-    /// the next `|`, `;`, line break or closing bracket: `print x + 1` prints
-    /// the sum, and `print -1` prints -1. A call inside the expression takes
-    /// parentheses, as everywhere else.
+    /// One argument of a word call: a single atom (literal, name, `(paren)`,
+    /// `[array]`, `{record}`) with any glued `.field`, `[i]` or `(args)` suffix,
+    /// so `print len([1, 2])` passes the call `len([1, 2])`. A `-` or `!` glued
+    /// to its operand is part of the argument: `print -1`, `print !true`. An
+    /// operator after the arguments is refused by
+    /// [`Parser::reject_ambiguous_word_call`].
     fn parse_word_call_arg(&mut self) -> Result<Expr> {
-        let start = self.i;
-        if !self.check(Tok::Minus) {
-            let atom = self.parse_indexed_atom()?;
-            let continues = self.continues_line()
-                && matches!(
-                    self.peek().kind,
-                    Tok::Plus
-                        | Tok::Minus
-                        | Tok::Star
-                        | Tok::Slash
-                        | Tok::Percent
-                        | Tok::Caret
-                        | Tok::EqEq
-                        | Tok::Ne
-                        | Tok::Lt
-                        | Tok::Lte
-                        | Tok::Gt
-                        | Tok::Gte
-                        | Tok::AndAnd
-                        | Tok::OrOr
-                        | Tok::Dot
-                );
-            if !continues {
-                return Ok(atom);
+        if self.match_tok(Tok::Minus) {
+            // `-9223372036854775808`: the magnitude alone does not fit an Int.
+            if self.check(Tok::Int) && self.peek().text.as_str() == "9223372036854775808" {
+                self.i += 1;
+                return Ok(Expr::LitInt(i64::MIN));
             }
-            self.i = start;
+            let e = self.parse_word_call_operand()?;
+            return Ok(Expr::Unary {
+                op: UnOp::Neg,
+                expr: Box::new(e),
+            });
         }
-        let prev = self.allow_word_call;
-        self.allow_word_call = false;
-        let e = self.parse_logic_or();
-        self.allow_word_call = prev;
-        e
+        if self.match_tok(Tok::Bang) {
+            let e = self.parse_word_call_operand()?;
+            return Ok(Expr::Unary {
+                op: UnOp::Not,
+                expr: Box::new(e),
+            });
+        }
+        self.parse_word_call_operand()
+    }
+
+    /// An atom and its glued postfix suffixes, for [`Parser::parse_word_call_arg`].
+    fn parse_word_call_operand(&mut self) -> Result<Expr> {
+        let mut e = self.parse_indexed_atom()?;
+        let mut links = 0usize;
+        loop {
+            links += 1;
+            self.chain_guard(links)?;
+            if self.check(Tok::LParen)
+                && self.glued_to_operand()
+                && matches!(e, Expr::Ident(_) | Expr::MemberAccess { .. })
+            {
+                let args = self.parse_paren_call_args()?;
+                e = Expr::Call {
+                    callee: Box::new(e),
+                    args,
+                    named: Vec::new(),
+                };
+            } else if self.check(Tok::Dot) && self.dot_is_glued() {
+                self.i += 1;
+                let field = self.need_field("expected field name after '.'")?;
+                e = Expr::MemberAccess {
+                    object: Box::new(e),
+                    field,
+                };
+            } else if self.at_index_bracket() || self.at_literal_index(&e) {
+                e = self.parse_index_suffix(e)?;
+            } else {
+                break;
+            }
+        }
+        Ok(e)
+    }
+
+    /// Whether the current `.` is written with no space before it and a field
+    /// name right after it, on the line of the token before: `x.y`, `"a".len`.
+    fn dot_is_glued(&self) -> bool {
+        if self.i == 0 {
+            return false;
+        }
+        let (Some(prev), Some(dot), Some(next)) = (
+            self.toks.get(self.i - 1),
+            self.toks.get(self.i),
+            self.toks.get(self.i + 1),
+        ) else {
+            return false;
+        };
+        let prev_width = match prev.kind {
+            Tok::String => prev.text.chars().count() + 2,
+            Tok::RParen | Tok::RBracket | Tok::RBrace => 1,
+            _ => prev.text.chars().count(),
+        };
+        prev.line == dot.line
+            && prev.col + prev_width == dot.col
+            && next.line == dot.line
+            && next.col == dot.col + 1
+    }
+
+    /// The source words of the tokens `from..to`, spaced as they were written.
+    fn render_tokens(&self, from: usize, to: usize) -> String {
+        let mut out = String::new();
+        let mut before: Option<&Spanned> = None;
+        for t in self.toks.get(from..to).unwrap_or(&[]) {
+            if let Some(p) = before {
+                let width = match p.kind {
+                    Tok::String => p.text.chars().count() + 2,
+                    Tok::LParen | Tok::RParen | Tok::LBracket | Tok::RBracket => 1,
+                    Tok::LBrace | Tok::RBrace => 1,
+                    _ => p.text.chars().count(),
+                };
+                if t.line != p.line || t.col > p.col + width {
+                    out.push(' ');
+                }
+            }
+            if t.kind == Tok::String {
+                out.push('"');
+                out.push_str(&t.text);
+                out.push('"');
+            } else {
+                out.push_str(&t.text);
+            }
+            before = Some(t);
+        }
+        out
+    }
+
+    /// A binary, comparison or logical operator right after a word call's
+    /// arguments, on the same line, is ambiguous: `print x + 1` could mean
+    /// `print(x + 1)`, and `len x - 1` could mean `(len x) - 1`. No rule fits
+    /// both, so it is a parse error that shows both readings. `callee` is the
+    /// token index of the called name, `spans` the token range of each argument.
+    fn reject_ambiguous_word_call(&self, callee: usize, spans: &[(usize, usize)]) -> Result<()> {
+        if spans.is_empty() || !self.continues_line() {
+            return Ok(());
+        }
+        let Some(op) = self.toks.get(self.i) else {
+            return Ok(());
+        };
+        if !matches!(
+            op.kind,
+            Tok::Plus
+                | Tok::Minus
+                | Tok::Star
+                | Tok::Slash
+                | Tok::Percent
+                | Tok::Caret
+                | Tok::EqEq
+                | Tok::Ne
+                | Tok::Lt
+                | Tok::Lte
+                | Tok::Gt
+                | Tok::Gte
+                | Tok::AndAnd
+                | Tok::OrOr
+        ) {
+            return Ok(());
+        }
+        let name = self
+            .toks
+            .get(callee)
+            .map(|t| t.text.clone())
+            .unwrap_or_default();
+        let args: Vec<String> = spans
+            .iter()
+            .map(|&(a, b)| self.render_tokens(a, b))
+            .collect();
+        let mut end = self.i + 1;
+        let mut depth = 0usize;
+        while let Some(t) = self.toks.get(end) {
+            if t.line != op.line {
+                break;
+            }
+            match t.kind {
+                Tok::Semicolon | Tok::Pipe | Tok::Eof if depth == 0 => break,
+                Tok::LBrace if depth == 0 => break,
+                Tok::LParen | Tok::LBracket | Tok::LBrace => depth += 1,
+                Tok::RParen | Tok::RBracket | Tok::RBrace => {
+                    if depth == 0 {
+                        break;
+                    }
+                    depth -= 1;
+                }
+                _ => {}
+            }
+            end += 1;
+        }
+        let mut rest = self.render_tokens(self.i + 1, end);
+        if rest.is_empty() {
+            rest = "...".to_string();
+        }
+        let all = args.join(", ");
+        let last = args.last().cloned().unwrap_or_default();
+        let head = if args.len() > 1 {
+            format!("{}, ", args[..args.len() - 1].join(", "))
+        } else {
+            String::new()
+        };
+        let hint = format!(
+            "write {name}({all}) {op} {rest} to use the result, or \
+             {name}({head}{last} {op} {rest}) to pass the whole expression",
+            op = op.text
+        );
+        Err(anyhow::Error::new(HintedSyntax {
+            msg: format!(
+                "ambiguous word-call: `{}` after the arguments of `{name}` at line {}, column {}",
+                op.text, op.line, op.col
+            ),
+            hint,
+        }))
     }
 
     /// Whether the next token is a `[` written directly after an indexable token
@@ -2852,7 +3040,12 @@ impl Parser {
             return Ok(e);
         }
         if self.match_tok(Tok::LParen) {
-            let e = self.parse_expr()?;
+            // Parentheses make a word call unambiguous: `x = (len [1, 2, 3])`.
+            let prev_allow = self.allow_word_call;
+            self.allow_word_call = true;
+            let e = self.parse_expr();
+            self.allow_word_call = prev_allow;
+            let e = e?;
             self.need(Tok::RParen, "expected ')'")?;
             return Ok(e);
         }
@@ -3236,8 +3429,27 @@ impl Parser {
     fn parse_if_expr(&mut self) -> Result<Expr> {
         let prev_allow = self.allow_word_call;
         self.allow_word_call = false;
+        let cond_start = self.i;
         let cond = self.parse_pipe()?;
         self.allow_word_call = prev_allow;
+        // `if len [1, 2, 3] == 3 { }`: a word call whose result is compared is
+        // ambiguous. Re-read the condition as a word call to give that hint.
+        if !self.check(Tok::LBrace) && matches!(cond, Expr::Ident(_)) && self.continues_line() {
+            let after = self.i;
+            self.i = cond_start;
+            self.allow_word_call = true;
+            let retry = self.parse_postfix();
+            self.allow_word_call = prev_allow;
+            if let Err(e) = retry {
+                let ambiguous = e
+                    .downcast_ref::<HintedSyntax>()
+                    .is_some_and(|h| h.msg.starts_with("ambiguous word-call"));
+                if ambiguous {
+                    return Err(e);
+                }
+            }
+            self.i = after;
+        }
         self.need(Tok::LBrace, "expected '{' after if condition")?;
         let then_expr = self.parse_expr()?;
         self.need(Tok::RBrace, "expected '}' after if branch")?;
