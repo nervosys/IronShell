@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- The published crate leaves out `tests/`, `examples/` and `benches/` (161 files, 2.2 MiB compressed, down from 857 files and 3.5 MiB). The 14.0.4 crate was published this way from the v14.0.4 tag plus this change.
+
 ## [14.0.4] - 2026-11-14
 
 ### Changed

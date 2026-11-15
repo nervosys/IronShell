@@ -19,6 +19,9 @@ readme = "README.md"
 rust-version = "1.89"
 exclude = [
     "assets/",
+    "benches/",
+    "examples/",
+    "tests/",
     "demos/",
     "docs/",
     "editors/",
