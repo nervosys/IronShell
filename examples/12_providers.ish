@@ -71,7 +71,7 @@ let agent_response = ai("What files are in the current directory?")
 print agent_response
 
 # Pipeline integration - AI processes structured data
-let files = ls "."
+let files = ls(".")
 let summary = files | ai("Summarize these files by type")
 print summary
 
