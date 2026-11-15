@@ -39,77 +39,15 @@ use iron_shell::value::Value;
 /// unifying; until then, they are dispatchable and must not fail this test.
 const DISPATCHABLE_OUTSIDE_LOOKUP: &[&str] = &["agent", "ai", "swarm"];
 
-/// Builtin names referenced by a module alias that no builtin implements.
+/// Builtin names a module alias may point at without a builtin behind them.
+/// Empty since round 44c: the phantom members were withdrawn from `modules.rs`,
+/// and an alias to a builtin that does not exist is a failure again.
 ///
 /// These are genuinely unimplemented features, not typos — the typos (nine of
 /// them, e.g. `crypto_key_generate` for `crypto_generate_key` and
 /// `gui_window_close` for `gui_close_window`) were corrected rather than
 /// allowlisted.
-const KNOWN_UNIMPLEMENTED: &[&str] = &[
-    "ai_detect",
-    "audit_retention",
-    "audit_stream",
-    "clipboard_has_image",
-    "clipboard_watch",
-    "crypto_jwt_encode",
-    "crypto_key_derive",
-    "db_kv_close",
-    "db_kv_list",
-    "db_kv_open",
-    "db_redis_cmd",
-    "db_redis_connect",
-    "db_sqlite_close",
-    "db_sqlite_commit",
-    "db_sqlite_rollback",
-    "db_sqlite_transaction",
-    "embed",
-    "gui_click",
-    "gui_color_at",
-    "gui_double_click",
-    "gui_drag",
-    "gui_hotkey",
-    "gui_key_down",
-    "gui_key_up",
-    "gui_ocr_region",
-    "gui_pixel_search",
-    "gui_right_click",
-    "gui_scroll",
-    "gui_wait_image",
-    "gui_window_list",
-    "input_path",
-    "input_text",
-    "perm_acl_get",
-    "perm_acl_set",
-    "perm_owner_get",
-    "perm_owner_set",
-    "pkg_lock",
-    "pkg_outdated",
-    "pkg_repo_add",
-    "pkg_repo_remove",
-    "pkg_repos",
-    "pkg_uninstall",
-    "pkg_unlock",
-    "sso_providers",
-    "sso_refresh",
-    "sso_user_info",
-    "web_back",
-    "web_click",
-    "web_eval",
-    "web_extract",
-    "web_extract_all",
-    "web_form_fill",
-    "web_forward",
-    "web_links",
-    "web_navigate",
-    "web_pdf",
-    "web_refresh",
-    "web_screenshot",
-    "web_scroll",
-    "web_select",
-    "web_table_extract",
-    "web_type",
-    "web_wait",
-];
+const KNOWN_UNIMPLEMENTED: &[&str] = &[];
 
 /// Whether `name` can actually be dispatched by `builtins::call`.
 fn resolves(name: &str) -> bool {
@@ -193,6 +131,35 @@ fn previously_broken_aliases_now_resolve() {
         assert!(
             resolves(&target),
             "{module}.{exposed} regressed to a dangling target: {target}"
+        );
+    }
+}
+
+/// What `schema.modules` lists (the ontology's module table) resolves: every
+/// member names a builtin that exists, so no listed call answers "unknown
+/// builtin".
+#[test]
+fn every_member_the_schema_lists_resolves_to_a_builtin() {
+    let ontology = iron_shell::agent_api::build_language_ontology();
+    assert!(!ontology.modules.is_empty());
+    let mut phantom = Vec::new();
+    for m in &ontology.modules {
+        for f in &m.functions {
+            if !resolves(&f.builtin) && !iron_shell::builtins::is_dispatched(&f.builtin) {
+                phantom.push(format!("{}.{} -> {}", m.name, f.method, f.builtin));
+            }
+        }
+    }
+    assert!(phantom.is_empty(), "listed but not callable: {phantom:?}");
+}
+
+#[test]
+fn the_withdrawn_phantom_members_stay_withdrawn() {
+    let all = aliases();
+    for (module, exposed) in [("crypto", "jwt_encode"), ("crypto", "key_derive")] {
+        assert!(
+            !all.iter().any(|(m, e, _)| m == module && e == exposed),
+            "{module}.{exposed} is listed again"
         );
     }
 }
