@@ -4335,11 +4335,11 @@ pub fn write_jail_refusal(path: &str) -> Option<String> {
 ///
 /// Absolute paths are returned unchanged. In a **jailed** context (agent mode, or
 /// an explicit `IRONSHELL_WORKSPACE`) a relative path is resolved against the
-/// workspace root, so writes/deletes land inside the jail and agree with both the
-/// `within_workspace` check and the transaction journal — closing the gap where a
-/// relative path was resolved against the process CWD (escaping the workspace when
-/// CWD ≠ workspace). In plain human mode the path is left as-is, so the OS resolves
-/// it against the current directory like any normal shell.
+/// current directory (see [`relative_base`]), made absolute here so the write, the
+/// `within_workspace` check and the transaction journal all name one place, and a
+/// `cd` moves what a relative path means for reads and writes alike. In plain
+/// human mode the path is left as-is, so the OS resolves it against the current
+/// directory like any normal shell.
 pub fn resolve_path_str(path: &str) -> String {
     let p = std::path::Path::new(path);
     // A Windows drive-relative path (`C:foo`, `C:..`) is the drive's current
@@ -4350,16 +4350,32 @@ pub fn resolve_path_str(path: &str) -> String {
     }
     if p.is_absolute() || !jail_enforced(current_mode()) {
         path.to_string()
-    } else if std::env::var_os("IRONSHELL_WORKSPACE").is_some() {
-        join_native(workspace_root(), path)
     } else {
-        // No workspace was named, so a relative path means what it means to any
-        // program: the working directory. The jail still judges the result
-        // against the pinned root.
-        join_native(
-            std::env::current_dir().unwrap_or_else(|_| workspace_root()),
-            path,
-        )
+        // A relative path means what it means to any program: the working
+        // directory, which `cd` moves. The jail judges the result.
+        join_native(relative_base(), path)
+    }
+}
+
+/// The directory a relative path is taken against in a jailed context: the
+/// working directory, so that after `cd sub`, `file.write("x")`, `file.read("x")`
+/// and `ls("..")` all mean the same place, with or without `--workspace`.
+///
+/// With an explicit workspace the working directory counts only while it is
+/// inside it (it is, from `ish --workspace`, which starts there, and a `cd` out
+/// is refused by the jail). A library caller or a child process that set
+/// `IRONSHELL_WORKSPACE` and runs from somewhere else has no working directory
+/// the jail could call its own, so its relative paths are the workspace's.
+fn relative_base() -> PathBuf {
+    let cwd = std::env::current_dir().ok();
+    if std::env::var_os("IRONSHELL_WORKSPACE").is_some() {
+        let root = workspace_root();
+        match cwd {
+            Some(c) if within_root(&c.to_string_lossy(), &root) => c,
+            _ => root,
+        }
+    } else {
+        cwd.unwrap_or_else(workspace_root)
     }
 }
 
