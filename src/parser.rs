@@ -137,6 +137,33 @@ const PIPE_ARG_HINT: &str =
 /// The hint for `x in list`: membership is a builtin, not an operator.
 const IN_OPERATOR_HINT: &str = "`in` is not an operator; use contains(list, x) or x | in(list)";
 
+/// The hint for two expressions on one line with nothing between them.
+const STATEMENT_SEPARATOR_HINT: &str = "separate statements with a newline or `;`";
+
+/// The hint for `"a" | "b" =>` in a match arm.
+const OR_PATTERN_HINT: &str = "or-patterns are not supported: use a guard, \
+     e.g. s if s == \"a\" || s == \"b\" => ...";
+
+/// The hint for `1..5 =>` in a match arm.
+const RANGE_PATTERN_HINT: &str = "range patterns are not supported: use a guard, \
+     e.g. n if n >= 1 && n <= 5 => ...";
+
+/// The hint for `[h, ..t]` in a match arm.
+const REST_PATTERN_HINT: &str = "rest patterns are not supported: use a guard and index, \
+     e.g. a if len(a) > 0 => a[0], with a | slice(1) for the rest";
+
+/// The hint for a comparison written straight after a pipeline stage.
+const PIPE_COMPARE_HINT: &str = "`|` binds loosest, so a comparison after a stage is not \
+     applied to the stage's result: parenthesize the pipe, \
+     e.g. (\"Hello\" | upper) == \"HELLO\" or ([1, 2] | len) > 1";
+
+/// The hint for `try { } catch e { } finally { }`.
+const FINALLY_HINT: &str = "there is no `finally`: put the cleanup in the catch block, \
+     or run it after the try expression";
+
+/// The hint for `.5`.
+const LEADING_POINT_HINT: &str = "a number needs a digit before the point: write 0.5";
+
 /// The hint for `def f(...)`, which IronShell does not have.
 const FUNCTION_HINT: &str = "functions are values: f = fn(x) => x + 1";
 
@@ -401,6 +428,12 @@ pub fn parse_program_with_lines(src: &str) -> Result<(Vec<Stmt>, Vec<usize>)> {
         let line = p.peek().line;
         match p.parse_stmt() {
             Ok(s) => {
+                // Another expression on the same line, with no `;` between,
+                // used to be a second statement and the first value was lost.
+                if let Some(e) = p.stray_expression() {
+                    errors.push(e);
+                    break;
+                }
                 stmts.push(s);
                 lines.push(line);
             }
@@ -508,6 +541,9 @@ pub fn parse_program_strict(src: &str) -> Result<Vec<Stmt>> {
     let mut stmts = Vec::new();
     while !p.check(Tok::Eof) {
         let s = p.parse_stmt()?;
+        if let Some(e) = p.stray_expression() {
+            return Err(e);
+        }
         stmts.push(s);
     }
     Ok(stmts)
@@ -526,6 +562,15 @@ fn unterminated_string(line: usize, col: usize) -> anyhow::Error {
         format!("unterminated string at line {}, column {}", line, col),
         "close the string with the same quote character it opened with, \
          or escape the quote inside it",
+    ))
+}
+
+/// A triple-quoted string, `"""..."""` or `'''...'''`, reported where it opens.
+fn triple_quote(line: usize, col: usize) -> anyhow::Error {
+    anyhow::Error::new(ParseError::with_hint(
+        format!("triple-quoted string at line {}, column {}", line, col),
+        "triple-quoted strings are not supported: use a double-quoted string \
+         with \\n for a newline",
     ))
 }
 
@@ -1101,6 +1146,17 @@ fn lex_marked(src: &str) -> Result<(Vec<Spanned>, std::collections::HashSet<usiz
             }
             '/' => {
                 advance(&chars, &mut pos, &mut line, &mut col);
+                // `/* ... */` is a block comment in other languages. It used to
+                // fail at the `*` with nothing to say what was meant.
+                if peek(&chars, pos) == Some('*') {
+                    return Err(anyhow::Error::new(ParseError::with_hint(
+                        format!(
+                            "`/*` at line {}, column {} is not a comment",
+                            start_line, start_col
+                        ),
+                        "block comments are not supported: start each comment line with `#`",
+                    )));
+                }
                 // Check for line comment //
                 if peek(&chars, pos) == Some('/') {
                     // `//` straight after an operand, then an operand (`7 // 2`,
@@ -1163,6 +1219,11 @@ fn lex_marked(src: &str) -> Result<(Vec<Spanned>, std::collections::HashSet<usiz
             }
             '"' => {
                 advance(&chars, &mut pos, &mut line, &mut col);
+                // `"""text"""` is Python's triple quote. It used to read as the
+                // empty string `""` followed by `"text"` and `""`, silently.
+                if peek(&chars, pos) == Some('"') && peek_next(&chars, pos) == Some('"') {
+                    return Err(triple_quote(start_line, start_col));
+                }
                 let mut s = String::new();
                 let mut closed = false;
                 while let Some(ch) = peek(&chars, pos) {
@@ -1300,6 +1361,9 @@ fn lex_marked(src: &str) -> Result<(Vec<Spanned>, std::collections::HashSet<usiz
             }
             '\'' => {
                 advance(&chars, &mut pos, &mut line, &mut col);
+                if peek(&chars, pos) == Some('\'') && peek_next(&chars, pos) == Some('\'') {
+                    return Err(triple_quote(start_line, start_col));
+                }
                 let mut s = String::new();
                 let mut closed = false;
                 while let Some(ch) = peek(&chars, pos) {
@@ -1312,6 +1376,18 @@ fn lex_marked(src: &str) -> Result<(Vec<Spanned>, std::collections::HashSet<usiz
                 }
                 if !closed {
                     return Err(unterminated_string(start_line, start_col));
+                }
+                // `'it''s'` is SQL's and Python's doubled quote. It used to read
+                // as `'it'` followed by `'s'`, and the rest was dropped.
+                if peek(&chars, pos) == Some('\'') {
+                    return Err(anyhow::Error::new(ParseError::with_hint(
+                        format!(
+                            "a quote directly after a closing `'` at line {}, column {}",
+                            line,
+                            col
+                        ),
+                        "a single-quoted string cannot hold a `'` (it has no escapes): use a double-quoted string, \"it's\"",
+                    )));
                 }
                 out.push(Spanned {
                     kind: Tok::String,
@@ -2002,6 +2078,24 @@ impl Parser {
                 left: Box::new(left),
                 right: Box::new(right),
             };
+            // `x | f(a)[i]` and `x | f(a).field` take the index or the field
+            // of what the pipeline so far produced, `(x | f(a))[i]`, as
+            // `f(a)[i]` does outside a pipeline. They used to leave the `[i]`
+            // behind as a statement of its own, and drop the pipeline's value.
+            loop {
+                if self.at_index_bracket() {
+                    left = self.parse_index_suffix(left)?;
+                } else if self.check(Tok::Dot) && self.glued_to_operand() {
+                    self.i += 1;
+                    let field = self.need_field("expected field name after '.'")?;
+                    left = Expr::MemberAccess {
+                        object: Box::new(left),
+                        field,
+                    };
+                } else {
+                    break;
+                }
+            }
         }
         Ok(left)
     }
@@ -2152,7 +2246,13 @@ impl Parser {
                 named: Vec::new(),
             });
         }
-        let primary = self.parse_indexed_atom()?;
+        // A stage's own name takes no `[i]`: `x | reverse[0]` indexes the
+        // result of `reverse`, which `parse_pipe` applies after the stage.
+        let primary = if self.check(Tok::Ident) {
+            self.parse_atom_expr()?
+        } else {
+            self.parse_indexed_atom()?
+        };
         // Remember the line where the primary expression ended (for word-call line tracking)
         let primary_line = self.prev().line;
         if let Expr::Ident(_) = primary {
@@ -2172,6 +2272,7 @@ impl Parser {
             // Only continue if tokens are on the same line (newlines act as statement separators)
             let mut args: Vec<Expr> = Vec::new();
             while self.peek().line == primary_line
+                && !self.at_index_bracket()
                 && self.check_any(&[
                     Tok::Fn,
                     Tok::Async,
@@ -2572,17 +2673,7 @@ impl Parser {
     /// index. `a[0]` and `f(x)[0]` index; `f [0]` and a `[` on the next line stay
     /// an array argument or a new statement.
     fn at_index_bracket(&self) -> bool {
-        if !self.check(Tok::LBracket) || self.i == 0 || self.i >= self.toks.len() {
-            return false;
-        }
-        let prev = &self.toks[self.i - 1];
-        let cur = &self.toks[self.i];
-        let prev_len = match prev.kind {
-            Tok::Ident => prev.text.chars().count(),
-            Tok::RParen | Tok::RBracket => 1,
-            _ => return false,
-        };
-        prev.line == cur.line && prev.col + prev_len == cur.col
+        self.check(Tok::LBracket) && self.glued_to_operand()
     }
 
     /// Whether the next token is a `[` written directly after a string or record
@@ -2647,6 +2738,10 @@ impl Parser {
                     let item = self.parse_expr()?;
                     items.push(item);
                     if self.match_tok(Tok::Comma) {
+                        // A trailing comma: `[1, 2, 3,]`.
+                        if self.check(Tok::RBracket) {
+                            break;
+                        }
                         continue;
                     }
                     break;
@@ -2659,6 +2754,7 @@ impl Parser {
             let mut kvs = Vec::new();
             if !self.check(Tok::RBrace) {
                 loop {
+                    let (key_line, key_col) = (self.peek().line, self.peek().col);
                     let key = self.need_field("expected key in record")?;
                     // A `{ ... }` with statements in it parses as a record, so
                     // the first statement fails here: `name = value`, or `let`.
@@ -2690,8 +2786,23 @@ impl Parser {
                     }
                     self.need(Tok::Colon, "expected ':' after key")?;
                     let val = self.parse_expr()?;
+                    if kvs.iter().any(|(k, _)| *k == key) {
+                        return Err(anyhow::Error::new(HintedSyntax {
+                            msg: format!(
+                                "duplicate key `{}` in record at line {}, column {}",
+                                key, key_line, key_col
+                            ),
+                            hint: "each key may appear once in a record literal: \
+                                   remove one, or rename it"
+                                .to_string(),
+                        }));
+                    }
                     kvs.push((key, val));
                     if self.match_tok(Tok::Comma) {
+                        // A trailing comma: `{a: 1,}`.
+                        if self.check(Tok::RBrace) {
+                            break;
+                        }
                         continue;
                     }
                     break;
@@ -3035,6 +3146,17 @@ impl Parser {
         let catch_expr = self.parse_expr()?;
         self.need(Tok::RBrace, "expected '}' after catch expression")?;
 
+        if self.check(Tok::Ident) && self.peek().text == "finally" {
+            let at = self.peek();
+            return Err(anyhow::Error::new(HintedSyntax {
+                msg: format!(
+                    "`finally` is not supported at line {}, column {}",
+                    at.line, at.col
+                ),
+                hint: FINALLY_HINT.to_string(),
+            }));
+        }
+
         Ok(Expr::TryCatch {
             try_expr: Box::new(try_expr),
             catch_var,
@@ -3046,6 +3168,28 @@ impl Parser {
         use crate::ast::MatchArm;
 
         let pattern = self.parse_pattern()?;
+
+        // `"a" | "b" =>` and `1..5 =>`: patterns other languages have.
+        if self.check(Tok::Pipe) {
+            let at = self.peek();
+            return Err(anyhow::Error::new(HintedSyntax {
+                msg: format!(
+                    "or-patterns are not supported at line {}, column {}",
+                    at.line, at.col
+                ),
+                hint: OR_PATTERN_HINT.to_string(),
+            }));
+        }
+        if self.check(Tok::Dot) && self.peek_ahead(1) == Some(Tok::Dot) {
+            let at = self.peek();
+            return Err(anyhow::Error::new(HintedSyntax {
+                msg: format!(
+                    "range patterns are not supported at line {}, column {}",
+                    at.line, at.col
+                ),
+                hint: RANGE_PATTERN_HINT.to_string(),
+            }));
+        }
 
         // Optional guard: if condition
         let guard = if self.match_tok(Tok::If) {
@@ -3066,6 +3210,18 @@ impl Parser {
 
     fn parse_pattern(&mut self) -> Result<crate::ast::Pattern> {
         use crate::ast::Pattern;
+
+        // `[h, ..t]`: a rest pattern, which an array pattern does not have.
+        if self.check(Tok::Dot) && self.peek_ahead(1) == Some(Tok::Dot) {
+            let at = self.peek();
+            return Err(anyhow::Error::new(HintedSyntax {
+                msg: format!(
+                    "rest patterns are not supported at line {}, column {}",
+                    at.line, at.col
+                ),
+                hint: REST_PATTERN_HINT.to_string(),
+            }));
+        }
 
         // Wildcard: _
         if self.check(Tok::Ident) && self.peek().text == "_" {
@@ -3215,6 +3371,86 @@ impl Parser {
             (Some(prev), Some(cur)) => prev.line == cur.line,
             _ => true,
         }
+    }
+
+    /// After a complete statement, the error for a token that starts another
+    /// expression on the same line: `x = 5 6`, `1 2`, `x = 1 y = 2`. A `;` or a
+    /// newline separates statements; nothing else does. None when the statement
+    /// is followed by a separator, the end of input, or a closing bracket (which
+    /// has its own error).
+    fn stray_expression(&self) -> Option<anyhow::Error> {
+        let cur = self.toks.get(self.i)?;
+        let prev = self.toks.get(self.i.checked_sub(1)?)?;
+        if prev.line != cur.line {
+            return None;
+        }
+        let starts_expression = matches!(
+            cur.kind,
+            Tok::Int
+                | Tok::Float
+                | Tok::String
+                | Tok::Ident
+                | Tok::LParen
+                | Tok::LBracket
+                | Tok::LBrace
+                | Tok::True
+                | Tok::False
+                | Tok::Null
+                | Tok::Fn
+                | Tok::Async
+                | Tok::Match
+                | Tok::If
+                | Tok::Try
+                | Tok::Let
+                | Tok::Mut
+                | Tok::Bang
+                | Tok::Await
+                | Tok::Throw
+                | Tok::Import
+                | Tok::Export
+                | Tok::Pub
+        );
+        if !starts_expression {
+            return None;
+        }
+        if cur.kind == Tok::Ident && cur.text == "in" {
+            return Some(anyhow::Error::new(HintedSyntax {
+                msg: format!(
+                    "`in` is not an operator at line {}, column {}",
+                    cur.line, cur.col
+                ),
+                hint: IN_OPERATOR_HINT.to_string(),
+            }));
+        }
+        Some(anyhow::Error::new(HintedSyntax {
+            msg: format!(
+                "unexpected {} after a complete statement at line {}, column {}",
+                match cur.kind {
+                    Tok::String => "string".to_string(),
+                    Tok::Int | Tok::Float => "number".to_string(),
+                    _ => format!("`{}`", cur.text),
+                },
+                cur.line,
+                cur.col
+            ),
+            hint: STATEMENT_SEPARATOR_HINT.to_string(),
+        }))
+    }
+
+    /// Whether the current token is written directly after an indexable token on
+    /// the same line: an identifier, a `)` or a `]`.
+    fn glued_to_operand(&self) -> bool {
+        if self.i == 0 || self.i >= self.toks.len() {
+            return false;
+        }
+        let prev = &self.toks[self.i - 1];
+        let cur = &self.toks[self.i];
+        let prev_len = match prev.kind {
+            Tok::Ident => prev.text.chars().count(),
+            Tok::RParen | Tok::RBracket => 1,
+            _ => return false,
+        };
+        prev.line == cur.line && prev.col + prev_len == cur.col
     }
 
     fn check_any(&self, ks: &[Tok]) -> bool {
@@ -3539,7 +3775,51 @@ impl Parser {
         {
             return Some(TERNARY_HINT);
         }
+        // `x | stage == y`: the statement ended at the stage, and the
+        // comparison is left over.
+        if matches!(
+            cur,
+            Tok::EqEq | Tok::Ne | Tok::Lt | Tok::Lte | Tok::Gt | Tok::Gte
+        ) && self.pipe_before_current()
+        {
+            return Some(PIPE_COMPARE_HINT);
+        }
+        // `.5`: a point with no digit before it.
+        if matches!(cur, Tok::Dot) && !self.glued_to_operand() {
+            if let (Some(point), Some(digits)) = (self.toks.get(self.i), self.toks.get(self.i + 1))
+            {
+                if digits.kind == Tok::Int
+                    && digits.line == point.line
+                    && digits.col == point.col + 1
+                {
+                    return Some(LEADING_POINT_HINT);
+                }
+            }
+        }
         None
+    }
+
+    /// Whether a `|` outside any bracket stands before the current token in the
+    /// same statement (back to a `;`, an `=`, or the bracket that is still open).
+    fn pipe_before_current(&self) -> bool {
+        let mut depth = 0usize;
+        let mut k = self.i;
+        while k > 0 {
+            k -= 1;
+            match self.toks[k].kind {
+                Tok::RParen | Tok::RBracket | Tok::RBrace => depth += 1,
+                Tok::LParen | Tok::LBracket | Tok::LBrace => {
+                    if depth == 0 {
+                        return false;
+                    }
+                    depth -= 1;
+                }
+                Tok::Pipe if depth == 0 => return true,
+                Tok::Semicolon | Tok::Equal | Tok::ColonEqual if depth == 0 => return false,
+                _ => {}
+            }
+        }
+        false
     }
 
     /// Create an error message with line/column information at previous token

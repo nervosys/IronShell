@@ -160,6 +160,7 @@ add = fn(a, b) => a + b
 # IronShell has no loop statements (`for`/`while`); iterate with map / where / reduce / each
 
 # `|` binds loosest (as in jq): parenthesize a pipe inside && / || or before ==, e.g. ("Hello" | upper) == "HELLO"
+# `x | f(a)[i]` and `x | f(a).field` index or read the result of the pipeline so far, i.e. `(x | f(a))[i]`; `x | f[i]` likewise. Statements are separated by a newline or `;`, so `x = 5 6` is E_PARSE, not two statements. Trailing commas in `[...]` and `{...}` are fine; a duplicate record key is E_PARSE.
 open("issues.json") | where(fn(r) => (r.title | lower | contains("x")) || (r.body | lower | contains("x")))
 
 # Rows: `.field` in a pipeline stage's argument is the row (jq's spelling),
