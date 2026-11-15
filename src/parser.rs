@@ -140,6 +140,18 @@ const IN_OPERATOR_HINT: &str = "`in` is not an operator; use contains(list, x) o
 /// The hint for two expressions on one line with nothing between them.
 const STATEMENT_SEPARATOR_HINT: &str = "separate statements with a newline or `;`";
 
+/// The hint for a `[` after a space, where an index was probably meant.
+const INDEX_SPACING_HINT: &str =
+    "to index, write it with no space: x[0], or parenthesize: (expr)[0]";
+
+/// The hint for `fn name(...)`: a named function is a bound lambda.
+const NAMED_FN_HINT: &str = "define a named function as add = fn(a, b) => ...";
+
+/// The hint for `fn(x) => { x }`: braces make a record, not a block.
+const LAMBDA_BRACE_HINT: &str =
+    "a lambda body is one expression, and braces make a record: write fn(x) => x, \
+     or fn(x) => {key: x} for a record";
+
 /// The hint for `"a" | "b" =>` in a match arm.
 const OR_PATTERN_HINT: &str = "or-patterns are not supported: use a guard, \
      e.g. s if s == \"a\" || s == \"b\" => ...";
@@ -683,7 +695,13 @@ fn lex_error(e: anyhow::Error) -> ParseError {
 fn lex_marked(src: &str) -> Result<(Vec<Spanned>, std::collections::HashSet<usize>)> {
     let mut out = Vec::<Spanned>::new();
     let mut glued_brackets = std::collections::HashSet::<usize>::new();
-    let chars: Vec<char> = src.chars().collect();
+    // One leading UTF-8 byte order mark is not source: PowerShell 5 writes one
+    // at the start of every file it saves. A BOM anywhere else stays an error.
+    let chars: Vec<char> = src
+        .strip_prefix('\u{FEFF}')
+        .unwrap_or(src)
+        .chars()
+        .collect();
     let mut pos = 0;
     let mut line = 1usize;
     let mut col = 1usize;
@@ -1514,6 +1532,12 @@ fn lex_marked(src: &str) -> Result<(Vec<Spanned>, std::collections::HashSet<usiz
                     "a backslash outside a string: an earlier string may have ended early, since \" inside a string is an escaped quote; write C:\\ for a trailing backslash",
                 )));
             }
+            '\u{FEFF}' => {
+                return Err(anyhow::Error::new(ParseError::with_hint(
+                    format!("unknown character '\\u{{FEFF}}' at line {start_line}, column {start_col}"),
+                    "U+FEFF is a byte order mark (BOM); only one at the very start of a file is skipped, so delete this one",
+                )));
+            }
             other => {
                 return Err(anyhow!(
                     "unknown character '{}' at line {}, column {}",
@@ -2070,6 +2094,7 @@ impl Parser {
                     left: Box::new(left),
                     right: Box::new(projector),
                 };
+                left = self.parse_pipe_suffixes(left)?;
                 continue;
             }
             self.reject_hyphenated_stage()?;
@@ -2078,23 +2103,29 @@ impl Parser {
                 left: Box::new(left),
                 right: Box::new(right),
             };
-            // `x | f(a)[i]` and `x | f(a).field` take the index or the field
-            // of what the pipeline so far produced, `(x | f(a))[i]`, as
-            // `f(a)[i]` does outside a pipeline. They used to leave the `[i]`
-            // behind as a statement of its own, and drop the pipeline's value.
-            loop {
-                if self.at_index_bracket() {
-                    left = self.parse_index_suffix(left)?;
-                } else if self.check(Tok::Dot) && self.glued_to_operand() {
-                    self.i += 1;
-                    let field = self.need_field("expected field name after '.'")?;
-                    left = Expr::MemberAccess {
-                        object: Box::new(left),
-                        field,
-                    };
-                } else {
-                    break;
-                }
+            left = self.parse_pipe_suffixes(left)?;
+        }
+        Ok(left)
+    }
+
+    /// `x | f(a)[i]` and `x | f(a).field` take the index or the field
+    /// of what the pipeline so far produced, `(x | f(a))[i]`, as
+    /// `f(a)[i]` does outside a pipeline. They used to leave the `[i]`
+    /// behind as a statement of its own, and drop the pipeline's value. The same
+    /// holds after a `|.field` projection: `x |.items[0]`.
+    fn parse_pipe_suffixes(&mut self, mut left: Expr) -> Result<Expr> {
+        loop {
+            if self.at_index_bracket() {
+                left = self.parse_index_suffix(left)?;
+            } else if self.check(Tok::Dot) && self.glued_to_operand() {
+                self.i += 1;
+                let field = self.need_field("expected field name after '.'")?;
+                left = Expr::MemberAccess {
+                    object: Box::new(left),
+                    field,
+                };
+            } else {
+                break;
             }
         }
         Ok(left)
@@ -2127,6 +2158,10 @@ impl Parser {
                     a
                 });
                 if self.match_tok(Tok::Comma) {
+                    // A trailing comma: `len([1, 2],)`.
+                    if self.check(Tok::RParen) {
+                        break;
+                    }
                     continue;
                 }
                 break;
@@ -2273,7 +2308,7 @@ impl Parser {
             let mut args: Vec<Expr> = Vec::new();
             while self.peek().line == primary_line
                 && !self.at_index_bracket()
-                && self.check_any(&[
+                && (self.check_any(&[
                     Tok::Fn,
                     Tok::Async,
                     Tok::String,
@@ -2286,7 +2321,7 @@ impl Parser {
                     Tok::True,
                     Tok::False,
                     Tok::Null,
-                ])
+                ]) || (args.is_empty() && self.at_flaglike_minus()))
             {
                 if self.check(Tok::Fn) {
                     let lam = self.parse_lambda()?;
@@ -2307,7 +2342,7 @@ impl Parser {
                 ]) {
                     break;
                 }
-                let a = self.parse_indexed_atom()?;
+                let a = self.parse_word_call_arg()?;
                 args.push(a);
             }
             if args.is_empty() {
@@ -2623,9 +2658,10 @@ impl Parser {
                 // The sibling word-call loop in `parse_call_like` has always
                 // had this check; this one did not.
                 let call_line = self.prev().line;
+                let starts_statement = self.word_starts_statement();
                 let mut args: Vec<Expr> = Vec::new();
                 while self.peek().line == call_line
-                    && self.check_any(&[
+                    && (self.check_any(&[
                         Tok::Fn,
                         Tok::Async,
                         Tok::String,
@@ -2638,7 +2674,7 @@ impl Parser {
                         Tok::True,
                         Tok::False,
                         Tok::Null,
-                    ])
+                    ]) || (starts_statement && args.is_empty() && self.at_flaglike_minus()))
                 {
                     if self.check(Tok::Fn) {
                         let lam = self.parse_lambda()?;
@@ -2653,7 +2689,7 @@ impl Parser {
                     if self.check_any(&[Tok::Pipe, Tok::RBrace, Tok::RParen, Tok::Eof]) {
                         break;
                     }
-                    let a = self.parse_indexed_atom()?;
+                    let a = self.parse_word_call_arg()?;
                     args.push(a);
                 }
                 if !args.is_empty() {
@@ -2666,6 +2702,91 @@ impl Parser {
             }
         }
         Ok(e)
+    }
+
+    /// Whether the word just consumed (the previous token) starts a statement:
+    /// nothing before it, a `;`, or a line break.
+    fn word_starts_statement(&self) -> bool {
+        let Some(word) = self.i.checked_sub(1).and_then(|j| self.toks.get(j)) else {
+            return false;
+        };
+        match self.i.checked_sub(2).and_then(|j| self.toks.get(j)) {
+            None => true,
+            Some(before) => before.kind == Tok::Semicolon || before.line != word.line,
+        }
+    }
+
+    /// Whether the current `-` begins a word-call argument rather than a
+    /// subtraction: `print -1`, `ls -1`. The word before it is spaced from the
+    /// dash, the dash is glued to a number, name or `(`, and the word is not a
+    /// name assigned earlier in the source (`total -1` is arithmetic then).
+    fn at_flaglike_minus(&self) -> bool {
+        if !self.check(Tok::Minus) || self.i == 0 {
+            return false;
+        }
+        let (Some(word), Some(dash), Some(next)) = (
+            self.toks.get(self.i - 1),
+            self.toks.get(self.i),
+            self.toks.get(self.i + 1),
+        ) else {
+            return false;
+        };
+        if word.kind != Tok::Ident || word.line != dash.line {
+            return false;
+        }
+        let spaced = dash.col > word.col + word.text.chars().count();
+        let glued = next.line == dash.line && next.col == dash.col + 1;
+        if !spaced
+            || !glued
+            || !matches!(next.kind, Tok::Int | Tok::Float | Tok::Ident | Tok::LParen)
+        {
+            return false;
+        }
+        let name = word.text.as_str();
+        let bound_earlier = self.toks[..self.i - 1]
+            .windows(2)
+            .any(|w| w[0].kind == Tok::Ident && w[0].text == name && w[1].kind == Tok::Equal);
+        !bound_earlier
+    }
+
+    /// One argument of a word call. An atom, unless an operator follows it on
+    /// the same line, in which case the argument is the whole expression up to
+    /// the next `|`, `;`, line break or closing bracket: `print x + 1` prints
+    /// the sum, and `print -1` prints -1. A call inside the expression takes
+    /// parentheses, as everywhere else.
+    fn parse_word_call_arg(&mut self) -> Result<Expr> {
+        let start = self.i;
+        if !self.check(Tok::Minus) {
+            let atom = self.parse_indexed_atom()?;
+            let continues = self.continues_line()
+                && matches!(
+                    self.peek().kind,
+                    Tok::Plus
+                        | Tok::Minus
+                        | Tok::Star
+                        | Tok::Slash
+                        | Tok::Percent
+                        | Tok::Caret
+                        | Tok::EqEq
+                        | Tok::Ne
+                        | Tok::Lt
+                        | Tok::Lte
+                        | Tok::Gt
+                        | Tok::Gte
+                        | Tok::AndAnd
+                        | Tok::OrOr
+                        | Tok::Dot
+                );
+            if !continues {
+                return Ok(atom);
+            }
+            self.i = start;
+        }
+        let prev = self.allow_word_call;
+        self.allow_word_call = false;
+        let e = self.parse_logic_or();
+        self.allow_word_call = prev;
+        e
     }
 
     /// Whether the next token is a `[` written directly after an indexable token
@@ -2782,6 +2903,19 @@ impl Parser {
                                 at.line, at.col
                             ),
                             hint: ONE_EXPR_HINT.to_string(),
+                        }));
+                    }
+                    if !self.check(Tok::Colon)
+                        && self.check(Tok::RBrace)
+                        && !self.lambda_param_stack.is_empty()
+                    {
+                        let at = self.peek();
+                        return Err(anyhow::Error::new(HintedSyntax {
+                            msg: format!(
+                                "expected ':' after key at line {}, column {}",
+                                at.line, at.col
+                            ),
+                            hint: LAMBDA_BRACE_HINT.to_string(),
                         }));
                     }
                     self.need(Tok::Colon, "expected ':' after key")?;
@@ -2984,6 +3118,16 @@ impl Parser {
     }
 
     fn parse_lambda_after_fn_inner(&mut self, is_async: bool) -> Result<Expr> {
+        if self.check(Tok::Ident) {
+            let at = self.peek();
+            return Err(anyhow::Error::new(HintedSyntax {
+                msg: format!(
+                    "expected '(' after fn at line {}, column {}",
+                    at.line, at.col
+                ),
+                hint: NAMED_FN_HINT.to_string(),
+            }));
+        }
         self.need(Tok::LParen, "expected '(' after fn")?;
         let mut params = Vec::new();
         if !self.check(Tok::RParen) {
@@ -2992,6 +3136,10 @@ impl Parser {
                 self.reject_parameter_extra(&p)?;
                 params.push(p);
                 if self.match_tok(Tok::Comma) {
+                    // A trailing comma: `fn(a,) => a`.
+                    if self.check(Tok::RParen) {
+                        break;
+                    }
                     continue;
                 }
                 break;
@@ -3422,6 +3570,36 @@ impl Parser {
                 hint: IN_OPERATOR_HINT.to_string(),
             }));
         }
+        // `r = ls "."`: the value of an assignment is one bare name, and the
+        // stray token would be its argument. Splitting the statements, as the
+        // generic hint says, would assign the builtin itself.
+        let assigns_bare_name = prev.kind == Tok::Ident
+            && self.i >= 2
+            && matches!(self.toks[self.i - 2].kind, Tok::Equal | Tok::ColonEqual)
+            && matches!(
+                cur.kind,
+                Tok::Int
+                    | Tok::Float
+                    | Tok::String
+                    | Tok::Ident
+                    | Tok::LParen
+                    | Tok::LBracket
+                    | Tok::LBrace
+                    | Tok::True
+                    | Tok::False
+                    | Tok::Null
+                    | Tok::Fn
+            );
+        let hint = if assigns_bare_name {
+            format!(
+                "a word-call cannot be an assignment's value; write {}(args) with parentheses, e.g. {}(\".\")",
+                prev.text, prev.text
+            )
+        } else if cur.kind == Tok::LBracket {
+            INDEX_SPACING_HINT.to_string()
+        } else {
+            STATEMENT_SEPARATOR_HINT.to_string()
+        };
         Some(anyhow::Error::new(HintedSyntax {
             msg: format!(
                 "unexpected {} after a complete statement at line {}, column {}",
@@ -3433,7 +3611,7 @@ impl Parser {
                 cur.line,
                 cur.col
             ),
-            hint: STATEMENT_SEPARATOR_HINT.to_string(),
+            hint,
         }))
     }
 
