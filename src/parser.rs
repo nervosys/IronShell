@@ -2053,8 +2053,9 @@ impl Parser {
         if self.depth > Self::MAX_EXPR_DEPTH {
             self.depth -= 1;
             return Err(anyhow::anyhow!(
-                "expression nested more than {} deep at line {}, column {}",
+                "expression nested more than {} levels deep (a parenthesis counts as two, so about {} of them) at line {}, column {}",
                 Self::MAX_EXPR_DEPTH,
+                Self::MAX_EXPR_DEPTH / 2,
                 self.peek().line,
                 self.peek().col
             ));
@@ -2566,8 +2567,9 @@ impl Parser {
         if self.depth > Self::MAX_EXPR_DEPTH {
             self.depth -= 1;
             return Err(anyhow::anyhow!(
-                "expression nested more than {} deep at line {}, column {}",
+                "expression nested more than {} levels deep (a parenthesis counts as two, so about {} of them) at line {}, column {}",
                 Self::MAX_EXPR_DEPTH,
+                Self::MAX_EXPR_DEPTH / 2,
                 self.peek().line,
                 self.peek().col
             ));
