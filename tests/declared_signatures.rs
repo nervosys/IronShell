@@ -637,6 +637,12 @@ fn the_catalogue_entry_comes_from_the_declaration_not_a_second_one() {
             continue;
         }
         let def = iron_shell::agent_api::ontology_describe_json(sig.name);
+        // A name shared with a module answers the module record, with the
+        // builtin's own record under `builtin`.
+        let def = match def.get("builtin") {
+            Some(inner) if inner.is_object() => inner.clone(),
+            _ => def,
+        };
         let advertised = def
             .get("signature")
             .and_then(|v| v.as_str())

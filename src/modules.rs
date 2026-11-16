@@ -1492,20 +1492,33 @@ pub fn is_module_record(module: &str, map: &std::collections::BTreeMap<String, V
     })
 }
 
-/// The member names of the registered module `module`, in key order.
+/// The member names of the registered module `module`, in key order. A module
+/// registered more than once (`platform`) lists the members of every record.
 pub fn module_member_names(module: &str) -> Vec<&'static str> {
-    module_table()
+    let mut names: Vec<&'static str> = module_table()
         .iter()
-        .find_map(|(m, v)| match v {
-            Value::Record(members) if *m == module => Some(
-                members
-                    .keys()
-                    .map(|k| k.as_str())
-                    .collect::<Vec<&'static str>>(),
-            ),
+        .filter_map(|(m, v)| match v {
+            Value::Record(members) if *m == module => Some(members.keys()),
             _ => None,
         })
-        .unwrap_or_default()
+        .flatten()
+        .map(|k| k.as_str())
+        .collect();
+    names.sort_unstable();
+    names.dedup();
+    names
+}
+
+/// The type name of the member `func` of `module` when it is a constant
+/// (`math.pi`) rather than a builtin; `None` for a builtin or a missing member.
+pub fn module_constant_type(module: &str, func: &str) -> Option<&'static str> {
+    module_table().iter().find_map(|(m, v)| match v {
+        Value::Record(members) if *m == module => match members.get(func) {
+            Some(Value::Builtin(_)) | None => None,
+            Some(other) => Some(other.type_name()),
+        },
+        _ => None,
+    })
 }
 
 /// The builtin a module member calls, so `file.replace` resolves to

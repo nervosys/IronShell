@@ -3690,6 +3690,46 @@ pub fn ontology_category_names() -> Vec<String> {
 }
 
 pub fn ontology_describe_json(query: &str) -> JsonValue {
+    ontology_describe_inner(query, true)
+}
+
+/// The module record `{module, description, members}` for the namespace `q`:
+/// every member, each with the first sentence of the description of the builtin
+/// it runs (a constant such as `math.pi` says it is one).
+fn module_describe_record(q: &str, defs: &[BuiltinDefinition]) -> JsonValue {
+    let members: Vec<JsonValue> = crate::modules::module_member_names(q)
+        .into_iter()
+        .map(|member| {
+            let builtin = crate::modules::builtin_for_member(q, member);
+            let description = match builtin.as_deref() {
+                Some(b) => defs
+                    .iter()
+                    .find(|d| d.name == b)
+                    .map(|d| {
+                        let first = d
+                            .description
+                            .split_once(". ")
+                            .map_or(d.description.as_str(), |(a, _)| a);
+                        first.trim_end_matches('.').to_string()
+                    })
+                    .unwrap_or_default(),
+                None => crate::modules::module_constant_type(q, member)
+                    .map(|ty| format!("a constant ({ty}); read it without a call"))
+                    .unwrap_or_default(),
+            };
+            json!({ "name": member, "builtin": builtin, "description": description })
+        })
+        .collect();
+    json!({
+        "module": q,
+        "description": module_description(q),
+        "members": members,
+    })
+}
+
+/// [`ontology_describe_json`], with `modules` false to skip the module-name
+/// answer: used to describe the top-level builtin that shares a module's name.
+fn ontology_describe_inner(query: &str, modules: bool) -> JsonValue {
     let defs = get_all_builtin_definitions();
     // `file.replace` names the builtin that the call runs (`file_replace`), so
     // the dotted spelling describes that same entry.
@@ -3728,6 +3768,19 @@ pub fn ontology_describe_json(query: &str) -> JsonValue {
             "form": IMPORT_SYNTAX,
             "description": "Loads another IronShell file. The path is resolved relative to the importing file, not the working directory. Only names marked `pub` in that file are visible to the importer.",
         });
+    }
+
+    // A module name always answers the module record: `str`, `platform`, `ai`,
+    // `jq` and `shell` are also top-level builtins and `crypto` and `math` are
+    // also categories, and each of those used to hide the module's members.
+    // A builtin of the same name is kept, as `builtin`.
+    if modules && resolved.is_none() && crate::modules::is_module_name(q) {
+        let mut record = module_describe_record(q, &defs);
+        let same_name = ontology_describe_inner(q, false);
+        if same_name.get("builtin").is_some() && same_name.get("error").is_none() {
+            record["builtin"] = same_name;
+        }
+        return record;
     }
 
     // Resolve by alias as well as by canonical name. Every entry already
@@ -3841,32 +3894,17 @@ pub fn ontology_describe_json(query: &str) -> JsonValue {
         return json!({ "category": q, "builtins": in_cat });
     }
 
-    // A module name, `file` or `sys`: its members, each with the first
-    // sentence of the description of the builtin it runs.
-    if crate::modules::is_module_name(q) {
-        let members: Vec<JsonValue> = crate::modules::module_member_names(q)
-            .into_iter()
-            .map(|member| {
-                let builtin = crate::modules::builtin_for_member(q, member);
-                let description = builtin
-                    .as_deref()
-                    .and_then(|b| defs.iter().find(|d| d.name == b))
-                    .map(|d| {
-                        let first = d
-                            .description
-                            .split_once(". ")
-                            .map_or(d.description.as_str(), |(a, _)| a);
-                        first.trim_end_matches('.').to_string()
-                    })
-                    .unwrap_or_default();
-                json!({ "name": member, "builtin": builtin, "description": description })
-            })
-            .collect();
-        return json!({
-            "module": q,
-            "description": module_description(q),
-            "members": members,
-        });
+    // A constant member, `math.pi`: not a builtin, but listed as a member.
+    if let Some((m, f)) = query.trim().split_once('.') {
+        if let Some(ty) = crate::modules::module_constant_type(m, f) {
+            return json!({
+                "module": m,
+                "member": f,
+                "kind": "constant",
+                "type": ty,
+                "description": format!("{m}.{f} is a constant ({ty}); read it without a call"),
+            });
+        }
     }
 
     // Name the nearest real builtins, so a typo is one step from the answer
