@@ -196,9 +196,11 @@ crypto.jwt_decode(token)                 # Decode JWT
 
 ### 5.5 Database (`db`)
 ```ish
-db.sqlite_open("app.db")
-db.sqlite_query(conn, "SELECT * FROM users")
+db.sqlite_open("app.db")                  # returns true; later calls take the path
+db.sqlite_query("app.db", "SELECT * FROM users")
 ```
+The in-process sql(query) and sql_value(query) return a Bool as 1 or 0, and select * returns each row's columns in sorted key order.
+
 
 ### 5.6 Math, String, Array (`math`, `str`, `arr`)
 ```ish

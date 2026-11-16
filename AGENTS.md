@@ -172,6 +172,7 @@ cat("src/*.rs") | lines | len          # globs in cat/ls; glob("src/**/*.rs")
 # SQL over values or files (read-only, in-process)
 open("issues.json") | sql("select user, count(*) as n from t group by user")
 sql_value("issues.json", "select count(*) from issues where state = 'open'")
+# SQL stores a Bool as 1/0, so Bool values come back from sql as 1 and 0; select * returns each row's columns in sorted key order
 
 # Check effects before running
 explain_effects("rm(\"x\")")            # or: ish --explain -c '...'
@@ -227,7 +228,7 @@ crypto.uuid(); math.sqrt(16); arr.range(10)
 | `net`        | Network        | `net.ping("host")`, `net.dns_lookup("host")`          |
 | `http`       | HTTP client    | `http.get(url)`, `http.post(url, body)`               |
 | `crypto`     | Cryptography   | `crypto.uuid()`, `crypto.hash("sha256", data)`        |
-| `db`         | Database       | `db.sqlite_open("db")`, `db.sqlite_query(c, sql)`     |
+| `db`         | Database       | `db.sqlite_open("app.db")`, `db.sqlite_query("app.db", sql)` |
 | `math`       | Mathematics    | `math.sqrt(x)`, `math.pow(a, b)`, `math.pi` (3.14159…), `math.e` (2.71828…) constants, read without a call |
 | `str`        | Strings        | `str.upper(s)`, `str.split(s, ",")`                   |
 | `arr`        | Arrays         | `arr.range(n)`, `arr.flatten(a)` (one level), `arr.unique(a)` |
