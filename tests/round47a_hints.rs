@@ -4,10 +4,11 @@ use std::process::Command;
 
 /// Runs `ish -c src` with `extra` flags first; returns (stdout, stderr, exit code).
 fn run(extra: &[&str], src: &str) -> (String, String, i32) {
+    static N: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
     let dir = std::env::temp_dir().join(format!(
         "ae_r47a_{}_{}",
         std::process::id(),
-        src.len() + extra.len()
+        N.fetch_add(1, std::sync::atomic::Ordering::SeqCst)
     ));
     let _ = std::fs::create_dir_all(&dir);
     let out = Command::new(env!("CARGO_BIN_EXE_ish"))
@@ -75,5 +76,21 @@ fn match_arms_need_a_separator() {
     let (out, _, code) = run(&[], "match 1 { 1 => 2, _ => 3 }");
     assert_eq!((code, out.as_str()), (0, "2"));
     let (out, _, code) = run(&[], "match 1 {\n 1 => 2\n _ => 3\n}");
+    assert_eq!((code, out.as_str()), (0, "2"));
+}
+
+#[test]
+fn piping_into_a_literal_is_refused() {
+    for src in ["1 | 2", "[1] | 5", "1 | \"s\"", "1 | [2]", "1 | true", "1 | null"] {
+        let (out, err, code) = run(&[], src);
+        let all = format!("{out}{err}");
+        assert_ne!(code, 0, "{src}: {all}");
+        assert!(all.contains("cannot pipe into"), "{src}: {all}");
+        assert!(
+            all.contains("the right side of | must be a function call or builtin"),
+            "{src}: {all}"
+        );
+    }
+    let (out, _, code) = run(&[], "[1, 2] | len");
     assert_eq!((code, out.as_str()), (0, "2"));
 }

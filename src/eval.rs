@@ -1574,6 +1574,23 @@ fn method_on_non_record(
 fn check_pipeline_names(pipe: &Expr, env: &Env) -> Result<()> {
     let mut cur = pipe;
     while let Expr::Pipe { left, right } = cur {
+        // `1 | 2` and `[1] | 5` printed the right side: a literal takes no input.
+        let literal = match &**right {
+            Expr::LitInt(_) => Some("an Int"),
+            Expr::LitFloat(_) => Some("a Float"),
+            Expr::LitStr(_) => Some("a String"),
+            Expr::LitBool(_) => Some("a Bool"),
+            Expr::Null => Some("a null"),
+            Expr::Array(_) => Some("an Array"),
+            Expr::Record(_) => Some("a Record"),
+            _ => None,
+        };
+        if let Some(kind) = literal {
+            return Err(crate::safety::bad_value(
+                format!("cannot pipe into {kind} literal"),
+                "the right side of | must be a function call or builtin",
+            ));
+        }
         if let Some(name) = plain_stage_name(right) {
             if env.get_var(name).is_none() && !crate::builtins::is_served(name) {
                 return Err(crate::safety::unknown_builtin_hinted(
