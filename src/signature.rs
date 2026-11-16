@@ -15735,6 +15735,11 @@ pub fn validate(name: &str, args: &[Value], input: Option<&Value>) -> anyhow::Re
     if sig.name == "crypto_hash" && input.is_none() && args.len() == 2 {
         return Ok(());
     }
+    // `rm(path, {recursive: true})`: the body says rm has no recursive option
+    // and names rmdir(path, true), which a bare type mismatch would not.
+    if sig.name == "rm" && matches!(args.get(1), Some(Value::Record(_))) {
+        return Ok(());
+    }
     let supplied_args = &args[params_start..];
     let last = supplied_args.len().saturating_sub(1);
     let rest = supplied_args.iter().enumerate().map(|(i, a)| {

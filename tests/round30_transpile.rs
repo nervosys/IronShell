@@ -78,8 +78,20 @@ fn zsh_setopt_is_its_own_statement() {
     let d = fresh_dir("zsh-setopt");
     let o = zsh(&d, "setopt nullglob; echo hi");
     assert_eq!(o.stdout, "hi\n", "stderr: {}", o.stderr);
-    let o = zsh(&d, "setopt extended_glob\necho after");
+    let o = zsh(&d, "setopt histignoredups\necho after");
     assert_eq!(o.stdout, "after\n", "stderr: {}", o.stderr);
+}
+
+#[test]
+fn zsh_extendedglob_is_refused_by_name_in_every_spelling() {
+    let d = fresh_dir("zsh-setopt-extendedglob");
+    for spelling in ["extendedglob", "extended_glob", "EXTENDEDGLOB"] {
+        let o = zsh(&d, &format!("echo before\nsetopt {}\necho after", spelling));
+        assert_eq!(o.stdout, "", "nothing may run for {}", spelling);
+        assert!(o.stderr.contains(spelling), "stderr: {}", o.stderr);
+        assert!(o.stderr.contains("line 2"), "stderr: {}", o.stderr);
+        assert_eq!(o.code, 77, "stderr: {}", o.stderr);
+    }
 }
 
 #[test]
@@ -231,7 +243,7 @@ fn zsh_default_expansion_and_globs_and_cd() {
 #[test]
 fn zsh_script_file_runs_and_names_the_failing_line() {
     let d = fresh_dir("zsh-file");
-    write(&d, "ok.zsh", "setopt extendedglob\necho one\necho two\n");
+    write(&d, "ok.zsh", "setopt promptsubst\necho one\necho two\n");
     let o = run_in(&d, &["ok.zsh"]);
     assert_eq!(o.stdout, "one\ntwo\n", "stderr: {}", o.stderr);
     write(

@@ -494,6 +494,13 @@ impl<'a> Lexer<'a> {
                     self.i += 1;
                     self.double_quoted(&mut parts)?;
                 }
+                '$' if self.peek_at(1) == Some('\'') => {
+                    flush(&mut lit, &mut parts);
+                    let open = self.i;
+                    self.i += 2;
+                    let q = self.ansi_c_quoted(open)?;
+                    parts.push(Part::Lit(q, true));
+                }
                 '$' => {
                     flush(&mut lit, &mut parts);
                     self.dollar(&mut parts, false)?;
@@ -502,6 +509,9 @@ impl<'a> Lexer<'a> {
                     flush(&mut lit, &mut parts);
                     let body = self.backquote()?;
                     parts.push(Part::Cmd(body, false));
+                }
+                '{' if self.brace_expansion_ahead() => {
+                    return unsupported_at("brace expansion {a,b} or {a..b}", self.i);
                 }
                 _ => {
                     lit.push(c);
@@ -514,6 +524,113 @@ impl<'a> Lexer<'a> {
             return unsupported("empty word");
         }
         Ok(parts)
+    }
+
+    /// The body of `$'...'`, called just past the opening `$'` (`open` is the
+    /// `$`): backslash escapes are decoded, the closing `'` is consumed.
+    fn ansi_c_quoted(&mut self, open: usize) -> PResult<String> {
+        let mut q = String::new();
+        loop {
+            let Some(c) = self.peek() else {
+                return unterminated("unterminated quote", open, "a `'`");
+            };
+            self.i += 1;
+            match c {
+                '\'' => return Ok(q),
+                '\\' => {
+                    let Some(e) = self.peek() else {
+                        return unterminated("unterminated quote", open, "a `'`");
+                    };
+                    self.i += 1;
+                    match e {
+                        'n' => q.push('\n'),
+                        't' => q.push('\t'),
+                        'r' => q.push('\r'),
+                        'a' => q.push('\x07'),
+                        'b' => q.push('\x08'),
+                        'e' | 'E' => q.push('\x1b'),
+                        'f' => q.push('\x0c'),
+                        'v' => q.push('\x0b'),
+                        '\\' | '\'' | '"' | '?' => q.push(e),
+                        '0'..='7' => {
+                            let mut v = e.to_digit(8).unwrap_or(0);
+                            for _ in 0..2 {
+                                match self.peek().and_then(|d| d.to_digit(8)) {
+                                    Some(d) => {
+                                        v = v * 8 + d;
+                                        self.i += 1;
+                                    }
+                                    None => break,
+                                }
+                            }
+                            q.push(char::from_u32(v & 0xff).unwrap_or('\0'));
+                        }
+                        'x' => {
+                            let mut v = 0u32;
+                            let mut n = 0;
+                            while n < 2 {
+                                match self.peek().and_then(|d| d.to_digit(16)) {
+                                    Some(d) => {
+                                        v = v * 16 + d;
+                                        self.i += 1;
+                                        n += 1;
+                                    }
+                                    None => break,
+                                }
+                            }
+                            if n == 0 {
+                                q.push_str("\\x");
+                            } else {
+                                q.push(char::from_u32(v).unwrap_or('\0'));
+                            }
+                        }
+                        other => {
+                            q.push('\\');
+                            q.push(other);
+                        }
+                    }
+                }
+                _ => q.push(c),
+            }
+        }
+    }
+
+    /// At an unquoted `{`: does a brace expansion (`{a,b}` or `{1..3}`) start
+    /// here? `{}`, `{a}` and a lone `{` are literal, as in bash.
+    fn brace_expansion_ahead(&self) -> bool {
+        let mut depth = 0usize;
+        let mut found = false;
+        let mut j = self.i;
+        while let Some(&c) = self.s.get(j) {
+            match c {
+                ' ' | '\t' | '\r' | '\n' | ';' | '|' | '&' | '<' | '>' | '(' | ')' => return false,
+                '\\' => j += 1,
+                '\'' | '"' => {
+                    j += 1;
+                    while self.s.get(j).is_some_and(|&d| d != c) {
+                        if c == '"' && self.s[j] == '\\' {
+                            j += 1;
+                        }
+                        j += 1;
+                    }
+                }
+                '{' => depth += 1,
+                '}' => {
+                    if depth == 0 {
+                        return false;
+                    }
+                    depth -= 1;
+                    if depth == 0 {
+                        return found;
+                    }
+                }
+                ',' if depth == 1 => found = true,
+                '.' if depth == 1 && self.s.get(j + 1) == Some(&'.') => found = true,
+                _ => {}
+            }
+            j += 1;
+        }
+        false
     }
 
     fn double_quoted(&mut self, parts: &mut Word) -> PResult<()> {
@@ -1738,7 +1855,13 @@ impl Shell {
         if let Some(v) = self.vars.get(name) {
             return Some(v.clone());
         }
-        std::env::var(name).ok()
+        match std::env::var(name).ok() {
+            Some(v) => Some(v),
+            // Windows has no HOME; the platform's home directory stands in for it
+            // (only here, the process environment is left alone).
+            None if name == "HOME" => dirs::home_dir().map(|p| p.to_string_lossy().into_owned()),
+            None => None,
+        }
     }
 
     fn set_var(&mut self, name: &str, value: String) {
@@ -2827,6 +2950,11 @@ impl Shell {
                         }
                         if let Ok(d) = std::env::current_dir() {
                             self.set_var("PWD", d.to_string_lossy().into_owned());
+                        }
+                        // `cd -` says where it went, as bash does.
+                        if args.first().map(|t| t == "-").unwrap_or(false) {
+                            sink.out.extend_from_slice(logical_pwd().as_bytes());
+                            sink.out.push(b'\n');
                         }
                         Flow::Next(0)
                     }
