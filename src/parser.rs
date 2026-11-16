@@ -2743,7 +2743,11 @@ impl Parser {
                     spans.push((arg_start, self.i));
                 }
                 self.reject_ambiguous_word_call(callee_idx, &spans)?;
-                if !args.is_empty() {
+                if args.is_empty() {
+                    // `{a: abs -3}` at statement level: no word call took
+                    // the atom, so the nested-position check still applies.
+                    self.reject_nested_word_call()?;
+                } else {
                     e = Expr::Call {
                         callee: Box::new(e),
                         args,

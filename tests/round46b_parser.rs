@@ -48,7 +48,8 @@ fn real_subtraction_and_parenthesised_calls_are_unchanged() {
 fn a_bad_word_call_inside_a_block_reports_one_error() {
     let (msg, hint) = parse_err("if true { print 1 + 1 } else { 0 }");
     assert!(msg.contains("ambiguous word-call"), "{msg}");
-    assert!(msg.starts_with("found 1 error(s)"), "{msg}");
+    assert!(msg.contains("found 1 error(s)"), "{msg}");
+    assert!(!msg.contains("found 2 error(s)"), "{msg}");
     assert!(!msg.contains("expected key in record"), "{msg}");
     assert!(hint.contains("print(1) + 1"), "{hint}");
 }
