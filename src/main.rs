@@ -1230,7 +1230,7 @@ IronShell is a typed functional shell where data flows as structured values thro
 - http.get(url), http.post(url, body), http.put(url, body), http.delete(url)\n\n\
 ### Crypto & Database\n\
 - crypto.uuid(), crypto.hash(algo, data), crypto.jwt_decode(token)\n\
-- db.sqlite_open(path), db.sqlite_query(conn, sql)\n\n\
+- db.sqlite_open(path), db.sqlite_query(path, sql)\n\n\
 ### AI & Agents\n\
 - ai(prompt), ai(prompt, {context: data}), ai(prompt, {images: [path]})\n\
 - agent(goal, tools), agent(goal, tools, {model: \"openai:gpt-4o\", max_steps: 10})\n\

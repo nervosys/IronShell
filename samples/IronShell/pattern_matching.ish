@@ -22,11 +22,11 @@ match value {
 }
 
 # Numeric pattern matching
-classify = fn(n) => match true {
-  n < 0 => "negative",
-  n == 0 => "zero",
-  n <= 10 => "small",
-  n <= 100 => "medium",
+classify = fn(n) => match n {
+  x if x < 0 => "negative",
+  0 => "zero",
+  x if x <= 10 => "small",
+  x if x <= 100 => "medium",
   _ => "large"
 }
 

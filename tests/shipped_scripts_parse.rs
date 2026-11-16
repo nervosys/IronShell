@@ -69,6 +69,38 @@ fn every_example_parses() {
     assert!(bad.is_empty(), "{}", report("example", &bad));
 }
 
+/// Every `.ish` file under `dir`, subfolders included.
+fn ae_files_recursive(dir: &Path, out: &mut Vec<PathBuf>) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for path in entries.filter_map(|e| e.ok().map(|e| e.path())) {
+        if path.is_dir() {
+            ae_files_recursive(&path, out);
+        } else if path.extension().is_some_and(|x| x == "ish") {
+            out.push(path);
+        }
+    }
+    out.sort();
+}
+
+/// `examples/plugins/` and `samples/` are shipped too, and the flat walk above
+/// never reached them: `plugins/math_utils.ish` used `if .. then .. else` and
+/// `samples/IronShell/pattern_matching.ish` used boolean match arms.
+#[test]
+fn every_nested_example_and_sample_parses() {
+    let mut files = Vec::new();
+    ae_files_recursive(&repo("examples"), &mut files);
+    ae_files_recursive(&repo("samples"), &mut files);
+    assert!(
+        files.iter().any(|p| p.ends_with("plugins/math_utils.ish"))
+            && files.iter().any(|p| p.ends_with("pattern_matching.ish")),
+        "the recursive walk did not reach examples/plugins and samples/"
+    );
+    let bad = parse_failures(&files);
+    assert!(bad.is_empty(), "{}", report("nested example/sample", &bad));
+}
+
 /// `test-scripts/` is tracked and shipped in the repository, and had never been
 /// checked either: two of its ten files failed, in the same two ways the
 /// examples did — a multi-statement lambda body, and a binding over a module

@@ -107,6 +107,9 @@ const BLOCK_HINT: &str = "a braced `{ ... }` holds one expression, not statement
      `name = value` and `let` are statements, and a record field is written \
      `{name: value}`. Put one expression in the braces, or move the statements out.";
 
+/// The start of the message for a word call written outside a statement.
+const NESTED_WORD_CALL_MSG: &str = "word call outside a statement";
+
 /// The hint for a `;` or a second statement inside an `if`, `else`, `try`,
 /// `catch`, match-arm or lambda block. A block holds one expression, so the
 /// values it needs are bound before it.
@@ -498,6 +501,19 @@ pub fn parse_program_with_lines(src: &str) -> Result<(Vec<Stmt>, Vec<usize>)> {
             first.msg.clone(),
             IN_OPERATOR_HINT,
         )));
+    }
+
+    // A word-call fault inside a block (`if c { print 1 + 1 } else { 0 }`)
+    // leaves the rest of the block behind, and parsing that fails in turn: the
+    // first error names the fault, so it is reported alone.
+    if let Some(first) = errors.first() {
+        if let Some(h) = first.downcast_ref::<HintedSyntax>() {
+            if h.msg.starts_with("ambiguous word-call") || h.msg.starts_with(NESTED_WORD_CALL_MSG) {
+                let mut single = ParseError::new(format!("found 1 error(s):\n  {}", first));
+                single.hint = h.hint.to_string();
+                return Err(anyhow::Error::new(single));
+            }
+        }
     }
 
     // If we had errors, return them combined
@@ -2735,8 +2751,126 @@ impl Parser {
                     };
                 }
             }
+        } else if let Expr::Ident(_) = e {
+            self.reject_nested_word_call()?;
         }
         Ok(e)
+    }
+
+    /// Whether `name` is bound by the source before token `upto`: assigned,
+    /// a lambda or catch parameter, a match binding, or passed as a value.
+    fn name_bound_before(&self, name: &str, upto: usize) -> bool {
+        (0..upto.min(self.toks.len())).any(|j| {
+            let t = &self.toks[j];
+            if t.kind != Tok::Ident || t.text != name {
+                return false;
+            }
+            let next = self.toks.get(j + 1).map(|n| n.kind);
+            let before = j
+                .checked_sub(1)
+                .and_then(|k| self.toks.get(k))
+                .map(|b| b.kind);
+            matches!(
+                next,
+                Some(
+                    Tok::Equal
+                        | Tok::ColonEqual
+                        | Tok::Comma
+                        | Tok::RParen
+                        | Tok::FatArrow
+                        | Tok::If
+                )
+            ) || matches!(before, Some(Tok::Catch | Tok::Let | Tok::Mut | Tok::Tilde))
+        })
+    }
+
+    /// Word calls are statements. A builtin name followed on its line by an
+    /// atom that starts a word-call argument, in a lambda body, record value,
+    /// call argument or array element, would otherwise parse as the bare name
+    /// (`abs -3` as `abs - 3`) or leave the atom behind. It is refused, with
+    /// the parenthesised spelling built from the words written.
+    fn reject_nested_word_call(&self) -> Result<()> {
+        #[cfg(not(feature = "native"))]
+        {
+            Ok(())
+        }
+        #[cfg(feature = "native")]
+        {
+            let Some(word_idx) = self.i.checked_sub(1) else {
+                return Ok(());
+            };
+            let (Some(word), Some(next)) = (self.toks.get(word_idx), self.toks.get(self.i)) else {
+                return Ok(());
+            };
+            if word.kind != Tok::Ident || next.line != word.line {
+                return Ok(());
+            }
+            let nested = word_idx > 0
+                && matches!(
+                    self.toks[word_idx - 1].kind,
+                    Tok::FatArrow
+                        | Tok::Colon
+                        | Tok::LBracket
+                        | Tok::LParen
+                        | Tok::Comma
+                        | Tok::LBrace
+                );
+            if !nested || !crate::builtins::is_dispatched(&word.text) {
+                return Ok(());
+            }
+            let after = self.toks.get(self.i + 1);
+            let glued_atom = after.is_some_and(|a| {
+                a.line == next.line
+                    && a.col == next.col + 1
+                    && matches!(
+                        a.kind,
+                        Tok::Int | Tok::Float | Tok::Ident | Tok::LParen | Tok::True | Tok::False
+                    )
+            });
+            let spaced = next.col > word.col + word.text.chars().count();
+            let starts_arg = match next.kind {
+                Tok::Int | Tok::Float | Tok::String | Tok::True | Tok::False | Tok::Null => true,
+                Tok::Ident => !matches!(next.text.as_str(), "in" | "else" | "finally"),
+                Tok::LBracket => true,
+                Tok::Minus | Tok::Bang => spaced && glued_atom,
+                _ => false,
+            };
+            if !starts_arg || after.is_some_and(|a| a.kind == Tok::FatArrow) {
+                return Ok(());
+            }
+            if self.name_bound_before(&word.text, word_idx) {
+                return Ok(());
+            }
+            let mut end = self.i;
+            let mut depth = 0usize;
+            while let Some(t) = self.toks.get(end) {
+                if t.line != word.line {
+                    break;
+                }
+                match t.kind {
+                    Tok::Eof => break,
+                    Tok::Comma | Tok::Semicolon | Tok::Pipe | Tok::FatArrow if depth == 0 => break,
+                    Tok::LParen | Tok::LBracket | Tok::LBrace => depth += 1,
+                    Tok::RParen | Tok::RBracket | Tok::RBrace => {
+                        if depth == 0 {
+                            break;
+                        }
+                        depth -= 1;
+                    }
+                    _ => {}
+                }
+                end += 1;
+            }
+            let args = self.render_tokens(self.i, end);
+            let name = word.text.as_str();
+            Err(anyhow::Error::new(HintedSyntax {
+                msg: format!(
+                    "{NESTED_WORD_CALL_MSG}: `{name} {args}` at line {}, column {}",
+                    word.line, word.col
+                ),
+                hint: format!("word calls work only as statements; write {name}({args})"),
+            }))
+        }
     }
 
     /// Whether the word just consumed (the previous token) starts a statement:
@@ -3739,6 +3873,60 @@ impl Parser {
         }
     }
 
+    /// `print x, x + 1`: a comma after a word call's arguments. A word call
+    /// takes one argument per atom, so the commas belong to a parenthesised
+    /// call. None unless the statement is a name followed by a spaced argument.
+    fn comma_after_word_call(&self) -> Option<anyhow::Error> {
+        let comma = self.toks.get(self.i)?;
+        let mut first = self.i;
+        while first > 0 {
+            let before = &self.toks[first - 1];
+            if before.line != comma.line || before.kind == Tok::Semicolon {
+                break;
+            }
+            first -= 1;
+        }
+        let word = self.toks.get(first)?;
+        let second = self.toks.get(first + 1)?;
+        if word.kind != Tok::Ident
+            || second.line != word.line
+            || !matches!(
+                second.kind,
+                Tok::Int
+                    | Tok::Float
+                    | Tok::String
+                    | Tok::Ident
+                    | Tok::LBracket
+                    | Tok::LBrace
+                    | Tok::True
+                    | Tok::False
+                    | Tok::Null
+                    | Tok::Minus
+                    | Tok::Bang
+            )
+        {
+            return None;
+        }
+        let mut end = self.i;
+        while let Some(t) = self.toks.get(end) {
+            if t.line != comma.line || matches!(t.kind, Tok::Semicolon | Tok::Eof) {
+                break;
+            }
+            end += 1;
+        }
+        let args = self.render_tokens(first + 1, end);
+        Some(anyhow::Error::new(HintedSyntax {
+            msg: format!(
+                "unexpected ',' after the arguments of `{}` at line {}, column {}",
+                word.text, comma.line, comma.col
+            ),
+            hint: format!(
+                "a word-call takes one argument per atom, with no commas; write {name}({args}), or call it with parentheses",
+                name = word.text
+            ),
+        }))
+    }
+
     /// After a complete statement, the error for a token that starts another
     /// expression on the same line: `x = 5 6`, `1 2`, `x = 1 y = 2`. A `;` or a
     /// newline separates statements; nothing else does. None when the statement
@@ -3749,6 +3937,9 @@ impl Parser {
         let prev = self.toks.get(self.i.checked_sub(1)?)?;
         if prev.line != cur.line {
             return None;
+        }
+        if cur.kind == Tok::Comma {
+            return self.comma_after_word_call();
         }
         let starts_expression = matches!(
             cur.kind,
