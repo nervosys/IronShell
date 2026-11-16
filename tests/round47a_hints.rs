@@ -81,7 +81,14 @@ fn match_arms_need_a_separator() {
 
 #[test]
 fn piping_into_a_literal_is_refused() {
-    for src in ["1 | 2", "[1] | 5", "1 | \"s\"", "1 | [2]", "1 | true", "1 | null"] {
+    for src in [
+        "1 | 2",
+        "[1] | 5",
+        "1 | \"s\"",
+        "1 | [2]",
+        "1 | true",
+        "1 | null",
+    ] {
         let (out, err, code) = run(&[], src);
         let all = format!("{out}{err}");
         assert_ne!(code, 0, "{src}: {all}");
@@ -93,4 +100,18 @@ fn piping_into_a_literal_is_refused() {
     }
     let (out, _, code) = run(&[], "[1, 2] | len");
     assert_eq!((code, out.as_str()), (0, "2"));
+}
+
+#[test]
+fn empty_array_extremum_hint_names_the_empty_array() {
+    for src in ["[] | max", "[] | min", "max([])"] {
+        let (out, err, code) = run(&[], src);
+        let all = format!("{out}{err}");
+        assert_ne!(code, 0, "{src}: {all}");
+        assert!(
+            all.contains("the array is empty; check len(xs) > 0 first"),
+            "{src}: {all}"
+        );
+        assert!(!all.contains("max takes Array"), "{src}: {all}");
+    }
 }

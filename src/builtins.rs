@@ -5920,7 +5920,7 @@ fn bi_avg(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
                 return Err(crate::safety::bad_arg_in(
                     "avg",
                     "avg of an empty array is undefined",
-                    "check the array is not empty first, such as with len, or give a default for the empty case",
+                    "the array is empty; check len(xs) > 0 first, or use a default",
                 ));
             }
 
@@ -6016,7 +6016,7 @@ fn bi_median(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
         return Err(crate::safety::bad_arg_in(
             "median",
             "median of an empty array is undefined",
-            "check the array is not empty first, such as with len",
+            "the array is empty; check len(xs) > 0 first, or use a default",
         ));
     }
     v.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
@@ -6100,7 +6100,7 @@ fn bi_percentile(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
         return Err(crate::safety::bad_arg_in(
             "percentile",
             "percentile of an empty array is undefined",
-            "check the array is not empty first, such as with len",
+            "the array is empty; check len(xs) > 0 first, or use a default",
         ));
     }
     v.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
@@ -16132,11 +16132,16 @@ fn aggregate_operand<'a>(args: &'a [Value], input: &'a Option<Value>) -> Option<
 /// Largest (`want_max`) or smallest element of a numeric array.
 fn fold_extremum(items: &[Value], want_max: bool) -> Result<Value> {
     if items.is_empty() {
-        return Err(crate::safety::arg_err(if want_max {
-            "max of an empty array is undefined"
+        let (name, message) = if want_max {
+            ("max", "max of an empty array is undefined")
         } else {
-            "min of an empty array is undefined"
-        }));
+            ("min", "min of an empty array is undefined")
+        };
+        return Err(crate::safety::bad_arg_in(
+            name,
+            message,
+            "the array is empty; check len(xs) > 0 first, or use a default",
+        ));
     }
     let name = if want_max { "max" } else { "min" };
     // Strings order by code point, as sort orders them, so an array of Strings
