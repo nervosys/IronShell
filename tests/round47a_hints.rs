@@ -123,3 +123,22 @@ fn a_builtin_name_where_data_was_wanted_says_to_call_it() {
     assert_ne!(code, 0, "{all}");
     assert!(all.contains("call it, e.g. ls()"), "{all}");
 }
+
+#[test]
+fn method_calls_on_literals_and_arrays_say_they_have_no_methods() {
+    let (out, err, code) = run(&[], "\"s\".upper()");
+    let all = format!("{out}{err}");
+    assert_ne!(code, 0, "{all}");
+    assert!(
+        all.contains("a String has no methods; call upper("),
+        "{all}"
+    );
+    let (out, err, code) = run(&[], "[1, 2, 3].map(fn(x) => x)");
+    let all = format!("{out}{err}");
+    assert_ne!(code, 0, "{all}");
+    assert!(all.contains("an Array has no methods; call map("), "{all}");
+    let (out, err, code) = run(&[], "xs = [1, 2]\nxs.length");
+    let all = format!("{out}{err}");
+    assert_ne!(code, 0, "{all}");
+    assert!(all.contains("len(xs)"), "{all}");
+}

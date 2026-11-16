@@ -1228,15 +1228,7 @@ pub fn eval_expr(expr: &Expr, env: &mut Env) -> Result<Value> {
                 // Named after the expression when it is a plain name, so
                 // `nope.read(...)` says `nope` -- the unbound name is the
                 // commonest cause.
-                other => Err(crate::safety::bad_arg(
-                    &match object.as_ref() {
-                        // `__` is the implicit row of `.field`; it is not written.
-                        Expr::Ident(name) if name != "__" => format!("{name}.{field}"),
-                        _ => format!(".{field}"),
-                    },
-                    "a Record (or a module)",
-                    other.type_name(),
-                )),
+                other => Err(non_record_field_error(object, field, other.type_name())),
             }
         }
 
@@ -1486,15 +1478,7 @@ fn borrowed_member<'a>(expr: &Expr, env: &'a Env) -> Option<Result<&'a Value>> {
                     Value::Record(map) => map
                         .get(field)
                         .ok_or_else(|| module_field_error(field, map, object)),
-                    other => Err(crate::safety::bad_arg(
-                        &match object.as_ref() {
-                            // `__` is the implicit row of `.field`; it is not written.
-                            Expr::Ident(name) if name != "__" => format!("{name}.{field}"),
-                            _ => format!(".{field}"),
-                        },
-                        "a Record (or a module)",
-                        other.type_name(),
-                    )),
+                    other => Err(non_record_field_error(object, field, other.type_name())),
                 }
             }))
         }
@@ -1530,16 +1514,28 @@ fn method_on_non_record(
             ));
         }
     }
-    let receiver = match borrowed_member(object, env)? {
-        Ok(Value::Record(_)) | Ok(Value::Null) | Err(_) => return None,
-        Ok(value) => value,
+    // A literal receiver (`"s".upper()`, `[1, 2].map(f)`) is not borrowed from
+    // the environment; its type is known from how it was written.
+    let literal_ty = match object {
+        Expr::LitStr(_) => Some("String"),
+        Expr::LitInt(_) => Some("Int"),
+        Expr::LitFloat(_) => Some("Float"),
+        Expr::LitBool(_) => Some("Bool"),
+        Expr::Array(_) => Some("Array"),
+        _ => None,
+    };
+    let ty = match literal_ty {
+        Some(ty) => ty,
+        None => match borrowed_member(object, env)? {
+            Ok(Value::Record(_)) | Ok(Value::Null) | Err(_) => return None,
+            Ok(value) => value.type_name(),
+        },
     };
     // `__` is the implicit row of `.field`: it is named as the value it is.
     let recv = match object {
         Expr::Ident(name) if name != "__" => name.as_str(),
         _ => "value",
     };
-    let ty = receiver.type_name();
     let article = if matches!(ty.chars().next(), Some('A' | 'E' | 'I' | 'O' | 'U')) {
         "an"
     } else {
@@ -1564,6 +1560,30 @@ fn method_on_non_record(
         ty,
         &hint,
     ))
+}
+
+/// `object.field` where `object` is not a Record. A `.length` or `.size` read
+/// of an Array, String or Record says to call `len`; any other field keeps the
+/// generic "pass an argument matching" hint.
+fn non_record_field_error(object: &Expr, field: &str, ty: &str) -> anyhow::Error {
+    let written = match object {
+        // `__` is the implicit row of `.field`; it is not written.
+        Expr::Ident(name) if name != "__" => format!("{name}.{field}"),
+        _ => format!(".{field}"),
+    };
+    if matches!(field, "length" | "size" | "count") && matches!(ty, "Array" | "String") {
+        let recv = match object {
+            Expr::Ident(name) if name != "__" => name.as_str(),
+            _ => "value",
+        };
+        return crate::safety::bad_arg_with_hint(
+            &written,
+            "a Record (or a module)",
+            ty,
+            &format!("a {ty} has no `.{field}` field; use len({recv}) or {recv} | len"),
+        );
+    }
+    crate::safety::bad_arg(&written, "a Record (or a module)", ty)
 }
 
 /// Refuse a pipeline whose stage names a plain builtin that nothing serves,
