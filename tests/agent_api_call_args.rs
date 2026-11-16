@@ -294,14 +294,15 @@ fn code_and_hint_come_from_the_structured_error_only_when_there_is_one() {
         "{wire}"
     );
 
-    // A plain-text failure has no code to report.
+    // A pipeline that could not be built is a bad argument of the request:
+    // the runner's class is the code, and the hint says what a pipeline is.
     let plain = process_request(&AgentRequest::Pipeline {
         steps: Vec::new(),
         input: None,
     });
     assert!(!plain.success);
-    assert_eq!(plain.code, None);
-    assert_eq!(plain.hint, None);
+    assert_eq!(plain.code.as_deref(), Some("E_BAD_ARG"));
+    assert!(plain.hint.as_deref().is_some_and(|h| !h.is_empty()));
 }
 
 #[test]
