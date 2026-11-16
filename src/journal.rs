@@ -547,7 +547,10 @@ pub fn enabled() -> bool {
 fn is_journal_builtin(name: &str) -> bool {
     matches!(
         name,
-        "undo"
+        // `cd` writes no file. It was captured as a write of its target, so a
+        // directory argument became an irreversible step, and it discarded the
+        // redo stack.
+        "cd" | "undo"
             | "journal"
             | "journal_clear"
             | "rewind"
@@ -1493,6 +1496,7 @@ fn remove_created(path: &str, what: String, absent_why: &str) -> Outcome {
         };
     }
     if std::fs::symlink_metadata(p).is_ok_and(|m| m.is_dir()) {
+        leave_directory(p);
         return match std::fs::remove_dir(p) {
             Ok(()) => Outcome::Removed(what),
             Err(e) if crate::safety::dir_not_empty(&e) => Outcome::Skipped {
@@ -1520,6 +1524,33 @@ fn remove_created(path: &str, what: String, absent_why: &str) -> Outcome {
     Outcome::Skipped {
         what,
         why: absent_why.into(),
+    }
+}
+
+/// Move the process out of `dir` when its working directory is `dir` or inside
+/// it. Windows will not remove a directory that a process has as its working
+/// directory (os error 32), so an undo of the `file.mkdir` that made the working
+/// directory failed, and it stopped the undo short of the older steps. The move
+/// goes to the nearest ancestor that still exists.
+fn leave_directory(dir: &Path) {
+    let Ok(cwd) = std::env::current_dir() else {
+        return;
+    };
+    // Both sides are normalised the same way, so a spelling difference (a
+    // trailing separator, `..`, the `\\?\` prefix a canonical path carries) does
+    // not hide the match.
+    let cwd = normalized_path(&cwd.to_string_lossy());
+    let dir = normalized_path(&dir.to_string_lossy());
+    if !Path::new(&cwd).starts_with(&dir) {
+        return;
+    }
+    let mut ancestor = Path::new(&dir).parent();
+    while let Some(a) = ancestor {
+        if a.is_dir() {
+            let _ = std::env::set_current_dir(a);
+            return;
+        }
+        ancestor = a.parent();
     }
 }
 
@@ -1934,6 +1965,37 @@ mod tests {
         assert!(is_journal_builtin("journal"));
         assert!(is_journal_builtin("session_redo"));
         assert!(!is_journal_builtin("file_write"));
+        // cd changes no file, so it is not a step.
+        assert!(is_journal_builtin("cd"));
+    }
+
+    #[test]
+    fn removing_the_directory_the_process_is_in_moves_the_process_out_first() {
+        let _guard = crate::safety::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let root = std::env::temp_dir().join(format!("ae_journal_leave_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let parent = root.join("a");
+        let inner = parent.join("b");
+        std::fs::create_dir_all(&inner).expect("tree");
+        let before = std::env::current_dir().ok();
+        std::env::set_current_dir(&inner).expect("enter the directory");
+        let removed = matches!(
+            remove_created(&inner.to_string_lossy(), "b".into(), ABSENT_BEFORE_AND_NOW),
+            Outcome::Removed(_)
+        );
+        let now = std::env::current_dir().ok();
+        if let Some(b) = &before {
+            let _ = std::env::set_current_dir(b);
+        }
+        let _ = std::fs::remove_dir_all(&root);
+        assert!(removed, "the directory the process was in was not removed");
+        assert_eq!(
+            now.map(|c| normalized_path(&c.to_string_lossy())),
+            Some(normalized_path(&parent.to_string_lossy())),
+            "the process was not moved to the surviving parent"
+        );
     }
 
     #[cfg(unix)]
