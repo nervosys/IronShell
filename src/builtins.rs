@@ -5642,6 +5642,11 @@ fn bi_where(args: Vec<Value>, input: Option<Value>, env: &mut Env) -> Result<Val
     })
 }
 
+/// The hint for a `reduce` call with no initial value, which it always needs
+/// (an empty array returns it as is, so there is no first element to fall back on).
+const REDUCE_INIT_HINT: &str = "the initial value is required, even for an empty array: \
+     xs | reduce(fn(acc, x) => acc + x, 0)";
+
 fn bi_reduce(args: Vec<Value>, input: Option<Value>, env: &mut Env) -> Result<Value> {
     // Cases:
     //  - piping:  [1,2,3] | reduce fn(a,b)=>... 0
@@ -5649,10 +5654,11 @@ fn bi_reduce(args: Vec<Value>, input: Option<Value>, env: &mut Env) -> Result<Va
     // Determine arr, lambda index and init index without moving `input`
     let piped = input.is_some();
     if !piped && args.len() < 3 {
-        return Err(crate::safety::bad_arg(
+        return Err(crate::safety::bad_arg_with_hint(
             "reduce",
             "<array> <fn(acc,x)> <init>",
-            "nothing",
+            &format!("{} arguments", args.len()),
+            REDUCE_INIT_HINT,
         ));
     }
     let (lam_idx, init_idx) = if piped {
@@ -5662,7 +5668,17 @@ fn bi_reduce(args: Vec<Value>, input: Option<Value>, env: &mut Env) -> Result<Va
     };
 
     let lam = need_lambda(arg("reduce", &args, lam_idx, "a lambda")?, "reduce")?;
-    let init = arg("reduce", &args, init_idx, "an initial value")?.clone();
+    let init = match args.get(init_idx) {
+        Some(v) => v.clone(),
+        None => {
+            return Err(crate::safety::bad_arg_with_hint(
+                "reduce",
+                "an initial value",
+                "nothing",
+                REDUCE_INIT_HINT,
+            ))
+        }
+    };
     // Select arity before running the body. Retrying on any error copied the
     // accumulator and hid an indexed lambda's body error behind an arity error.
     let indexed = lam.params.len() == 3;

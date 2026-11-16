@@ -156,8 +156,6 @@ fn let_destructuring_hint_names_the_real_problem() {
 
 #[test]
 fn explain_of_a_missing_file_is_not_found_not_plain_text() {
-    let (out, err, code) = run(&["--agent", "--explain"], "");
-    let _ = (out, err, code);
     let dir = std::env::temp_dir().join(format!("ae_r47a_explain_{}", std::process::id()));
     let _ = std::fs::create_dir_all(&dir);
     let out = Command::new(env!("CARGO_BIN_EXE_ish"))
@@ -183,4 +181,17 @@ fn explain_names_a_module_member_that_does_not_exist() {
     let all = format!("{out}{err}");
     assert!(all.contains("unknown builtin file.delete"), "{all}");
     assert!(!all.contains("\"decision\": \"allow\""), "{all}");
+}
+
+#[test]
+fn reduce_without_an_initial_value_says_it_is_required() {
+    for src in [
+        "[] | reduce(fn(a, b) => a + b)",
+        "reduce([], fn(a, b) => a + b)",
+    ] {
+        let (out, err, code) = run(&[], src);
+        let all = format!("{out}{err}");
+        assert_ne!(code, 0, "{src}: {all}");
+        assert!(all.contains("initial value is required"), "{src}: {all}");
+    }
 }
