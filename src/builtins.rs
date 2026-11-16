@@ -26826,6 +26826,23 @@ fn bi_ontology_describe(args: Vec<Value>, _input: Option<Value>) -> Result<Value
         // An unknown name is a failed lookup, as an unknown builtin call is: an
         // E_UNKNOWN_BUILTIN error with the nearest real builtin or category
         // names, not a successful record that carries an error field.
+        // `math.ps_add` names a top-level builtin as a module member: the
+        // error says so, as calling it does.
+        if let Some((module, field)) = q.trim().split_once('.') {
+            if crate::modules::is_module_name(module) && is_dispatched(field) {
+                let members = crate::modules::module_member_names(module);
+                let candidates = module_member_candidates(module, field, &members);
+                let specific = format!(
+                    "`{field}` is a top-level builtin, not a member of {module}: call {field}(s, ...) or s | {field}(...)"
+                );
+                return Err(crate::safety::unknown_module_member_hinted(
+                    module,
+                    field,
+                    candidates,
+                    Some(specific),
+                ));
+            }
+        }
         let categories = crate::agent_api::ontology_category_names();
         let candidates = nearest_names(
             q.trim(),

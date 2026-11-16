@@ -121,7 +121,14 @@ fn a_lowercase_name_still_reaches_the_builtin_behind_a_category() {
             c["builtins"].as_array().is_some_and(|b| !b.is_empty()),
             "{category} should describe as a category: {c}"
         );
+        // A name that is also a module answers the module record, with the
+        // builtin's record under `builtin`.
         let b = ontology_describe_json(builtin);
+        let b = if b.get("module").is_some() {
+            b["builtin"].clone()
+        } else {
+            b
+        };
         assert_eq!(
             b["builtin"].as_str(),
             Some(builtin),
