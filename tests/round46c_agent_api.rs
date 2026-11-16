@@ -47,31 +47,43 @@ async fn serve() -> u16 {
     let _held = START.lock().await;
     std::env::set_current_dir(&dir).expect("start outside the workspace");
 
-    let probe = std::net::TcpListener::bind("127.0.0.1:0").expect("bind probe");
-    let port = probe.local_addr().expect("addr").port();
-    drop(probe);
-    let config = AgentApiConfig {
-        host: "127.0.0.1".to_string(),
-        port,
-        enable_cors: true,
-        auth_token: Some(TOKEN.to_string()),
-        request_timeout_secs: 300,
-    };
-    tokio::spawn(async move {
-        let _ = start_agent_api_server(config).await;
-    });
-    // 30 s: a loaded macOS runner can take several seconds to build the
-    // ontology before it listens.
-    for _ in 0..600 {
-        if tokio::net::TcpStream::connect(("127.0.0.1", port))
-            .await
-            .is_ok()
-        {
-            return port;
+    // The probed port can be taken again before the server binds it, so a
+    // server that stops without listening is retried on a fresh port.
+    for _attempt in 0..5 {
+        let probe = std::net::TcpListener::bind("127.0.0.1:0").expect("bind probe");
+        let port = probe.local_addr().expect("addr").port();
+        drop(probe);
+        let config = AgentApiConfig {
+            host: "127.0.0.1".to_string(),
+            port,
+            enable_cors: true,
+            auth_token: Some(TOKEN.to_string()),
+            request_timeout_secs: 300,
+        };
+        let server = tokio::spawn(async move {
+            if let Err(e) = start_agent_api_server(config).await {
+                eprintln!("agent api server on port {port} stopped: {e}");
+            }
+        });
+        // 30 s: a loaded macOS runner can take several seconds to build the
+        // ontology before it listens.
+        for _ in 0..600 {
+            if tokio::net::TcpStream::connect(("127.0.0.1", port))
+                .await
+                .is_ok()
+            {
+                return port;
+            }
+            if server.is_finished() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
         }
-        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        if !server.is_finished() {
+            panic!("agent api server did not start on port {port}");
+        }
     }
-    panic!("agent api server did not start on port {port}");
+    panic!("agent api server stopped before listening on five ports");
 }
 
 fn client() -> reqwest::Client {
