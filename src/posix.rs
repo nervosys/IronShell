@@ -1738,7 +1738,13 @@ impl Shell {
         if let Some(v) = self.vars.get(name) {
             return Some(v.clone());
         }
-        std::env::var(name).ok()
+        match std::env::var(name).ok() {
+            Some(v) => Some(v),
+            // Windows has no HOME; the platform's home directory stands in for it
+            // (only here, the process environment is left alone).
+            None if name == "HOME" => dirs::home_dir().map(|p| p.to_string_lossy().into_owned()),
+            None => None,
+        }
     }
 
     fn set_var(&mut self, name: &str, value: String) {
