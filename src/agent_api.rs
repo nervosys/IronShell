@@ -6803,7 +6803,8 @@ pub mod server {
                 return Err(refuse(
                     None,
                     format!(
-                        "E_PARSE: the frame is not JSON ({})",
+                        "{}: the frame is not JSON ({})",
+                        crate::parser::ParseError::CODE,
                         truncate_echo(&e.to_string(), 200)
                     ),
                 ))
@@ -6817,7 +6818,11 @@ pub mod server {
             return serde_json::from_value::<WsClientMessage>(value).map_err(|e| {
                 refuse(
                     id,
-                    format!("E_BAD_ARG: {}", truncate_echo(&e.to_string(), 200)),
+                    format!(
+                        "{}: {}",
+                        crate::safety::ErrorCode::BadArg.as_str(),
+                        truncate_echo(&e.to_string(), 200)
+                    ),
                 )
             });
         }
@@ -6986,7 +6991,10 @@ pub mod server {
                 Ok(Message::Binary(_)) => {
                     let reply = WsServerMessage::Error {
                         id: None,
-                        message: format!("E_BAD_ARG: binary frames are not accepted; {WS_SHAPES}"),
+                        message: format!(
+                            "{}: binary frames are not accepted; {WS_SHAPES}",
+                            crate::safety::ErrorCode::BadArg.as_str()
+                        ),
                     };
                     if tx.send(reply).await.is_err() {
                         break;
