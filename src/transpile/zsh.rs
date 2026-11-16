@@ -343,8 +343,7 @@ fn setopt_effect(base: &str) -> Option<&'static str> {
         "nounset" => Some("nounset"),
         "pipefail" => Some("pipefail"),
         "nullglob" => Some("nullglob"),
-        "extendedglob"
-        | "histignoredups"
+        "histignoredups"
         | "histignorespace"
         | "histignorealldups"
         | "sharehistory"
@@ -1691,6 +1690,22 @@ mod tests {
         let r = route("setopt shwordsplit").unwrap_err();
         assert_eq!(r.line, 1);
         assert!(r.construct.contains("shwordsplit"), "got {:?}", r);
+    }
+
+    #[test]
+    fn glob_changing_setopts_are_refused_by_name() {
+        for o in [
+            "extendedglob",
+            "extended_glob",
+            "EXTENDEDGLOB",
+            "globdots",
+            "ksharrays",
+            "kshglob",
+        ] {
+            let r = route(&format!("setopt {}", o)).unwrap_err();
+            assert_eq!(r.line, 1);
+            assert!(r.construct.contains(o), "got {:?}", r);
+        }
     }
 
     #[test]
