@@ -153,3 +153,34 @@ fn let_destructuring_hint_names_the_real_problem() {
         assert!(!all.contains("use `==` to compare"), "{src}: {all}");
     }
 }
+
+#[test]
+fn explain_of_a_missing_file_is_not_found_not_plain_text() {
+    let (out, err, code) = run(&["--agent", "--explain"], "");
+    let _ = (out, err, code);
+    let dir = std::env::temp_dir().join(format!("ae_r47a_explain_{}", std::process::id()));
+    let _ = std::fs::create_dir_all(&dir);
+    let out = Command::new(env!("CARGO_BIN_EXE_ish"))
+        .args(["--agent", "--explain", "nonexist.ish"])
+        .env("NO_COLOR", "1")
+        .env("IRONSHELL_SESSION_DIR", dir.join("session"))
+        .current_dir(&dir)
+        .output()
+        .expect("run ish");
+    let _ = std::fs::remove_dir_all(&dir);
+    let all = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(all.contains("E_NOT_FOUND"), "{all}");
+    assert_eq!(out.status.code(), Some(66), "{all}");
+}
+
+#[test]
+fn explain_names_a_module_member_that_does_not_exist() {
+    let (out, err, _) = run(&["--explain"], "file.delete(\"x\")");
+    let all = format!("{out}{err}");
+    assert!(all.contains("unknown builtin file.delete"), "{all}");
+    assert!(!all.contains("\"decision\": \"allow\""), "{all}");
+}
