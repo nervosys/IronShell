@@ -7565,8 +7565,123 @@ pub fn read_operands(head: &str, args: &[String]) -> Option<Vec<String>> {
             (!flags.contains(&'l') || cfg!(unix)).then_some(ops)
         }
         "sed" => sed_operands(args),
+        "grep" => grep_operands(args),
+        "head" | "tail" => head_tail_operands(args),
+        "sort" => SortSpec::parse(args).map(|spec| spec.files),
+        "uniq" => short_flags(args, "cdui").and_then(|(_, ops)| (ops.len() <= 1).then_some(ops)),
+        "cut" => cut_operands(args),
+        "find" => Some(
+            args.iter()
+                .take_while(|a| !a.starts_with('-') && a.as_str() != "!")
+                .cloned()
+                .collect(),
+        ),
         _ => None,
     }
+}
+
+/// The files `grep` reads: its operands after the pattern, as `grep()` splits
+/// its arguments. `None` where `grep()` declines or refuses the options. With
+/// `-r` and no file it walks `.`, which is the workspace, so it names none.
+fn grep_operands(args: &[String]) -> Option<Vec<String>> {
+    if invalid_option("grep", args, GREP_SHORT, GREP_LONG).is_some() {
+        return None;
+    }
+    let mut have_pattern = false;
+    let mut ops = Vec::new();
+    let mut i = 0;
+    let mut done = false;
+    while i < args.len() {
+        let a = &args[i];
+        if !done && a == "--" {
+            done = true;
+        } else if !done && a == "-e" {
+            args.get(i + 1)?;
+            have_pattern = true;
+            i += 1;
+        } else if let Some((_, inline)) = grep_glob_opt(a).filter(|_| !done) {
+            if inline.is_none() {
+                i += 1;
+                args.get(i)?;
+            }
+        } else if !done && a.starts_with("--") {
+            return None;
+        } else if !done && a.len() > 1 && a.starts_with('-') {
+            if !a[1..].chars().all(|c| "rRnclLivEFwoqshHx".contains(c)) {
+                return None;
+            }
+        } else {
+            ops.push(a.clone());
+        }
+        i += 1;
+    }
+    if !have_pattern {
+        if ops.is_empty() {
+            return None;
+        }
+        ops.remove(0);
+    }
+    Some(ops)
+}
+
+/// The files `head` and `tail` read, as `head_tail()` splits its arguments.
+/// `None` where it declines.
+fn head_tail_operands(args: &[String]) -> Option<Vec<String>> {
+    let count_ok = |s: &str| s.strip_prefix('+').unwrap_or(s).parse::<i64>().is_ok();
+    let mut files = Vec::new();
+    let mut i = 0;
+    while i < args.len() {
+        let a = &args[i];
+        if a == "-n" || a == "-c" {
+            if !args.get(i + 1).is_some_and(|v| count_ok(v)) {
+                return None;
+            }
+            i += 2;
+            continue;
+        }
+        if let Some(v) = a.strip_prefix("-n").or_else(|| a.strip_prefix("-c")) {
+            if !v.is_empty() {
+                if !count_ok(v) {
+                    return None;
+                }
+                i += 1;
+                continue;
+            }
+        }
+        if a == "-q"
+            || (a.len() > 1 && a.starts_with('-') && a[1..].chars().all(|c| c.is_ascii_digit()))
+        {
+        } else if a.starts_with('-') && a != "-" {
+            return None;
+        } else {
+            files.push(a.clone());
+        }
+        i += 1;
+    }
+    Some(files)
+}
+
+/// The files `cut` reads, as `cut()` splits its arguments. `None` where it
+/// declines.
+fn cut_operands(args: &[String]) -> Option<Vec<String>> {
+    let mut files = Vec::new();
+    let mut i = 0;
+    while i < args.len() {
+        let a = &args[i];
+        if ["-d", "-f", "-c", "-b"].iter().any(|f| a.starts_with(f)) {
+            if a.len() <= 2 {
+                i += 1;
+                args.get(i)?;
+            }
+        } else if a == "-s" {
+        } else if a.starts_with('-') && a != "-" {
+            return None;
+        } else {
+            files.push(a.clone());
+        }
+        i += 1;
+    }
+    Some(files)
 }
 
 /// The files `sed` reads: the operands after its script, as `sed()` splits its
