@@ -255,7 +255,10 @@ enum AgentApiCommands {
         #[arg(long)]
         token: Option<String>,
         /// Seconds a single request/response route may run before it is
-        /// cancelled with 408. Does not apply to the SSE stream or WebSocket
+        /// cancelled. The evaluation stops itself at 90% of this and the
+        /// answer is 400 E_BUDGET_EXCEEDED; a request that cannot be
+        /// interrupted (a builtin blocked in a system call) is cut off at the
+        /// full value with 408. Does not apply to the SSE stream or WebSocket
         /// routes, which are long-lived by design. 0 disables the deadline,
         /// which lets one caller hold a worker indefinitely.
         #[arg(long, default_value = "300")]

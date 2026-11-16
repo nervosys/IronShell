@@ -4386,6 +4386,28 @@ fn relative_base() -> PathBuf {
     }
 }
 
+/// Make the working directory the workspace root when the process was started
+/// outside it, in a jailed context. Returns the directory entered, if it moved.
+///
+/// A relative write resolves against [`relative_base`] (the workspace when the
+/// working directory is outside it) while a read or a listing is handed to the
+/// OS, which uses the working directory, so with the two apart `file.write("x")`
+/// and `file.read("x")` named different files. Starting in the workspace makes
+/// both the same place. `ish --workspace` does this for a script or `-c`; a
+/// long-running server (`ish agent serve`) calls this at startup as well.
+pub fn enter_workspace_if_outside() -> Option<PathBuf> {
+    if !jail_enforced(current_mode()) {
+        return None;
+    }
+    let root = workspace_root();
+    let cwd = std::env::current_dir().ok()?;
+    if within_root(&cwd.to_string_lossy(), &root) || !root.is_dir() {
+        return None;
+    }
+    std::env::set_current_dir(&root).ok()?;
+    Some(root)
+}
+
 /// `base` joined with the relative `path` one component at a time, so the
 /// result uses the platform's separator throughout (`proj\src\a.py` on
 /// Windows, not `proj\src/a.py`) for the journal, the audit log and messages.

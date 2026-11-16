@@ -666,9 +666,43 @@ fn structured_error_fields(error: &str) -> Option<(String, Option<String>)> {
     })
 }
 
+/// The prefix `/schema/openai`, `/schema/claude`, `/schema/gemini` and
+/// `/schema/llama` put in front of a builtin's name in a tool name.
+pub const SCHEMA_TOOL_PREFIX: &str = "ironshell_";
+
+/// The builtin name behind a tool name from any `/schema` format. The schema
+/// writes a tool as `ironshell_<builtin>` (the other formats use the builtin's
+/// name as it is), and a builtin's name is already letters, digits and
+/// underscores, so no other character is substituted: stripping the prefix is
+/// the whole reverse. A name that is itself a builtin is left alone, so a
+/// builtin that happens to start with the prefix still resolves to itself.
+pub fn canonical_tool_name(name: &str) -> String {
+    if let Some(rest) = name.strip_prefix(SCHEMA_TOOL_PREFIX) {
+        if !rest.is_empty() && unknown_builtin_refusal(name).is_some() {
+            return rest.to_string();
+        }
+    }
+    name.to_string()
+}
+
+/// The builtin a pipeline step runs: its name as a tool name, or as a
+/// module-qualified name (`arr.range`) that is the builtin the member is.
+fn step_builtin_name(name: &str) -> String {
+    let canonical = canonical_tool_name(name);
+    match canonical.split_once('.') {
+        Some((module, member)) => {
+            crate::modules::builtin_for_member(module, member).unwrap_or(canonical)
+        }
+        None => canonical,
+    }
+}
+
 /// Execute a single builtin call
 fn execute_call(builtin: &str, args: &JsonValue) -> AgentResponse {
     let started = std::time::Instant::now();
+    // A tool name from any schema format calls the builtin it advertises.
+    let canonical = canonical_tool_name(builtin);
+    let builtin = canonical.as_str();
     // A module-qualified name (`math.sqrt`) calls the builtin that module member
     // is, as eval resolves it. Any other dotted name is refused, with the bare
     // builtin name as the hint.
@@ -755,8 +789,11 @@ fn execute_pipeline(steps: &[PipelineStep], input: Option<&JsonValue>) -> AgentR
     match run_pipeline_steps(steps, input, |_| {}) {
         Ok((value, code)) => response_from_value(value, &code),
         Err(failure) => AgentResponse {
-            code: None,
-            hint: None,
+            // A step's own error keeps its code (`annotate_error_fields` reads
+            // it from the message); the rest are the class the runner gave.
+            code: Some(failure.code.as_str().to_string()),
+            hint: (failure.code == crate::safety::ErrorCode::BadArg && failure.step.is_none())
+                .then(|| PIPELINE_HINT.to_string()),
             success: false,
             result: None,
             error: Some(failure.message),
@@ -1223,12 +1260,62 @@ fn describe_builtin(name: &str) -> AgentResponse {
 /// List all available builtins
 fn list_builtins(category: Option<&str>) -> AgentResponse {
     let builtins = get_all_builtin_definitions();
+    let mut matched = None;
 
-    let filtered: Vec<_> = if let Some(cat) = category {
-        builtins
+    let filtered: Vec<_> = if let Some(cat) = category.map(str::trim).filter(|c| !c.is_empty()) {
+        let wanted = cat.to_lowercase();
+        let by_category: Vec<_> = builtins
+            .iter()
+            .filter(|b| b.category.to_lowercase() == wanted)
+            .cloned()
+            .collect();
+        if !by_category.is_empty() {
+            matched = Some("category");
+            by_category
+        } else if let Some(module) = get_module_definitions()
             .into_iter()
-            .filter(|b| b.category.to_lowercase() == cat.to_lowercase())
-            .collect()
+            .find(|m| m.name.eq_ignore_ascii_case(&wanted))
+        {
+            // A module name is accepted as a category: `file` lists the
+            // builtins the `file` module members run.
+            matched = Some("module");
+            let names: Vec<String> = module.functions.iter().map(|f| f.builtin.clone()).collect();
+            builtins
+                .into_iter()
+                .filter(|b| {
+                    names.contains(&b.name)
+                        || b.aliases
+                            .as_ref()
+                            .is_some_and(|a| a.iter().any(|x| names.contains(x)))
+                })
+                .collect()
+        } else {
+            let categories = ontology_category_names();
+            let modules: Vec<String> = get_module_definitions()
+                .into_iter()
+                .map(|m| m.name)
+                .collect();
+            let did_you_mean = crate::builtins::nearest_names(
+                cat,
+                categories.iter().chain(modules.iter()).map(String::as_str),
+            );
+            let mut hint = format!(
+                "valid categories: {}; a module name such as file or math is accepted too",
+                categories.join(", ")
+            );
+            if !did_you_mean.is_empty() {
+                hint = format!("did you mean {}? {hint}", did_you_mean.join(", "));
+            }
+            return AgentResponse {
+                code: Some("E_BAD_ARG".to_string()),
+                hint: Some(hint.clone()),
+                success: false,
+                result: None,
+                error: Some(format!("Unknown category '{cat}'; {hint}")),
+                result_type: None,
+                metadata: Some(json!({"code": "E_BAD_ARG", "did_you_mean": did_you_mean})),
+            };
+        }
     } else {
         builtins
     };
@@ -1255,7 +1342,7 @@ fn list_builtins(category: Option<&str>) -> AgentResponse {
         })),
         error: None,
         result_type: Some("BuiltinList".to_string()),
-        metadata: None,
+        metadata: matched.map(|kind| json!({ "category_matched_as": kind })),
     }
 }
 
@@ -1755,7 +1842,9 @@ fn is_identifier(name: &str) -> bool {
 
 /// Build code for a single pipeline step
 fn build_step_code(step: &PipelineStep) -> Result<String> {
-    let mut code = args_to_code(&step.builtin, &step.args)?;
+    // `arr.range` and `ironshell_range` name the builtin they run, as `call` does.
+    let builtin = step_builtin_name(&step.builtin);
+    let mut code = args_to_code(&builtin, &step.args)?;
 
     // Handle predicate (for where/filter operations). The predicate is an
     // expression over `x` that is written into the code as text, so it must
@@ -1772,7 +1861,7 @@ fn build_step_code(step: &PipelineStep) -> Result<String> {
                 &format!("'{pred}'"),
             ));
         }
-        code = format!("{}({})", step.builtin, lambda);
+        code = format!("{}({})", builtin, lambda);
     }
 
     // Handle field selection. The field is written as `x.<field>`, so it must
@@ -5095,11 +5184,11 @@ pub mod server {
         (
             StatusCode::SERVICE_UNAVAILABLE,
             [(header::RETRY_AFTER, "5")],
-            Json(serde_json::json!({
-                "error": "busy",
-                "code": "E_BUDGET_EXCEEDED",
-                "detail": stream_busy_detail(),
-            })),
+            Json(bad_request(
+                "E_BUDGET_EXCEEDED",
+                stream_busy_detail(),
+                "retry after an in-flight streamed or WebSocket evaluation finishes".to_string(),
+            )),
         )
             .into_response()
     }
@@ -5138,14 +5227,14 @@ pub mod server {
             _ => (
                 StatusCode::SERVICE_UNAVAILABLE,
                 [(header::RETRY_AFTER, "5")],
-                Json(serde_json::json!({
-                    "error": "busy",
-                    "code": "E_BUDGET_EXCEEDED",
-                    "detail": format!(
+                Json(bad_request(
+                    "E_BUDGET_EXCEEDED",
+                    format!(
                         "all {max} request slots stayed busy for {} ms; retry later",
                         wait.as_millis()
                     ),
-                })),
+                    "retry after a few seconds".to_string(),
+                )),
             )
                 .into_response(),
         }
@@ -5499,12 +5588,23 @@ pub mod server {
             }
         }
 
+        /// An `error` event whose `error` is the object every API failure
+        /// carries (`code`, `message`, `hint`, `retryable`). A message that is a
+        /// structured error (the evaluator writes its failures as JSON text)
+        /// contributes its own fields, so a client never has to parse a string
+        /// that holds escaped JSON.
         pub fn error(message: &str) -> Self {
+            Self::failure(message, None, None)
+        }
+
+        /// As [`StreamEvent::error`], with the failure's code and hint when the
+        /// caller knows them.
+        pub fn failure(message: &str, code: Option<&str>, hint: Option<&str>) -> Self {
             Self {
                 event: "error".to_string(),
                 data: json!({
                     "success": false,
-                    "error": message
+                    "error": error_object(message, code, hint)
                 }),
                 id: None,
             }
@@ -5588,6 +5688,117 @@ pub mod server {
         Ok(URL_SAFE_NO_PAD.encode(bytes))
     }
 
+    /// The token of an `Authorization: Bearer <token>` header value. The scheme
+    /// is case-insensitive (RFC 7235 section 2.1), so `bearer x` and `BEARER x`
+    /// are the same as `Bearer x`; the token itself is compared exactly.
+    pub fn bearer_token(value: &str) -> Option<&str> {
+        let (scheme, rest) = value.split_once(char::is_whitespace)?;
+        scheme.eq_ignore_ascii_case("bearer").then(|| rest.trim())
+    }
+
+    /// Replace a failure the framework wrote as plain text (axum's rejection of
+    /// a malformed or oversized body, a wrong content type, an unknown path, a
+    /// wrong method, the request deadline) with the API's own error shape:
+    /// `success: false` and an `error` of `code`, `message`, `hint` and
+    /// `retryable`. A response that is already JSON is left as it is.
+    async fn json_errors(req: axum::extract::Request, next: axum::middleware::Next) -> Response {
+        let res = next.run(req).await;
+        let status = res.status();
+        if !(status.is_client_error() || status.is_server_error()) {
+            return res;
+        }
+        let is_json = res
+            .headers()
+            .get(header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok())
+            .is_some_and(|v| v.starts_with("application/json"));
+        if is_json {
+            return res;
+        }
+        let (parts, body) = res.into_parts();
+        let bytes = axum::body::to_bytes(body, 64 * 1024)
+            .await
+            .unwrap_or_default();
+        let detail = String::from_utf8_lossy(&bytes);
+        let refusal = error_for_status(status.as_u16(), detail.trim());
+        let mut out = (status, Json(refusal)).into_response();
+        for (name, value) in parts.headers.iter() {
+            if name != header::CONTENT_TYPE && name != header::CONTENT_LENGTH {
+                out.headers_mut().append(name.clone(), value.clone());
+            }
+        }
+        out
+    }
+
+    /// The API's error for an HTTP failure the framework answered in text:
+    /// the code and hint the status calls for, and the framework's own words
+    /// (cut to 200 characters) as the message.
+    pub fn error_for_status(status: u16, detail: &str) -> AgentResponse {
+        let shown = truncate_echo(detail, 200);
+        let (code, what, hint) = match status {
+            400 => (
+                if detail.to_ascii_lowercase().contains("json") {
+                    "E_PARSE"
+                } else {
+                    "E_BAD_ARG"
+                },
+                "the request could not be read",
+                "send a JSON object as the body with Content-Type: application/json; .well-known/openapi.yaml gives each route's body",
+            ),
+            401 => (
+                "E_UNAUTHORIZED",
+                "missing or wrong bearer token",
+                "send `Authorization: Bearer <token>`",
+            ),
+            404 => (
+                "E_NOT_FOUND",
+                "no route matches this path",
+                "the routes are listed in .well-known/openapi.yaml; GET /api/v1/builtins lists the builtins",
+            ),
+            405 => (
+                "E_BAD_ARG",
+                "this path does not take this HTTP method",
+                "see .well-known/openapi.yaml for the method each route takes",
+            ),
+            408 => (
+                "E_BUDGET_EXCEEDED",
+                "the request ran past the server's request timeout",
+                "split the work, or ask the operator to raise --request-timeout",
+            ),
+            413 => (
+                "E_BUDGET_EXCEEDED",
+                "the request body is too large",
+                "send a smaller body; read a large input from a file in the workspace instead",
+            ),
+            415 => (
+                "E_BAD_ARG",
+                "the request has the wrong content type",
+                "send Content-Type: application/json",
+            ),
+            422 => (
+                "E_BAD_ARG",
+                "the JSON body does not have the shape this route takes",
+                "see .well-known/openapi.yaml for the body of this route",
+            ),
+            429 | 503 => (
+                "E_BUDGET_EXCEEDED",
+                "the server is busy",
+                "retry after a few seconds",
+            ),
+            _ => (
+                "E_UNKNOWN",
+                "the server could not answer the request",
+                "retry; if it persists the operator should read the server log",
+            ),
+        };
+        let message = if shown.is_empty() {
+            what.to_string()
+        } else {
+            format!("{what}: {shown}")
+        };
+        bad_request(code, message, hint.to_string())
+    }
+
     /// Constant-time comparison, so a token cannot be recovered a byte at a time
     /// by timing the response.
     fn tokens_match(presented: &str, expected: &str) -> bool {
@@ -5604,6 +5815,17 @@ pub mod server {
 
     /// Start the Agent API HTTP server
     pub async fn start_agent_api_server(config: AgentApiConfig) -> Result<()> {
+        // Started outside its workspace, a relative write went to the workspace
+        // while a read or a listing went to the working directory, which the
+        // jail refused. Run from the workspace root, as `ish --workspace` does
+        // for a script, so one relative path names one file for every builtin.
+        if let Some(root) = crate::safety::enter_workspace_if_outside() {
+            println!(
+                "   Working directory moved to the workspace root {}",
+                root.display()
+            );
+        }
+
         // Create shared orchestrator state
         let state = Arc::new(OrchestratorState::new());
 
@@ -5820,8 +6042,7 @@ pub mod server {
                         .headers()
                         .get(header::AUTHORIZATION)
                         .and_then(|v| v.to_str().ok())
-                        .and_then(|v| v.strip_prefix("Bearer "))
-                        .map(str::trim)
+                        .and_then(bearer_token)
                         .unwrap_or("");
 
                     if tokens_match(presented, &expected) {
@@ -5830,17 +6051,22 @@ pub mod server {
                         (
                             StatusCode::UNAUTHORIZED,
                             [(header::WWW_AUTHENTICATE, "Bearer")],
-                            Json(serde_json::json!({
-                                "error": "unauthorized",
-                                "detail": "Send `Authorization: Bearer <token>`. \
-                                           The token is printed when the server starts.",
-                            })),
+                            Json(bad_request(
+                                "E_UNAUTHORIZED",
+                                "missing or wrong bearer token".to_string(),
+                                "send `Authorization: Bearer <token>`; the token is printed when the server starts, or set with IRONSHELL_API_TOKEN".to_string(),
+                            )),
                         )
                             .into_response()
                     }
                 }
             },
         ));
+
+        // Failures the framework writes as plain text (a rejected body, an
+        // unknown path, a wrong method, the deadline) leave in the API's own
+        // error shape. Outside the auth layer, so it covers that layer's 401 too.
+        app = app.layer(axum::middleware::from_fn(json_errors));
 
         if config.enable_cors {
             // `allow_origin(Any)` tells every browser that any web page may talk
@@ -6044,10 +6270,35 @@ pub mod server {
         }
     }
 
+    /// The arguments of a `/call/:builtin` body. The body is optional, as the
+    /// OpenAPI spec says: no body, or a blank one, is `{}`, whatever the
+    /// `Content-Type` (or its absence) says. A body that is not JSON is
+    /// `E_PARSE`.
+    pub fn call_args_from_body(body: &[u8]) -> Result<JsonValue, AgentResponse> {
+        let text = String::from_utf8_lossy(body);
+        if text.trim().is_empty() {
+            return Ok(json!({}));
+        }
+        serde_json::from_str(text.trim_start_matches('\u{feff}')).map_err(|e| {
+            bad_request(
+                "E_PARSE",
+                format!("the request body is not JSON: {e}"),
+                "send the builtin's arguments as one JSON object (for example {\"path\": \".\"}), or no body for a builtin that takes none".to_string(),
+            )
+        })
+    }
+
     async fn handle_call(
         axum::extract::Path(builtin): axum::extract::Path<String>,
-        Json(args): Json<JsonValue>,
-    ) -> impl IntoResponse {
+        body: axum::body::Bytes,
+    ) -> (StatusCode, Json<AgentResponse>) {
+        let args = match call_args_from_body(&body) {
+            Ok(args) => args,
+            Err(refusal) => return (StatusCode::BAD_REQUEST, Json(refusal)),
+        };
+        // A tool name from a `/schema` format (`ironshell_sqrt`) names the
+        // builtin it advertises.
+        let builtin = crate::agent_api::canonical_tool_name(&builtin);
         // An unknown builtin is a missing resource, not a malformed request.
         if !builtin.contains('.') {
             if let Some(refusal) = crate::agent_api::unknown_builtin_refusal(&builtin) {
@@ -6057,16 +6308,30 @@ pub mod server {
         run_blocking(AgentRequest::Call { builtin, args }, eval_deadline()).await
     }
 
+    /// The steps and input of a pipeline body, or the `E_BAD_ARG` response that
+    /// says what is wrong with them. A `steps` that does not parse used to be
+    /// read as no steps at all.
+    pub fn pipeline_from_body(
+        body: &JsonValue,
+    ) -> Result<(Vec<PipelineStep>, Option<JsonValue>), AgentResponse> {
+        let steps: Vec<PipelineStep> = match body.get("steps") {
+            None => Vec::new(),
+            Some(value) => serde_json::from_value(value.clone()).map_err(|e| {
+                bad_request(
+                    "E_BAD_ARG",
+                    format!("the request field 'steps' is not a list of steps: {e}"),
+                    PIPELINE_HINT.to_string(),
+                )
+            })?,
+        };
+        Ok((steps, body.get("input").cloned()))
+    }
+
     async fn handle_pipeline(Json(body): Json<JsonValue>) -> impl IntoResponse {
-        let steps: Vec<PipelineStep> = serde_json::from_value(
-            body.get("steps")
-                .cloned()
-                .unwrap_or(JsonValue::Array(vec![])),
-        )
-        .unwrap_or_default();
-
-        let input = body.get("input").cloned();
-
+        let (steps, input) = match pipeline_from_body(&body) {
+            Ok(parts) => parts,
+            Err(refusal) => return (StatusCode::BAD_REQUEST, Json(refusal)),
+        };
         run_blocking(AgentRequest::Pipeline { steps, input }, eval_deadline()).await
     }
 
@@ -6116,10 +6381,12 @@ pub mod server {
     ) -> Vec<StreamEvent> {
         let mut events = vec![StreamEvent::start("Processing request...")];
         if !response.success {
-            events.push(StreamEvent::error(
+            events.push(StreamEvent::failure(
                 &response
                     .error
                     .unwrap_or_else(|| "Unknown error".to_string()),
+                response.code.as_deref(),
+                response.hint.as_deref(),
             ));
             return events;
         }
@@ -6176,6 +6443,7 @@ pub mod server {
                 ));
             }
             Err(failure) => {
+                let code = failure.code;
                 let message = match failure.step {
                     Some(i) => format!(
                         "Step {}/{} ({}) failed: {}",
@@ -6186,7 +6454,7 @@ pub mod server {
                     ),
                     None => failure.message,
                 };
-                events.push(StreamEvent::error(&message));
+                events.push(StreamEvent::failure(&message, Some(code.as_str()), None));
             }
         }
         events
@@ -6194,17 +6462,13 @@ pub mod server {
 
     /// Stream pipeline execution with progress updates
     async fn handle_stream_pipeline(Json(body): Json<JsonValue>) -> Response {
+        let (steps, input) = match pipeline_from_body(&body) {
+            Ok(parts) => parts,
+            Err(refusal) => return (StatusCode::BAD_REQUEST, Json(refusal)).into_response(),
+        };
         let Some(slot) = try_take_stream_slot(&stream_slots()) else {
             return stream_busy_response();
         };
-        let steps: Vec<PipelineStep> = serde_json::from_value(
-            body.get("steps")
-                .cloned()
-                .unwrap_or(JsonValue::Array(vec![])),
-        )
-        .unwrap_or_default();
-
-        let input = body.get("input").cloned();
         let deadline = eval_deadline();
 
         create_sse_response(async move {
@@ -6259,7 +6523,14 @@ pub mod server {
                     Some("stream"),
                 ));
             }
-            Err(e) => events.push(StreamEvent::error(&format!("{}", e))),
+            Err(e) => {
+                let code = crate::safety::code_of(&e);
+                events.push(StreamEvent::failure(
+                    &format!("{}", e),
+                    Some(code.as_str()),
+                    None,
+                ));
+            }
         }
         events
     }
@@ -6326,11 +6597,11 @@ pub mod server {
         let Some(schema_format) = parse_schema_format(&format) else {
             return (
                 StatusCode::BAD_REQUEST,
-                Json(json!({
-                    "success": false,
-                    "error": format!("Unknown schema format: '{format}'. Supported: {SCHEMA_FORMATS_HINT}"),
-                    "metadata": { "code": "E_BAD_ARG" },
-                })),
+                Json(json!(bad_request(
+                    "E_BAD_ARG",
+                    format!("Unknown schema format: '{format}'"),
+                    format!("supported formats: {SCHEMA_FORMATS_HINT}"),
+                ))),
             );
         };
 
@@ -6358,7 +6629,13 @@ pub mod server {
     ) -> impl IntoResponse {
         let category = params.get("category").cloned();
         let request = AgentRequest::ListBuiltins { category };
-        Json(process_request(&request))
+        let response = process_request(&request);
+        let status = if response.success {
+            StatusCode::OK
+        } else {
+            StatusCode::BAD_REQUEST
+        };
+        (status, Json(response))
     }
 
     async fn handle_describe_builtin(
@@ -6507,6 +6784,78 @@ pub mod server {
         let _ = task.await;
     }
 
+    /// The message shapes a WebSocket accepts, as the `error` reply names them.
+    const WS_SHAPES: &str = "send one JSON object per text frame: an AgentRequest such as {\"action\":\"eval\",\"code\":\"1+2\"} (optionally with an \"id\", which the response echoes), or a typed message: {\"type\":\"execute\",\"id\":\"1\",\"request\":{AgentRequest}}, {\"type\":\"ping\"}, {\"type\":\"subscribe\",\"channel\":\"c\"}, {\"type\":\"unsubscribe\",\"channel\":\"c\"}, {\"type\":\"register\",\"agent_id\":\"a\",\"capabilities\":[]}, {\"type\":\"agent_message\",\"to\":\"a\",\"payload\":{}}, {\"type\":\"broadcast\",\"channel\":\"c\",\"payload\":{}}";
+
+    /// What a WebSocket text frame asks for. A bare AgentRequest (a JSON object
+    /// with an `action`) is an `execute` whose id is the message's own `id`
+    /// string, or empty; a typed message is itself; anything else is the
+    /// `error` message to send back, which names the accepted shapes. A frame is
+    /// never ignored.
+    pub fn parse_ws_text(text: &str) -> Result<WsClientMessage, WsServerMessage> {
+        let refuse = |id: Option<String>, why: String| WsServerMessage::Error {
+            id,
+            message: format!("{why}; {WS_SHAPES}"),
+        };
+        let value: JsonValue = match serde_json::from_str(text) {
+            Ok(v) => v,
+            Err(e) => {
+                return Err(refuse(
+                    None,
+                    format!(
+                        "E_PARSE: the frame is not JSON ({})",
+                        truncate_echo(&e.to_string(), 200)
+                    ),
+                ))
+            }
+        };
+        let id = value
+            .get("id")
+            .and_then(JsonValue::as_str)
+            .map(str::to_string);
+        if value.get("type").is_some() {
+            return serde_json::from_value::<WsClientMessage>(value).map_err(|e| {
+                refuse(
+                    id,
+                    format!("E_BAD_ARG: {}", truncate_echo(&e.to_string(), 200)),
+                )
+            });
+        }
+        if value.get("action").is_some() {
+            return match parse_request(text) {
+                Ok(request) => Ok(WsClientMessage::Execute {
+                    id: id.unwrap_or_default(),
+                    request,
+                }),
+                Err(response) => Err(refuse(
+                    id,
+                    format!(
+                        "{}: {}",
+                        response.code.as_deref().unwrap_or("E_BAD_ARG"),
+                        truncate_echo(response.error.as_deref().unwrap_or("bad request"), 200)
+                    ),
+                )),
+            };
+        }
+        Err(refuse(
+            id,
+            "E_BAD_ARG: the message has neither an \"action\" (an AgentRequest) nor a \"type\""
+                .to_string(),
+        ))
+    }
+
+    /// `text` cut to at most `max` characters, with the number left out stated.
+    /// Error replies echo caller input, and an echo of a hundred thousand
+    /// characters is not a diagnosis.
+    pub fn truncate_echo(text: &str, max: usize) -> String {
+        let total = text.chars().count();
+        if total <= max {
+            return text.to_string();
+        }
+        let kept: String = text.chars().take(max).collect();
+        format!("{kept}... ({} more characters)", total - max)
+    }
+
     async fn handle_websocket(
         ws: WebSocketUpgrade,
         state: Arc<OrchestratorState>,
@@ -6537,7 +6886,13 @@ pub mod server {
         while let Some(result) = receiver.next().await {
             match result {
                 Ok(Message::Text(text)) => {
-                    if let Ok(msg) = serde_json::from_str::<WsClientMessage>(&text) {
+                    let parsed = parse_ws_text(&text);
+                    if let Err(reply) = &parsed {
+                        if tx.send(reply.clone()).await.is_err() {
+                            break;
+                        }
+                    }
+                    if let Ok(msg) = parsed {
                         let response = match msg {
                             WsClientMessage::Execute { id, request } => {
                                 // The slot is held for the whole evaluation; a refused
@@ -6628,6 +6983,15 @@ pub mod server {
                     }
                 }
                 Ok(Message::Close(_)) => break,
+                Ok(Message::Binary(_)) => {
+                    let reply = WsServerMessage::Error {
+                        id: None,
+                        message: format!("E_BAD_ARG: binary frames are not accepted; {WS_SHAPES}"),
+                    };
+                    if tx.send(reply).await.is_err() {
+                        break;
+                    }
+                }
                 Err(_) => break,
                 _ => {}
             }

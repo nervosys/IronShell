@@ -75,7 +75,9 @@ fn failing_second_step_gives_one_progress_then_an_error_naming_step_two() {
 
     assert_eq!(kinds(&events), ["start", "progress", "error"]);
     assert_eq!(events[1].data["current"], 1);
-    let message = events[2].data["error"].as_str().expect("error message");
+    let message = events[2].data["error"]["message"]
+        .as_str()
+        .expect("error message");
     assert!(
         message.contains("Step 2/2") && message.contains("no_such_builtin_zz"),
         "error should name step 2 and its builtin, got: {message}"
@@ -94,7 +96,7 @@ fn empty_pipeline_still_errors_without_progress() {
 
     assert_eq!(kinds(&events), ["start", "error"]);
     assert_eq!(
-        events[1].data["error"],
+        events[1].data["error"]["message"],
         "Pipeline must have at least one step".to_string()
     );
 }

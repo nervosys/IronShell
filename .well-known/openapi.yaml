@@ -13,7 +13,30 @@ info:
     This is not optional: the API evaluates arbitrary code, so an
     unauthenticated server lets any web page the user visits drive it from
     their browser. Binding a non-loopback address additionally requires
-    `IRONSHELL_ALLOW_REMOTE_BIND=true`.
+    `IRONSHELL_ALLOW_REMOTE_BIND=true`. The `Bearer` scheme word is
+    case-insensitive (RFC 7235); the token is compared exactly.
+
+
+    Every request is evaluated in a fresh environment: a variable assigned by
+    one `/eval`, `/call` or `/pipeline` request is gone in the next, and the
+    only state that persists between requests is the filesystem (inside the
+    workspace). Approval for an effect that needs it is given only by the
+    operator, through the `IRONSHELL_APPROVE` environment variable of the
+    server process; a request cannot grant itself approval, and a call that
+    needs it fails with `E_NEEDS_APPROVAL`.
+
+
+    A relative path means one place for every builtin, reads and writes alike:
+    the server runs from its workspace root (it moves there at startup when it
+    was started outside it), so `file.write('b.txt', 'hi')` followed by
+    `file.read('b.txt')` reads back what was written.
+
+
+    Every failure, including the ones the HTTP layer produces itself (an
+    unknown path, a wrong method, a malformed or oversized body, a wrong
+    content type, a missing token), is JSON of the same shape: `success: false`
+    and an `error` object with `code`, `message`, `hint` and `retryable`. Input
+    echoed in a message is cut to about 200 characters.
   license:
     name: AGPL-3.0-or-later
     url: https://www.gnu.org/licenses/agpl-3.0.html
@@ -100,9 +123,16 @@ paths:
             type: string
           description: >
             Builtin name, optionally module-qualified (e.g., "ls", "file.read",
-            "sys.hostname", "crypto.uuid")
+            "sys.hostname", "crypto.uuid"). The tool names the `/schema`
+            formats advertise are accepted exactly as written: `ironshell_sqrt`
+            (the openai, claude, gemini and llama formats prefix a builtin's
+            name with `ironshell_`; the other formats use the name as it is)
+            calls `sqrt`. `/execute` with `action: call` takes the same names.
       requestBody:
         required: false
+        description: >
+          The arguments object itself. No body, or an empty one, is `{}`, with
+          or without a Content-Type. A body that is not JSON is 400 E_PARSE.
         content:
           application/json:
             schema:
@@ -112,6 +142,18 @@ paths:
       responses:
         '200':
           description: Builtin result
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AgentResponse'
+        '400':
+          description: A failure (E_BAD_ARG, E_PARSE, ...), as `AgentResponse`
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AgentResponse'
+        '404':
+          description: No such builtin (E_UNKNOWN_BUILTIN, with did_you_mean candidates)
           content:
             application/json:
               schema:
@@ -134,10 +176,23 @@ paths:
                   type: array
                   items:
                     $ref: '#/components/schemas/PipelineStep'
-                  description: Ordered pipeline stages
+                  description: >
+                    Ordered pipeline stages. A step's `builtin` takes the same
+                    names as `/call`: bare, module-qualified (`arr.range`) or a
+                    schema tool name (`ironshell_range`). A `steps` that is not
+                    a list of steps is 400 E_BAD_ARG.
       responses:
         '200':
           description: Pipeline result
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AgentResponse'
+        '400':
+          description: >
+            A failure. `error.code` is the failing step's own code (for
+            example E_UNKNOWN_BUILTIN or E_BAD_ARG), or E_BAD_ARG for a
+            pipeline that could not be built.
           content:
             application/json:
               schema:
@@ -171,6 +226,12 @@ paths:
     post:
       operationId: streamExecute
       summary: Stream execution results via SSE
+      description: >
+        Events are `start`, then `complete` (the result), or for an array
+        longer than 50 rows ordered `chunk` events (`seq`, `rows`, `total`)
+        and a `complete` of `{streamed_rows: total}`. A failure is an `error`
+        event whose `data.error` is an object (`code`, `message`, `hint`,
+        `retryable`), not a string.
       requestBody:
         required: true
         content:
@@ -187,6 +248,11 @@ paths:
     post:
       operationId: streamPipeline
       summary: Stream pipeline results via SSE
+      description: >
+        Events are `start`, a `progress` after each step that completed, then
+        `complete` (the pipeline's result) or an `error` event naming the step
+        that failed. `data.error` is an object (`code`, `message`, `hint`,
+        `retryable`).
       requestBody:
         required: true
         content:
@@ -210,6 +276,14 @@ paths:
     post:
       operationId: streamEval
       summary: Stream eval results via SSE
+      description: >
+        The value arrives only in `chunk` events (`seq`, `rows`, `total`;
+        50 items each), one item per element of an array result and a single
+        item for any other value, so a scalar `1 + 2` is one `chunk` whose
+        `rows` is `[3]`. The closing `complete` event carries only the count,
+        `{streamed_items: n}` with result type `stream`: it does not repeat the
+        value. A failure is an `error` event whose `data.error` is an object
+        (`code`, `message`, `hint`, `retryable`).
       requestBody:
         required: true
         content:
@@ -233,8 +307,17 @@ paths:
       summary: Bidirectional WebSocket for real-time interaction
       description: >
         WebSocket endpoint for streaming, multi-turn conversations, and
-        real-time pipeline monitoring. Send AgentRequest JSON messages and
-        receive AgentResponse JSON messages.
+        real-time pipeline monitoring. Send one JSON object per text frame.
+        An AgentRequest such as `{"action":"eval","code":"1+2"}` is run and
+        answered with `{"type":"response","id":ID,"response":AgentResponse}`,
+        where ID is the request's own `"id"` string, or empty. The typed
+        messages are `{"type":"execute","id":"1","request":{AgentRequest}}`,
+        `ping`, `subscribe`, `unsubscribe`, `register`, `agent_message` and
+        `broadcast`. A frame that is none of these (not JSON, binary, no
+        `action` or `type`, a typed message with the wrong fields) is answered
+        with `{"type":"error","id":ID,"message":"CODE: ...; send one JSON
+        object per text frame: ..."}` naming the accepted shapes; no frame is
+        ignored. The bearer token is sent on the upgrade request.
       responses:
         '101':
           description: WebSocket upgrade
@@ -325,7 +408,11 @@ paths:
           required: false
           schema:
             type: string
-          description: Filter by module category (e.g., "file", "sys", "ai")
+          description: >
+            Filter by category (the names in each entry's `category`, such as
+            FileSystem or Math, case-insensitive) or by module name (`file`,
+            `sys`, `math`: the builtins that module's members run). An unknown
+            value is a 400 E_BAD_ARG that lists the valid categories.
       responses:
         '200':
           description: List of builtins with descriptions
@@ -333,6 +420,12 @@ paths:
             application/json:
               schema:
                 type: object
+        '400':
+          description: Unknown category or module (E_BAD_ARG)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AgentResponse'
 
   /api/v1/builtins/{name}:
     get:
@@ -421,7 +514,7 @@ paths:
                 properties:
                   status:
                     type: string
-                    example: ok
+                    example: healthy
                   version:
                     type: string
                     example: 14.0.4
@@ -635,7 +728,7 @@ components:
           description: Only the builtins whose name or description contains this, case-insensitively (for schema action)
         category:
           type: string
-          description: Module category (for list_builtins)
+          description: Category or module name (for list_builtins); an unknown value is E_BAD_ARG
         type_name:
           type: string
           description: Type name (for type_info)
@@ -672,8 +765,22 @@ components:
           type: string
           description: IronShell type of the result (Int, String, Array, Record, etc.)
         error:
-          type: string
-          description: Error message if success is false
+          type: object
+          description: >-
+            Present when success is false: `code` (E_BAD_ARG, E_PARSE,
+            E_UNKNOWN_BUILTIN, E_NOT_FOUND, E_UNAUTHORIZED, E_BUDGET_EXCEEDED,
+            ...), `message`, `hint` and `retryable`, plus any fields of a
+            structured error. The same shape is used for failures of the HTTP
+            layer itself (404, 405, 400, 401, 413, 415).
+          properties:
+            code:
+              type: string
+            message:
+              type: string
+            hint:
+              type: string
+            retryable:
+              type: boolean
         code:
           type: string
           description: >-
