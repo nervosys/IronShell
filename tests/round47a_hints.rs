@@ -41,7 +41,7 @@ fn unknown_module_member_does_not_suggest_none() {
 
 #[test]
 fn unterminated_single_quote_says_use_double_quotes() {
-    let (out, err, code) = run(&[], r"'a\'b");
+    let (out, err, code) = run(&[], r"'a\'b'");
     let all = format!("{out}{err}");
     assert_ne!(code, 0, "{all}");
     assert!(all.contains("takes no escapes"), "{all}");
