@@ -5777,7 +5777,13 @@ fn bi_sum(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
                         if has_float {
                             float_sum += n as f64;
                         } else {
-                            int_sum += n;
+                            int_sum = int_sum.checked_add(n).ok_or_else(|| {
+                                crate::safety::bad_arg(
+                                    "sum",
+                                    "a sum within Int range",
+                                    "integer overflow",
+                                )
+                            })?;
                         }
                     }
                     Value::Float(f) => {
