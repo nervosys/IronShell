@@ -425,18 +425,23 @@ async fn http_layer_failures_are_json_in_the_api_error_shape() {
     assert_eq!(status, 415);
     assert_error_shape(&body, "E_BAD_ARG");
 
-    let (status, body) = json_of(
-        c.post(url(port, "/api/v1/eval"))
-            .bearer_auth(TOKEN)
-            .header("content-type", "application/json")
-            .body(" ".repeat(3 * 1024 * 1024))
-            .send()
-            .await
-            .expect("request"),
-    )
-    .await;
-    assert_eq!(status, 413);
-    assert_error_shape(&body, "E_BUDGET_EXCEEDED");
+    // The server may answer 413 and close before the client finishes
+    // sending; Windows then reports the reset instead of the answer.
+    match c
+        .post(url(port, "/api/v1/eval"))
+        .bearer_auth(TOKEN)
+        .header("content-type", "application/json")
+        .body(" ".repeat(3 * 1024 * 1024))
+        .send()
+        .await
+    {
+        Ok(resp) => {
+            let (status, body) = json_of(resp).await;
+            assert_eq!(status, 413);
+            assert_error_shape(&body, "E_BUDGET_EXCEEDED");
+        }
+        Err(e) => assert!(e.is_request(), "oversized body: {e:?}"),
+    }
 
     let (status, body) = json_of(
         c.get(url(port, "/api/v1/schema/bogus"))
