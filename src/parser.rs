@@ -4024,6 +4024,16 @@ impl Parser {
         if bound_earlier {
             return Ok(());
         }
+        // `abs -x` negates a name assigned earlier: a value, not a flag.
+        let flag_bound = !second_dash && {
+            let flag_name = flag.text.as_str();
+            self.toks[..self.i].windows(2).any(|w| {
+                w[0].kind == Tok::Ident && w[0].text == flag_name && w[1].kind == Tok::Equal
+            })
+        };
+        if flag_bound {
+            return Ok(());
+        }
         Err(anyhow::Error::new(HintedSyntax {
             msg: format!(
                 "unexpected '-' after `{name}` at line {}, column {}",

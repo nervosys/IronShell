@@ -10838,7 +10838,7 @@ pub static SIGNATURES: &[Signature] = &[
         subject: None,
         params: &[],
         returns: "Array",
-        doc: "Every process as {pid, name, cpu, mem, memory_bytes, command}. mem and memory_bytes are the same number, resident bytes (memory_bytes is the name proc_info uses; mem is kept for compatibility). cpu is percent of one CPU from ps on Unix, and total CPU seconds (kernel plus user time, null when the process cannot be opened) on Windows, so the unit differs by OS. A failed listing is E_TOOL_FAILED; arguments and pipeline input are E_BAD_ARG.",
+        doc: "Every process as {pid, name, cpu, mem, memory_bytes, command}. name is the image name, as proc_info gives it, and command is the whole command line on Unix. mem and memory_bytes are the same number, resident bytes (memory_bytes is the name proc_info uses; mem is kept for compatibility). cpu is percent of one CPU from ps on Unix, and total CPU seconds (kernel plus user time, null when the process cannot be opened) on Windows, so the unit differs by OS. A failed listing is E_TOOL_FAILED; arguments and pipeline input are E_BAD_ARG.",
         examples: &[
             (r#"proc_list()"#, r#"[{command: systemd, cpu: 0.0, mem: 13000000, name: systemd, pid: 1}, ...]"#),
         ],
@@ -15729,6 +15729,12 @@ pub fn validate(name: &str, args: &[Value], input: Option<&Value>) -> anyhow::Re
     // Without a variadic, the last argument may likewise skip one optional
     // parameter whose type it does not match for the optional one after it:
     // `sql("select ?", [7])` gives the Array to `params`, past `query`.
+    // `crypto_hash("sha256", 5)` writes the algorithm first, so the 5 is the data
+    // and not the `algorithm` parameter this shift would check it against. The
+    // body names which of the two is wrong.
+    if sig.name == "crypto_hash" && input.is_none() && args.len() == 2 {
+        return Ok(());
+    }
     let supplied_args = &args[params_start..];
     let last = supplied_args.len().saturating_sub(1);
     let rest = supplied_args.iter().enumerate().map(|(i, a)| {

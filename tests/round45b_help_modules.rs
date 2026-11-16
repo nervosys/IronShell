@@ -48,11 +48,12 @@ fn a_module_that_shares_a_builtin_name_keeps_both() {
         let builtin = record
             .get("builtin")
             .unwrap_or_else(|| panic!("{name} should carry its same-named builtin: {record}"));
-        assert_eq!(
-            builtin.get("builtin").and_then(|v| v.as_str()),
-            Some(name),
-            "{name}: {builtin}"
-        );
+        // `shell` is an alias, so its builtin is described under `sh`.
+        let is_it = builtin.get("builtin").and_then(|v| v.as_str()) == Some(name)
+            || builtin["aliases"]
+                .as_array()
+                .is_some_and(|a| a.iter().any(|x| x.as_str() == Some(name)));
+        assert!(is_it, "{name}: {builtin}");
     }
 }
 

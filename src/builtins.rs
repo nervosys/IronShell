@@ -5477,9 +5477,19 @@ fn bi_http_get(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
 /// of a module bound in `env`.
 pub fn qualified_builtin(env: &Env, name: &str) -> Option<String> {
     let (module, member) = name.split_once('.')?;
+    let member_of = |r: &BTreeMap<String, Value>| match r.get(member) {
+        Some(Value::Builtin(b)) => Some(b.name.clone()),
+        _ => None,
+    };
     match env.get_var(module) {
-        Some(Value::Record(r)) => match r.get(member) {
-            Some(Value::Builtin(b)) => Some(b.name.clone()),
+        Some(Value::Record(r)) => member_of(r),
+        // An Env built without the module table (a bare `Env::new()`) still
+        // resolves the built-in modules' names.
+        None => match crate::modules::all_modules()
+            .into_iter()
+            .find(|(n, _)| *n == module)
+        {
+            Some((_, Value::Record(r))) => member_of(&r),
             _ => None,
         },
         _ => None,
@@ -30338,6 +30348,34 @@ fn bi_proc_list(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
             },
             PROBE_DEADLINE_SECS,
         )?;
+        // The image name, as proc_info gives it: `comm`, not the whole command
+        // line that `ps aux` ends with. A pid missing here (it exited between
+        // the two reads) keeps the command line as its name.
+        let comm_out = proc_tool(
+            "proc_list",
+            "ps",
+            {
+                let mut c = crate::safety::child_command("ps");
+                c.args(["-axo", "pid=,comm="]);
+                c
+            },
+            PROBE_DEADLINE_SECS,
+        )?;
+        let mut comms: HashMap<i64, String> = HashMap::new();
+        for line in String::from_utf8_lossy(&comm_out.stdout).lines() {
+            let line = line.trim_start();
+            if let Some((p, c)) = line.split_once(char::is_whitespace) {
+                if let Ok(p) = p.parse::<i64>() {
+                    let c = c.trim();
+                    // macOS prints the executable's full path.
+                    #[cfg(target_os = "macos")]
+                    let c = c.rsplit('/').next().unwrap_or(c);
+                    if !c.is_empty() {
+                        comms.insert(p, c.to_string());
+                    }
+                }
+            }
+        }
         let mut procs = Vec::new();
         for line in String::from_utf8_lossy(&out.stdout).lines().skip(1) {
             if line.trim().is_empty() {
@@ -30359,7 +30397,8 @@ fn bi_proc_list(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
             let command = parts[10..].join(" ");
             let mut rec = BTreeMap::new();
             rec.insert("pid".to_string(), Value::Int(pid));
-            rec.insert("name".to_string(), Value::Str(command.clone()));
+            let name = comms.get(&pid).cloned().unwrap_or_else(|| command.clone());
+            rec.insert("name".to_string(), Value::Str(name));
             rec.insert("cpu".to_string(), Value::Float(cpu));
             rec.insert("mem".to_string(), Value::Int(rss_kb.saturating_mul(1024)));
             rec.insert(

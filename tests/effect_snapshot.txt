@@ -596,7 +596,7 @@ hw_sensors	ReadLocal
 hw_usb	ReadLocal
 hyperfine	Exec
 hyperfine_bench	Exec
-ifconfig	Network
+ifconfig	ReadLocal
 in	Pure
 index_docs	WriteLocal
 index_of	Pure

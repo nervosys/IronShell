@@ -129,7 +129,12 @@ fn item1_every_declared_subject_is_the_first_advertised_parameter() {
         if sig.params.iter().any(|p| p.name == "subject") {
             continue;
         }
-        let def = ontology_describe_json(sig.name);
+        let mut def = ontology_describe_json(sig.name);
+        // A name shared with a module answers the module record, and keeps the
+        // builtin of that name under `builtin`.
+        if def.get("module").is_some() {
+            def = def["builtin"].clone();
+        }
         let params = def["parameters"].as_array().expect("parameters");
         assert_eq!(
             params.first().and_then(|p| p["name"].as_str()),
