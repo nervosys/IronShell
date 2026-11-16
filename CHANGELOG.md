@@ -7,6 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- `ish --zsh` refuses `setopt extendedglob` (in every spelling) by name; it was accepted and then ignored, so `^a.txt` globbed literally.
+- `ish -b` refuses brace expansion (`{a,b}`, `{1..3}`) by name instead of printing it literally; `{}`, `{a}`, `${x}` and `find -exec {} \;` are unaffected.
+- Match arms must be separated by a comma or a newline, like every other list.
+- AGENTS.md lists the `${...}` operators `ish -b` runs (`#`, `##`, `%`, `%%`, `-`, `:-`, `=`, `:=`, `+`, `:+`, `?`, `:?`, `${#x}`, `${x:o:l}`) and those it refuses.
+- Piping into a literal (`1 | 2`, `[1] | 5`) is E_BAD_ARG; the right side of `|` must be a call.
+
+### Added
+
+- `ish -b` decodes ANSI-C quoting (`$'a\tb'`), and `cd -` prints the directory it changes to, as bash does.
+- `db.sqlite_exec` takes an optional third argument, an Array of values bound to `?` placeholders (one statement).
+
+### Fixed
+
+- `sum` and `math.sum` raise on Int overflow instead of wrapping silently (`sum([9223372036854775807, 1])` was a large negative number).
+- `sort` and `sort_by` order an Int against a Float exactly, as `>` does; above 2^53 they could disagree.
+- `to_csv` quotes a field holding a bare CR, so it round-trips; `from_csv` names the line of an unterminated quoted field instead of reporting a short row.
+- `~` and `$HOME` in `ish -b` use the platform home directory when HOME is unset (Windows), where `~/x` became `/x`.
+- Messages: an unknown module member no longer suggests `None` (and is not retryable without a suggestion); an unterminated single-quoted string says single quotes take no escapes; empty-array `min`/`max`/`avg`/`median`/`percentile` say the array is empty; a type error on an uncalled builtin says to call it (`ls()`); method-style calls on literals and arrays, and `.length`, get the "has no methods" hint; `let [a, b]` says destructuring is not supported; `reduce` without an initial value says it is required; `1_000` says digit separators are not supported; `join` names the index and type of an element it cannot join; `rm(path, {recursive: true})` points at `rmdir(path, true)`.
+- `--explain` of a missing file is E_NOT_FOUND (exit 66), and a module member that does not exist is noted as an unknown builtin.
+
 ## [14.0.5] - 2026-11-16
 
 ### Security
