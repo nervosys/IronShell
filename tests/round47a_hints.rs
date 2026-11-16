@@ -37,3 +37,24 @@ fn unknown_module_member_does_not_suggest_none() {
     assert!(!all.contains("\"None\""), "{all}");
     assert!(all.contains("\"retryable\":false"), "{all}");
 }
+
+#[test]
+fn unterminated_single_quote_says_use_double_quotes() {
+    let (out, err, code) = run(&[], "'a\'b'");
+    let all = format!("{out}{err}");
+    assert_ne!(code, 0, "{all}");
+    assert!(all.contains("takes no escapes"), "{all}");
+    assert!(all.contains("double-quoted"), "{all}");
+    assert!(!all.contains("or escape the quote inside it"), "{all}");
+    // A double-quoted one still may escape.
+    let (out, err, _) = run(&[], "\"abc");
+    assert!(format!("{out}{err}").contains("escape the quote"), "{out}{err}");
+}
+
+#[test]
+fn unclosed_hole_in_single_quotes_points_to_double_quotes() {
+    let (out, err, code) = run(&[], "'a ${x'");
+    let all = format!("{out}{err}");
+    assert_ne!(code, 0, "{all}");
+    assert!(all.contains("double-quoted string with"), "{all}");
+}

@@ -2905,7 +2905,8 @@ fn interpolation_name_error(e: anyhow::Error) -> anyhow::Error {
 fn unclosed_interpolation_error() -> anyhow::Error {
     anyhow::Error::new(crate::parser::ParseError::with_hint(
         "unclosed interpolation `${`: no `}` closes it before the string ends",
-        "close it with }, or write \\${ for a literal ${",
+        "close it with }, or use a double-quoted string with \\${ for a literal ${ \
+         (a single-quoted string takes no escapes)",
     ))
 }
 

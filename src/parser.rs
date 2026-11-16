@@ -585,11 +585,19 @@ fn lex(src: &str) -> Result<Vec<Spanned>> {
 
 /// A string literal with no closing quote. Reported at the opening quote,
 /// because that is where the literal starts and where the fix goes.
-fn unterminated_string(line: usize, col: usize) -> anyhow::Error {
+fn unterminated_string(line: usize, col: usize, single: bool) -> anyhow::Error {
+    let hint = if single {
+        // A single-quoted string takes no escapes, so `'a\'b'` cannot hold the
+        // quote: the way to write it is a double-quoted string.
+        "close the string with `'`; a single-quoted string takes no escapes, so \
+         to hold a `'` use a double-quoted string, \"a'b\""
+    } else {
+        "close the string with the same quote character it opened with, \
+         or escape the quote inside it"
+    };
     anyhow::Error::new(ParseError::with_hint(
         format!("unterminated string at line {}, column {}", line, col),
-        "close the string with the same quote character it opened with, \
-         or escape the quote inside it",
+        hint,
     ))
 }
 
@@ -1384,7 +1392,7 @@ fn lex_marked(src: &str) -> Result<(Vec<Spanned>, std::collections::HashSet<usiz
                     }
                 }
                 if !closed {
-                    return Err(unterminated_string(start_line, start_col));
+                    return Err(unterminated_string(start_line, start_col, false));
                 }
                 out.push(Spanned {
                     kind: Tok::String,
@@ -1409,7 +1417,7 @@ fn lex_marked(src: &str) -> Result<(Vec<Spanned>, std::collections::HashSet<usiz
                     s.push(ch);
                 }
                 if !closed {
-                    return Err(unterminated_string(start_line, start_col));
+                    return Err(unterminated_string(start_line, start_col, true));
                 }
                 // `'it''s'` is SQL's and Python's doubled quote. It used to read
                 // as `'it'` followed by `'s'`, and the rest was dropped.
