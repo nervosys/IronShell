@@ -9721,12 +9721,14 @@ fn bi_sort(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
                 f1.partial_cmp(f2).unwrap_or(std::cmp::Ordering::Equal)
             }
             // An Int and a Float are both numbers, so they order by value.
-            (Value::Int(i), Value::Float(f)) => (*i as f64)
-                .partial_cmp(f)
-                .unwrap_or(std::cmp::Ordering::Equal),
-            (Value::Float(f), Value::Int(i)) => f
-                .partial_cmp(&(*i as f64))
-                .unwrap_or(std::cmp::Ordering::Equal),
+            // Exactly, as `<` and `>` compare them: an Int above 2^53 is not
+            // rounded to a Float first.
+            (Value::Int(i), Value::Float(f)) => {
+                crate::value::cmp_int_float(*i, *f).unwrap_or(std::cmp::Ordering::Equal)
+            }
+            (Value::Float(f), Value::Int(i)) => crate::value::cmp_int_float(*i, *f)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .reverse(),
             _ => std::cmp::Ordering::Equal,
         };
         if reverse {
@@ -27960,8 +27962,13 @@ fn sort_compare_values(a: &Value, b: &Value) -> std::cmp::Ordering {
     match (a, b) {
         (Value::Int(x), Value::Int(y)) => x.cmp(y),
         (Value::Float(x), Value::Float(y)) => x.partial_cmp(y).unwrap_or(Ordering::Equal),
-        (Value::Int(x), Value::Float(y)) => (*x as f64).partial_cmp(y).unwrap_or(Ordering::Equal),
-        (Value::Float(x), Value::Int(y)) => x.partial_cmp(&(*y as f64)).unwrap_or(Ordering::Equal),
+        // Exact, as `<` and `>` compare them, not through a lossy f64 cast.
+        (Value::Int(x), Value::Float(y)) => {
+            crate::value::cmp_int_float(*x, *y).unwrap_or(Ordering::Equal)
+        }
+        (Value::Float(x), Value::Int(y)) => crate::value::cmp_int_float(*y, *x)
+            .unwrap_or(Ordering::Equal)
+            .reverse(),
         (Value::Str(x), Value::Str(y)) => x.cmp(y),
         (Value::Bool(x), Value::Bool(y)) => x.cmp(y),
         _ => Ordering::Equal,
