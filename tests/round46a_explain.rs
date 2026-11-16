@@ -211,13 +211,21 @@ fn a_climbing_prefix_with_an_unknown_rest_is_not_judged_deny() {
 
 #[test]
 fn the_nesting_limit_message_states_the_real_limit() {
-    let src = format!("{}1{}", "(".repeat(300), ")".repeat(300));
-    let err = iron_shell::parser::parse_program(&src)
-        .expect_err("300 parentheses are past the limit")
-        .to_string();
-    assert!(err.contains("nested more than"), "{err}");
-    assert!(err.contains("about 256"), "{err}");
-    // 200 parentheses are inside the limit.
-    let ok = format!("{}1{}", "(".repeat(200), ")".repeat(200));
-    assert!(iron_shell::parser::parse_program(&ok).is_ok());
+    // Deep recursion needs more than a test thread's default stack.
+    std::thread::Builder::new()
+        .stack_size(64 * 1024 * 1024)
+        .spawn(|| {
+            let src = format!("{}1{}", "(".repeat(300), ")".repeat(300));
+            let err = iron_shell::parser::parse_program(&src)
+                .expect_err("300 parentheses are past the limit")
+                .to_string();
+            assert!(err.contains("nested more than"), "{err}");
+            assert!(err.contains("about 256"), "{err}");
+            // 200 parentheses are inside the limit.
+            let ok = format!("{}1{}", "(".repeat(200), ")".repeat(200));
+            assert!(iron_shell::parser::parse_program(&ok).is_ok());
+        })
+        .unwrap()
+        .join()
+        .unwrap();
 }
