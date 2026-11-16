@@ -726,8 +726,13 @@ pub fn read_jail_dispatch(builtin: &str, args: &[crate::value::Value], piped: bo
     };
     // Called directly, a builtin with a subject takes it as its first argument.
     let offset = usize::from(sig.subject.is_some() && !piped);
+    if offset == 1 && PATH_SUBJECT.contains(&sig.name) {
+        if let Some(Value::Str(s)) = args.first() {
+            judge(s)?;
+        }
+    }
     for (i, p) in sig.params.iter().enumerate() {
-        if !names_a_path_param(p.name) || NOT_A_PATH.contains(&(builtin, p.name)) {
+        if !is_path_param(builtin, p.name) {
             continue;
         }
         let Some(arg) = args.get(i + offset) else {
@@ -789,6 +794,9 @@ pub fn outside_path_literal(
                     }
                     let name = match slot {
                         LiteralSlot::Position(n) => {
+                            if *n == 0 && offset == 1 && PATH_SUBJECT.contains(&sig.name) {
+                                return true;
+                            }
                             let Some(i) = n.checked_sub(offset) else {
                                 return false;
                             };
@@ -799,7 +807,7 @@ pub fn outside_path_literal(
                         }
                         LiteralSlot::Named(n) => n.as_str(),
                     };
-                    names_a_path_param(name) && !NOT_A_PATH.contains(&(builtin, name))
+                    is_path_param(builtin, name)
                 })
                 .map(|(_, s)| s)
                 .collect()
@@ -824,6 +832,31 @@ pub fn outside_path_literal(
             outside_read_jail_as_agent(judged)
         })
         .cloned()
+}
+
+/// Parameters that are paths though their names do not say so: both files of
+/// a diff, and a glob (judged by its literal directory).
+const EXTRA_PATH_PARAMS: &[(&str, &str)] = &[
+    ("file_diff", "path1"),
+    ("file_diff", "path2"),
+    ("fs_glob", "pattern"),
+];
+
+/// Builtins whose subject, the first argument of a direct call, is a path.
+const PATH_SUBJECT: &[&str] = &["file_exists"];
+
+/// Whether `name`, a parameter of `builtin`, takes a file-system path.
+fn is_path_param(builtin: &str, name: &str) -> bool {
+    if NOT_A_PATH.contains(&(builtin, name)) {
+        return false;
+    }
+    if names_a_path_param(name) {
+        return true;
+    }
+    match crate::signature::signature_of(builtin) {
+        Some(sig) => EXTRA_PATH_PARAMS.contains(&(sig.name, name)),
+        None => false,
+    }
 }
 
 /// Parameters whose name reads like a path but whose value is not one.
