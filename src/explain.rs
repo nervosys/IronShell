@@ -30,6 +30,12 @@ use std::path::PathBuf;
 /// Most modules one explanation will fold in; past it the verdict is `unknown`.
 const MAX_MODULES: usize = 256;
 
+/// Most elements of an Array literal a lambda is judged against one by one.
+const MAX_ELEMENTS: usize = 256;
+
+/// Deepest nesting of function bodies entered for a call or an element.
+const MAX_DEPTH: usize = 16;
+
 struct Walk<'a> {
     env: &'a crate::env::Env,
     /// Names bound by `let`, which shadow builtins of the same name.
@@ -50,6 +56,14 @@ struct Walk<'a> {
     /// Names bound once, immutably, to a string literal: `name = "rm"`, so that
     /// `call(name, ...)` can be read as a call to that builtin.
     consts: HashMap<String, String>,
+    /// Names bound once, immutably, to a fn literal: a call through one is
+    /// judged by its body with the literal arguments bound.
+    fns: HashMap<String, (Vec<String>, Expr)>,
+    /// How deep the walk is inside bodies it entered for a call or an element.
+    depth: usize,
+    /// Set by a pipe for the `map`/`each`/`where` on its right: the strings of
+    /// the literal Array on its left.
+    elems: Option<Vec<String>>,
     /// Modules already folded in, by canonical path (cycles end here).
     visited: HashSet<PathBuf>,
 }
@@ -63,37 +77,99 @@ fn plain_literal(s: &str) -> Option<String> {
     }
 }
 
+/// The value of an expression that is a String known without running: a literal,
+/// one whose interpolation holes are all such values, or a name bound once to
+/// one (`consts`).
+fn const_str(consts: &HashMap<String, String>, e: &Expr) -> Option<String> {
+    match e {
+        Expr::LitStr(s) => fold_interpolation(consts, s),
+        Expr::Ident(n) => consts.get(n).cloned(),
+        _ => None,
+    }
+}
+
+/// A string literal's value, its `${...}` holes replaced by their known values.
+/// `None` when a hole is anything but a known String.
+fn fold_interpolation(consts: &HashMap<String, String>, s: &str) -> Option<String> {
+    if !s.contains("${") {
+        return plain_literal(s);
+    }
+    let chars: Vec<char> = s.chars().collect();
+    let mut out = String::new();
+    let mut i = 0;
+    while i < chars.len() {
+        if chars[i] == '$' && chars.get(i + 1) == Some(&'{') {
+            let body = i + 2;
+            let end = crate::parser::interp_hole_end(&chars, body)?;
+            let src: String = chars[body..end - 1].iter().collect();
+            let stmts = crate::parser::parse_program(&src).ok()?;
+            let value = match stmts.as_slice() {
+                [Stmt::Expr(e)] => const_str(consts, e)?,
+                _ => return None,
+            };
+            out.push_str(&value);
+            i = end;
+        } else {
+            out.push(chars[i]);
+            i += 1;
+        }
+    }
+    Some(out.replace(crate::parser::ESCAPED_DOLLAR, "$"))
+}
+
+/// The Strings of an Array literal whose elements are all known Strings.
+fn const_array(consts: &HashMap<String, String>, e: &Expr) -> Option<Vec<String>> {
+    match e {
+        Expr::Array(items) if items.len() <= MAX_ELEMENTS => {
+            items.iter().map(|x| const_str(consts, x)).collect()
+        }
+        _ => None,
+    }
+}
+
 /// The plain String literal at each position of `args`, `None` for any other
-/// argument (a variable, a computed value, a string with an interpolation hole).
-fn positional_literals(args: &[Expr]) -> Vec<Option<String>> {
-    args.iter()
-        .map(|a| match a {
-            Expr::LitStr(s) => plain_literal(s),
-            _ => None,
-        })
-        .collect()
+/// argument (a computed value, a string with a hole that is not a known String).
+fn positional_literals(consts: &HashMap<String, String>, args: &[Expr]) -> Vec<Option<String>> {
+    args.iter().map(|a| const_str(consts, a)).collect()
 }
 
 /// The literal Strings among a call's arguments (and among the elements of an
-/// Array argument), each with its slot.
-fn literal_args(args: &[Expr], named: &[(String, Expr)]) -> Vec<(LiteralSlot, String)> {
+/// Array argument), each with its slot. A name bound once to a String, and an
+/// interpolation of known Strings, count as literals, with their value.
+fn literal_args(
+    consts: &HashMap<String, String>,
+    args: &[Expr],
+    named: &[(String, Expr)],
+) -> Vec<(LiteralSlot, String)> {
     let mut out = Vec::new();
+    let one = |a: &Expr| -> Option<String> {
+        match const_str(consts, a) {
+            Some(v) => Some(v),
+            None => match a {
+                Expr::LitStr(s) => Some(s.clone()),
+                _ => None,
+            },
+        }
+    };
     for (i, a) in args.iter().enumerate() {
         match a {
-            Expr::LitStr(s) => out.push((LiteralSlot::Position(i), s.clone())),
             Expr::Array(items) => {
                 for it in items {
-                    if let Expr::LitStr(s) = it {
-                        out.push((LiteralSlot::Position(i), s.clone()));
+                    if let Some(s) = one(it) {
+                        out.push((LiteralSlot::Position(i), s));
                     }
                 }
             }
-            _ => {}
+            _ => {
+                if let Some(s) = one(a) {
+                    out.push((LiteralSlot::Position(i), s));
+                }
+            }
         }
     }
     for (n, a) in named {
-        if let Expr::LitStr(s) = a {
-            out.push((LiteralSlot::Named(n.clone()), s.clone()));
+        if let Some(s) = one(a) {
+            out.push((LiteralSlot::Named(n.clone()), s));
         }
     }
     out
@@ -125,22 +201,43 @@ impl Walk<'_> {
     /// Run `f` with `names` bound as parameters: they shadow builtins and
     /// literal bindings of the same name for its duration.
     fn scoped(&mut self, names: &[String], f: impl FnOnce(&mut Self)) {
+        let binds: Vec<(String, Option<String>)> =
+            names.iter().map(|n| (n.clone(), None)).collect();
+        self.scoped_values(&binds, f);
+    }
+
+    /// Like `scoped`, with each name that has a value bound to that String for
+    /// the duration, as a name bound once to a literal is.
+    fn scoped_values(&mut self, binds: &[(String, Option<String>)], f: impl FnOnce(&mut Self)) {
         let mut added = Vec::new();
         let mut shadowed = Vec::new();
-        for n in names {
+        let mut shadowed_fns = Vec::new();
+        for (n, value) in binds {
             if self.locals.insert(n.clone()) {
                 added.push(n.clone());
             }
             if let Some(v) = self.consts.remove(n) {
                 shadowed.push((n.clone(), v));
             }
+            if let Some(g) = self.fns.remove(n) {
+                shadowed_fns.push((n.clone(), g));
+            }
+            if let Some(v) = value {
+                self.consts.insert(n.clone(), v.clone());
+            }
         }
         f(self);
+        for (n, _) in binds {
+            self.consts.remove(n);
+        }
         for n in added {
             self.locals.remove(&n);
         }
         for (n, v) in shadowed {
             self.consts.insert(n, v);
+        }
+        for (n, g) in shadowed_fns {
+            self.fns.insert(n, g);
         }
     }
 
@@ -184,15 +281,26 @@ impl Walk<'_> {
             _ => None,
         };
         let rest = args.get(1..).unwrap_or(&[]);
+        // `call("file.read", ...)` names the builtin as `file.read(...)` does.
+        let name = name.map(|n| {
+            if crate::builtins::is_dispatched(&n) || crate::plugins::is_manifest_builtin(&n) {
+                n
+            } else {
+                crate::builtins::qualified_builtin(self.env, &n).unwrap_or(n)
+            }
+        });
         match name {
             Some(n)
                 if crate::builtins::is_dispatched(&n)
                     || crate::plugins::is_manifest_builtin(&n) =>
             {
                 self.calls.push((n.clone(), Some(n.clone())));
-                self.positional
-                    .insert(self.calls.len() - 1, positional_literals(rest));
-                self.literals.push((false, literal_args(rest, &[])));
+                self.positional.insert(
+                    self.calls.len() - 1,
+                    positional_literals(&self.consts, rest),
+                );
+                self.literals
+                    .push((false, literal_args(&self.consts, rest, &[])));
                 if n == "call" {
                     self.call_by_name(rest);
                 } else {
@@ -264,11 +372,13 @@ impl Walk<'_> {
         let _entry = crate::module_loader::enter_entry_file(&path);
         let locals = std::mem::take(&mut self.locals);
         let consts = std::mem::take(&mut self.consts);
+        let fns = std::mem::take(&mut self.fns);
         for s in &stmts {
             self.stmt(s);
         }
         self.locals = locals;
         self.consts = consts;
+        self.fns = fns;
     }
 
     /// The builtin a callee names, if it names one.
@@ -315,9 +425,11 @@ impl Walk<'_> {
                 ..
             } => {
                 self.expr(value);
-                let literal = match value {
-                    Expr::LitStr(s) if !*is_mut && !self.locals.contains(name) => plain_literal(s),
-                    _ => None,
+                let fresh = !*is_mut && !self.locals.contains(name);
+                let literal = if fresh {
+                    const_str(&self.consts, value)
+                } else {
+                    None
                 };
                 match literal {
                     Some(s) => {
@@ -325,6 +437,15 @@ impl Walk<'_> {
                     }
                     None => {
                         self.consts.remove(name);
+                    }
+                }
+                match value {
+                    Expr::Lambda { params, body } if fresh => {
+                        self.fns
+                            .insert(name.clone(), (params.clone(), (**body).clone()));
+                    }
+                    _ => {
+                        self.fns.remove(name);
                     }
                 }
                 self.locals.insert(name.clone());
@@ -349,17 +470,69 @@ impl Walk<'_> {
                 named,
             } => {
                 let piped = std::mem::take(&mut self.piped_next);
+                let elems = self.elems.take();
+                // A call through a name bound to a fn literal, with a known
+                // String for every parameter: judged by the body with them bound.
+                if let (Expr::Ident(n), false, true) =
+                    (callee.as_ref(), piped, self.depth < MAX_DEPTH)
+                {
+                    if let Some((params, body)) = self.fns.get(n).cloned() {
+                        let known: Vec<Option<String>> =
+                            args.iter().map(|a| const_str(&self.consts, a)).collect();
+                        if self.locals.contains(n)
+                            && named.is_empty()
+                            && params.len() == args.len()
+                            && known.iter().all(|k| k.is_some())
+                        {
+                            for a in args {
+                                self.expr(a);
+                            }
+                            let binds: Vec<(String, Option<String>)> =
+                                params.iter().cloned().zip(known).collect();
+                            self.depth += 1;
+                            self.scoped_values(&binds, |w| w.expr(&body));
+                            self.depth -= 1;
+                            return;
+                        }
+                    }
+                }
                 let r = self.resolve(callee);
                 let target = r.1.clone();
+                // `map`/`each`/`where` over an Array literal of known Strings:
+                // the lambda is judged with its parameter bound to each one.
+                let source: Option<Vec<String>> = match target.as_deref() {
+                    Some("map" | "each" | "where" | "filter") if self.depth < MAX_DEPTH => elems
+                        .or_else(|| {
+                            if piped {
+                                None
+                            } else {
+                                args.first().and_then(|a| const_array(&self.consts, a))
+                            }
+                        }),
+                    _ => None,
+                };
                 self.calls.push(r);
-                self.positional
-                    .insert(self.calls.len() - 1, positional_literals(args));
-                self.literals.push((piped, literal_args(args, named)));
+                self.positional.insert(
+                    self.calls.len() - 1,
+                    positional_literals(&self.consts, args),
+                );
+                self.literals
+                    .push((piped, literal_args(&self.consts, args, named)));
                 if !matches!(callee.as_ref(), Expr::Ident(_) | Expr::MemberAccess { .. }) {
                     self.expr(callee);
                 }
                 for a in args {
-                    self.expr(a);
+                    match (a, &source) {
+                        (Expr::Lambda { params, body }, Some(items)) if !params.is_empty() => {
+                            self.depth += 1;
+                            for item in items {
+                                let bind = [(params[0].clone(), Some(item.clone()))];
+                                self.scoped_values(&bind, |w| w.expr(body));
+                            }
+                            self.depth -= 1;
+                        }
+                        _ => self.expr(a),
+                    }
                 }
                 for (_, a) in named {
                     self.expr(a);
@@ -386,8 +559,14 @@ impl Walk<'_> {
                     }
                     other => {
                         self.piped_next = matches!(other, Expr::Call { .. });
+                        self.elems = if self.piped_next {
+                            const_array(&self.consts, left)
+                        } else {
+                            None
+                        };
                         self.expr(other);
                         self.piped_next = false;
+                        self.elems = None;
                     }
                 }
             }
@@ -557,6 +736,29 @@ fn name_refusal(
     None
 }
 
+/// The refusal of `rm` given a glob it would not expand: E_BAD_ARG, worded as the
+/// run words it. The name is judged as the run judges it, so a file that really
+/// has a `*` in its name is not a glob. `None` for any other builtin.
+fn glob_refusal(builtin: &str, positional: Option<&Vec<Option<String>>>) -> Option<String> {
+    if builtin != "rm" {
+        return None;
+    }
+    let name = positional?.first()?.as_ref()?;
+    if !name.contains(['*', '?'])
+        || ["\\?\\", "\\.\\", "//?/", "//./"]
+            .iter()
+            .any(|p| name.starts_with(p))
+        || crate::safety::names_a_remote_share(name)
+        || std::fs::symlink_metadata(name).is_ok()
+    {
+        return None;
+    }
+    Some(
+        "rm does not expand globs; list the files with glob(...) and remove each (the run refuses it with E_BAD_ARG)"
+            .to_string(),
+    )
+}
+
 /// The refusal of an archive extraction whose archive is named by a literal and
 /// can be read here: an entry that lands outside the destination or the
 /// workspace, through a link already on disk or by its name. The archive is read
@@ -599,6 +801,9 @@ pub fn explain(code: &str) -> Result<Value> {
         positional: HashMap::new(),
         piped_next: false,
         consts: HashMap::new(),
+        fns: HashMap::new(),
+        depth: 0,
+        elems: None,
         visited: HashSet::new(),
     };
     for s in &stmts {
@@ -623,6 +828,7 @@ pub fn explain(code: &str) -> Result<Value> {
                 let refused = refused_outright(b)
                     .or_else(|| name_refusal(b, effect, w.positional.get(&i)))
                     .or_else(|| jail_refusal(b, effect, literals, piped))
+                    .or_else(|| glob_refusal(b, w.positional.get(&i)))
                     .or_else(|| extraction_refusal(b, &plain));
                 let decision = if refused.is_some() {
                     "deny"

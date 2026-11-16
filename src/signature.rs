@@ -834,8 +834,8 @@ pub static SIGNATURES: &[Signature] = &[
     Signature {
         name: "call", category: None, subject_required: false, aliases: &[], subject: None,
         params: &[req("name", Ty::Str, "builtin name or alias"), opt_rest("args", Ty::Any, "arguments forwarded unchanged to the target")], returns: "Any",
-        doc: "Dynamically dispatch a builtin name (String or Uri) with zero or more arguments and forward any pipeline input unchanged. Use normal target signature validation and effect gating; target errors propagate. This calls builtins, not user-defined lambdas.",
-        examples: &[(r#"call("rl_gridworld").width"#, "5"), (r#"call("lower", "ABC")"#, r#""abc""#), (r#"[1,2] | call("map", fn(x) => x + 1)"#, "[2, 3]")],
+        doc: "Dynamically dispatch a builtin name (String or Uri) with zero or more arguments and forward any pipeline input unchanged. Use normal target signature validation and effect gating; target errors propagate. A module-qualified name (file.read) names the builtin as file.read(...) does. This calls builtins, not user-defined lambdas.",
+        examples: &[(r#"call("rl_gridworld").width"#, "5"), (r#"call("lower", "ABC")"#, r#""abc""#), (r#"call("str.upper", "abc")"#, r#""ABC""#), (r#"[1,2] | call("map", fn(x) => x + 1)"#, "[2, 3]")],
     },
     Signature {
         name: "budget", category: None, subject_required: false, aliases: &[], subject: Some(Ty::Any),
@@ -14962,10 +14962,11 @@ pub static SIGNATURES: &[Signature] = &[
         name: "rm", category: None, subject_required: false, aliases: &[], subject: None,
         params: &[req("path", Ty::Str, "the file to delete; relative paths resolve against the workspace"), opt("force", Ty::Bool, "true: a file that is already absent is not an error (default false)")],
         returns: "String",
-        doc: "Delete one file. The path passes the workspace jail and the Destructive gate first, and inside a transaction the file is snapshotted before it goes. Returns \"removed: <path>\", or with force, \"already absent: <path>\" when there was nothing to delete. force excuses only absence: a directory, a locked file or a permission refusal is a coded file-system error either way. A force that is not a Bool, pipeline input and surplus arguments are refused with E_BAD_ARG.",
+        doc: "Delete one file. The path passes the workspace jail and the Destructive gate first, and inside a transaction the file is snapshotted before it goes. Returns \"removed: <path>\", or with force, \"already absent: <path>\" when there was nothing to delete. force excuses only absence: a directory, a locked file or a permission refusal is a coded file-system error either way. A force that is not a Bool, pipeline input, surplus arguments, and a name with * or ? that names no file (rm expands no globs: list with glob(...) and remove each) are refused with E_BAD_ARG.",
         examples: &[
             (r#"(try { rm(1) } catch e { e.error.code })"#, "E_BAD_ARG"),
             (r#"(try { rm("x", "yes") } catch e { e.error.code })"#, "E_BAD_ARG"),
+            (r#"(try { rm("no_such_dir_*.zzz") } catch e { e.error.code })"#, "E_BAD_ARG"),
         ],
     },
     Signature {

@@ -5472,6 +5472,20 @@ fn bi_http_get(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
     Ok(Value::Record(out))
 }
 
+/// The builtin a module-qualified name (`file.read`) refers to, as a call
+/// written `file.read(...)` resolves it. `None` when `name` is not `module.member`
+/// of a module bound in `env`.
+pub fn qualified_builtin(env: &Env, name: &str) -> Option<String> {
+    let (module, member) = name.split_once('.')?;
+    match env.get_var(module) {
+        Some(Value::Record(r)) => match r.get(member) {
+            Some(Value::Builtin(b)) => Some(b.name.clone()),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
 fn bi_call(args: Vec<Value>, input: Option<Value>, env: &mut Env) -> Result<Value> {
     // call <name> [args...]
     let name_val = args
@@ -5486,6 +5500,12 @@ fn bi_call(args: Vec<Value>, input: Option<Value>, env: &mut Env) -> Result<Valu
                 other
             )));
         }
+    };
+    // `call("file.read", ...)` names the builtin as `file.read(...)` does.
+    let name = if is_served(&name) {
+        name
+    } else {
+        qualified_builtin(env, &name).unwrap_or(name)
     };
     // remaining args (after name)
     let mut rem: Vec<Value> = Vec::new();
@@ -68102,6 +68122,23 @@ pub fn bi_rm(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
         }
     };
     let force = fs_flag("rm", "force", args.get(1))?;
+    // rm names one file and expands nothing: a `*` or `?` that names no file is a
+    // glob the caller expected expanded. Left to the jail it was called "outside
+    // the workspace" (the name cannot be resolved), which it is not.
+    if path.contains(['*', '?'])
+        && !["\\\\?\\", "\\\\.\\", "//?/", "//./"]
+            .iter()
+            .any(|p| path.starts_with(p))
+        && !crate::safety::names_a_remote_share(&path)
+        && std::fs::symlink_metadata(&path).is_err()
+    {
+        return Err(crate::safety::bad_arg_with_hint(
+            "rm",
+            "a file name",
+            "a glob pattern",
+            "rm does not expand globs; list the files with glob(...) and remove each",
+        ));
+    }
     let written = path.clone();
     // Jailed: relative paths are workspace-relative; resolve before the jail check
     // so the guard validates the path that is actually deleted.
