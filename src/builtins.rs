@@ -15405,13 +15405,16 @@ fn bi_join(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
 
     let strings: Result<Vec<String>> = arr
         .iter()
-        .map(|v| match v {
+        .enumerate()
+        .map(|(i, v)| match v {
             Value::Str(s) => Ok(s.clone()),
             Value::Int(i) => Ok(i.to_string()),
             Value::Float(f) => Ok(crate::value::float_text(*f)),
             Value::Bool(b) => Ok(b.to_string()),
-            _ => Err(crate::safety::arg_err(
-                "join requires array of strings or numbers",
+            other => Err(crate::safety::bad_arg(
+                "join",
+                "an array of strings, numbers or Bools",
+                &format!("{} at index {i}", other.type_name()),
             )),
         })
         .collect();
@@ -51248,9 +51251,6 @@ fn sqlite_db_in_workspace(db_path: &str) -> Result<String> {
 }
 
 fn bi_db_sqlite_exec(args: Vec<Value>, _input: Option<Value>) -> Result<Value> {
-    let (db_path, sql) = sqlite_exec_prepare(args)?;
-    // Every mutating sqlite builtin (insert/update/delete/create_table/drop_table)
-    // routes through here, so snapshotting the db file at this single chokepoint
     // An optional third Array binds the statement's ? placeholders, as the
     // query builtin's trailing Array does.
     let params = match args.get(2) {
@@ -51271,17 +51271,20 @@ fn bi_db_sqlite_exec(args: Vec<Value>, _input: Option<Value>) -> Result<Value> {
             args.len(),
         ));
     }
+    let (db_path, sql) = sqlite_exec_prepare(args)?;
+    // Every mutating sqlite builtin (insert/update/delete/create_table/drop_table)
+    // routes through here, so snapshotting the db file at this single chokepoint
     // makes those mutations reversible inside a transaction. No-op when no
     // transaction is active.
     crate::tx::snapshot(&db_path);
-    sqlite_exec_run("db_sqlite_exec", &db_path, &sql, false)
-}
-
     if let Some(params) = params {
         sqlite_db_file("db_sqlite_exec", &db_path)?;
         crate::sql::exec_bound("db_sqlite_exec", &db_path, &sql, &params)?;
         return Ok(Value::Bool(true));
     }
+    sqlite_exec_run("db_sqlite_exec", &db_path, &sql, false)
+}
+
 /// Runs a statement that a builtin of its own built and validated. The sqlite3
 /// CLI gets `-safe`, which refuses writefile(), ATTACH and the file
 /// dot-commands, so a `;` the builtin missed still cannot reach the filesystem.
