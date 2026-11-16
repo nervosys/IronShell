@@ -68431,6 +68431,14 @@ pub fn bi_rm(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
             ))
         }
     };
+    if let Some(Value::Record(_)) = args.get(1) {
+        return Err(crate::safety::bad_arg_with_hint(
+            "rm",
+            "force: Bool",
+            "Record",
+            "rm takes only a path and an optional force Bool and has no recursive option; to remove a directory and what it holds use rmdir(path, true)",
+        ));
+    }
     let force = fs_flag("rm", "force", args.get(1))?;
     // rm names one file and expands nothing: a `*` or `?` that names no file is a
     // glob the caller expected expanded. Left to the jail it was called "outside
