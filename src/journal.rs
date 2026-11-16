@@ -1539,6 +1539,10 @@ fn leave_directory(dir: &Path) {
     // Both sides are normalised the same way, so a spelling difference (a
     // trailing separator, `..`, the `\\?\` prefix a canonical path carries) does
     // not hide the match.
+    // Symlinks are resolved first (macOS: /var is /private/var, and the cwd
+    // is reported in the resolved form), falling back to the path as given.
+    let cwd = std::fs::canonicalize(&cwd).unwrap_or(cwd);
+    let dir = std::fs::canonicalize(dir).unwrap_or_else(|_| dir.to_path_buf());
     let cwd = normalized_path(&cwd.to_string_lossy());
     let dir = normalized_path(&dir.to_string_lossy());
     if !Path::new(&cwd).starts_with(&dir) {
@@ -1979,6 +1983,8 @@ mod tests {
         let parent = root.join("a");
         let inner = parent.join("b");
         std::fs::create_dir_all(&inner).expect("tree");
+        // Resolved while it exists: the process reports its directory this way.
+        let parent_canonical = std::fs::canonicalize(&parent).unwrap_or_else(|_| parent.clone());
         let before = std::env::current_dir().ok();
         std::env::set_current_dir(&inner).expect("enter the directory");
         let removed = matches!(
@@ -1993,7 +1999,7 @@ mod tests {
         assert!(removed, "the directory the process was in was not removed");
         assert_eq!(
             now.map(|c| normalized_path(&c.to_string_lossy())),
-            Some(normalized_path(&parent.to_string_lossy())),
+            Some(normalized_path(&parent_canonical.to_string_lossy())),
             "the process was not moved to the surviving parent"
         );
     }
