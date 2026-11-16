@@ -3445,6 +3445,19 @@ pub fn rename_builtin(e: anyhow::Error, from: &str, to: &str) -> anyhow::Error {
 /// returned untouched (its specific code is strictly better information), and
 /// anything else is wrapped with its original message preserved verbatim.
 pub fn ensure_structured(builtin: &str, e: anyhow::Error) -> anyhow::Error {
+    /// The hint for a type error whose received value is a Builtin or a Lambda:
+    /// the name was written without the call that produces the data.
+    fn uncalled_function_hint(se: &SafetyError) -> Option<&'static str> {
+        let received = |ty: &str| se.got == ty || se.message.ends_with(&format!("got {ty}"));
+        if received("Builtin") {
+            Some("a builtin name alone is the function, not its result: call it, e.g. ls()")
+        } else if received("Lambda") {
+            Some("a lambda name alone is the function, not its result: call it with arguments, e.g. f(x)")
+        } else {
+            None
+        }
+    }
+
     if let Some(se) = e.downcast_ref::<SafetyError>() {
         // `arg_err` — by far the most-used structured helper — takes only a
         // message, so its `builtin` field is empty. The boundary is the one
@@ -3454,6 +3467,20 @@ pub fn ensure_structured(builtin: &str, e: anyhow::Error) -> anyhow::Error {
         // The same boundary replaces the generic `arg_err` hint with what the
         // builtin's declaration says it takes.
         let generic = matches!(se.code, ErrorCode::BadArg) && se.hint == ARG_ERR_HINT;
+        // A function value where data was wanted (`ls | len`): the name was
+        // written without a call. Say so, in place of the generic hint.
+        if matches!(se.code, ErrorCode::BadArg)
+            && (generic || se.hint.starts_with("pass an argument matching"))
+        {
+            if let Some(hint) = uncalled_function_hint(se) {
+                let mut filled = se.clone();
+                if filled.builtin.is_empty() {
+                    filled.builtin = builtin.to_string();
+                }
+                filled.hint = hint.to_string();
+                return anyhow::Error::new(filled);
+            }
+        }
         if !builtin.is_empty() && (se.builtin.is_empty() || generic) {
             let mut filled = se.clone();
             if filled.builtin.is_empty() {

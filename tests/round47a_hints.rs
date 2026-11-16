@@ -115,3 +115,11 @@ fn empty_array_extremum_hint_names_the_empty_array() {
         assert!(!all.contains("max takes Array"), "{src}: {all}");
     }
 }
+
+#[test]
+fn a_builtin_name_where_data_was_wanted_says_to_call_it() {
+    let (out, err, code) = run(&[], "ls | len");
+    let all = format!("{out}{err}");
+    assert_ne!(code, 0, "{all}");
+    assert!(all.contains("call it, e.g. ls()"), "{all}");
+}
