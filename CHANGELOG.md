@@ -33,6 +33,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `contains` works on an Array (membership, with `==`) and a Record (key present), as the `in` hint suggests.
 - Errors name the builtin as written (`hash:`, `from_json:`), not an internal alias or a hyphenated spelling.
 - `schema.modules` lists only callable members: 63 entries that named no builtin (among them `crypto.jwt_encode`, `crypto.key_derive`) were withdrawn.
+- A word call's argument is a single atom again, and an operator right after its arguments (`len [1,2,3] == 3`, `print x + 1`, `print (1+2) * 3`) is E_PARSE with a hint showing both readings; round 44's whole-expression rule had silently changed `len [1,2,3] == 3`. `(len [1,2,3])`, `print len([1,2])`, `print -x` and `print !true` work.
+- `help("module")` always returns the module's members, for all 108 modules (str, platform, ai, jq, shell, crypto and math included); a same-named builtin is kept under `builtin`.
+- `net_interfaces` (and its alias `ifconfig`) is read_local, like `hw.network`, so agent mode no longer asks for approval to list local interfaces.
+- `rm("*.txt")` is a clear E_BAD_ARG (rm does not expand globs) instead of a false E_OUTSIDE_WORKSPACE.
+- `cd` is no longer an undo journal step; undoing a `file.mkdir` of the working directory moves the process out first.
+- An uncaught error under `--deterministic` is JSON on stderr, as in agent mode.
 
 ### Added
 
@@ -42,6 +48,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Parse hints for a comparison right after a pipeline stage (parenthesize the pipe), `/* */` comments, `finally`, or-patterns, range and rest patterns in `match`, and `.5`.
 - `help("file")` (any module name) lists the module's members with a one-line description each.
 - Trailing commas in call arguments and lambda parameters; indexing and `.field` after a `|.field` projection (`xs |.n[0]`).
+- `call()` accepts module-qualified names (`call("file.read", "a.txt")`); `arr.contains` is the Array form of `contains`.
+- `df` and `sys.disk_info` rows carry numeric `size_bytes`, `used_bytes`, `available_bytes` and `use_pct` beside the strings; `sys.mem_info` and `hw.memory` carry `used`; `proc.list` rows carry `memory_bytes`.
 
 ### Fixed
 
@@ -53,6 +61,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - A piped number is `pow`'s base (`2 | pow(3)` is 8); the `uniq` help no longer claims `-c`; the `round` help states digits 0 to 17; truncated provider tool descriptions end at a whole sentence.
 - Better parse hints: a word-call as an assignment's value, a spaced `x [0]`, `fn name(...)` and a braced lambda body.
 - Docs: the AGENTS.md quick reference runs as written; llms-full.txt matches `sys.uptime`, `sys.mem_info`, `sys.cpu_info` and `file.patch`.
+- `--explain` predicts what agent mode does in more cases: it judges the paths of `file.exists`, `glob` and `file.diff`; follows literal paths through names, interpolation, `map`/`each`/`where` lambdas and calls to named lambdas; resolves `call("mod.member")`; and judges the read operands of `grep`, `head`, `tail`, `sort`, `uniq`, `cut` and `find` under `-b`, as it judged `cat`'s.
+- System information: Windows swap is the pagefile's size and use (it was commit minus RAM); a process with no known start time gives null, not 1970; `proc.list` and `proc.info` agree on `name` and `memory_bytes`, and `proc.info`'s `start_time` is ISO 8601; `sys.users` `last_logon` is ISO 8601; `cpu_info().mhz` is an Int; `sys.boot_time` agrees across calls; the `sys.load_avg` hint points at a builtin that reports load; an unknown pid reads "no process with pid N"; help lists the real fields.
+- Messages: `crypto_hash` and `pow` name the builtin as called, `crypto_hash` names a non-String data argument and refuses a piped value plus a second argument, `contains` names its three subject types, and `len`, `sum`, `avg`, `keys` and others name a type (`got Bool`) instead of Rust's debug form; the `unzip` help example shows E_NOT_FOUND.
+- `tar_create`'s hint for non-ASCII names (the system tar crashes on them on Windows) also covers names inside folder members.
 
 ## [14.0.4] - 2026-11-14
 
