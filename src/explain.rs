@@ -911,6 +911,7 @@ pub fn explain(code: &str) -> Result<Value> {
     let mut calls = Vec::new();
     let mut effects: BTreeMap<u8, &'static str> = BTreeMap::new();
     let mut unresolved = Vec::new();
+    let mut notes: Vec<String> = Vec::new();
     let mut verdict = "allow";
     for (i, (shown, builtin)) in w.calls.iter().enumerate() {
         let mut r = BTreeMap::new();
@@ -955,6 +956,23 @@ pub fn explain(code: &str) -> Result<Value> {
                     verdict = "unknown";
                 }
                 r.insert("decision".to_string(), Value::Str("unknown".to_string()));
+                // `file.delete`: a member the module does not have. The verdict
+                // is already `unknown`; the note says why, so it is not read as
+                // a call the analysis could not see into.
+                if let Some((module, member)) = shown.split_once('.') {
+                    let missing = !w.locals.contains(module)
+                        && matches!(
+                            w.env.get_var(module),
+                            Some(Value::Record(m)) if !m.contains_key(member)
+                        );
+                    if missing {
+                        let note = format!("unknown builtin {shown}");
+                        r.insert("hint".to_string(), Value::Str(note.clone()));
+                        if !notes.contains(&note) {
+                            notes.push(note);
+                        }
+                    }
+                }
             }
         }
         calls.push(Value::Record(r));
@@ -962,6 +980,12 @@ pub fn explain(code: &str) -> Result<Value> {
 
     let mut out = BTreeMap::new();
     out.insert("calls".to_string(), Value::Array(calls));
+    if !notes.is_empty() {
+        out.insert(
+            "notes".to_string(),
+            Value::Array(notes.into_iter().map(Value::Str).collect()),
+        );
+    }
     out.insert(
         "effects".to_string(),
         Value::Array(

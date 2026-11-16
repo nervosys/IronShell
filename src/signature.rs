@@ -15666,6 +15666,16 @@ pub fn validate(name: &str, args: &[Value], input: Option<&Value>) -> anyhow::Re
                 "sort_by(\"size\"), sort_by(fn(r) => r.size) or sort_by(\"size\", \"desc\")",
             ));
         }
+        // `[] | reduce(f)` has no value to start from: say the initial value
+        // is required, not just that an argument is missing.
+        if name == "reduce" {
+            return Err(crate::safety::bad_arg_with_hint(
+                name,
+                &sig.render(),
+                &format!("{supplied} of {required} required"),
+                "the initial value is required, even for an empty array: xs | reduce(fn(acc, x) => acc + x, 0)",
+            ));
+        }
         // `sql("select 1")` reads as complete; what it lacks is rows.
         if name == "sql" {
             return Err(crate::safety::bad_arg_with_hint(

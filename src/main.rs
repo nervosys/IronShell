@@ -653,9 +653,17 @@ fn run(mut cli: Cli) -> Result<()> {
     if cli.explain {
         let code = match (&cli.command, &file) {
             (Some(c), _) => c.clone(),
-            (None, Some(f)) => {
-                fs::read_to_string(f).with_context(|| format!("failed to read {f}"))?
-            }
+            (None, Some(f)) => match fs::read_to_string(f) {
+                Ok(code) => code,
+                // As a run reports a missing script: E_NOT_FOUND, exit 66, the
+                // JSON error shape under --agent.
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                    let err = iron_shell::safety::not_found("explain", "file", f);
+                    iron_shell::repl::report_error(&err);
+                    std::process::exit(iron_shell::repl::exit_status_for(&err));
+                }
+                Err(e) => return Err(e).with_context(|| format!("failed to read {f}")),
+            },
             (None, None) => {
                 let mut buf = String::new();
                 io::stdin().read_to_string(&mut buf)?;

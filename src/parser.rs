@@ -585,11 +585,19 @@ fn lex(src: &str) -> Result<Vec<Spanned>> {
 
 /// A string literal with no closing quote. Reported at the opening quote,
 /// because that is where the literal starts and where the fix goes.
-fn unterminated_string(line: usize, col: usize) -> anyhow::Error {
+fn unterminated_string(line: usize, col: usize, single: bool) -> anyhow::Error {
+    let hint = if single {
+        // A single-quoted string takes no escapes, so `'a\'b'` cannot hold the
+        // quote: the way to write it is a double-quoted string.
+        "close the string with `'`; a single-quoted string takes no escapes, so \
+         to hold a `'` use a double-quoted string, \"a'b\""
+    } else {
+        "close the string with the same quote character it opened with, \
+         or escape the quote inside it"
+    };
     anyhow::Error::new(ParseError::with_hint(
         format!("unterminated string at line {}, column {}", line, col),
-        "close the string with the same quote character it opened with, \
-         or escape the quote inside it",
+        hint,
     ))
 }
 
@@ -878,6 +886,29 @@ fn lex_marked(src: &str) -> Result<(Vec<Spanned>, std::collections::HashSet<usiz
         }
         if let Some(next) = peek(chars, *pos) {
             if is_ident_part(next) {
+                // `1_000`: a digit separator, which the language does not have.
+                if next == '_' {
+                    let mut joined = acc.clone();
+                    let mut at = *pos;
+                    while let Some(c) = peek(chars, at) {
+                        if c.is_ascii_digit() {
+                            joined.push(c);
+                        } else if c != '_' {
+                            break;
+                        }
+                        at += 1;
+                    }
+                    if !peek(chars, at).is_some_and(is_ident_part) {
+                        return Err(anyhow!(
+                            "malformed number: '{}' is followed by '_' at line {}, column {}; \
+                             digit separators (_) are not supported; write {}",
+                            acc,
+                            line,
+                            col,
+                            joined
+                        ));
+                    }
+                }
                 return Err(anyhow!(
                     "malformed number: '{}' is followed by '{}' at line {}, column {}; \
                      separate them with a space, or write a valid exponent such as 1e10",
@@ -1384,7 +1415,7 @@ fn lex_marked(src: &str) -> Result<(Vec<Spanned>, std::collections::HashSet<usiz
                     }
                 }
                 if !closed {
-                    return Err(unterminated_string(start_line, start_col));
+                    return Err(unterminated_string(start_line, start_col, false));
                 }
                 out.push(Spanned {
                     kind: Tok::String,
@@ -1409,7 +1440,7 @@ fn lex_marked(src: &str) -> Result<(Vec<Spanned>, std::collections::HashSet<usiz
                     s.push(ch);
                 }
                 if !closed {
-                    return Err(unterminated_string(start_line, start_col));
+                    return Err(unterminated_string(start_line, start_col, true));
                 }
                 // `'it''s'` is SQL's and Python's doubled quote. It used to read
                 // as `'it'` followed by `'s'`, and the rest was dropped.
@@ -1810,6 +1841,19 @@ impl Parser {
         if self.match_tok(Tok::Let) {
             // Keep let/let mut for explicit declarations
             let is_mut = self.match_tok(Tok::Mut);
+            // `let [a, b] = xs` and `let {a, b} = r`: no destructuring.
+            if self.check(Tok::LBracket) || self.check(Tok::LBrace) {
+                let at = self.peek();
+                return Err(anyhow::Error::new(HintedSyntax {
+                    msg: format!(
+                        "destructuring is not supported after let at line {}, column {}",
+                        at.line, at.col
+                    ),
+                    hint: "let takes a single name; destructuring is not supported: \
+                           write xs = [1, 2]; a = xs[0]"
+                        .to_string(),
+                }));
+            }
             let name = self.need_ident("expected identifier after let")?;
             let ty = if self.match_tok(Tok::Colon) {
                 Some(self.need_ident("expected type after ':'")?)
@@ -3554,8 +3598,21 @@ impl Parser {
         while !self.check(Tok::RBrace) && !self.check(Tok::Eof) {
             let arm = self.parse_match_arm()?;
             arms.push(arm);
-            // Optional comma after each arm
-            self.match_tok(Tok::Comma);
+            // A comma or a newline ends an arm, as it does in every other list.
+            if !self.match_tok(Tok::Comma)
+                && !self.check(Tok::RBrace)
+                && !self.check(Tok::Eof)
+                && self.continues_line()
+            {
+                let at = self.peek();
+                return Err(anyhow::Error::new(HintedSyntax {
+                    msg: format!(
+                        "expected ',' or a newline between match arms at line {}, column {}",
+                        at.line, at.col
+                    ),
+                    hint: "separate match arms with a comma or a newline".to_string(),
+                }));
+            }
         }
 
         self.need(Tok::RBrace, "expected '}' after match arms")?;
