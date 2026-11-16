@@ -40,7 +40,7 @@ fn unknown_module_member_does_not_suggest_none() {
 
 #[test]
 fn unterminated_single_quote_says_use_double_quotes() {
-    let (out, err, code) = run(&[], "'a\'b'");
+    let (out, err, code) = run(&[], r"'a\'b");
     let all = format!("{out}{err}");
     assert_ne!(code, 0, "{all}");
     assert!(all.contains("takes no escapes"), "{all}");
@@ -48,7 +48,10 @@ fn unterminated_single_quote_says_use_double_quotes() {
     assert!(!all.contains("or escape the quote inside it"), "{all}");
     // A double-quoted one still may escape.
     let (out, err, _) = run(&[], "\"abc");
-    assert!(format!("{out}{err}").contains("escape the quote"), "{out}{err}");
+    assert!(
+        format!("{out}{err}").contains("escape the quote"),
+        "{out}{err}"
+    );
 }
 
 #[test]
@@ -57,4 +60,20 @@ fn unclosed_hole_in_single_quotes_points_to_double_quotes() {
     let all = format!("{out}{err}");
     assert_ne!(code, 0, "{all}");
     assert!(all.contains("double-quoted string with"), "{all}");
+}
+
+#[test]
+fn match_arms_need_a_separator() {
+    let (out, err, code) = run(&[], "match 1 { 1 => 2 _ => 3 }");
+    let all = format!("{out}{err}");
+    assert_ne!(code, 0, "{all}");
+    assert!(all.contains("E_PARSE"), "{all}");
+    assert!(
+        all.contains("separate match arms with a comma or a newline"),
+        "{all}"
+    );
+    let (out, _, code) = run(&[], "match 1 { 1 => 2, _ => 3 }");
+    assert_eq!((code, out.as_str()), (0, "2"));
+    let (out, _, code) = run(&[], "match 1 {\n 1 => 2\n _ => 3\n}");
+    assert_eq!((code, out.as_str()), (0, "2"));
 }

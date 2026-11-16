@@ -3562,8 +3562,21 @@ impl Parser {
         while !self.check(Tok::RBrace) && !self.check(Tok::Eof) {
             let arm = self.parse_match_arm()?;
             arms.push(arm);
-            // Optional comma after each arm
-            self.match_tok(Tok::Comma);
+            // A comma or a newline ends an arm, as it does in every other list.
+            if !self.match_tok(Tok::Comma)
+                && !self.check(Tok::RBrace)
+                && !self.check(Tok::Eof)
+                && self.continues_line()
+            {
+                let at = self.peek();
+                return Err(anyhow::Error::new(HintedSyntax {
+                    msg: format!(
+                        "expected ',' or a newline between match arms at line {}, column {}",
+                        at.line, at.col
+                    ),
+                    hint: "separate match arms with a comma or a newline".to_string(),
+                }));
+            }
         }
 
         self.need(Tok::RBrace, "expected '}' after match arms")?;
