@@ -30272,6 +30272,10 @@ fn bi_proc_list(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
                     .unwrap_or(Value::Null),
             );
             rec.insert("mem".to_string(), Value::Int(process.memory() as i64));
+            rec.insert(
+                "memory_bytes".to_string(),
+                Value::Int(process.memory() as i64),
+            );
             rec.insert("command".to_string(), Value::Str(name));
             procs.push(Value::Record(rec));
         }
@@ -30313,6 +30317,10 @@ fn bi_proc_list(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
             rec.insert("name".to_string(), Value::Str(command.clone()));
             rec.insert("cpu".to_string(), Value::Float(cpu));
             rec.insert("mem".to_string(), Value::Int(rss_kb.saturating_mul(1024)));
+            rec.insert(
+                "memory_bytes".to_string(),
+                Value::Int(rss_kb.saturating_mul(1024)),
+            );
             rec.insert("command".to_string(), Value::Str(command));
             procs.push(Value::Record(rec));
         }
@@ -30759,10 +30767,11 @@ fn bi_proc_info(args: Vec<Value>, _input: Option<Value>) -> Result<Value> {
         .ok_or_else(|| crate::safety::not_found("proc_info", "process", &pid.to_string()))?;
     let mut rec = BTreeMap::new();
     rec.insert("pid".to_string(), Value::Int(pid));
-    rec.insert(
-        "name".to_string(),
-        Value::Str(p.name().to_string_lossy().to_string()),
-    );
+    // The same name form as proc_list: on Windows without the ".exe" suffix.
+    let raw_name = p.name().to_string_lossy().to_string();
+    #[cfg(windows)]
+    let raw_name = proc_strip_exe(&raw_name).to_string();
+    rec.insert("name".to_string(), Value::Str(raw_name));
     rec.insert("state".to_string(), Value::Str(p.status().to_string()));
     rec.insert(
         "ppid".to_string(),
@@ -30771,7 +30780,7 @@ fn bi_proc_info(args: Vec<Value>, _input: Option<Value>) -> Result<Value> {
             .unwrap_or(Value::Null),
     );
     rec.insert("memory_bytes".to_string(), Value::Int(p.memory() as i64));
-    rec.insert("start_time".to_string(), Value::Int(p.start_time() as i64));
+    rec.insert("start_time".to_string(), proc_start_value(p.start_time()));
     rec.insert(
         "exe".to_string(),
         p.exe()
@@ -32083,7 +32092,23 @@ fn bi_proc_start_time(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
         .process(sysinfo::Pid::from_u32(pid as u32))
         .ok_or_else(|| crate::safety::not_found("proc_start_time", "process", &pid.to_string()))?
         .start_time();
+    if secs == 0 {
+        return Ok(Value::Null);
+    }
     Ok(Value::Str(proc_utc_iso(pid, secs)?))
+}
+
+/// A start time as UTC ISO 8601, or Null when the system does not know it
+/// (sysinfo reports 0 for the Windows System process) or it is out of range.
+fn proc_start_value(secs: u64) -> Value {
+    if secs == 0 {
+        return Value::Null;
+    }
+    i64::try_from(secs)
+        .ok()
+        .and_then(utc_iso_seconds)
+        .map(Value::Str)
+        .unwrap_or(Value::Null)
 }
 
 /// Sends a stop or continue signal. Unix sends it with kill(2), as proc_kill
@@ -33769,6 +33794,28 @@ fn bi_fs_du(args: Vec<Value>, _input: Option<Value>) -> Result<Value> {
     Ok(Value::Record(rec))
 }
 
+/// Bytes in a `df -h` figure such as `3.7G`, `512M`, `228Gi` or `0B`, in
+/// binary units (K is 1024). None when the text is not such a figure.
+#[cfg(any(not(target_os = "windows"), test))]
+fn df_human_bytes(text: &str) -> Option<i64> {
+    let t = text.trim().trim_end_matches('i');
+    let (num, mult) = match t.chars().last()? {
+        'B' => (&t[..t.len() - 1], 1u64),
+        'K' | 'k' => (&t[..t.len() - 1], 1 << 10),
+        'M' => (&t[..t.len() - 1], 1 << 20),
+        'G' => (&t[..t.len() - 1], 1 << 30),
+        'T' => (&t[..t.len() - 1], 1 << 40),
+        'P' => (&t[..t.len() - 1], 1 << 50),
+        c if c.is_ascii_digit() => (t, 1),
+        _ => return None,
+    };
+    let v: f64 = num.parse().ok()?;
+    if !v.is_finite() || v < 0.0 {
+        return None;
+    }
+    Some((v * mult as f64).round() as i64)
+}
+
 fn bi_fs_df(_args: Vec<Value>, _input: Option<Value>) -> Result<Value> {
     // This was `Get-PSDrive -PSProvider FileSystem | Select-Object Name,Used,Free`
     // through PowerShell. It now reads the same drives from kernel32 (fixed,
@@ -33806,6 +33853,10 @@ fn bi_fs_df(_args: Vec<Value>, _input: Option<Value>) -> Result<Value> {
                     "use_percent".to_string(),
                     Value::Str(format!("{}%", use_pct)),
                 );
+                rec.insert("size_bytes".to_string(), Value::Int(total as i64));
+                rec.insert("used_bytes".to_string(), Value::Int(used as i64));
+                rec.insert("available_bytes".to_string(), Value::Int(free as i64));
+                rec.insert("use_pct".to_string(), Value::Int(use_pct));
             }
             rec.insert(
                 "mounted_on".to_string(),
@@ -33833,6 +33884,20 @@ fn bi_fs_df(_args: Vec<Value>, _input: Option<Value>) -> Result<Value> {
                     rec.insert("used".to_string(), Value::Str(parts[2].to_string()));
                     rec.insert("available".to_string(), Value::Str(parts[3].to_string()));
                     rec.insert("use_percent".to_string(), Value::Str(parts[4].to_string()));
+                    // Numeric twins of the `df -h` strings: bytes (binary
+                    // units, as exact as `df -h` rounds) and a whole percent.
+                    for (key, text) in [
+                        ("size_bytes", parts[1]),
+                        ("used_bytes", parts[2]),
+                        ("available_bytes", parts[3]),
+                    ] {
+                        if let Some(n) = df_human_bytes(text) {
+                            rec.insert(key.to_string(), Value::Int(n));
+                        }
+                    }
+                    if let Ok(pct) = parts[4].trim_end_matches('%').parse::<i64>() {
+                        rec.insert("use_pct".to_string(), Value::Int(pct));
+                    }
                     rec.insert("mounted_on".to_string(), Value::Str(parts[5].to_string()));
                     drives.push(Value::Record(rec));
                 }
@@ -36480,8 +36545,12 @@ fn bi_sys_boot_time(_args: Vec<Value>, _input: Option<Value>) -> Result<Value> {
     // every OS: UTC ISO 8601 to the second.
     #[cfg(target_os = "windows")]
     {
-        let now = chrono::Utc::now().timestamp();
-        return boot_time_value(now - (windows_uptime_ms() / 1000) as i64);
+        // now - uptime moves by a second between calls (two roundings); the
+        // first answer is kept so repeated calls in one process agree.
+        static BOOT: std::sync::OnceLock<i64> = std::sync::OnceLock::new();
+        let secs = *BOOT
+            .get_or_init(|| chrono::Utc::now().timestamp() - (windows_uptime_ms() / 1000) as i64);
+        return boot_time_value(secs);
     }
     // `uptime -s` is a procps/GNU flag. macOS `uptime` does not have it, so
     // this exited non-zero there and fell through to `Ok(Value::Null)` -- a
@@ -36569,7 +36638,7 @@ fn parse_cpuinfo(text: &str) -> Result<Value> {
                         "a clock speed in /proc/cpuinfo",
                     )
                 })?;
-                rec.insert("mhz".to_string(), Value::Float(f));
+                rec.insert("mhz".to_string(), Value::Int(f.round() as i64));
             }
         }
     }
@@ -36598,7 +36667,7 @@ fn bi_sys_cpu_info(_args: Vec<Value>, _input: Option<Value>) -> Result<Value> {
             rec.insert("cores".to_string(), Value::Int(cores as i64));
         }
         if let Ok(Some(mhz)) = windows_cpu_mhz("sys_cpu_info") {
-            rec.insert("mhz".to_string(), Value::Float(mhz as f64));
+            rec.insert("mhz".to_string(), Value::Int(mhz as i64));
         }
         return Ok(Value::Record(rec));
     }
@@ -36662,7 +36731,10 @@ fn bi_sys_cpu_info(_args: Vec<Value>, _input: Option<Value>) -> Result<Value> {
                             "a clock frequency in hertz",
                         )
                     })?;
-                    rec.insert("mhz".to_string(), Value::Float(hz / 1_000_000.0));
+                    rec.insert(
+                        "mhz".to_string(),
+                        Value::Int((hz / 1_000_000.0).round() as i64),
+                    );
                 }
             }
         }
@@ -36813,11 +36885,81 @@ fn bi_sys_mem_info(_args: Vec<Value>, _input: Option<Value>) -> Result<Value> {
             "available".into(),
             memory_bytes("sys_mem_info", system.available_memory())?,
         ),
+        (
+            "used".into(),
+            memory_bytes(
+                "sys_mem_info",
+                system
+                    .total_memory()
+                    .saturating_sub(system.available_memory()),
+            )?,
+        ),
     ])))
+}
+
+/// The paging files' total size and use, in bytes, from
+/// NtQuerySystemInformation(SystemPageFileInformation). sysinfo's Windows swap
+/// is the commit charge minus RAM, which is not what the pagefile holds. None
+/// when the query fails; a machine with no pagefile answers (0, 0).
+#[cfg(windows)]
+fn windows_pagefile_bytes() -> Option<(u64, u64)> {
+    #[link(name = "ntdll")]
+    extern "system" {
+        fn NtQuerySystemInformation(class: u32, info: *mut u8, len: u32, ret_len: *mut u32) -> i32;
+    }
+    const SYSTEM_PAGEFILE_INFORMATION: u32 = 18;
+    const PAGE: u64 = 4096;
+    let mut buf = vec![0u8; 64 * 1024];
+    let mut ret_len = 0u32;
+    // SAFETY: the buffer is live for the call and its length is passed; the
+    // call writes at most that many bytes.
+    let status = unsafe {
+        NtQuerySystemInformation(
+            SYSTEM_PAGEFILE_INFORMATION,
+            buf.as_mut_ptr(),
+            buf.len() as u32,
+            &mut ret_len,
+        )
+    };
+    if status < 0 {
+        return None;
+    }
+    // A chain of {NextEntryOffset, TotalSize, TotalInUse, PeakUsage: u32, name}
+    // entries, sizes in pages.
+    let (mut total, mut used) = (0u64, 0u64);
+    let mut off = 0usize;
+    while off + 16 <= buf.len() {
+        let word = |i: usize| {
+            u32::from_le_bytes([
+                buf[off + i],
+                buf[off + i + 1],
+                buf[off + i + 2],
+                buf[off + i + 3],
+            ])
+        };
+        let next = word(0) as usize;
+        total += u64::from(word(4));
+        used += u64::from(word(8));
+        if next == 0 {
+            break;
+        }
+        off += next;
+    }
+    Some((total * PAGE, used.min(total) * PAGE))
 }
 
 fn bi_sys_swap_info(_args: Vec<Value>, _input: Option<Value>) -> Result<Value> {
     let system = memory_snapshot("sys_swap_info")?;
+    #[cfg(windows)]
+    {
+        if let Some((total, used)) = windows_pagefile_bytes() {
+            return Ok(Value::Record(BTreeMap::from([
+                ("total".into(), memory_bytes("sys_swap_info", total)?),
+                ("used".into(), memory_bytes("sys_swap_info", used)?),
+                ("free".into(), memory_bytes("sys_swap_info", total - used)?),
+            ])));
+        }
+    }
     Ok(Value::Record(BTreeMap::from([
         (
             "total".into(),
@@ -36924,7 +37066,7 @@ fn bi_sys_load_avg(_args: Vec<Value>, _input: Option<Value>) -> Result<Value> {
         return Err(crate::safety::unimplemented(
             "sys_load_avg",
             "Windows has no load average",
-            "read the current processor load with `sys_cpu_info` or the busiest processes with `proc_list`",
+            "read total CPU use with `monitor_watch_cpu()` (average_cpu over a few samples) or per-process use with `top_snapshot()`",
         ));
     }
     // Any other OS has no load-average source wired up here.
@@ -37137,11 +37279,40 @@ mod quiet_sys_tests {
     }
 
     #[test]
+    fn dotnet_dates_become_iso_8601() {
+        assert_eq!(
+            dotnet_date_iso("/Date(0)/").as_deref(),
+            Some("1970-01-01T00:00:00Z")
+        );
+        assert_eq!(
+            dotnet_date_iso("/Date(1794527744372)/").as_deref(),
+            Some("2026-11-12T23:55:44Z")
+        );
+        assert_eq!(
+            dotnet_date_iso("/Date(86400000+0100)/").as_deref(),
+            Some("1970-01-02T00:00:00Z")
+        );
+        assert_eq!(dotnet_date_iso("2026-01-01"), None);
+        assert_eq!(dotnet_date_iso("/Date(x)/"), None);
+    }
+
+    #[test]
+    fn df_figures_parse_in_binary_units() {
+        assert_eq!(df_human_bytes("0"), Some(0));
+        assert_eq!(df_human_bytes("512B"), Some(512));
+        assert_eq!(df_human_bytes("4.0K"), Some(4096));
+        assert_eq!(df_human_bytes("2M"), Some(2 << 20));
+        assert_eq!(df_human_bytes("1.5G"), Some(3 << 29));
+        assert_eq!(df_human_bytes("228Gi"), Some(228i64 << 30));
+        assert_eq!(df_human_bytes("-"), None);
+    }
+
+    #[test]
     fn cpuinfo_reads_x86_fields() {
         let v = parse_cpuinfo("model name\t: Intel Xeon\ncpu cores\t: 4\ncpu MHz\t\t: 2394.2\n")
             .unwrap();
         assert!(matches!(field(&v, "cores"), Some(Value::Int(4))));
-        assert!(matches!(field(&v, "mhz"), Some(Value::Float(f)) if (*f - 2394.2).abs() < 1e-6));
+        assert!(matches!(field(&v, "mhz"), Some(Value::Int(2394))));
     }
 
     #[test]
@@ -37175,6 +37346,22 @@ mod quiet_sys_tests {
     fn group_refuses_non_numeric_gid() {
         assert!(parse_group("odd:x:zz:\n").is_err());
     }
+}
+
+/// UTC ISO 8601 for a .NET JSON date such as `/Date(1794527744372)/` (epoch
+/// milliseconds, optionally followed by a `+hhmm` offset that is ignored: the
+/// milliseconds are already UTC). None when the text is not that form.
+#[cfg(any(target_os = "windows", test))]
+fn dotnet_date_iso(text: &str) -> Option<String> {
+    let inner = text.trim().strip_prefix("/Date(")?.strip_suffix(")/")?;
+    let digits_end = inner
+        .char_indices()
+        .find(|(i, c)| !(c.is_ascii_digit() || (*i == 0 && *c == '-')))
+        .map(|(i, _)| i)
+        .unwrap_or(inner.len());
+    let ms: i64 = inner[..digits_end].parse().ok()?;
+    chrono::DateTime::<chrono::Utc>::from_timestamp_millis(ms)
+        .map(|at| at.format("%Y-%m-%dT%H:%M:%SZ").to_string())
 }
 
 fn bi_sys_users(_args: Vec<Value>, _input: Option<Value>) -> Result<Value> {
@@ -37218,7 +37405,13 @@ fn bi_sys_users(_args: Vec<Value>, _input: Option<Value>) -> Result<Value> {
                     rec.insert("enabled".to_string(), json_to_value(v.clone()));
                 }
                 if let Some(v) = o.get("LastLogon") {
-                    rec.insert("last_logon".to_string(), json_to_value(v.clone()));
+                    // Windows PowerShell writes a date as "/Date(ms)/"; give
+                    // ISO 8601 as proc_start_time does. Null stays null.
+                    let value = match v.as_str().and_then(dotnet_date_iso) {
+                        Some(iso) => Value::Str(iso),
+                        None => json_to_value(v.clone()),
+                    };
+                    rec.insert("last_logon".to_string(), value);
                 }
                 Some(Value::Record(rec))
             })

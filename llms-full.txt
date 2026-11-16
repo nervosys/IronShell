@@ -170,7 +170,7 @@ sys.hostname()          # => "my-machine"
 sys.uptime()            # => 475320 (whole seconds since boot, an Int)
 sys.cpu_info()          # => {cores: 8, name: "...", ...}
 sys.mem_info()          # => {total, free, available}, each an Int in bytes
-proc.list()             # => [{pid, name, cpu, memory}, ...]
+proc.list()             # => [{pid, name, cpu, mem, memory_bytes, command}, ...] (cpu: total CPU seconds on Windows, percent on Unix)
 proc.kill(1234)         # Kill process
 sys.os()                # => "windows" | "linux" | "macos"
 platform.arch()         # => "x86_64" | "aarch64"
