@@ -11,6 +11,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Windows: a drive-relative path (`C:..\x`, `C:../outside/f`) could write outside the workspace jail in agent mode or with a workspace set (file.write, append, replace, copy, `ish -b` redirection, tee, touch, mkdir) and read outside it under `ish -b` (cat, ls). Such a path now resolves against the drive's current directory, as Windows does, and the jail, `--explain` and the undo journal all judge that one absolute path.
 - `zip_extract`, `unzip` and `tar_extract` (tar, tar.gz, bz2, xz, zst) refuse an entry that would land outside the destination, or outside the workspace when the jail is enforced, through a link or junction that already exists inside it (E_OUTSIDE_WORKSPACE under the jail, E_POLICY_DENY otherwise); such an entry could overwrite a file outside the workspace. Nothing is written before the refusal, and `--explain` predicts it.
+- `ish agent serve` runs from its workspace root, so a relative path is read, listed, explained and written against the same folder; started outside its workspace, the server wrote `b.txt` into the workspace but refused to read it back.
 
 ### Changed
 
@@ -39,6 +40,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `rm("*.txt")` is a clear E_BAD_ARG (rm does not expand globs) instead of a false E_OUTSIDE_WORKSPACE.
 - `cd` is no longer an undo journal step; undoing a `file.mkdir` of the working directory moves the process out first.
 - An uncaught error under `--deterministic` is JSON on stderr, as in agent mode.
+- `--explain` treats a name as a known value only when it is bound once, without `mut`, and never assigned again, so a rebound name or a closure over one is no longer judged by its first value; a path computed at run time (concatenation with an unknown part, a collection, a record field, `file.read`, `args()`, `env`) is listed under `unresolved` and makes the verdict `unknown` instead of `allow`. `+` of known strings is folded.
+- A builtin name followed by an argument inside a lambda body, record value, call argument or array element is E_PARSE ("word calls work only as statements; write abs(-3)"), so `abs -3` there no longer parses silently as `abs - 3`; `print x, x + 1` gets a hint, and a bad word call in a block reports one error.
+- Agent API errors share one JSON shape (`code`, `message`, `hint`) for every status, including 400, 401, 404, 405, 413 and 415 from the HTTP layer; SSE error events carry an error object; pipeline errors carry real codes; `/call` with no body means `{}`.
 
 ### Added
 
@@ -50,6 +54,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Trailing commas in call arguments and lambda parameters; indexing and `.field` after a `|.field` projection (`xs |.n[0]`).
 - `call()` accepts module-qualified names (`call("file.read", "a.txt")`); `arr.contains` is the Array form of `contains`.
 - `df` and `sys.disk_info` rows carry numeric `size_bytes`, `used_bytes`, `available_bytes` and `use_pct` beside the strings; `sys.mem_info` and `hw.memory` carry `used`; `proc.list` rows carry `memory_bytes`.
+- `/call`, `/execute` and pipeline steps accept the tool names each `/schema` format advertises (`ironshell_sqrt`) and module-qualified names; the WebSocket answers an AgentRequest and replies to anything else with the accepted shapes; `/builtins?category=` accepts module names and refuses unknown ones; the Authorization scheme is case-insensitive.
 
 ### Fixed
 
@@ -65,6 +70,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - System information: Windows swap is the pagefile's size and use (it was commit minus RAM); a process with no known start time gives null, not 1970; `proc.list` and `proc.info` agree on `name` and `memory_bytes`, and `proc.info`'s `start_time` is ISO 8601; `sys.users` `last_logon` is ISO 8601; `cpu_info().mhz` is an Int; `sys.boot_time` agrees across calls; the `sys.load_avg` hint points at a builtin that reports load; an unknown pid reads "no process with pid N"; help lists the real fields.
 - Messages: `crypto_hash` and `pow` name the builtin as called, `crypto_hash` names a non-String data argument and refuses a piped value plus a second argument, `contains` names its three subject types, and `len`, `sum`, `avg`, `keys` and others name a type (`got Bool`) instead of Rust's debug form; the `unzip` help example shows E_NOT_FOUND.
 - `tar_create`'s hint for non-ASCII names (the system tar crashes on them on Windows) also covers names inside folder members.
+- The nesting-limit error states the real limit; `examples/plugins/math_utils.ish` and `samples/IronShell/pattern_matching.ish` parse, and the shipped-scripts test covers every subfolder.
+- Docs: `db.sqlite_query` takes the database path (`sqlite_open` returns true); SQL returns Bool as 1/0 and `select *` in sorted key order; the OpenAPI spec matches the server (health status, stateless eval, operator approval, timeout status).
 
 ## [14.0.4] - 2026-11-14
 
