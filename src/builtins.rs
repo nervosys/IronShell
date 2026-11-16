@@ -15672,7 +15672,15 @@ fn bi_contains(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
         }
         _ => {}
     }
-    let text = expect_string("contains", &input_val)?;
+    // Only a String, an Array or a Record has a `contains`; the message names all
+    // three, as the subject is what the caller got wrong.
+    let Value::Str(text) = &input_val else {
+        return Err(crate::safety::bad_arg(
+            "contains",
+            "a String, Array or Record",
+            input_val.type_name(),
+        ));
+    };
     let substring = expect_string("contains", substring_arg)?;
     Ok(Value::Bool(text.contains(substring)))
 }
@@ -16645,7 +16653,7 @@ fn bi_pow(mut args: Vec<Value>, input: Option<Value>) -> Result<Value> {
         return Err(crate::safety::value_not_representable(
             "pow",
             format!(
-                "math_pow: {} ** {} overflows a Float",
+                "pow: {} ** {} overflows a Float",
                 float_for_message(base),
                 float_for_message(exp)
             ),
@@ -16656,7 +16664,7 @@ fn bi_pow(mut args: Vec<Value>, input: Option<Value>) -> Result<Value> {
         return Err(crate::safety::value_not_representable(
             "pow",
             format!(
-                "math_pow: {} ** {} is not a real number",
+                "pow: {} ** {} is not a real number",
                 float_for_message(base),
                 float_for_message(exp)
             ),
@@ -40327,14 +40335,19 @@ fn bi_tar_create(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
         tool_to_new_file("tar_create", "tar", &argv, &out)
     };
     if let Err(mut e) = written {
-        // Windows bsdtar crashes (exit -1073741819) on some non-ASCII names.
-        let non_ascii = placed.iter().any(|(d, n)| !d.is_ascii() || !n.is_ascii());
+        // Windows bsdtar crashes (exit -1073741819) on some non-ASCII names. The
+        // crash can come from a name inside a folder member, so the trees are
+        // walked, but only once a crash is seen.
         if let Some(se) = e.downcast_mut::<crate::safety::SafetyError>() {
             let crashed = se
                 .got
                 .strip_prefix("exited ")
                 .and_then(|c| c.parse::<i64>().ok())
                 .is_some_and(|c| !(0..=255).contains(&c));
+            let non_ascii = placed.iter().any(|(d, n)| !d.is_ascii() || !n.is_ascii())
+                || members
+                    .iter()
+                    .any(|m| tree_has_non_ascii_name(std::path::Path::new(m)));
             if crashed && non_ascii {
                 se.hint = "tar crashed on a member name with non-ASCII characters; use zip_create(archive, members) for an archive of such names, or rename the files".to_string();
             }
@@ -40342,6 +40355,31 @@ fn bi_tar_create(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
         return Err(e);
     }
     Ok(Value::Bool(true))
+}
+
+/// Whether `root`, or a file or folder under it, has a name with a non-ASCII
+/// character. Symbolic links are not followed, and a remote share is not walked
+/// (its names are not local, and a probe of one stalls).
+fn tree_has_non_ascii_name(root: &std::path::Path) -> bool {
+    if crate::safety::names_a_remote_share(&root.to_string_lossy()) {
+        return false;
+    }
+    let mut pending = vec![root.to_path_buf()];
+    while let Some(path) = pending.pop() {
+        if path
+            .file_name()
+            .is_some_and(|n| !n.to_string_lossy().is_ascii())
+        {
+            return true;
+        }
+        if !std::fs::symlink_metadata(&path).is_ok_and(|m| m.is_dir()) {
+            continue;
+        }
+        if let Ok(entries) = std::fs::read_dir(&path) {
+            pending.extend(entries.flatten().map(|entry| entry.path()));
+        }
+    }
+    false
 }
 
 /// How `tar_create` stores one member: the directory tar is run from, and the
@@ -49779,7 +49817,7 @@ fn bi_crypto_hash(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
                 return Err(crate::safety::bad_arg_in(
                     "crypto_hash",
                     format!(
-                        "crypto.hash: `{only}` is an algorithm name; pass the data too: crypto.hash(\"{only}\", data) or data | crypto.hash(\"{only}\")"
+                        "crypto_hash: `{only}` is an algorithm name; pass the data too: crypto.hash(\"{only}\", data) or data | crypto.hash(\"{only}\")"
                     ),
                     "put the algorithm first and the data after it, or pipe the data in; to hash the text itself, spell the algorithm: crypto.hash(\"sha256\", \"sha256\")",
                 ));
@@ -49815,6 +49853,29 @@ fn bi_crypto_hash(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
                     "put the algorithm first, as crypto.hash(\"sha256\", data), or last, as crypto.hash(data, \"sha256\")",
                 ));
             }
+        }
+    }
+    // Piped, the data is the input, so one argument (the algorithm) is all that
+    // can follow. A second one was ignored, and `"abc" | crypto_hash("sha256",
+    // "abc")` hashed "abc" without complaint.
+    if input.is_some() && args.len() > 1 {
+        return Err(crate::safety::bad_arg_in(
+            "crypto_hash",
+            format!(
+                "crypto_hash: a piped value takes one argument, the algorithm; got {} arguments",
+                args.len()
+            ),
+            "pipe the data and pass only the algorithm: data | crypto.hash(\"sha256\")",
+        ));
+    }
+    // Called directly with an algorithm first, the second argument is the data.
+    if let [Value::Str(first), second] = args.as_slice() {
+        if input.is_none() && is_hash_algorithm(first) && !matches!(second, Value::Str(_)) {
+            return Err(crate::safety::bad_arg(
+                "crypto_hash",
+                "data: String",
+                second.type_name(),
+            ));
         }
     }
     let (data, params) = subject_and_params("crypto_hash", &args, input)?;
@@ -84291,5 +84352,28 @@ mod ai_local_generate_chat_tests {
         extra.insert("content".to_string(), Value::Str("hi".to_string()));
         extra.insert("name".to_string(), Value::Str("x".to_string()));
         assert_eq!(refused(vec![Value::Record(extra)]), BadArg);
+    }
+}
+
+#[cfg(test)]
+mod tar_non_ascii_walk_tests {
+    use super::tree_has_non_ascii_name;
+
+    /// A folder member whose non-ASCII name is inside it, one level down, is
+    /// found; an all-ASCII tree is not. The walk is what lets the zip_create
+    /// hint fire for such a member, since only the top-level name was checked.
+    #[test]
+    fn a_non_ascii_name_below_a_folder_member_is_found() {
+        let root = std::env::temp_dir().join(format!("ae_tar_walk_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let nested = root.join("src").join("ascii");
+        std::fs::create_dir_all(&nested).expect("tree");
+        std::fs::write(nested.join("plain.txt"), b"x").expect("file");
+        assert!(!tree_has_non_ascii_name(&root), "all-ASCII tree");
+        std::fs::create_dir_all(root.join("src").join("\u{fc}n\u{ef}").as_path())
+            .expect("non-ASCII folder");
+        let found = tree_has_non_ascii_name(&root);
+        let _ = std::fs::remove_dir_all(&root);
+        assert!(found, "non-ASCII folder below the member was not found");
     }
 }

@@ -2607,7 +2607,7 @@ pub static SIGNATURES: &[Signature] = &[
         subject: Some(Ty::Any),
         params: &[req("needle", Ty::Any, "a substring (String subject), an element (Array subject) or a key name (Record subject)")],
         returns: "Bool",
-        doc: "Whether the subject holds the needle. A String holds a substring; an Array holds an element equal to the needle under == (so 1 and 1.0 match); a Record holds a key of that name (the needle must be a String). Anything else is E_BAD_ARG. The same test as `in`, with the collection first: contains(list, x) is x | in(list).",
+        doc: "Whether the subject holds the needle. The subject is a String, an Array or a Record. A String holds a substring; an Array holds an element equal to the needle under == (so 1 and 1.0 match); a Record holds a key of that name (the needle must be a String). Anything else is E_BAD_ARG. The same test as `in`, with the collection first: contains(list, x) is x | in(list).",
         examples: &[
             (r#"contains("security fix", "security")"#, "true"),
             ("contains([1, 2], 1.0)", "true"),
@@ -12130,7 +12130,7 @@ pub static SIGNATURES: &[Signature] = &[
         doc: "Extract a zip archive. Entries that would land outside the destination (absolute names, drive or UNC paths, `..` components) are refused with E_POLICY_DENY before anything is written, and so is an entry that would land outside the destination through a link or junction already there (E_OUTSIDE_WORKSPACE when it also leaves the workspace). Extracted in-process: files and empty folders are written under the destination (created if missing), symbolic-link entries are not created, and true is returned only after the entries were written. A file that is not a zip is E_BAD_ARG; a missing one is E_NOT_FOUND.",
         examples: &[
             (r#"unzip("tests/fixtures/archives/sample.zip", fs_tempdir("ae_zip"))"#, r#"true"#),
-            (r#"unzip("no-such.zip")"#, r#"error: E_TOOL_FAILED"#),
+            (r#"unzip("no-such.zip")"#, r#"error: E_NOT_FOUND"#),
         ],
     },
     // 1b: the catalogue helpers. They read the declared signatures and the
