@@ -19,7 +19,7 @@
 //! cannot see is `eval` of a string built at run time, which it reports as the
 //! `eval` builtin's own effect and no more; that limit is stated in the output.
 
-use crate::ast::{Expr, Stmt};
+use crate::ast::{BinOp, Expr, Stmt};
 use crate::safety::{effect_of, effective_decision, Decision, Effect, Mode};
 use crate::security::LiteralSlot;
 use crate::value::Value;
@@ -56,6 +56,11 @@ struct Walk<'a> {
     /// Names bound once, immutably, to a string literal: `name = "rm"`, so that
     /// `call(name, ...)` can be read as a call to that builtin.
     consts: HashMap<String, String>,
+    /// Names that are not constants: bound with `mut`, bound more than once in
+    /// the program, or the target of a field assignment. A later rebinding would
+    /// change what a call made earlier, or from a closure, sees, so such a name
+    /// is never judged by its first value.
+    rebound: HashSet<String>,
     /// Names bound once, immutably, to a fn literal: a call through one is
     /// judged by its body with the literal arguments bound.
     fns: HashMap<String, (Vec<String>, Expr)>,
@@ -66,6 +71,47 @@ struct Walk<'a> {
     elems: Option<Vec<String>>,
     /// Modules already folded in, by canonical path (cycles end here).
     visited: HashSet<PathBuf>,
+}
+
+/// The names a program may rebind: every `mut` binding, every name bound by
+/// more than one `let` or `name = value`, and every target of `r.f = v`.
+fn rebound_names(stmts: &[Stmt]) -> HashSet<String> {
+    fn go(s: &Stmt, seen: &mut HashSet<String>, out: &mut HashSet<String>) {
+        match s {
+            Stmt::Let { name, is_mut, .. } => {
+                if *is_mut || !seen.insert(name.clone()) {
+                    out.insert(name.clone());
+                }
+            }
+            Stmt::SetField { name, .. } => {
+                out.insert(name.clone());
+            }
+            Stmt::Cfg { body, .. } => go(body, seen, out),
+            _ => {}
+        }
+    }
+    let mut seen = HashSet::new();
+    let mut out = HashSet::new();
+    for s in stmts {
+        go(s, &mut seen, &mut out);
+    }
+    out
+}
+
+/// Whether an argument in a path position is a value that is not known without
+/// running: neither a literal nor foldable to one. Numbers, booleans and null
+/// are not paths, and a lambda is not either.
+fn is_computed(consts: &HashMap<String, String>, e: &Expr) -> bool {
+    match e {
+        Expr::LitInt(_)
+        | Expr::LitFloat(_)
+        | Expr::LitBool(_)
+        | Expr::Null
+        | Expr::Lambda { .. }
+        | Expr::AsyncLambda { .. } => false,
+        Expr::Array(items) => items.iter().any(|x| is_computed(consts, x)),
+        _ => const_str(consts, e).is_none(),
+    }
 }
 
 /// The value of a string literal that has no interpolation hole.
@@ -84,6 +130,16 @@ fn const_str(consts: &HashMap<String, String>, e: &Expr) -> Option<String> {
     match e {
         Expr::LitStr(s) => fold_interpolation(consts, s),
         Expr::Ident(n) => consts.get(n).cloned(),
+        // `+` of two known Strings is their concatenation.
+        Expr::Binary {
+            left,
+            op: BinOp::Add,
+            right,
+        } => {
+            let mut l = const_str(consts, left)?;
+            l.push_str(&const_str(consts, right)?);
+            Some(l)
+        }
         _ => None,
     }
 }
@@ -198,6 +254,41 @@ impl Walk<'_> {
         self.literals.push((false, Vec::new()));
     }
 
+    /// A call to `builtin` that the jail judges, given a path argument that is
+    /// neither a literal nor foldable to one: the path is unknown here, so the
+    /// call is listed as unresolved (the verdict is then at least `unknown`).
+    fn computed_paths(
+        &mut self,
+        shown: &str,
+        builtin: &str,
+        piped: bool,
+        args: &[Expr],
+        named: &[(String, Expr)],
+    ) {
+        if !matches!(
+            effect_of(builtin),
+            Effect::ReadLocal | Effect::WriteLocal | Effect::Destructive
+        ) {
+            return;
+        }
+        let has_source = args.len() > 1;
+        let positional = args.iter().enumerate().any(|(i, a)| {
+            crate::security::is_path_slot(builtin, &LiteralSlot::Position(i), piped, has_source)
+                && is_computed(&self.consts, a)
+        });
+        let by_name = named.iter().any(|(n, a)| {
+            crate::security::is_path_slot(
+                builtin,
+                &LiteralSlot::Named(n.clone()),
+                piped,
+                has_source,
+            ) && is_computed(&self.consts, a)
+        });
+        if positional || by_name {
+            self.unknown(format!("{shown}: path is computed at run time"));
+        }
+    }
+
     /// Run `f` with `names` bound as parameters: they shadow builtins and
     /// literal bindings of the same name for its duration.
     fn scoped(&mut self, names: &[String], f: impl FnOnce(&mut Self)) {
@@ -246,6 +337,7 @@ impl Walk<'_> {
     fn walk_source(&mut self, src: &str) {
         match crate::parser::parse_program(src) {
             Ok(stmts) => {
+                self.rebound.extend(rebound_names(&stmts));
                 for s in &stmts {
                     self.stmt(s);
                 }
@@ -373,9 +465,11 @@ impl Walk<'_> {
         let locals = std::mem::take(&mut self.locals);
         let consts = std::mem::take(&mut self.consts);
         let fns = std::mem::take(&mut self.fns);
+        let rebound = std::mem::replace(&mut self.rebound, rebound_names(&stmts));
         for s in &stmts {
             self.stmt(s);
         }
+        self.rebound = rebound;
         self.locals = locals;
         self.consts = consts;
         self.fns = fns;
@@ -425,7 +519,7 @@ impl Walk<'_> {
                 ..
             } => {
                 self.expr(value);
-                let fresh = !*is_mut && !self.locals.contains(name);
+                let fresh = !*is_mut && !self.locals.contains(name) && !self.rebound.contains(name);
                 let literal = if fresh {
                     const_str(&self.consts, value)
                 } else {
@@ -511,6 +605,9 @@ impl Walk<'_> {
                         }),
                     _ => None,
                 };
+                if let Some(b) = target.as_deref() {
+                    self.computed_paths(&r.0, b, piped, args, named);
+                }
                 self.calls.push(r);
                 self.positional.insert(
                     self.calls.len() - 1,
@@ -801,6 +898,7 @@ pub fn explain(code: &str) -> Result<Value> {
         positional: HashMap::new(),
         piped_next: false,
         consts: HashMap::new(),
+        rebound: rebound_names(&stmts),
         fns: HashMap::new(),
         depth: 0,
         elems: None,

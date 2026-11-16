@@ -834,6 +834,43 @@ pub fn outside_path_literal(
         .cloned()
 }
 
+/// Whether the argument at `slot` of a call to `builtin` is one the jail
+/// judges as a path when the call runs. `piped` is true for a stage that
+/// receives its subject from the left; `has_source` is true for `sql`-style
+/// calls given a query after the source. A builtin with no declared signature
+/// is not judged by slot, so is `false` here.
+pub fn is_path_slot(builtin: &str, slot: &LiteralSlot, piped: bool, has_source: bool) -> bool {
+    let Some(sig) = crate::signature::signature_of(builtin) else {
+        return false;
+    };
+    let sql_source = !piped
+        && has_source
+        && matches!(
+            builtin,
+            "sql" | "sql_value" | "sqlite_query" | "db_sqlite_query"
+        );
+    let offset = usize::from(sig.subject.is_some() && !piped);
+    let name = match slot {
+        LiteralSlot::Position(n) => {
+            if *n == 0 && sql_source {
+                return true;
+            }
+            if *n == 0 && offset == 1 && PATH_SUBJECT.contains(&sig.name) {
+                return true;
+            }
+            let Some(i) = n.checked_sub(offset) else {
+                return false;
+            };
+            match sig.params.get(i) {
+                Some(p) => p.name,
+                None => return false,
+            }
+        }
+        LiteralSlot::Named(n) => n.as_str(),
+    };
+    is_path_param(builtin, name)
+}
+
 /// Parameters that are paths though their names do not say so: both files of
 /// a diff, and a glob (judged by its literal directory).
 const EXTRA_PATH_PARAMS: &[(&str, &str)] = &[
