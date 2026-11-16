@@ -1176,6 +1176,9 @@ fn classified_effect(name: &str) -> Option<Effect> {
         // `ioreg`/equivalent purely to read an identifier.
         "fs_link" | "fs_symlink" | "git_ignore" | "perm_set" => Some(Effect::WriteLocal),
         "platform_has_network" | "platform_machine_id" => Some(Effect::ReadLocal),
+        // Listing the local adapters sends nothing; `hw_network` gives the same answer
+        // and is `ReadLocal`, so this must be too.
+        "net_interfaces" => Some(Effect::ReadLocal),
         // The `web_*` fetch family already routes through `guard_network` at each
         // call site, so it was *gated* as Network at runtime while `effect_of`
         // reported `Pure` — meaning the agent-facing ontology advertised
@@ -2269,6 +2272,10 @@ pub fn not_found(builtin: &str, kind: &str, name: &str) -> anyhow::Error {
             // Worded as `no_file_at` words it, so one missing file reads alike
             // from every builtin.
             format!("{builtin}: no {kind} at {name}")
+        } else if kind == "process" && !name.is_empty() && name.bytes().all(|b| b.is_ascii_digit())
+        {
+            // Every caller names a process by pid.
+            format!("{builtin}: no process with pid {name}")
         } else {
             format!("{builtin}: no {kind} named '{name}'")
         },

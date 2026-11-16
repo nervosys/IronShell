@@ -3846,7 +3846,7 @@ pub static SIGNATURES: &[Signature] = &[
         subject: None,
         params: &[],
         returns: "String",
-        doc: "When the machine last booted, as UTC ISO 8601 to the second, for example 2026-10-30T12:34:56Z. The same form on every OS.",
+        doc: "When the machine last booted, as UTC ISO 8601 to the second, for example 2026-10-30T12:34:56Z. The same form on every OS. On Windows the first answer is kept for the life of the process, so repeated calls agree to the second.",
         examples: &[("typeof(sys_boot_time())", "String")],
     },
     Signature {
@@ -3868,7 +3868,7 @@ pub static SIGNATURES: &[Signature] = &[
         subject: None,
         params: &[],
         returns: "Record",
-        doc: "The CPU's model name, physical core count and clock speed in MHz.",
+        doc: "The CPU as {name, cores, mhz}: model name, physical core count and clock speed in MHz. mhz is an Int, as sys_cpu_freq gives it. A field the OS does not report is left out.",
         examples: &[("typeof(sys_cpu_info())", "Record")],
     },
     Signature {
@@ -3879,7 +3879,7 @@ pub static SIGNATURES: &[Signature] = &[
         subject: None,
         params: &[],
         returns: "Array",
-        doc: "Every mounted filesystem: device, mount point and free space.",
+        doc: "Every mounted filesystem as {filesystem, size, used, available, use_percent, mounted_on, size_bytes, used_bytes, available_bytes, use_pct}. size, used and available are strings in binary units (K is 1024, so 3724.3G is GiB) and use_percent is a string such as \"99%\"; size_bytes, used_bytes, available_bytes and use_pct are the same figures as Ints (exact on Windows; on Unix parsed from df -h, so rounded as df rounds). Same answer as df().",
         examples: &[("typeof(sys_disk_info())", "Array")],
     },
     Signature {
@@ -3901,7 +3901,7 @@ pub static SIGNATURES: &[Signature] = &[
         subject: None,
         params: &[],
         returns: "Record",
-        doc: "A summary of the host: os, arch, family and os_name (the distribution name). Every key is present on every OS; a value this host cannot read is null, and the names of the null fields are listed in missing.",
+        doc: "A summary of the host: os, arch, family, os_name (the distribution name) and missing. Every key is present on every OS; a value this host cannot read is null, and missing is an Array of the names of the null fields (empty when every field is known).",
         examples: &[("typeof(sys_info())", "Record")],
     },
     Signature {
@@ -3923,7 +3923,7 @@ pub static SIGNATURES: &[Signature] = &[
         subject: None,
         params: &[],
         returns: "Record",
-        doc: "The 1, 5 and 15 minute load averages: from /proc/loadavg on Linux and sysctl vm.loadavg on macOS. Windows has no load average and is refused with E_UNIMPLEMENTED; use sys_cpu_info or proc_list there. Other systems are refused.",
+        doc: "The 1, 5 and 15 minute load averages: from /proc/loadavg on Linux and sysctl vm.loadavg on macOS. Windows has no load average and is refused with E_UNIMPLEMENTED; use monitor_watch_cpu (total CPU use) or top_snapshot (per-process use) there. Other systems are refused.",
         examples: &[("sys_load_avg()", "{load_1: 0.5, load_5: 0.4, load_15: 0.3}")],
     },
     Signature {
@@ -3951,8 +3951,8 @@ pub static SIGNATURES: &[Signature] = &[
     Signature {
         name: "sys_mem_info", category: None, subject_required: false, aliases: &[],
         subject: None, params: &[], returns: "Record",
-        doc: "Read memory in process: total, free and available bytes as Int fields. Free means unallocated memory; available includes reusable memory where the OS reports it. Unsupported systems or unavailable measurements produce coded errors.",
-        examples: &[("sys_mem_info()", "{available: 4294967296, free: 2147483648, total: 8589934592}")],
+        doc: "Read memory in process: total, free, available and used bytes as Int fields. Free means unallocated memory; available includes reusable memory where the OS reports it; used is total minus available. Unsupported systems or unavailable measurements produce coded errors.",
+        examples: &[("sys_mem_info()", "{available: 4294967296, free: 2147483648, total: 8589934592, used: 4294967296}")],
     },
     Signature {
         name: "sys_swap_info",
@@ -3962,7 +3962,7 @@ pub static SIGNATURES: &[Signature] = &[
         subject: None,
         params: &[],
         returns: "Record",
-        doc: "Read system swap in process: total, used and free bytes as Int fields. A system with no swap returns zero totals. Unsupported systems or unavailable memory queries produce coded errors.",
+        doc: "Read system swap in process: total, used and free bytes as Int fields. On Windows these are the paging files (NtQuerySystemInformation SystemPageFileInformation: their size and current use), not the commit charge; elsewhere the OS swap. A system with no swap returns zero totals. Unsupported systems or unavailable memory queries produce coded errors.",
         examples: &[("sys_swap_info()", "{free: 1073741824, total: 2147483648, used: 1073741824}")],
     },
     Signature {
@@ -5904,7 +5904,7 @@ pub static SIGNATURES: &[Signature] = &[
         subject: None,
         params: &[],
         returns: "Array",
-        doc: "Mounted filesystems with size, used and available space.",
+        doc: "Mounted filesystems as {filesystem, size, used, available, use_percent, mounted_on, size_bytes, used_bytes, available_bytes, use_pct}. size, used and available are strings in binary units (K is 1024, so 3724.3G is GiB) and use_percent is a string such as \"99%\"; size_bytes, used_bytes, available_bytes and use_pct are the same figures as Ints (exact on Windows; on Unix parsed from df -h, so rounded as df rounds).",
         examples: &[("typeof(df())", "Array")],
     },
     Signature {
@@ -6020,7 +6020,7 @@ pub static SIGNATURES: &[Signature] = &[
         subject: None,
         params: &[],
         returns: "Array",
-        doc: "Disks and their usage; the same answer as df().",
+        doc: "Disks and their usage; the same answer as df(): size, used and available as binary-unit strings, with size_bytes, used_bytes, available_bytes and use_pct as numbers.",
         examples: &[("typeof(hw_disk())", "Array")],
     },
     Signature {
@@ -10801,7 +10801,7 @@ pub static SIGNATURES: &[Signature] = &[
         subject: None,
         params: &[req("pid", Ty::Any, "a positive process id, Int or numeric String")],
         returns: "Record",
-        doc: "A process as {pid, name, state, ppid, memory_bytes, start_time, exe}. An unknown pid is E_NOT_FOUND.",
+        doc: "A process as {pid, name, state, ppid, memory_bytes, start_time, exe}. name is the image name as proc_list gives it (on Windows without .exe); start_time is UTC ISO 8601 to the second, as proc_start_time gives it, or null when the system does not know it (the Windows System process). An unknown pid is E_NOT_FOUND (no process with pid N).",
         examples: &[
             (r#"proc_info(1)"#, r#"{name: systemd, pid: 1, ppid: null, state: Sleeping, ...}"#),
         ],
@@ -10838,7 +10838,7 @@ pub static SIGNATURES: &[Signature] = &[
         subject: None,
         params: &[],
         returns: "Array",
-        doc: "Every process as {pid, name, cpu, mem, command}. mem is resident bytes. cpu is percent of one CPU from ps on Unix, and total CPU seconds on Windows, so the unit differs by OS. A failed listing is E_TOOL_FAILED; arguments and pipeline input are E_BAD_ARG.",
+        doc: "Every process as {pid, name, cpu, mem, memory_bytes, command}. mem and memory_bytes are the same number, resident bytes (memory_bytes is the name proc_info uses; mem is kept for compatibility). cpu is percent of one CPU from ps on Unix, and total CPU seconds (kernel plus user time, null when the process cannot be opened) on Windows, so the unit differs by OS. A failed listing is E_TOOL_FAILED; arguments and pipeline input are E_BAD_ARG.",
         examples: &[
             (r#"proc_list()"#, r#"[{command: systemd, cpu: 0.0, mem: 13000000, name: systemd, pid: 1}, ...]"#),
         ],
@@ -11023,7 +11023,7 @@ pub static SIGNATURES: &[Signature] = &[
         subject: None,
         params: &[req("pid", Ty::Any, "a positive process id, Int or numeric String")],
         returns: "String",
-        doc: "When a live process started, as UTC ISO 8601 to the second (for example 2026-10-19T09:30:00Z), on every OS. A pid that is not live is E_NOT_FOUND.",
+        doc: "When a live process started, as UTC ISO 8601 to the second (for example 2026-10-19T09:30:00Z), on every OS, or null when the system does not know it (the Windows System process). A pid that is not live is E_NOT_FOUND.",
         examples: &[
             (r#"(try { proc_start_time(0) } catch e { e.error.code })"#, r#"E_BAD_ARG"#),
             (r#"(try { proc_start_time(2000000000) } catch e { e.error.code })"#, r#"E_NOT_FOUND"#),
@@ -12561,9 +12561,9 @@ pub static SIGNATURES: &[Signature] = &[
         subject: None,
         params: &[],
         returns: "Record",
-        doc: "Total, used and free memory.",
+        doc: "Memory as {total, free, available, used} in bytes (Int); the same answer as sys_mem_info(). used is total minus available.",
         examples: &[
-            (r#"hw_memory()"#, r#"{available: 12884901888, total: 17179869184, used: ...}"#),
+            (r#"hw_memory()"#, r#"{available: 12884901888, free: ..., total: 17179869184, used: ...}"#),
         ],
     },
     Signature {
@@ -13170,7 +13170,7 @@ pub static SIGNATURES: &[Signature] = &[
         subject: None,
         params: &[],
         returns: "Array",
-        doc: "Accounts as {name, uid, gid, home, shell} (Windows: {name, enabled, last_logon}).",
+        doc: "Accounts as {name, uid, gid, home, shell} (Windows: {name, enabled, last_logon}, last_logon as UTC ISO 8601 to the second, or null when the account has never logged on).",
         examples: &[
             (r#"sys_users()"#, r#"[{gid: 0, home: /root, name: root, shell: /bin/bash, uid: 0}, ...]"#),
         ],

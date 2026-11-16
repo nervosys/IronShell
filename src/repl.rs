@@ -369,7 +369,8 @@ pub fn report_error(e: &anyhow::Error) {
 fn print_eval_error(e: &anyhow::Error, color: bool, line: Option<usize>, note: Option<String>) {
     use crate::safety::{current_mode, Mode, SafetyError};
 
-    if current_mode() == Mode::Agent {
+    // `--deterministic` is the form a program parses, so its errors are JSON too.
+    if current_mode() == Mode::Agent || crate::agent_api::deterministic_mode() {
         // Structured form is what an agent reads — emit it verbatim, with the
         // line of the failing statement in the error object.
         match (e.downcast_ref::<SafetyError>(), line) {

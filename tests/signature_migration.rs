@@ -101,7 +101,8 @@ fn memory_queries_return_complete_byte_records_and_refuse_options() {
         let Value::Record(record) = value.unwrap() else {
             panic!("expected {name} record")
         };
-        assert_eq!(record.len(), 3);
+        // sys_mem_info also answers used (total minus available).
+        assert_eq!(record.len(), if name == "sys_mem_info" { 4 } else { 3 });
         let total = match record["total"] {
             Value::Int(n) => n,
             _ => panic!("expected bytes"),

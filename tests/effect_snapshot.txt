@@ -817,7 +817,7 @@ net_connect	Network
 net_connections	Network
 net_dns_lookup	Network
 net_dns_reverse	Network
-net_interfaces	Network
+net_interfaces	ReadLocal
 net_ip	Network
 net_latency	Network
 net_listen	Network
