@@ -11543,6 +11543,17 @@ pub(crate) fn check_csv_headers(builtin: &str, headers: &[String]) -> Result<()>
 /// plus one. A row with the wrong number of fields is named by its line and by
 /// the two counts.
 fn csv_row_error(builtin: &str, text: &str, e: &csv::Error) -> anyhow::Error {
+    // A quote that is never closed swallows the rest of the text into one field,
+    // which then shows as a short row; say what is wrong, not its symptom.
+    if builtin == "from_csv" {
+        if let Some(line) = csv_unterminated_quote_line(text) {
+            return crate::safety::bad_arg_in(
+                builtin,
+                format!("{builtin}: unterminated quoted field starting on line {line}"),
+                "close the quote with a matching \", or double a literal quote inside a quoted field (\"\")",
+            );
+        }
+    }
     if let csv::ErrorKind::UnequalLengths {
         pos: Some(pos),
         expected_len,
@@ -11567,6 +11578,50 @@ fn csv_row_error(builtin: &str, text: &str, e: &csv::Error) -> anyhow::Error {
         );
     }
     crate::safety::bad_arg(builtin, "CSV text", &e.to_string())
+}
+
+/// The line a quoted CSV field opens on when the text ends inside it, else None.
+/// A quote opens a field only at a field's start; inside one, `""` is a literal
+/// quote and a lone `"` closes it.
+fn csv_unterminated_quote_line(text: &str) -> Option<usize> {
+    let mut line = 1usize;
+    let mut open_line = 0usize;
+    let mut in_quotes = false;
+    let mut field_start = true;
+    let mut chars = text.chars().peekable();
+    while let Some(c) = chars.next() {
+        if in_quotes {
+            match c {
+                '"' if chars.peek() == Some(&'"') => {
+                    chars.next();
+                }
+                '"' => {
+                    in_quotes = false;
+                    field_start = false;
+                }
+                '\n' => line += 1,
+                _ => {}
+            }
+            continue;
+        }
+        match c {
+            '"' if field_start => {
+                in_quotes = true;
+                open_line = line;
+            }
+            ',' => field_start = true,
+            '\n' => {
+                line += 1;
+                field_start = true;
+            }
+            _ => field_start = false,
+        }
+    }
+    if in_quotes {
+        Some(open_line)
+    } else {
+        None
+    }
 }
 
 /// Whether a cell is a number a numeric column can hold: it parses as an Int or
