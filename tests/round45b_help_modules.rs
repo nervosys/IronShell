@@ -84,3 +84,24 @@ fn a_top_level_builtin_named_as_a_member_gets_the_call_hint() {
     assert!(s.hint.contains("is a top-level builtin"), "{}", s.hint);
     assert!(!s.hint.contains("ontology_manifest"), "{}", s.hint);
 }
+
+#[test]
+fn argument_errors_name_the_type_not_the_rust_debug_form() {
+    let mut env = iron_shell::modules::env_with_modules();
+    for (src, ty) in [
+        ("len(true)", "Bool"),
+        ("sum(5)", "Int"),
+        ("avg(true)", "Bool"),
+        ("keys(1)", "Int"),
+        ("sum([1, \"a\"])", "String"),
+    ] {
+        let stmts = iron_shell::parser::parse_program(src).expect("parses");
+        let e = iron_shell::eval::eval_program(&stmts, &mut env).expect_err(src);
+        let msg = format!("{e}");
+        assert!(msg.contains(&format!("got {ty}")), "{src}: {msg}");
+        assert!(
+            !msg.contains("Bool(") && !msg.contains("Int(") && !msg.contains("Str("),
+            "{src}: {msg}"
+        );
+    }
+}

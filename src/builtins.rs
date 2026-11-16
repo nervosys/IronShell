@@ -5482,8 +5482,8 @@ fn bi_call(args: Vec<Value>, input: Option<Value>, env: &mut Env) -> Result<Valu
         Value::Str(s) | Value::Uri(s) => s,
         other => {
             return Err(crate::safety::arg_err(format!(
-                "call: expected String builtin name, got {:?}",
-                other
+                "call: expected String builtin name, got {}",
+                other.type_name()
             )));
         }
     };
@@ -5695,8 +5695,8 @@ fn bi_keys(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
             Ok(Value::Array(keys))
         }
         _ => Err(crate::safety::arg_err(format!(
-            "keys: requires a Record, got {:?}",
-            val
+            "keys: requires a Record, got {}",
+            val.type_name()
         ))),
     }
 }
@@ -5718,8 +5718,8 @@ fn bi_values(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
             Ok(Value::Array(values))
         }
         _ => Err(crate::safety::arg_err(format!(
-            "values: requires a Record, got {:?}",
-            val
+            "values: requires a Record, got {}",
+            val.type_name()
         ))),
     }
 }
@@ -5759,8 +5759,8 @@ fn bi_sum(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
                     }
                     _ => {
                         return Err(crate::safety::arg_err(format!(
-                            "sum: array must contain only numbers, got {:?}",
-                            item
+                            "sum: array must contain only numbers, got {}",
+                            item.type_name()
                         )))
                     }
                 }
@@ -5773,8 +5773,8 @@ fn bi_sum(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
             }
         }
         _ => Err(crate::safety::arg_err(format!(
-            "sum: requires an Array, got {:?}",
-            arr
+            "sum: requires an Array, got {}",
+            arr.type_name()
         ))),
     }
 }
@@ -5893,8 +5893,8 @@ fn bi_avg(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
                     Value::Float(f) => sum += *f,
                     _ => {
                         return Err(crate::safety::arg_err(format!(
-                            "avg: array must contain only numbers, got {:?}",
-                            item
+                            "avg: array must contain only numbers, got {}",
+                            item.type_name()
                         )))
                     }
                 }
@@ -5903,8 +5903,8 @@ fn bi_avg(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
             Ok(Value::Float(sum / items.len() as f64))
         }
         _ => Err(crate::safety::arg_err(format!(
-            "avg: requires an Array, got {:?}",
-            arr
+            "avg: requires an Array, got {}",
+            arr.type_name()
         ))),
     }
 }
@@ -6129,8 +6129,8 @@ fn bi_product(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
             }
         }
         _ => Err(crate::safety::arg_err(format!(
-            "product: requires an Array, got {:?}",
-            arr
+            "product: requires an Array, got {}",
+            arr.type_name()
         ))),
     }
 }
@@ -6728,8 +6728,8 @@ fn bi_len(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
         Value::Str(ref s) => s.chars().count(),
         _ => {
             return Err(crate::safety::arg_err(format!(
-                "len: requires Array, Record, or String, got {:?}",
-                val
+                "len: requires Array, Record, or String, got {}",
+                val.type_name()
             )));
         }
     };
@@ -15090,8 +15090,8 @@ fn bi_any(args: Vec<Value>, input: Option<Value>, env: &mut Env) -> Result<Value
             return Err(crate::safety::arg_err("any requires an array as input"));
         } else {
             return Err(crate::safety::arg_err(format!(
-                "any expects array, got {:?}",
-                args[0]
+                "any expects array, got {}",
+                args[0].type_name()
             )));
         }
     } else {
@@ -15147,8 +15147,8 @@ fn bi_all(args: Vec<Value>, input: Option<Value>, env: &mut Env) -> Result<Value
             return Err(crate::safety::arg_err("all requires an array as input"));
         } else {
             return Err(crate::safety::arg_err(format!(
-                "all expects array, got {:?}",
-                args[0]
+                "all expects array, got {}",
+                args[0].type_name()
             )));
         }
     } else {
@@ -20846,8 +20846,8 @@ fn value_to_f64(v: &Value) -> Result<f64> {
         Value::Float(f) => Ok(*f),
         Value::Int(i) => Ok(*i as f64),
         _ => Err(crate::safety::arg_err(format!(
-            "Expected numeric value, got {:?}",
-            v
+            "Expected numeric value, got {}",
+            v.type_name()
         ))),
     }
 }
