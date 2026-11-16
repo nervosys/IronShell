@@ -195,3 +195,15 @@ fn reduce_without_an_initial_value_says_it_is_required() {
         assert!(all.contains("initial value is required"), "{src}: {all}");
     }
 }
+
+#[test]
+fn digit_separators_are_named_not_blamed_on_exponents() {
+    let (out, err, code) = run(&[], "1_000");
+    let all = format!("{out}{err}");
+    assert_ne!(code, 0, "{all}");
+    assert!(
+        all.contains("digit separators (_) are not supported; write 1000"),
+        "{all}"
+    );
+    assert!(!all.contains("exponent"), "{all}");
+}

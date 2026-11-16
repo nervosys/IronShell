@@ -886,6 +886,29 @@ fn lex_marked(src: &str) -> Result<(Vec<Spanned>, std::collections::HashSet<usiz
         }
         if let Some(next) = peek(chars, *pos) {
             if is_ident_part(next) {
+                // `1_000`: a digit separator, which the language does not have.
+                if next == '_' {
+                    let mut joined = acc.clone();
+                    let mut at = *pos;
+                    while let Some(c) = peek(chars, at) {
+                        if c.is_ascii_digit() {
+                            joined.push(c);
+                        } else if c != '_' {
+                            break;
+                        }
+                        at += 1;
+                    }
+                    if !peek(chars, at).is_some_and(is_ident_part) {
+                        return Err(anyhow!(
+                            "malformed number: '{}' is followed by '_' at line {}, column {}; \
+                             digit separators (_) are not supported; write {}",
+                            acc,
+                            line,
+                            col,
+                            joined
+                        ));
+                    }
+                }
                 return Err(anyhow!(
                     "malformed number: '{}' is followed by '{}' at line {}, column {}; \
                      separate them with a space, or write a valid exponent such as 1e10",
