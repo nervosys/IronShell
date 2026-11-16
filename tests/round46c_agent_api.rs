@@ -160,9 +160,21 @@ async fn a_relative_path_written_is_read_back_when_started_outside_the_workspace
             .contains("outside the workspace"),
         "{explained}"
     );
+    // Agent mode gates a delete: the call is refused for approval, and the
+    // target it names is the file in the workspace, not one beside it.
     let removed = eval(port, "rm('b.txt')").await;
-    assert_eq!(removed["success"], json!(true), "{removed}");
-    assert!(!ws.join("b.txt").exists());
+    assert_eq!(removed["success"], json!(false), "{removed}");
+    assert_eq!(removed["code"], json!("E_NEEDS_APPROVAL"), "{removed}");
+    let target = removed["error"]["approval"]["targets"][0]
+        .as_str()
+        .unwrap_or_default()
+        .replace('\\', "/");
+    let expected = ws.join("b.txt").to_string_lossy().replace('\\', "/");
+    assert!(
+        target.ends_with("/ws/b.txt") && target.contains("ironshell_r46c_"),
+        "approval target {target:?}, expected {expected:?}: {removed}"
+    );
+    assert!(ws.join("b.txt").exists(), "nothing was deleted");
 }
 
 // ── 2. the tool names a schema advertises are accepted ─────────────────────
@@ -390,7 +402,7 @@ async fn http_layer_failures_are_json_in_the_api_error_shape() {
         c.post(url(port, "/api/v1/eval"))
             .bearer_auth(TOKEN)
             .header("content-type", "application/json")
-            .body("[0]".repeat(40_000))
+            .body("{nope".repeat(8_000))
             .send()
             .await
             .expect("request"),
