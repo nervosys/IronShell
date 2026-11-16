@@ -4229,6 +4229,14 @@ pub fn module_member_candidates(module: &str, field: &str, members: &[&str]) -> 
         .keys()
         .copied()
         .filter_map(|g| {
+            // `None` and `Some` are value constructors: `file.nope` is not a
+            // slip of `None`, so a capitalised global is not offered for a
+            // lower-case member.
+            if g.chars().next().is_some_and(char::is_uppercase)
+                && !field.chars().next().is_some_and(char::is_uppercase)
+            {
+                return None;
+            }
             let lower = g.to_lowercase();
             // A short global inside a long typed name is chance, not kinship:
             // `math.variance` contains `nc`. Substrings count from 4 characters.
