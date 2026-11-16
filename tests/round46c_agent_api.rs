@@ -60,7 +60,9 @@ async fn serve() -> u16 {
     tokio::spawn(async move {
         let _ = start_agent_api_server(config).await;
     });
-    for _ in 0..100 {
+    // 30 s: a loaded macOS runner can take several seconds to build the
+    // ontology before it listens.
+    for _ in 0..600 {
         if tokio::net::TcpStream::connect(("127.0.0.1", port))
             .await
             .is_ok()
