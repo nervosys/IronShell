@@ -51251,12 +51251,37 @@ fn bi_db_sqlite_exec(args: Vec<Value>, _input: Option<Value>) -> Result<Value> {
     let (db_path, sql) = sqlite_exec_prepare(args)?;
     // Every mutating sqlite builtin (insert/update/delete/create_table/drop_table)
     // routes through here, so snapshotting the db file at this single chokepoint
+    // An optional third Array binds the statement's ? placeholders, as the
+    // query builtin's trailing Array does.
+    let params = match args.get(2) {
+        None => None,
+        Some(Value::Array(values)) => Some(values.clone()),
+        Some(other) => {
+            return Err(crate::safety::bad_arg(
+                "db_sqlite_exec",
+                "params: Array of bind values",
+                other.type_name(),
+            ))
+        }
+    };
+    if args.len() > 3 {
+        return Err(arity_error(
+            "db_sqlite_exec",
+            "a database, SQL and optional params Array",
+            args.len(),
+        ));
+    }
     // makes those mutations reversible inside a transaction. No-op when no
     // transaction is active.
     crate::tx::snapshot(&db_path);
     sqlite_exec_run("db_sqlite_exec", &db_path, &sql, false)
 }
 
+    if let Some(params) = params {
+        sqlite_db_file("db_sqlite_exec", &db_path)?;
+        crate::sql::exec_bound("db_sqlite_exec", &db_path, &sql, &params)?;
+        return Ok(Value::Bool(true));
+    }
 /// Runs a statement that a builtin of its own built and validated. The sqlite3
 /// CLI gets `-safe`, which refuses writefile(), ATTACH and the file
 /// dot-commands, so a `;` the builtin missed still cannot reach the filesystem.

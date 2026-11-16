@@ -473,6 +473,65 @@ fn bind_value(builtin: &str, position: usize, v: &Value) -> Result<rusqlite::typ
     })
 }
 
+/// Run one statement that may write, binding `params` to its `?` placeholders in
+/// order, as the query runner binds them. `db_sqlite_exec(db, sql, params)` uses
+/// this; without params it hands the SQL to the sqlite3 CLI instead. One
+/// statement only, since placeholders are numbered across a single statement.
+pub(crate) fn exec_bound(builtin: &str, db_path: &str, sql: &str, params: &[Value]) -> Result<()> {
+    // No SQLITE_OPEN_URI, as for the reader: a `file:` name is a path here.
+    let conn = Connection::open_with_flags(
+        db_path,
+        OpenFlags::SQLITE_OPEN_READ_WRITE
+            | OpenFlags::SQLITE_OPEN_CREATE
+            | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )
+    .map_err(|e| {
+        bad(
+            builtin,
+            format!("{db_path} could not be opened as a SQLite database: {e}"),
+            "name a SQLite file, or a path that does not exist yet".to_string(),
+            "a SQLite database",
+            e.to_string(),
+        )
+    })?;
+    let sql_err = |e: rusqlite::Error| {
+        let text = e.to_string();
+        bad(
+            builtin,
+            text.clone(),
+            "check the statement, and that it holds one ? for each bind parameter".to_string(),
+            "a valid SQL statement",
+            text,
+        )
+    };
+    let mut stmt = conn.prepare(sql).map_err(sql_err)?;
+    let wanted = stmt.parameter_count();
+    if wanted != params.len() {
+        return Err(bad(
+            builtin,
+            format!(
+                "the statement has {wanted} placeholder(s) but {} bind parameter(s) were given",
+                params.len()
+            ),
+            "pass one value in the params array for each ? in the statement, in order".to_string(),
+            &format!("{wanted} bind parameter(s)"),
+            params.len().to_string(),
+        ));
+    }
+    let bound = params
+        .iter()
+        .enumerate()
+        .map(|(i, v)| bind_value(builtin, i, v))
+        .collect::<Result<Vec<_>>>()?;
+    let mut rows = stmt
+        .query(rusqlite::params_from_iter(bound))
+        .map_err(sql_err)?;
+    // A statement that returns rows (a SELECT, RETURNING) is run to its end and
+    // its rows are dropped, as the CLI path drops its output.
+    while rows.next().map_err(sql_err)?.is_some() {}
+    Ok(())
+}
+
 /// Run one read-only statement, binding `params` to its `?` placeholders in
 /// order, and return column names and rows.
 fn run(

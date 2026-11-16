@@ -11385,9 +11385,9 @@ pub static SIGNATURES: &[Signature] = &[
     },
     Signature {
         name: "db_sqlite_exec", category: None, subject_required: false, aliases: &["sqlite_exec"],
-        subject: None, params: &[req("db", Ty::Str, "SQLite database path"), req("sql", Ty::Str, "SQL statements; no SQLite dot commands")], returns: "Bool",
-        doc: "Execute SQL through the sqlite3 CLI, snapshotting the database for an active transaction. Return true on success or a coded tool error. SQL query output is discarded; use sql for results.",
-        examples: &[(r#"db_sqlite_dump("tests/fixtures/sample.db"); let d = fs_tempdir("ae_exec"); let result = db_sqlite_exec(d + "/example.db", "CREATE TABLE example(value INTEGER)"); rmdir(d, true); result"#, "true")],
+        subject: None, params: &[req("db", Ty::Str, "SQLite database path"), req("sql", Ty::Str, "SQL statements; no SQLite dot commands"), opt("params", Ty::Array, "bind values for the ? placeholders, in order; with them the SQL is one statement")], returns: "Bool",
+        doc: "Execute SQL through the sqlite3 CLI, snapshotting the database for an active transaction. Return true on success or a coded tool error. SQL query output is discarded; use sql for results. An optional params Array binds the ? placeholders as sql binds them (Null, Bool, Int, Float or String values).",
+        examples: &[(r#"db_sqlite_dump("tests/fixtures/sample.db"); let d = fs_tempdir("ae_exec"); let result = db_sqlite_exec(d + "/example.db", "CREATE TABLE example(value INTEGER)"); rmdir(d, true); result"#, "true"), (r#"db_sqlite_dump("tests/fixtures/sample.db"); let d = fs_tempdir("ae_exec"); let f = d + "/bound.db"; db_sqlite_exec(f, "CREATE TABLE t(v INTEGER, n TEXT)"); let r = db_sqlite_exec(f, "INSERT INTO t VALUES (?, ?)", [7, "a"]); let v = sql_value(f, "select v from t"); rmdir(d, true); r && v == 7"#, "true")],
     },
     Signature {
         name: "db_kv_set", category: None, subject_required: false, aliases: &[],
