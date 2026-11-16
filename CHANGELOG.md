@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [14.0.5] - 2026-11-16
+
 ### Security
 
 - Windows: a drive-relative path (`C:..\x`, `C:../outside/f`) could write outside the workspace jail in agent mode or with a workspace set (file.write, append, replace, copy, `ish -b` redirection, tee, touch, mkdir) and read outside it under `ish -b` (cat, ls). Such a path now resolves against the drive's current directory, as Windows does, and the jail, `--explain` and the undo journal all judge that one absolute path.
@@ -4734,7 +4736,8 @@ N/A - Initial release
 
 See [ROADMAP.md](ROADMAP.md) for upcoming features.
 
-[Unreleased]: https://github.com/nervosys/IronShell/compare/v14.0.4...HEAD
+[Unreleased]: https://github.com/nervosys/IronShell/compare/v14.0.5...HEAD
+[14.0.5]: https://github.com/nervosys/IronShell/compare/v14.0.4...v14.0.5
 [14.0.4]: https://github.com/nervosys/IronShell/compare/v14.0.3...v14.0.4
 [14.0.3]: https://github.com/nervosys/IronShell/compare/v14.0.2...v14.0.3
 [14.0.2]: https://github.com/nervosys/IronShell/compare/v14.0.1...v14.0.2

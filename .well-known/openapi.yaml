@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: IronShell Agent API
-  version: 14.0.4
+  version: 14.0.5
   description: >
     Structured JSON API for AI agents to interact with IronShell, a typed
     functional shell with 1,200+ builtins. Start the server with
@@ -517,7 +517,7 @@ paths:
                     example: healthy
                   version:
                     type: string
-                    example: 14.0.4
+                    example: 14.0.5
 
   /api/v1/orchestration/agents:
     get:
