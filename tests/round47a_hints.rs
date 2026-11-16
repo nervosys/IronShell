@@ -142,3 +142,14 @@ fn method_calls_on_literals_and_arrays_say_they_have_no_methods() {
     assert_ne!(code, 0, "{all}");
     assert!(all.contains("len(xs)"), "{all}");
 }
+
+#[test]
+fn let_destructuring_hint_names_the_real_problem() {
+    for src in ["let [a, b] = [1, 2]", "let {a, b} = {a: 1, b: 2}"] {
+        let (out, err, code) = run(&[], src);
+        let all = format!("{out}{err}");
+        assert_ne!(code, 0, "{src}: {all}");
+        assert!(all.contains("let takes a single name"), "{src}: {all}");
+        assert!(!all.contains("use `==` to compare"), "{src}: {all}");
+    }
+}

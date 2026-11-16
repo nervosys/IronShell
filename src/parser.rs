@@ -1818,6 +1818,19 @@ impl Parser {
         if self.match_tok(Tok::Let) {
             // Keep let/let mut for explicit declarations
             let is_mut = self.match_tok(Tok::Mut);
+            // `let [a, b] = xs` and `let {a, b} = r`: no destructuring.
+            if self.check(Tok::LBracket) || self.check(Tok::LBrace) {
+                let at = self.peek();
+                return Err(anyhow::Error::new(HintedSyntax {
+                    msg: format!(
+                        "destructuring is not supported after let at line {}, column {}",
+                        at.line, at.col
+                    ),
+                    hint: "let takes a single name; destructuring is not supported: \
+                           write xs = [1, 2]; a = xs[0]"
+                        .to_string(),
+                }));
+            }
             let name = self.need_ident("expected identifier after let")?;
             let ty = if self.match_tok(Tok::Colon) {
                 Some(self.need_ident("expected type after ':'")?)
