@@ -71,3 +71,11 @@ fn a_brace_glob_sorts_across_alternatives() {
     assert_eq!(names, ["a.py", "b.rs", "c.py", "d.rs"]);
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn ls_with_options_hints_at_glob() {
+    let v =
+        try_run("try { ls(\"src\", {recursive: true}) } catch e { e.error.hint }").expect("caught");
+    let text = v.to_display_string();
+    assert!(text.contains("glob("), "{text}");
+}

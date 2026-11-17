@@ -15798,6 +15798,19 @@ pub fn validate(name: &str, args: &[Value], input: Option<&Value>) -> anyhow::Re
         // argument is one of those arguments, so `sqrt(1, 2, 3)` may take one
         // argument, not zero: the parameter list is empty and the subject is the
         // one argument it takes.
+        // `ls('src', {recursive: true})`: ls has no options and is not recursive.
+        if name == "ls" {
+            return Err(crate::safety::bad_arg_with_hint(
+                name,
+                &format!(
+                    "at most {} argument(s): {}",
+                    sig.params.len() + params_start,
+                    sig.render()
+                ),
+                &format!("{}", args.len()),
+                "ls takes one path and is not recursive; list a tree with glob(\"src/**/*\") (add a `/` to match directories only)",
+            ));
+        }
         return Err(crate::safety::bad_arg(
             name,
             &format!(
