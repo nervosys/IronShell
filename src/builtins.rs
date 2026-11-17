@@ -33747,6 +33747,53 @@ fn brace_alternatives(pattern: &str) -> Vec<String> {
     vec![pattern.to_string()]
 }
 
+/// What is unbalanced about the braces of `pattern`: `an unclosed {` or
+/// `a } with no {`, or `None`. A brace inside a `[...]` class is a literal.
+fn unbalanced_brace(pattern: &str) -> Option<&'static str> {
+    let mut depth = 0usize;
+    let mut in_class = false;
+    for c in pattern.chars() {
+        match c {
+            '[' => in_class = true,
+            ']' => in_class = false,
+            '{' if !in_class => depth += 1,
+            '}' if !in_class => {
+                if depth == 0 {
+                    return Some("a } with no matching {");
+                }
+                depth -= 1;
+            }
+            _ => {}
+        }
+    }
+    (depth > 0).then_some("an unclosed {")
+}
+
+/// `pattern` with each `{x}` group that holds one alternative (no comma, no
+/// nested brace, not empty) replaced by `x`, as zsh and globset read it. `{}`
+/// stays as written.
+fn single_alternative_braces(pattern: &str) -> String {
+    let chars: Vec<char> = pattern.chars().collect();
+    let mut out = String::with_capacity(pattern.len());
+    let mut i = 0;
+    while i < chars.len() {
+        if chars[i] == '{' {
+            if let Some(len) = chars[i + 1..]
+                .iter()
+                .position(|c| matches!(c, '{' | '}' | ','))
+                .filter(|&len| len > 0 && chars[i + 1 + len] == '}')
+            {
+                out.extend(&chars[i + 1..i + 1 + len]);
+                i += len + 2;
+                continue;
+            }
+        }
+        out.push(chars[i]);
+        i += 1;
+    }
+    out
+}
+
 /// True when a path string is a glob: it has a wildcard, or a `{a,b}` group.
 fn has_glob_syntax(s: &str) -> bool {
     crate::posix::has_glob_meta(s) || brace_alternatives(s).len() > 1
@@ -33757,6 +33804,23 @@ fn has_glob_syntax(s: &str) -> bool {
 /// rather than an empty answer that reads like "no files". A `{a,b}` group
 /// matches either alternative (`*.{rs,py}`); a path matched twice appears once.
 fn expand_glob_for(builtin: &str, pattern: &str) -> Result<Vec<String>> {
+    // `glob` reads braces strictly: an unbalanced one is a mistyped pattern,
+    // not a name to look for, and a one-alternative group is the alternative.
+    let unbraced;
+    let pattern = if builtin == "glob" {
+        if let Some(what) = unbalanced_brace(pattern) {
+            return Err(crate::safety::bad_arg_with_hint(
+                builtin,
+                "a pattern whose { } braces balance",
+                &format!("{what} in {pattern}"),
+                "close every `{` with a `}` (`**/*.{rs,py}`)",
+            ));
+        }
+        unbraced = single_alternative_braces(pattern);
+        unbraced.as_str()
+    } else {
+        pattern
+    };
     let alternatives = brace_alternatives(pattern);
     if alternatives.len() <= 1 {
         return expand_glob_one(builtin, pattern);

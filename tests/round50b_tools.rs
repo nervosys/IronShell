@@ -223,3 +223,19 @@ fn b8_missing_cp_names_the_subset() {
         assert_eq!(o.status.code(), Some(127), "{text}");
     }
 }
+
+#[test]
+fn b9_glob_unbalanced_brace_is_refused_and_single_alternative_is_the_name() {
+    let dir = scratch("b9");
+    let o = ish_in(&dir, r#"glob("**/{*.rs,*.py")"#);
+    let text = out(&o);
+    assert!(!o.status.success(), "{text}");
+    assert!(text.contains("E_BAD_ARG"), "{text}");
+    assert!(text.contains("unclosed {"), "{text}");
+    let o = ish_in(&dir, r#"glob("src/*.{rs}")"#);
+    let text = out(&o);
+    assert!(o.status.success(), "{text}");
+    assert!(text.contains("main.rs"), "{text}");
+    let o = ish_in(&dir, r#"glob("src/*.rs}")"#);
+    assert!(out(&o).contains("E_BAD_ARG"), "{}", out(&o));
+}
