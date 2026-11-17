@@ -50269,6 +50269,22 @@ fn bi_crypto_hash_file(args: Vec<Value>, _input: Option<Value>) -> Result<Value>
 
 fn bi_crypto_hmac(args: Vec<Value>, _input: Option<Value>) -> Result<Value> {
     use hmac::{Hmac, Mac};
+    // The argument order is (data, key, algorithm). `crypto_hmac("sha256", "key",
+    // "msg")` puts the algorithm first, as crypto_hash does: say so.
+    if let (Some(Value::Str(first)), Some(Value::Str(key)), Some(Value::Str(last))) =
+        (args.first(), args.get(1), args.get(2))
+    {
+        if is_hash_algorithm(first) && !is_hash_algorithm(last) {
+            return Err(crate::safety::bad_arg_with_hint(
+                "crypto_hmac",
+                "(data, key, algorithm)",
+                &format!("the algorithm `{first}` first and `{last}` last"),
+                &format!(
+                    "crypto_hmac takes (data, key, algorithm): write crypto_hmac({last:?}, {key:?}, {first:?})"
+                ),
+            ));
+        }
+    }
     let data = args
         .first()
         .ok_or_else(|| crate::safety::arg_err("crypto_hmac: data is required"))?;

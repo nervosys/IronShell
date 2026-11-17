@@ -103,3 +103,18 @@ fn file_digest_and_hmac_spellings_name_the_crypto_builtins() {
         vec!["crypto_hmac".to_string()]
     );
 }
+
+#[test]
+fn crypto_hmac_with_the_algorithm_first_says_the_argument_order() {
+    let dir = scratch("hmac");
+    let proj = dir.join("proj");
+    let t = text(&ish_in(&proj, r#"crypto_hmac("sha256", "key", "msg")"#));
+    assert!(
+        t.contains(
+            r#"crypto_hmac takes (data, key, algorithm): write crypto_hmac("msg", "key", "sha256")"#
+        ),
+        "{t}"
+    );
+    let ok = ish_in(&proj, r#"crypto_hmac("msg", "key", "sha256") | len"#);
+    assert!(ok.status.success(), "{}", text(&ok));
+}
