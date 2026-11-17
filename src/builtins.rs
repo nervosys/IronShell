@@ -40390,7 +40390,19 @@ fn tar_tool_entry_names(
     let mut verbose = crate::safety::child_command("tar");
     verbose.arg("-tvf").arg(archive);
     let long = bounded_cmd_output(builtin, "tar", verbose, TOOL_DEADLINE_SECS)?;
-    if long.status.success() && tar_verbose_lists_a_link(&String::from_utf8_lossy(&long.stdout)) {
+    // Fail closed: a verbose listing that does not complete cannot be checked.
+    if !long.status.success() {
+        return Err(crate::safety::tool_failed(
+            builtin,
+            "tar -tvf",
+            long.status.code(),
+            &format!(
+                "the link check could not list the archive, so nothing was extracted: {}",
+                String::from_utf8_lossy(&long.stderr)
+            ),
+        ));
+    }
+    if tar_verbose_lists_a_link(&String::from_utf8_lossy(&long.stdout)) {
         return Err(crate::safety::policy_deny(
             builtin,
             format!("{builtin}: the archive holds a symbolic or hard link entry, and its targets cannot be checked for this format"),
@@ -69215,6 +69227,16 @@ pub fn bi_rm(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
         ));
     }
     let force = fs_flag("rm", "force", args.get(1))?;
+    // A trailing separator names what a link points at, not the link, so it
+    // could be read as a request to follow it. Refused before anything else.
+    if path.ends_with(['/', '\\']) {
+        return Err(crate::safety::bad_arg_with_hint(
+            "rm",
+            "a file or link name with no trailing separator",
+            &format!("'{path}'"),
+            "name the file or link without a trailing / or \\; to remove a directory use rmdir",
+        ));
+    }
     // rm names one file and expands nothing: a `*` or `?` that names no file is a
     // glob the caller expected expanded. Left to the jail it was called "outside
     // the workspace" (the name cannot be resolved), which it is not.

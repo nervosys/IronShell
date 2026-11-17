@@ -303,3 +303,64 @@ fn explain_agrees_about_an_overlong_entry_name() {
     let lit = archive.to_string_lossy().replace('\\', "/");
     assert_eq!(decision(&format!("tar_extract('{lit}', 'out')")), "deny");
 }
+
+// ── Follow-ups: rm and links, edge spellings ──
+
+#[test]
+fn rm_refuses_a_trailing_separator_and_spellings_that_reach_through_a_link() {
+    let s = Scratch::new("rmspell");
+    std::fs::write(s.outside.join("x"), "keep").unwrap();
+    std::fs::write(s.outside.join("keep.txt"), "keep").unwrap();
+    if !link_dir(&s.outside, &s.ws.join("jx")) {
+        return;
+    }
+    for expr in [
+        r#"rm("jx/")"#,
+        r#"rm("jx\\")"#,
+        r#"rm("jx/.")"#,
+        r#"rm("jx/../x")"#,
+    ] {
+        let out = s.jailed(expr);
+        let shown = text(&out);
+        assert!(!out.status.success(), "{expr}: {shown}");
+        assert!(
+            std::fs::symlink_metadata(s.ws.join("jx")).is_ok(),
+            "{expr}: the link was removed: {shown}"
+        );
+        assert!(s.outside.join("keep.txt").is_file(), "{expr}: {shown}");
+        assert!(s.outside.join("x").is_file(), "{expr}: {shown}");
+    }
+    let out = s.jailed(r#"rm("jx/")"#);
+    assert!(text(&out).contains("E_BAD_ARG"), "{}", text(&out));
+}
+
+#[test]
+fn a_dangling_link_in_the_workspace_is_removed_and_undo_does_not_recreate_it() {
+    let s = Scratch::new("dangling");
+    let gone = s.root.join("gone");
+    std::fs::create_dir_all(&gone).unwrap();
+    let jx = s.ws.join("jx");
+    if !link_dir(&gone, &jx) {
+        return;
+    }
+    std::fs::remove_dir(&gone).unwrap();
+    let out = Command::new(env!("CARGO_BIN_EXE_ish"))
+        .args(["-c", r#"rm("jx"); undo()"#])
+        .current_dir(&s.ws)
+        .env("NO_COLOR", "1")
+        .env("IRONSHELL_SESSION_DIR", &s.session)
+        .env("IRONSHELL_WORKSPACE", &s.ws)
+        .env("IRONSHELL_JOURNAL", "on")
+        .env_remove("IRONSHELL_MODE")
+        .output()
+        .expect("run ish");
+    let shown = text(&out);
+    assert!(
+        std::fs::symlink_metadata(&jx).is_err(),
+        "an undo of a link cannot recreate it, and must not pretend to: {shown}"
+    );
+    assert!(
+        !shown.contains("complete: true") && !shown.contains("complete=true"),
+        "{shown}"
+    );
+}

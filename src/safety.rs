@@ -4548,12 +4548,14 @@ pub fn is_link(path: &str) -> bool {
 
 /// The folder a link sits in, when `path` names a link. `None` otherwise.
 fn link_leaf_parent(path: &str) -> Option<String> {
-    if !is_link(path) {
+    // A relative path is placed where `within_root` places it (the workspace
+    // root), not against the process's working directory.
+    let abs = absolute_form(path);
+    if !is_link(&abs.to_string_lossy()) {
         return None;
     }
-    let p = Path::new(path);
-    p.file_name()?;
-    let parent = p.parent()?;
+    abs.file_name()?;
+    let parent = abs.parent()?;
     if parent.as_os_str().is_empty() {
         return Some(".".to_string());
     }
