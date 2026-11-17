@@ -39870,6 +39870,45 @@ struct ZipBuild {
     names: std::collections::HashSet<String>,
     bytes: u64,
     entries: usize,
+    /// The folder member being walked (canonical): a link inside it that leads
+    /// out of it is not stored.
+    root: Option<std::path::PathBuf>,
+    /// The links not stored because they lead out of the archived tree.
+    skipped: Vec<String>,
+}
+
+/// Whether `path` is a symbolic link (or a junction on Windows) whose target
+/// lies outside `root`, the canonical folder being archived. Such a link is not
+/// archived: stored as a link it would carry a target of the archiver's own
+/// machine, and stored as the file it would copy what lies outside the tree.
+/// A dangling link is judged by where its target text points.
+fn link_leaves_tree(path: &std::path::Path, root: &std::path::Path) -> bool {
+    if !std::fs::symlink_metadata(path).is_ok_and(|m| m.file_type().is_symlink()) {
+        return false;
+    }
+    let inside = match std::fs::canonicalize(path) {
+        Ok(real) => real.starts_with(root),
+        Err(_) => match std::fs::read_link(path) {
+            Ok(target) => {
+                let joined = if target.is_absolute() {
+                    target
+                } else {
+                    path.parent().unwrap_or(root).join(target)
+                };
+                std::path::Path::new(&crate::journal::normalized_path(&joined.to_string_lossy()))
+                    .starts_with(root)
+            }
+            Err(_) => false,
+        },
+    };
+    !inside
+}
+
+/// Say, on stderr, which links an archive call left out and why.
+fn note_skipped_links(builtin: &str, skipped: &[String]) {
+    for link in skipped {
+        eprintln!("{builtin}: skipped link '{link}': its target is outside the archived folder");
+    }
 }
 
 fn zip_write_error(builtin: &str, e: impl std::fmt::Display) -> anyhow::Error {
@@ -39927,6 +39966,12 @@ fn zip_add_tree(
                 continue;
             }
             let p = k.path();
+            if let Some(root) = st.root.clone() {
+                if link_leaves_tree(&p, &root) {
+                    st.skipped.push(p.to_string_lossy().into_owned());
+                    continue;
+                }
+            }
             let is_link = std::fs::symlink_metadata(&p)
                 .map(|m| m.file_type().is_symlink())
                 .unwrap_or(false);
@@ -39974,12 +40019,15 @@ fn zip_write_archive(
         names: std::collections::HashSet::new(),
         bytes: 0,
         entries: 0,
+        root: None,
+        skipped: Vec::new(),
     };
     let cwd = crate::journal::normalized_path(&crate::safety::resolve_path_str("."));
     for m in members {
         let p = std::path::Path::new(m);
         // The current folder itself: its contents are stored directly, as
         // `zip -r x .` does, not under the folder's own name.
+        st.root = std::fs::canonicalize(p).ok().filter(|c| c.is_dir());
         if crate::journal::normalized_path(m) == cwd {
             let mut kids = Vec::new();
             for k in std::fs::read_dir(p).map_err(|e| crate::safety::fs_error(builtin, m, &e))? {
@@ -39991,6 +40039,12 @@ fn zip_write_archive(
                     continue;
                 }
                 let kp = k.path();
+                if let Some(root) = st.root.clone() {
+                    if link_leaves_tree(&kp, &root) {
+                        st.skipped.push(kp.to_string_lossy().into_owned());
+                        continue;
+                    }
+                }
                 let is_link = std::fs::symlink_metadata(&kp)
                     .map(|md| md.file_type().is_symlink())
                     .unwrap_or(false);
@@ -40034,6 +40088,7 @@ fn zip_write_archive(
         }
     }
     w.finish().map_err(|e| zip_write_error(builtin, e))?;
+    note_skipped_links(builtin, &st.skipped);
     Ok(())
 }
 
@@ -41260,6 +41315,11 @@ fn tar_io_error(path: &str, e: &std::io::Error) -> anyhow::Error {
 struct TarBuild {
     entries: usize,
     skip: Option<std::path::PathBuf>,
+    /// The folder member being walked (canonical): a link inside it that leads
+    /// out of it is not stored.
+    root: Option<std::path::PathBuf>,
+    /// The links not stored because they lead out of the archived tree.
+    skipped: Vec<String>,
 }
 
 /// Add `fs_path`, a file, a link or a whole folder, to `b` under `name`
@@ -41294,6 +41354,13 @@ fn tar_add_tree<W: std::io::Write>(
             if is_state_dir(&k) {
                 continue;
             }
+            if let Some(root) = st.root.clone() {
+                let kp = k.path();
+                if link_leaves_tree(&kp, &root) {
+                    st.skipped.push(kp.to_string_lossy().into_owned());
+                    continue;
+                }
+            }
             let leaf = k.file_name().to_string_lossy().into_owned();
             let child = if name.is_empty() {
                 leaf
@@ -41326,6 +41393,8 @@ fn tar_write_archive(
     let mut st = TarBuild {
         entries: 0,
         skip: std::fs::canonicalize(out_path).ok(),
+        root: None,
+        skipped: Vec::new(),
     };
     let capped = CappedWriter {
         inner: out,
@@ -41338,6 +41407,7 @@ fn tar_write_archive(
     } else {
         tar_write_members(capped, members, placed, &mut st, out_path)?;
     }
+    note_skipped_links("tar_create", &st.skipped);
     Ok(())
 }
 
@@ -41353,6 +41423,7 @@ fn tar_write_members<W: std::io::Write>(
     for (m, (_, name)) in members.iter().zip(placed) {
         let name = name.strip_prefix("./").unwrap_or(name);
         let name = if name == "." { "" } else { name };
+        st.root = std::fs::canonicalize(m).ok().filter(|c| c.is_dir());
         tar_add_tree(&mut b, std::path::Path::new(m), name, st)?;
     }
     b.into_inner().map_err(|e| tar_io_error(out_path, &e))

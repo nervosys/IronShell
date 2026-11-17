@@ -306,3 +306,40 @@ fn a_zip_with_a_symlink_entry_is_refused_and_does_not_test_clean() {
     assert!(shown.contains("symbolic link"), "{shown}");
     assert!(!s.ws.join("ex").exists(), "something was written: {shown}");
 }
+
+// ── C6: tar_create and zip_create both leave out a link that leaves the tree ──
+
+#[test]
+fn tar_and_zip_create_skip_a_link_out_of_the_archived_folder_and_say_so() {
+    let s = Scratch::new("c6");
+    std::fs::write(s.outside.join("secret.txt"), "secret").unwrap();
+    std::fs::create_dir_all(s.ws.join("proj")).unwrap();
+    std::fs::write(s.ws.join("proj/a.txt"), "a").unwrap();
+    if !link_dir(&s.outside, &s.ws.join("proj/jx")) {
+        return;
+    }
+    for (make, list, archive) in [
+        (
+            r#"tar_create("o.tar", "proj")"#,
+            r#"tar_list("o.tar")"#,
+            "o.tar",
+        ),
+        (
+            r#"zip_create("o.zip", "proj")"#,
+            r#"zip_list("o.zip")"#,
+            "o.zip",
+        ),
+    ] {
+        let out = s.jailed(&["-c", make]);
+        let shown = text(&out);
+        assert!(out.status.success(), "{make}: {shown}");
+        assert!(shown.contains("skipped link"), "{make}: {shown}");
+        assert!(s.ws.join(archive).is_file(), "{make}: {shown}");
+        let out = s.jailed(&["-c", list]);
+        let shown = text(&out);
+        assert!(shown.contains("a.txt"), "{list}: {shown}");
+        assert!(!shown.contains("jx"), "{list}: {shown}");
+        assert!(!shown.contains("secret"), "{list}: {shown}");
+    }
+    let _ = std::fs::remove_dir(s.ws.join("proj/jx"));
+}
