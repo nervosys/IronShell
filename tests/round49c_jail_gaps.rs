@@ -330,8 +330,14 @@ fn rm_refuses_a_trailing_separator_and_spellings_that_reach_through_a_link() {
         assert!(s.outside.join("keep.txt").is_file(), "{expr}: {shown}");
         assert!(s.outside.join("x").is_file(), "{expr}: {shown}");
     }
+    // Refused either by rm's own check (E_BAD_ARG) or, where the OS follows
+    // the link at a trailing `/` (Unix), first by the jail.
     let out = s.jailed(r#"rm("jx/")"#);
-    assert!(text(&out).contains("E_BAD_ARG"), "{}", text(&out));
+    let shown = text(&out);
+    assert!(
+        shown.contains("E_BAD_ARG") || shown.contains("E_OUTSIDE_WORKSPACE"),
+        "{shown}"
+    );
 }
 
 #[test]
