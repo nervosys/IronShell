@@ -91,3 +91,22 @@ fn b2_find_refusal_names_the_operand_that_is_unsupported() {
     let text = out(&o);
     assert!(text.contains("does not support -exec;"), "{text}");
 }
+
+#[test]
+fn b3_tar_extract_of_a_zip_says_zip_and_never_a_signal() {
+    let dir = scratch("b3");
+    let made = ish_in(&dir, r#"zip_create("a.zip", "src")"#);
+    assert!(made.status.success(), "{}", out(&made));
+    let o = ish_in(&dir, r#"tar_extract("a.zip", "ex")"#);
+    let text = out(&o);
+    assert!(!o.status.success(), "{text}");
+    assert!(text.contains("zip archive"), "{text}");
+    assert!(text.contains("zip_extract"), "{text}");
+    assert!(!text.contains("signal"), "{text}");
+    // A damaged tar is a read error, not a killed process.
+    std::fs::write(dir.join("proj").join("bad.tar"), vec![b'x'; 2048]).expect("bad tar");
+    let o = ish_in(&dir, r#"tar_extract("bad.tar", "ex2")"#);
+    let text = out(&o);
+    assert!(!o.status.success(), "{text}");
+    assert!(!text.contains("signal"), "{text}");
+}

@@ -40591,9 +40591,9 @@ fn zip_archive_entries(
     let mut out = Vec::with_capacity(zip.len());
     let mut declared: u64 = 0;
     for i in 0..zip.len() {
-        let mut entry = zip.by_index(i).map_err(|e| {
-            crate::safety::tool_failed(builtin, "zip", None, &format!("unreadable entry: {e}"))
-        })?;
+        let mut entry = zip
+            .by_index(i)
+            .map_err(|e| archive_read_error(builtin, "zip", &format!("unreadable entry: {e}")))?;
         declared = declared.saturating_add(entry.size());
         let name = entry
             .name()
@@ -40787,6 +40787,37 @@ fn tar_archive_entries(builtin: &str, archive: &str) -> Result<Vec<(String, Opti
     Ok(tar_archive_listing(builtin, archive)?.0)
 }
 
+/// A tar or zip archive the shell read itself and could not: `E_TOOL_FAILED`
+/// without a status, since no program ran and nothing was killed.
+fn archive_read_error(builtin: &str, kind: &str, detail: &str) -> anyhow::Error {
+    let hint = if kind == "zip" {
+        "the zip archive is damaged or truncated; re-create it, or check it with zip_test"
+    } else {
+        "the tar archive is damaged or truncated (or is not a tar file); re-create it, or check it with archive_test"
+    };
+    crate::safety::tool_failed_in_process(
+        builtin,
+        &format!("reading the {kind} archive"),
+        detail,
+        hint,
+    )
+}
+
+/// The refusal for a zip archive handed to a tar builtin: the file starts with
+/// `PK`, so it is a zip, and the zip builtin of the same job reads it.
+fn tar_given_a_zip(builtin: &str, archive: &str) -> anyhow::Error {
+    let use_instead = if builtin == "tar_extract" {
+        "zip_extract"
+    } else {
+        "zip_list"
+    };
+    crate::safety::bad_value_in(
+        builtin,
+        format!("{builtin}: `{archive}` is a zip archive, not a tar archive"),
+        &format!("use {use_instead} for a zip archive"),
+    )
+}
+
 /// The entries of a tar archive, and the total of their declared sizes. A plain
 /// or gzip-compressed tar is read in-process. A bzip2, xz or zstd stream is read
 /// in-process through its decompressor; where that program is not installed,
@@ -40817,6 +40848,8 @@ fn tar_archive_listing(
         // extract them. Link targets are not listed this way, so an archive
         // with any link entry is refused (see `tar_tool_entry_names`).
         return tar_tool_entry_names(builtin, archive);
+    } else if n == 2 && &magic == b"PK" {
+        return Err(tar_given_a_zip(builtin, archive));
     } else {
         Box::new(file)
     };
@@ -40830,18 +40863,17 @@ fn read_tar_entries<R: std::io::Read>(
     reader: R,
 ) -> Result<(Vec<(String, Option<String>)>, u64)> {
     let mut ar = tar::Archive::new(reader);
-    let entries = ar.entries().map_err(|e| {
-        crate::safety::tool_failed(builtin, "tar", None, &format!("not a tar archive: {e}"))
-    })?;
+    let entries = ar
+        .entries()
+        .map_err(|e| archive_read_error(builtin, "tar", &format!("not a tar archive: {e}")))?;
     let mut out = Vec::new();
     let mut declared: u64 = 0;
     for entry in entries {
         if out.len() >= WALK_MAX_ENTRIES {
             return Err(walk_over(builtin, WALK_MAX_ENTRIES));
         }
-        let entry = entry.map_err(|e| {
-            crate::safety::tool_failed(builtin, "tar", None, &format!("unreadable entry: {e}"))
-        })?;
+        let entry = entry
+            .map_err(|e| archive_read_error(builtin, "tar", &format!("unreadable entry: {e}")))?;
         declared = declared.saturating_add(entry.size());
         let name = entry
             .path()
@@ -41525,22 +41557,23 @@ fn tar_extract_in_process(archive: &str, root: &str) -> Result<bool> {
         Box::new(flate2::read::GzDecoder::new(file))
     } else if n == 2 && tar_stream_decompressor(magic).is_some() {
         return Ok(false);
+    } else if n == 2 && &magic == b"PK" {
+        return Err(tar_given_a_zip(B, archive));
     } else {
         Box::new(file)
     };
     std::fs::create_dir_all(root).map_err(|e| crate::safety::fs_write_error(B, root, &e))?;
     let mut ar = tar::Archive::new(reader);
-    let entries = ar.entries().map_err(|e| {
-        crate::safety::tool_failed(B, "tar", None, &format!("not a tar archive: {e}"))
-    })?;
+    let entries = ar
+        .entries()
+        .map_err(|e| archive_read_error(B, "tar", &format!("not a tar archive: {e}")))?;
     let mut count: usize = 0;
     let mut total: u64 = 0;
     let mut extracted: usize = 0;
     let mut skipped_links: usize = 0;
     for entry in entries {
-        let mut entry = entry.map_err(|e| {
-            crate::safety::tool_failed(B, "tar", None, &format!("unreadable entry: {e}"))
-        })?;
+        let mut entry =
+            entry.map_err(|e| archive_read_error(B, "tar", &format!("unreadable entry: {e}")))?;
         count += 1;
         if count > WALK_MAX_ENTRIES {
             return Err(walk_over(B, WALK_MAX_ENTRIES));
