@@ -129,3 +129,15 @@ fn explain_denies_sqlite_exec_on_an_outside_database() {
         "deny"
     );
 }
+
+// ── Item 7: extra arguments after -c say why they are probably there ──
+
+#[test]
+fn arguments_after_c_hint_at_a_split_quote() {
+    let s = Scratch::new("cargs");
+    let out = s.plain(&["-c", "1 + 1", "x"]);
+    let shown = text(&out);
+    assert!(shown.contains("arguments after -c are ignored"), "{shown}");
+    assert!(shown.contains("split it at a quote"), "{shown}");
+    assert!(shown.contains(".ish file"), "{shown}");
+}

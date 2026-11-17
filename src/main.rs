@@ -587,7 +587,9 @@ fn run(mut cli: Cli) -> Result<()> {
         // reads them, so say so instead of dropping them without a word.
         if !cli.bash && !c_args.is_empty() {
             eprintln!(
-                "ish: arguments after -c are ignored (args() is empty under -c); use a script file"
+                "ish: arguments after -c are ignored (args() is empty under -c); use a script file. \
+                 If you meant them as part of the code, the shell probably split it at a quote: \
+                 put the code in a .ish file, or quote it as one argument"
             );
         }
     }
