@@ -8045,6 +8045,18 @@ fn sed_operands(args: &[String]) -> Option<Vec<String>> {
             s if sed_inplace_suffix(s).is_some() => {}
             "-e" => {
                 i += 1;
+/// The paths in-process `rm` and `rmdir` remove, for `--explain`: each operand is
+/// a `delete`, judged by the jail as the run judges it. `None` for any other
+/// command, or when the utility declines its flags (which the run refuses under
+/// the jail).
+pub fn remove_operands(head: &str, args: &[String]) -> Option<Vec<String>> {
+    match head {
+        "rm" => short_flags(args, "rRf").map(|(_, ops)| ops),
+        "rmdir" => short_flags(args, "").map(|(_, ops)| ops),
+        _ => None,
+    }
+}
+
                 if i >= args.len() {
                     return None;
                 }
