@@ -14,11 +14,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Match arms must be separated by a comma or a newline, like every other list.
 - AGENTS.md lists the `${...}` operators `ish -b` runs (`#`, `##`, `%`, `%%`, `-`, `:-`, `=`, `:=`, `+`, `:+`, `?`, `:?`, `${#x}`, `${x:o:l}`) and those it refuses.
 - Piping into a literal (`1 | 2`, `[1] | 5`) is E_BAD_ARG; the right side of `|` must be a call.
+- Agent-mode (AECON) tables JSON-quote a cell string that would read as another type (`"null"`, `"true"`, `"1"`, `""`, a leading `@`, `"`, `[` or `{`, edge whitespace, a tab or newline), and `@same` compares typed values; header and record keys holding a delimiter are quoted; `null`, `""` and `[{}]` print distinguishably at top level.
+- `--deterministic` Floats keep their point in exponent form (`1.0e16`, `1.0e-7`).
+- `ai`, `error`, `kg_add`, `kg_relate`, `rag_index`, `semantic_cache` and `trace` declare their required parameters as required in the schema; the Agent API takes `min`/`max`'s `values` by name.
+- `input_read_line` (and `read_line`, `prompt`) is classed exec, like the other interactive reads.
+- `sort` is filed under Array, and its help says a String subject is split into lines; `platform_normalize_path`'s help says it only converts separators.
 
 ### Added
 
 - `ish -b` decodes ANSI-C quoting (`$'a\tb'`), and `cd -` prints the directory it changes to, as bash does.
 - `db.sqlite_exec` takes an optional third argument, an Array of values bound to `?` placeholders (one statement).
+- `cut` takes an Array of field numbers.
+- Unknown names `file_hash`, `hash_file`, `sha256sum`, `checksum` and `file_checksum` suggest `crypto_hash_file`; `hmac` suggests `crypto_hmac`.
 
 ### Fixed
 
@@ -28,6 +35,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `~` and `$HOME` in `ish -b` use the platform home directory when HOME is unset (Windows), where `~/x` became `/x`.
 - Messages: an unknown module member no longer suggests `None` (and is not retryable without a suggestion); an unterminated single-quoted string says single quotes take no escapes; empty-array `min`/`max`/`avg`/`median`/`percentile` say the array is empty; a type error on an uncalled builtin says to call it (`ls()`); method-style calls on literals and arrays, and `.length`, get the "has no methods" hint; `let [a, b]` says destructuring is not supported; `reduce` without an initial value says it is required; `1_000` says digit separators are not supported; `join` names the index and type of an element it cannot join; `rm(path, {recursive: true})` points at `rmdir(path, true)`.
 - `--explain` of a missing file is E_NOT_FOUND (exit 66), and a module member that does not exist is noted as an unknown builtin.
+- `tar_create` and `tar_extract` run in-process for plain and gzip tars, so a non-ASCII member name no longer crashes the system tar or half-extracts on Windows.
+- `glob` patterns ending in `/` return only directories; `path_dirname` and `path_normalize` keep a UNC path's leading `//`.
+- `lines` also splits on a lone CR.
+- `arr.range` and `map` refuse with E_BUDGET_EXCEEDED before an allocation that would pass the memory limit, instead of aborting the process.
+- `from_csv` refuses a quote left open at the end of the text and text after a closing quote, naming the line.
+- `x.y` and `x.y(...)` with an undefined `x` are E_UNKNOWN_NAME, as a bare `x` is; `explain` resolves `file.read` and `file_read` as `help` does.
+- `help("ai")` and other module names with a same-named builtin carry the builtin's parameters and signature at the top level.
+- `ish -b`: `$'...'` decodes `\u`, `\U` and `\c` escapes; `cd -` without a previous directory says `OLDPWD not set`; `~/` uses `/` throughout on Windows; `~` expands after `:` and `=` in assignments.
+- Messages: reading a UTF-16 file says it is UTF-16, and a binary file's error points at `crypto_hash_file`; `crypto_hmac` with the algorithm first states its argument order; `zip_create`, `zip_add` and `tar_create` given an Array say to pass names as separate arguments; `proc.info(0)` explains why 0 is refused; a missing handle names the session directory.
 
 ## [14.0.5] - 2026-11-16
 
