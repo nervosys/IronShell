@@ -40337,6 +40337,13 @@ pub fn explain_extraction_refusal(builtin: &str, archive: &str, dest: &str) -> O
                 .map(|s| s.message.clone())
         }
     };
+    if builtin != "tar_extract" {
+        if let Some(refusal) = zip_link_refusal("zip_extract", &members) {
+            return refusal
+                .downcast_ref::<crate::safety::SafetyError>()
+                .map(|s| s.message.clone());
+        }
+    }
     let canonical = if builtin == "tar_extract" {
         "tar_extract"
     } else {
@@ -40555,6 +40562,20 @@ fn refuse_archive_entry(builtin: &str, name: &str) -> anyhow::Error {
         "the archive was refused before anything was written; remove the entry \
          or rebuild the archive with relative paths that stay inside it",
     )
+}
+
+/// The refusal of a zip that holds a symbolic link entry: `E_POLICY_DENY`, as a
+/// tar link entry is refused. A zip link is a member whose content is its
+/// target; written as a file it is no link, and a later member could be written
+/// through it where links are made, so the archive is refused before anything is
+/// written. `None` when the listing holds none.
+fn zip_link_refusal(builtin: &str, entries: &[(String, Option<String>)]) -> Option<anyhow::Error> {
+    let (name, _) = entries.iter().find(|(_, target)| target.is_some())?;
+    Some(crate::safety::policy_deny(
+        builtin,
+        format!("{builtin}: entry `{name}` is a symbolic link, and a zip's links are not extracted"),
+        "nothing was extracted; remove the link entries, or put the files in a .tar.gz, whose links are checked before anything is written",
+    ))
 }
 
 /// Largest symlink target read from a zip entry. Longer targets are not read in
@@ -40886,6 +40907,9 @@ fn bi_zip_extract(args: Vec<Value>, _input: Option<Value>) -> Result<Value> {
     // Refuse a member that would land outside the destination before anything
     // is written.
     let (members, declared) = zip_archive_entries("zip_extract", &archive)?;
+    if let Some(refusal) = zip_link_refusal("zip_extract", &members) {
+        return Err(refusal);
+    }
     check_archive_entries("zip_extract", members.iter().cloned())?;
     check_archive_budget("zip_extract", declared)?;
     crate::safety::reject_option_like("zip_extract", std::slice::from_ref(&archive))?;
@@ -41833,9 +41857,9 @@ fn archive_test_local(path: &str, kind: LocalArchive, cap: u64) -> Result<bool> 
             // the archive unsafe, so it does not test clean: the same
             // per-entry check, over the same listing, as `zip_extract`.
             let unsafe_name = match zip_archive_entries("archive_test", path) {
-                Ok((entries, _)) => entries
-                    .iter()
-                    .any(|(n, t)| archive_entry_refusal("archive_test", n, t.as_deref()).is_some()),
+                Ok((entries, _)) => entries.iter().any(|(n, t)| {
+                    t.is_some() || archive_entry_refusal("archive_test", n, t.as_deref()).is_some()
+                }),
                 Err(_) => true,
             };
             if unsafe_name {

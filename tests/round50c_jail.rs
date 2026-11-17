@@ -278,3 +278,31 @@ fn undo_of_a_removed_link_gives_the_journals_reason_not_the_jails() {
     assert!(shown.contains("link the journal cannot restore"), "{shown}");
     assert!(s.outside.join("keep.txt").is_file(), "{shown}");
 }
+
+// ── C5: a zip's symlink entry is refused, and archive_test says false ──
+
+#[test]
+fn a_zip_with_a_symlink_entry_is_refused_and_does_not_test_clean() {
+    use std::io::Write;
+    let s = Scratch::new("c5");
+    {
+        let file = std::fs::File::create(s.ws.join("l.zip")).unwrap();
+        let mut w = zip::ZipWriter::new(file);
+        let opts = zip::write::SimpleFileOptions::default()
+            .compression_method(zip::CompressionMethod::Stored);
+        w.start_file("a.txt", opts).unwrap();
+        w.write_all(b"a").unwrap();
+        w.add_symlink("lnk", "a.txt", opts).unwrap();
+        w.start_file("lnk/b.txt", opts).unwrap();
+        w.write_all(b"b").unwrap();
+        w.finish().unwrap();
+    }
+    let out = s.jailed(&["-c", "archive_test('l.zip')"]);
+    assert!(text(&out).trim().ends_with("false"), "{}", text(&out));
+    let out = s.jailed(&["-c", "zip_extract('l.zip', 'ex')"]);
+    let shown = text(&out);
+    assert!(!out.status.success(), "{shown}");
+    assert!(shown.contains("E_POLICY_DENY"), "{shown}");
+    assert!(shown.contains("symbolic link"), "{shown}");
+    assert!(!s.ws.join("ex").exists(), "something was written: {shown}");
+}
