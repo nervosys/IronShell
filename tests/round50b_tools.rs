@@ -62,3 +62,32 @@ fn b1_archive_into_a_missing_folder_names_the_folder() {
         assert!(!text.contains("no file at"), "{text}");
     }
 }
+
+/// `ish -b -c script` with an empty PATH, so no GNU program can answer.
+fn ish_b(dir: &Path, script: &str) -> Output {
+    let empty = dir.join("empty-path");
+    std::fs::create_dir_all(&empty).expect("empty path dir");
+    Command::new(env!("CARGO_BIN_EXE_ish"))
+        .args(["-b", "-c", script])
+        .current_dir(dir.join("proj"))
+        .env("IRONSHELL_SESSION_DIR", dir.join("session"))
+        .env("NO_COLOR", "1")
+        .env("PATH", &empty)
+        .env_remove("IRONSHELL_MODE")
+        .env_remove("IRONSHELL_AGENT")
+        .env_remove("IRONSHELL_WORKSPACE")
+        .output()
+        .expect("run ish")
+}
+
+#[cfg(windows)]
+#[test]
+fn b2_find_refusal_names_the_operand_that_is_unsupported() {
+    let dir = scratch("b2");
+    let o = ish_b(&dir, r#"find src -name "*.rs" -o -name "*.py""#);
+    let text = out(&o);
+    assert!(text.contains("does not support -o;"), "{text}");
+    let o = ish_b(&dir, r#"find src -type f -name "*.rs" -exec wc -l {} +"#);
+    let text = out(&o);
+    assert!(text.contains("does not support -exec;"), "{text}");
+}

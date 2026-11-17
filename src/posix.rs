@@ -7359,7 +7359,9 @@ fn find(args: &[String], sink: &mut Sink) -> Util {
             }
             "-print" => {}
             "-name" | "-iname" | "-path" | "-wholename" | "-type" | "-maxdepth" | "-mindepth" => {
-                let Some(v) = val else { return Util::Decline };
+                let Some(v) = val else {
+                    return Util::DeclineFor(a.to_string());
+                };
                 match a {
                     "-name" => tests.push((negate, Test::Name(v, false))),
                     "-iname" => tests.push((negate, Test::Name(v.to_lowercase(), true))),
@@ -7368,20 +7370,22 @@ fn find(args: &[String], sink: &mut Sink) -> Util {
                         "f" | "d" | "l" => {
                             tests.push((negate, Test::Type(v.chars().next().unwrap_or('f'))))
                         }
-                        _ => return Util::Decline,
+                        _ => return Util::DeclineFor(format!("-type {v}")),
                     },
                     "-maxdepth" => match v.parse() {
                         Ok(n) => maxdepth = n,
-                        Err(_) => return Util::Decline,
+                        Err(_) => return Util::DeclineFor(format!("-maxdepth {v}")),
                     },
                     _ => match v.parse() {
                         Ok(n) => mindepth = n,
-                        Err(_) => return Util::Decline,
+                        Err(_) => return Util::DeclineFor(format!("-mindepth {v}")),
                     },
                 }
                 i += 1;
             }
-            _ => return Util::Decline,
+            // The operand the subset does not run (`-o`, `-exec`, `(`), not the
+            // first option in the command, which it may well support.
+            _ => return Util::DeclineFor(a.to_string()),
         }
         negate = false;
         i += 1;
