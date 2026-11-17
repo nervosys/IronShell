@@ -2413,14 +2413,14 @@ pub static SIGNATURES: &[Signature] = &[
     },
     Signature {
         name: "sort",
-        category: None,
+        category: Some("Array"),
         subject_required: false,
         aliases: &[],
         subject: Some(Ty::Sequence),
         params: &[],
         returns: "Array",
-        doc: "Sort an array ascending by natural ordering.",
-        examples: &[("[3, 1, 2] | sort", "[1, 2, 3]")],
+        doc: "Sort an array ascending by natural ordering. A String subject is split into lines first, and the sorted lines come back as an Array of Strings.",
+        examples: &[("[3, 1, 2] | sort", "[1, 2, 3]"), (r#""b\na\nc" | sort"#, r#"["a", "b", "c"]"#)],
     },
     Signature {
         name: "first",
@@ -7592,9 +7592,10 @@ pub static SIGNATURES: &[Signature] = &[
         subject: None,
         params: &[req("path", Ty::Str, "a path with either separator")],
         returns: "String",
-        doc: "Convert backslash separators to forward slashes.",
+        doc: "Convert backslash separators to forward slashes, and nothing else: it does not resolve . or .. segments or collapse repeated separators (use path_normalize for that).",
         examples: &[
             (r#"platform_normalize_path("src/main.rs")"#, r#"src/main.rs"#),
+            (r#"platform_normalize_path("a\\b\\..\\c")"#, r#"a/b/../c"#),
         ],
     },
     Signature {

@@ -243,3 +243,13 @@ fn item10_tilde_slash_is_uniform_and_expands_in_assignments() {
     let (_, out, err) = ish_b("x=a:~/q:~; echo $x", Some(home));
     assert_eq!(out, format!("a:{want}/q:{home}\n"), "{err}");
 }
+
+// ---- item 11: documentation ----
+
+#[test]
+fn item11_sort_and_platform_normalize_path_docs() {
+    assert_eq!(text(r#"help("sort").category"#), "Array");
+    assert!(text(r#"help("sort").description"#).contains("split into lines"));
+    assert!(text(r#"help("platform_normalize_path").description"#).contains("does not resolve"));
+    assert!(text(r#"help("platform_normalize_path").description"#).contains("path_normalize"));
+}
