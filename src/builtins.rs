@@ -12548,6 +12548,15 @@ fn bi_ai_explain(args: Vec<Value>, input: Option<Value>, _env: &mut Env) -> Resu
             name = canonical.to_string();
         }
     }
+    // `file_read` is the underscore spelling of the member `file.read`.
+    if crate::signature::signature_of(&name).is_none() && !is_dispatched(&name) {
+        if let Some(member) = name
+            .split_once('_')
+            .and_then(|(m, f)| crate::modules::builtin_for_member(m, f))
+        {
+            name = member;
+        }
+    }
     if let Some(sig) = crate::signature::signature_of(&name) {
         return Ok(hint_signature_record(sig));
     }

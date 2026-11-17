@@ -80,5 +80,8 @@ fn a_module_member_without_a_call_is_a_pipe_stage() {
 fn an_unknown_module_as_a_pipe_stage_is_the_unknown_name_error() {
     let (_, err, code) = run_script("unknown", "\"abc\" | nope.thing()\n");
     assert_ne!(code, 0);
-    assert!(err.contains("E_UNKNOWN_NAME") && err.contains("`nope`"), "{err}");
+    assert!(
+        err.contains("E_UNKNOWN_NAME") && err.contains("`nope`"),
+        "{err}"
+    );
 }

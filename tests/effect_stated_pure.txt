@@ -224,11 +224,9 @@ population
 pow
 print
 product
-prompt
 ps_add
 push
 range
-read_line
 reduce
 refactor_add_parameter
 refactor_change_signature

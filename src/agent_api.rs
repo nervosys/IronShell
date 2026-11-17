@@ -1725,7 +1725,8 @@ pub(crate) fn named_args_to_positional(
     }
 
     let variadic_last = signature.is_some_and(|s| s.params.last().is_some_and(|p| p.variadic));
-    // min/max list subject (the Array a pipeline would pipe in) and alues`n    // (the numbers of a direct call). {"values": [3, 1, 2]} names the same Array
+    // min/max list subject (the Array a pipeline would pipe in) and `values`
+    // (the numbers of a direct call). {"values": [3, 1, 2]} names the same Array
     // as the subject, so it is passed as that one Array when no subject is given.
     if variadic_last
         && has_subject
@@ -2459,13 +2460,13 @@ fn get_builtin_definitions() -> Vec<BuiltinDefinition> {
             name: "ai".to_string(),
             description: "Query AI model with a prompt".to_string(),
             category: "AI".to_string(),
-            signature: "ai(prompt?: String, config?: Record) -> String".to_string(),
+            signature: "ai(prompt: String, config?: Record) -> String".to_string(),
             parameters: vec![
                 ParameterDefinition {
                     name: "prompt".to_string(),
                     param_type: "String".to_string(),
                     description: "The prompt to send to the AI; with piped input the piped string is the prompt".to_string(),
-                    required: false,
+                    required: true,
                     default: None,
                 },
                 ParameterDefinition {

@@ -43,7 +43,10 @@ fn an_unknown_module_is_the_unknown_name_error() {
     let (out, err, code) = run_script("zzzz", "zzzz.parse(\"x\")\n");
     assert_ne!(code, 0, "ran; stdout {out:?}");
     assert!(err.contains("E_UNKNOWN_NAME"), "{err}");
-    assert!(err.contains("`zzzz` is not a variable, builtin or module"), "{err}");
+    assert!(
+        err.contains("`zzzz` is not a variable, builtin or module"),
+        "{err}"
+    );
     assert!(
         !err.contains("expected a Record"),
         "still reported as a record error: {err}"
