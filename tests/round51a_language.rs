@@ -55,3 +55,69 @@ fn a2_int_overflow_in_sum_is_e_bad_value() {
         assert!(se.message.contains("integer overflow"), "{src}");
     }
 }
+
+// A3
+#[test]
+fn a3_group_by_a_missing_field_is_null_in_all_three_forms() {
+    for key in [r#""u""#, ".u", "fn(r) => r.u"] {
+        let src = format!(
+            "[{{u: 1}}, {{x: 2}}, {{u: null}}] | group_by({key}) | map(fn(g) => [g.Name, g.Key, g.Count])"
+        );
+        let names = run(&format!(
+            "[{{u: 1}}, {{x: 2}}, {{u: null}}] | group_by({key}) | map(fn(g) => g.Name)"
+        ));
+        assert_eq!(
+            names,
+            Value::Array(vec![Value::Str("1".into()), Value::Str("<null>".into())]),
+            "{src}"
+        );
+        let counts = run(&format!(
+            "[{{u: 1}}, {{x: 2}}, {{u: null}}] | group_by({key}) | map(fn(g) => g.Count)"
+        ));
+        assert_eq!(
+            counts,
+            Value::Array(vec![Value::Int(1), Value::Int(2)]),
+            "{src}"
+        );
+    }
+}
+
+// A4
+#[test]
+fn a4_group_by_merges_an_int_and_an_equal_float() {
+    assert_eq!(
+        run("[1, 1.0, 2] | group_by(fn(x) => x) | map(fn(g) => g.Count)"),
+        Value::Array(vec![Value::Int(2), Value::Int(1)])
+    );
+    assert_eq!(
+        run("[1.0, 1] | group_by(fn(x) => x) | first | fn(g) => g.Name"),
+        Value::Str("1.0".into())
+    );
+}
+
+// A5
+#[test]
+fn a5_a_field_no_row_has_is_unknown() {
+    for src in [
+        r#"[{a: 1}] | count_by("zz")"#,
+        r#"[{a: 1}] | count_by(.zz)"#,
+        r#"[{a: 1}] | group_by("zz")"#,
+        r#"[{abc: 1}] | group_by("abd")"#,
+    ] {
+        let se = refusal(src);
+        assert_eq!(se.code.as_str(), "E_UNKNOWN_FIELD", "{src}");
+    }
+    let se = refusal(r#"[{abc: 1}] | count_by("abd")"#);
+    assert!(se.did_you_mean.contains(&"abc".to_string()));
+}
+
+#[test]
+fn a5_a_non_record_row_with_a_field_key_is_bad_arg_naming_the_index() {
+    for src in ["[1, 2, 3] | count_by(.a)", "[{a: 1}, 5] | group_by(\"a\")"] {
+        let se = refusal(src);
+        assert_eq!(se.code.as_str(), "E_BAD_ARG", "{src}");
+        assert!(se.message.contains("at index"), "{}", se.message);
+    }
+    // An empty array and a row that merely lacks the field are fine.
+    assert_eq!(run(r#"[] | count_by("a")"#), Value::Array(vec![]));
+}

@@ -11091,59 +11091,36 @@ fn bi_group_object(args: Vec<Value>, input: Option<Value>, env: &mut Env) -> Res
     // The key is a field name, or a lambda called once per row whose result is
     // the key. `group_by(.region)` and `group_by(fn(r) => r.region)` are both
     // lambdas by the time they arrive here.
-    let property = match &args[0] {
-        Value::Str(s) => Some(s),
-        Value::Lambda(_) | Value::Builtin(_) => None,
-        _ => {
-            return Err(crate::safety::arg_err(
-                "group_by: the key must be a field name String or a lambda",
-            ))
-        }
-    };
+    if !matches!(
+        &args[0],
+        Value::Str(_) | Value::Lambda(_) | Value::Builtin(_)
+    ) {
+        return Err(crate::safety::arg_err(
+            "group_by: the key must be a field name String or a lambda",
+        ));
+    }
 
     match input {
         Value::Array(arr) => {
-            // Each row with its key's text and type name. Rows share a group
-            // only when both match, so Int 1 and String "1" stay apart, while
-            // the group is still named by the text, as it always was.
-            let mut keyed: Vec<((String, &'static str), Value, Value)> =
-                Vec::with_capacity(arr.len());
-            match property {
-                Some(property) => {
-                    for item in arr {
-                        let key = get_property_value(&item, property);
-                        keyed.push(((value_to_string(&key), key.type_name()), key, item));
-                    }
-                }
-                None => {
-                    let lam_val = callable(&args[0]);
-                    let lam = need_lambda(&lam_val, "group_by")?;
-                    with_param_slots(lam, env, |env| {
-                        for item in arr {
-                            let key = call_lambda_one(lam, item.clone(), env, false)?.0;
-                            keyed.push(((value_to_string(&key), key.type_name()), key, item));
-                        }
-                        Ok(())
-                    })?;
-                }
-            }
+            let keys = row_keys("group_by", &arr, &args[0], env)?;
 
-            // Ordered by the key's text, then its type, so the groups come out
-            // in the same order as before. `Key` is the first key seen, with
-            // its type.
+            // One group per key slot, in slot order (the key's text, then its
+            // type); an Int and an equal Float are one slot. `Key` is the
+            // first key seen, `Name` its text; a row without the field has the
+            // key null (Name "<null>"), the group an explicit null makes.
             let mut groups: BTreeMap<(String, &'static str), (Value, Vec<Value>)> = BTreeMap::new();
-            for (slot, key, item) in keyed {
+            for (key, item) in keys.into_iter().zip(arr) {
                 groups
-                    .entry(slot)
+                    .entry(key_slot(&key))
                     .or_insert_with(|| (key, Vec::new()))
                     .1
                     .push(item);
             }
 
             let mut result = Vec::new();
-            for ((key, _type), (key_value, items)) in groups {
+            for (_slot, (key_value, items)) in groups {
                 let mut group = BTreeMap::new();
-                group.insert("Name".to_string(), Value::Str(key));
+                group.insert("Name".to_string(), Value::Str(value_to_string(&key_value)));
                 group.insert("Key".to_string(), key_value);
                 group.insert("Count".to_string(), Value::Int(items.len() as i64));
                 group.insert("Group".to_string(), Value::Array(items));
@@ -11156,6 +11133,97 @@ fn bi_group_object(args: Vec<Value>, input: Option<Value>, env: &mut Env) -> Res
             "group_by: the rows must be an Array",
         )),
     }
+}
+
+/// The group a key falls in for group_by and count_by: its text and type name,
+/// except that an Int and a Float that are equal (1 and 1.0) share one slot, as
+/// `unique` treats them.
+fn key_slot(key: &Value) -> (String, &'static str) {
+    match key {
+        Value::Float(f) if f.is_finite() && f.fract() == 0.0 && f.abs() < 9.0e15 => {
+            ((*f as i64).to_string(), "Int")
+        }
+        _ => (value_to_string(key), key.type_name()),
+    }
+}
+
+/// The key of each row for group_by and count_by. `key` is a field name String,
+/// a lambda, or a builtin. A field name, or a lambda that only reads a field
+/// (`.a`, `fn(r) => r.a`), reads the field: a row without it has the key null,
+/// but when no row has it the field is unknown (`E_UNKNOWN_FIELD`), and a row
+/// that is not a Record cannot have one (`E_BAD_ARG`). Any other lambda is
+/// called once per row.
+fn row_keys(name: &str, rows: &[Value], key: &Value, env: &mut Env) -> Result<Vec<Value>> {
+    if let Value::Str(property) = key {
+        return field_keys(name, rows, std::slice::from_ref(property));
+    }
+    let lam_val = callable(key);
+    let lam = need_lambda(&lam_val, name)?;
+    if let Some(path) = row_field_path(lam) {
+        return field_keys(name, rows, &path);
+    }
+    with_param_slots(lam, env, |env| {
+        let mut keys = Vec::with_capacity(rows.len());
+        for item in rows {
+            keys.push(call_lambda_one(lam, item.clone(), env, false)?.0);
+        }
+        Ok(keys)
+    })
+}
+
+/// The value at `path` in each row, null for a row that lacks it. See
+/// [`row_keys`] for the two refusals.
+fn field_keys<S: AsRef<str>>(name: &str, rows: &[Value], path: &[S]) -> Result<Vec<Value>> {
+    let field = path
+        .iter()
+        .map(|f| f.as_ref())
+        .collect::<Vec<_>>()
+        .join(".");
+    let mut keys = Vec::with_capacity(rows.len());
+    let mut found = false;
+    for (i, row) in rows.iter().enumerate() {
+        if !matches!(row, Value::Record(_)) {
+            return Err(crate::safety::bad_arg_with_hint(
+                name,
+                &format!("a Record row to read the field `{field}` from"),
+                &format!("{} at index {i}", row.type_name()),
+                &format!(
+                    "{name} with a field key needs rows that are Records; \
+                     pass a lambda to compute a key from other values, e.g. {name}(fn(x) => x)"
+                ),
+            ));
+        }
+        match count_by_field(row, path) {
+            Some(v) => {
+                found = true;
+                keys.push(v);
+            }
+            None => keys.push(Value::Null),
+        }
+    }
+    if !found && !rows.is_empty() {
+        let mut names: Vec<&str> = Vec::new();
+        for row in rows {
+            if let Value::Record(r) = row {
+                for k in r.keys() {
+                    if !names.contains(&k.as_str()) {
+                        names.push(k.as_str());
+                    }
+                }
+            }
+        }
+        let candidates = nearest_names(path[0].as_ref(), names.iter().copied());
+        let specific = candidates.is_empty().then(|| {
+            format!(
+                "no row has a field `{field}`. {}",
+                crate::safety::record_keys_hint(names.iter().copied())
+            )
+        });
+        return Err(crate::safety::unknown_field_hinted(
+            &field, candidates, specific,
+        ));
+    }
+    Ok(keys)
 }
 
 /// The fields a count_by key lambda reads when its whole body is a field path
@@ -11181,19 +11249,16 @@ fn row_field_path(lam: &Lambda) -> Option<Vec<String>> {
     }
 }
 
-/// The value at `path` in a row, or null when a field on the way is missing.
-fn count_by_field<S: AsRef<str>>(row: &Value, path: &[S]) -> Value {
+/// The value at `path` in a row, or None when a field on the way is missing.
+fn count_by_field<S: AsRef<str>>(row: &Value, path: &[S]) -> Option<Value> {
     let mut cur = row;
     for field in path {
         match cur {
-            Value::Record(r) => match r.get(field.as_ref()) {
-                Some(v) => cur = v,
-                None => return Value::Null,
-            },
-            _ => return Value::Null,
+            Value::Record(r) => cur = r.get(field.as_ref())?,
+            _ => return None,
         }
     }
-    cur.clone()
+    Some(cur.clone())
 }
 
 /// count_by(key): how many rows have each key, as {key, count} records sorted by
@@ -11227,18 +11292,17 @@ fn bi_count_by(args: Vec<Value>, input: Option<Value>, env: &mut Env) -> Result<
             r#"pass the key: rows | count_by("field") or rows | count_by(fn(r) => r.field)"#,
         ));
     }
-    let property = match &args[0] {
-        Value::Str(s) => Some(s),
-        Value::Lambda(_) | Value::Builtin(_) => None,
-        other => {
-            return Err(crate::safety::bad_arg_with_hint(
-                "count_by",
-                "a field name String or a lambda as the key",
-                other.type_name(),
-                r#"pass the key: rows | count_by("field") or rows | count_by(.field)"#,
-            ))
-        }
-    };
+    if !matches!(
+        &args[0],
+        Value::Str(_) | Value::Lambda(_) | Value::Builtin(_)
+    ) {
+        return Err(crate::safety::bad_arg_with_hint(
+            "count_by",
+            "a field name String or a lambda as the key",
+            args[0].type_name(),
+            r#"pass the key: rows | count_by("field") or rows | count_by(.field)"#,
+        ));
+    }
     let rows = match input {
         Value::Array(arr) => arr,
         other => {
@@ -11250,45 +11314,12 @@ fn bi_count_by(args: Vec<Value>, input: Option<Value>, env: &mut Env) -> Result<
         }
     };
 
-    let mut keys: Vec<Value> = Vec::with_capacity(rows.len());
-    match property {
-        Some(property) => {
-            for item in &rows {
-                keys.push(count_by_field(item, std::slice::from_ref(property)));
-            }
-        }
-        None => {
-            let lam_val = callable(&args[0]);
-            let lam = need_lambda(&lam_val, "count_by")?;
-            // `.field` and `fn(r) => r.field` read a field: a row without it
-            // has the key null, where calling the lambda would be an error.
-            if let Some(path) = row_field_path(lam) {
-                for item in &rows {
-                    keys.push(count_by_field(item, &path));
-                }
-            } else {
-                with_param_slots(lam, env, |env| {
-                    for item in rows {
-                        keys.push(call_lambda_one(lam, item, env, false)?.0);
-                    }
-                    Ok(())
-                })?;
-            }
-        }
-    }
+    let keys = row_keys("count_by", &rows, &args[0], env)?;
 
-    // One entry per (text, type) key: the first key seen, and its count. An
-    // Int and a Float that are equal (1 and 1.0) are one key, as `unique`
-    // treats them.
+    // One entry per key slot: the first key seen, and its count.
     let mut counts: BTreeMap<(String, &'static str), (Value, i64)> = BTreeMap::new();
     for key in keys {
-        let slot = match &key {
-            Value::Float(f) if f.is_finite() && f.fract() == 0.0 && f.abs() < 9.0e15 => {
-                ((*f as i64).to_string(), "Int")
-            }
-            _ => (value_to_string(&key), key.type_name()),
-        };
-        counts.entry(slot).or_insert((key, 0)).1 += 1;
+        counts.entry(key_slot(&key)).or_insert((key, 0)).1 += 1;
     }
     let mut ordered: Vec<((String, &'static str), (Value, i64))> = counts.into_iter().collect();
     // BTreeMap order is by text then type, so a stable sort on count alone

@@ -173,7 +173,7 @@ grep("TODO\\|FIXME", "src/*.rs")       # grep is BRE (as grep without -E): a bar
 # SQL over values or files (read-only, in-process)
 open("issues.json") | sql("select user, count(*) as n from t group by user")
 sql_value("issues.json", "select count(*) from issues where state = 'open'")
-open("issues.json") | count_by(.user)  # [{key, count}] sorted by count descending; the short form of group_by + sort_by("Count", "desc"). The key may be a field name, `.field`, a lambda or a builtin (`count_by(len)`); 1 and 1.0 are one key; a row without the field counts under the key null. group_by rows carry `Name` (the key's text, "<null>" for null) and `Key` (the key with its type)
+open("issues.json") | count_by(.user)  # [{key, count}] sorted by count descending; the short form of group_by + sort_by("Count", "desc"). The key may be a field name, `.field`, a lambda or a builtin (`count_by(len)`); 1 and 1.0 are one key; a row without the field counts under the key null (when no row has the field it is E_UNKNOWN_FIELD, and a non-Record row with a field key is E_BAD_ARG). group_by takes the same keys and treats a missing field the same way (the group of an explicit null, Name "<null>"), and merges 1 and 1.0 into one group like count_by. group_by rows carry `Name` (the key's text, "<null>" for null) and `Key` (the key with its type)
 # SQL stores a Bool as 1/0, so Bool values come back from sql as 1 and 0; every sql row (not only select *) has its columns in sorted key order, because a Record sorts its keys: to control the order prefix the aliases (a_region, b_rev) or write the table with to_csv(rows, [cols])
 
 # Check effects before running

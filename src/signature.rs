@@ -2251,7 +2251,7 @@ pub static SIGNATURES: &[Signature] = &[
         // a Haiku run returned the whole `{Count, Group, Name}` record: the
         // right fact in a form nobody asked for. The idiom that answers it is
         // named here rather than left to be discovered.
-        doc: r#"Group records by a field name or by a lambda key (`group_by(.region)`, `group_by(fn(r) => r.region)`), returning {Name, Count, Group} records. The subject is piped or the first argument: `rows | group_by("a")` and `group_by(rows, "a")` are the same. Name is always a String, the key's text (the Int key 1 is Name "1", and Int 1 and String "1" stay separate groups with the same Name), and the groups are sorted by Name as text, not by first appearance or by number: "10" comes before "9". A row without the field groups under Name "". `Key` is the key itself, with its type (Int 1 stays Int 1 and null stays null, where Name is the text "1" or "<null>"); Name is kept as it is for compatibility. For "which, and how many": | sort_by("Count", "desc") | first | fn(g) => "${g.Name} ${g.Count}"."#,
+        doc: r#"Group records by a field name or by a lambda key (`group_by(.region)`, `group_by(fn(r) => r.region)`), returning {Name, Count, Group} records. The subject is piped or the first argument: `rows | group_by("a")` and `group_by(rows, "a")` are the same. Name is always a String, the key's text (the Int key 1 is Name "1", and Int 1 and String "1" stay separate groups with the same Name), and the groups are sorted by Name as text, not by first appearance or by number: "10" comes before "9". A row without the field has the key null (Name "<null>", Key null), the group an explicit null makes; when no row has the field it is E_UNKNOWN_FIELD, and a row that is not a Record, with a field key, is E_BAD_ARG. An Int and a Float that are equal (1 and 1.0) are one group, as in count_by, and the first one seen gives Key and Name. `Key` is the key itself, with its type (Int 1 stays Int 1 and null stays null, where Name is the text "1" or "<null>"); Name is kept as it is for compatibility. For "which, and how many": | sort_by("Count", "desc") | first | fn(g) => "${g.Name} ${g.Count}"."#,
         examples: &[
             (
                 r#"[{user: "a"}, {user: "a"}, {user: "b"}] | group_by("user") | len"#,
@@ -2281,6 +2281,18 @@ pub static SIGNATURES: &[Signature] = &[
                 r#"[1, 2] | group_by(fn(x) => null) | map(fn(g) => g.Key == null)"#,
                 "[true]",
             ),
+            (
+                r#"[{a: 1}, {b: 2}] | group_by("a") | map(fn(g) => g.Name)"#,
+                r#"["1", "<null>"]"#,
+            ),
+            (
+                r#"[1, 1.0, 2] | group_by(fn(x) => x) | map(fn(g) => g.Count)"#,
+                "[2, 1]",
+            ),
+            (
+                r#"(try { [{a: 1}] | group_by("zz") } catch e { e.error.code })"#,
+                r#""E_UNKNOWN_FIELD""#,
+            ),
         ],
     },
     Signature {
@@ -2291,7 +2303,7 @@ pub static SIGNATURES: &[Signature] = &[
         subject: Some(Ty::Array),
         params: &[req("key", Ty::Any, "field name String to count on, or a lambda (or .field) called per row whose result is the key")],
         returns: "Array",
-        doc: r#"Count rows by a key, as {key, count} records sorted by count descending, then by the key's text: `rows | count_by(.state)`, `rows | count_by("state")`, `rows | count_by(fn(r) => r.user)`. The subject is piped or the first argument. The key keeps its type (Int 1 and String "1" are counted apart), except that an Int and a Float that are equal (1 and 1.0) are one key, as `unique` treats them, and the first one seen is the key shown. A builtin name works as the key (`count_by(len)`, `count_by(path_extension)`). A row without the field counts under the key null. It is the short form of `group_by(key) | map(...) | sort_by("count", "desc")`."#,
+        doc: r#"Count rows by a key, as {key, count} records sorted by count descending, then by the key's text: `rows | count_by(.state)`, `rows | count_by("state")`, `rows | count_by(fn(r) => r.user)`. The subject is piped or the first argument. The key keeps its type (Int 1 and String "1" are counted apart), except that an Int and a Float that are equal (1 and 1.0) are one key, as `unique` treats them, and the first one seen is the key shown. A builtin name works as the key (`count_by(len)`, `count_by(path_extension)`). A row without the field counts under the key null, but when no row has the field it is E_UNKNOWN_FIELD (a typo is not one null group), and a row that is not a Record, with a field key, is E_BAD_ARG. It is the short form of `group_by(key) | map(...) | sort_by("count", "desc")`."#,
         examples: &[
             (
                 r#"[{u: "a"}, {u: "b"}, {u: "b"}] | count_by("u")"#,
@@ -2316,6 +2328,14 @@ pub static SIGNATURES: &[Signature] = &[
             (
                 r#"[{a: 1}, {b: 2}] | count_by(.a) | map(fn(r) => r.key == null)"#,
                 "[false, true]",
+            ),
+            (
+                r#"(try { [{a: 1}] | count_by("zz") } catch e { e.error.code })"#,
+                r#""E_UNKNOWN_FIELD""#,
+            ),
+            (
+                r#"(try { [1, 2] | count_by(.a) } catch e { e.error.code })"#,
+                r#""E_BAD_ARG""#,
             ),
             (
                 r#"(try { [1] | count_by() } catch e { e.error.code })"#,
