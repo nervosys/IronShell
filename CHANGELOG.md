@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security
+
+- `tar_extract` refuses any link entry in a .tar.bz2/.xz/.zst archive (extracted by the system tar, whose link targets ish cannot check), and refuses outright when the tool's verbose listing fails; `--explain` agrees. A failed extraction removes what it created. Entry names with a component over 255 characters are refused up front.
+- `tar_create`, `zip_create` and `zip_add` skip the workspace's `.ironshell` state folder (journal and audit log) unless it is named as a member.
+- `rm` removes a symlink or junction that sits inside the workspace without following it; `rmdir(link, true)` stays refused; `rm` refuses a trailing separator; removing a dangling link or a link out of the workspace is recorded as irreversible, and the approval request says so.
+- Reading `x.txt:stream` is refused on Windows as writing it is, and `--explain` judges an exec builtin's path arguments (`db.sqlite_exec` on a database outside the workspace is deny), as the run does.
+
 ### Changed
 
 - `ish --zsh` refuses `setopt extendedglob` (in every spelling) by name; it was accepted and then ignored, so `^a.txt` globbed literally.
@@ -19,6 +26,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `ai`, `error`, `kg_add`, `kg_relate`, `rag_index`, `semantic_cache` and `trace` declare their required parameters as required in the schema; the Agent API takes `min`/`max`'s `values` by name.
 - `input_read_line` (and `read_line`, `prompt`) is classed exec, like the other interactive reads.
 - `sort` is filed under Array, and its help says a String subject is split into lines; `platform_normalize_path`'s help says it only converts separators.
+- An archive of `.` stores its entries relative to it (`src/main.rs`, not `proj/src/main.rs`).
+- `--explain` lists the paths each call is judged on and prints one compact JSON line when piped or in agent mode.
+- AECON tables never print a row as an empty line: `@prefix`/`@suffix` are not used when a cell equals the shared run, and `@same` keeps a row's first cell.
+- `${...}` interpolation of an Array or Record quotes the Strings inside it (`[1, "a"]`).
+- An unknown `let` type annotation is E_BAD_ARG naming the closest type; `Array<Int>` and `String?` are E_PARSE listing the supported forms.
 
 ### Added
 
@@ -26,6 +38,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `db.sqlite_exec` takes an optional third argument, an Array of values bound to `?` placeholders (one statement).
 - `cut` takes an Array of field numbers.
 - Unknown names `file_hash`, `hash_file`, `sha256sum`, `checksum` and `file_checksum` suggest `crypto_hash_file`; `hmac` suggests `crypto_hmac`.
+- `count_by(key)`: `{key, count}` rows sorted by count, the key keeping its type.
+- `glob`, `ls` and `cat` expand brace alternatives (`**/*.{rs,py}`).
+- `grep(..., {extended: true})` takes an extended regex; grep is BRE by default.
+- A builtin works as a callback (`map(len)`, `sort_by(len)`, `where`, `each`, `any`, `all`, `group_by`).
+- `to_json(x, true)` indents by two spaces.
 
 ### Fixed
 
@@ -44,6 +61,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `help("ai")` and other module names with a same-named builtin carry the builtin's parameters and signature at the top level.
 - `ish -b`: `$'...'` decodes `\u`, `\U` and `\c` escapes; `cd -` without a previous directory says `OLDPWD not set`; `~/` uses `/` throughout on Windows; `~` expands after `:` and `=` in assignments.
 - Messages: reading a UTF-16 file says it is UTF-16, and a binary file's error points at `crypto_hash_file`; `crypto_hmac` with the algorithm first states its argument order; `zip_create`, `zip_add` and `tar_create` given an Array say to pass names as separate arguments; `proc.info(0)` explains why 0 is refused; a missing handle names the session directory.
+- Messages: a field read on a non-Record says what the value is; a wrong-arity callback says the lambda takes the element; `grep` with `recursive` names `search.grep`; `-c` followed by extra arguments says the shell probably split the code at a quote; extraction write failures say "cannot write"; a refused extraction destination is named as given.
+- AGENTS.md: every sql row's columns come back in sorted key order; `/`, `!`, `if` and `&&`/`||` rules; the `@type` directive; `error`'s message parameter.
 
 ## [14.0.5] - 2026-11-16
 
