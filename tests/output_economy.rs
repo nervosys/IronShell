@@ -452,11 +452,12 @@ fn aecon_typed_round_trip_is_lossless_for_ambiguous_values() {
         Value::Str(s) => s,
         other => panic!("{other:?}"),
     };
-    // A type line is present, tagging exactly the ambiguous columns.
+    // A type line is present, tagging the float column; a numeric-looking string
+    // is JSON-quoted in its cell instead of tagged.
     assert!(encoded.contains("@type "), "type header present: {encoded}");
     assert!(
-        encoded.contains("code:s"),
-        "numeric-looking string tagged string: {encoded}"
+        encoded.contains("\"200\"") && !encoded.contains("code:s"),
+        "numeric-looking string quoted, not tagged: {encoded}"
     );
     assert!(
         encoded.contains("ratio:f"),

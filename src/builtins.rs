@@ -23934,12 +23934,12 @@ fn aecon_atom(v: &Value) -> String {
             // (record/array), which renders as JSON below. A *string* that happens to
             // start that way is JSON-quoted so the two can never be confused — the
             // same reservation `""` already provides for the empty string.
-            if s.is_empty()
-                || s.contains('\t')
-                || s.contains('\n')
-                || s.starts_with('{')
-                || s.starts_with('[')
-            {
+            // A bare cell opening with `{` or `[` is reserved for a composite value
+            // (record/array), which renders as JSON below. A *string* that happens to
+            // start that way is JSON-quoted so the two can never be confused — the
+            // same reservation `""` already provides for the empty string. The same
+            // goes for any string that would read back as another type.
+            if aecon_str_needs_quote(s) {
                 serde_json::to_string(s).unwrap_or_else(|_| format!("{:?}", s))
             } else {
                 s.clone()
@@ -23952,6 +23952,20 @@ fn aecon_atom(v: &Value) -> String {
         Value::Null => "null".to_string(),
         other => serde_json::to_string(&other.to_json()).unwrap_or_else(|_| "null".to_string()),
     }
+}
+
+/// Whether a string cell must be JSON-quoted to read back as that string: it is
+/// empty, would read as `null`/`true`/`false` or a number, opens with a character
+/// that has a meaning of its own (`@` directive, `"` quote, `[` `{` composite),
+/// has leading or trailing whitespace, or holds a tab, newline or carriage
+/// return. Ordinary strings stay bare.
+fn aecon_str_needs_quote(s: &str) -> bool {
+    s.is_empty()
+        || s.contains(['\t', '\n', '\r'])
+        || s.starts_with(['@', '"', '[', '{'])
+        || s.starts_with(char::is_whitespace)
+        || s.ends_with(char::is_whitespace)
+        || aecon_str_is_ambiguous(s)
 }
 
 /// Longest common character prefix shared by every string in `vals` (empty if
@@ -24275,7 +24289,13 @@ fn aecon_render(v: &Value) -> String {
                 } else {
                     String::new()
                 };
-                let ps_cost = if lcp.is_empty() && lcs.is_empty() {
+                // A residue opening with `@` or `"` would read as a directive or a
+                // quoted cell on its own line, so such a column stays unfactored.
+                let ps_cost = if (lcp.is_empty() && lcs.is_empty())
+                    || residue
+                        .iter()
+                        .any(|r| r.starts_with('@') || r.starts_with('"'))
+                {
                     usize::MAX
                 } else {
                     residue.iter().map(|s| s.len() - lcs.len()).sum::<usize>()
@@ -24430,7 +24450,10 @@ fn aecon_render(v: &Value) -> String {
                         continue;
                     }
                     let saved: usize = (1..matrix.len())
-                        .filter(|&ri| matrix[ri][ci] == matrix[ri - 1][ci])
+                        .filter(|&ri| {
+                            matrix[ri][ci] == matrix[ri - 1][ci]
+                                && rows[ri].get(k) == rows[ri - 1].get(k)
+                        })
                         .map(|ri| matrix[ri][ci].len())
                         .sum();
                     // Naming a column costs a tab plus its name; the `\n@same `
@@ -24445,7 +24468,11 @@ fn aecon_render(v: &Value) -> String {
                     .filter_map(|k| var_keys.iter().position(|v| v == k))
                     .map(|ci| {
                         (1..matrix.len())
-                            .filter(|&ri| matrix[ri][ci] == matrix[ri - 1][ci])
+                            .filter(|&ri| {
+                                matrix[ri][ci] == matrix[ri - 1][ci]
+                                    && rows[ri].get(&var_keys[ci])
+                                        == rows[ri - 1].get(&var_keys[ci])
+                            })
                             .map(|ri| matrix[ri][ci].len())
                             .sum::<usize>()
                     })
@@ -24463,7 +24490,9 @@ fn aecon_render(v: &Value) -> String {
                     .collect::<Vec<_>>()
                 {
                     for ri in (1..matrix.len()).rev() {
-                        if matrix[ri][ci] == matrix[ri - 1][ci] {
+                        if matrix[ri][ci] == matrix[ri - 1][ci]
+                            && rows[ri].get(&var_keys[ci]) == rows[ri - 1].get(&var_keys[ci])
+                        {
                             matrix[ri][ci].clear();
                         }
                     }
@@ -24579,16 +24608,10 @@ fn aecon_type_tag(vals: &[&Value]) -> Option<char> {
     if vals.is_empty() {
         return None;
     }
+    // A string that would read as another type is JSON-quoted in the cell
+    // (`aecon_str_needs_quote`), so a string column needs no tag.
     if vals.iter().all(|v| matches!(v, Value::Str(_))) {
-        let ambiguous = vals.iter().any(|v| match v {
-            // Empty / tab / newline strings render JSON-quoted and decode exactly,
-            // so only *bare* ambiguous strings need the tag.
-            Value::Str(s) => {
-                !s.is_empty() && !s.contains('\t') && !s.contains('\n') && aecon_str_is_ambiguous(s)
-            }
-            _ => false,
-        });
-        return ambiguous.then_some('s');
+        return None;
     }
     if vals.iter().all(|v| matches!(v, Value::Float(_))) {
         let ambiguous = vals.iter().any(|v| match v {

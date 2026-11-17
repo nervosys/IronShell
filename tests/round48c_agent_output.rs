@@ -94,3 +94,48 @@ fn a_big_map_near_the_memory_limit_is_refused_not_aborted() {
     assert!(all.contains("E_BUDGET_EXCEEDED"), "{all}");
     assert!(!all.contains("memory allocation of"), "{all}");
 }
+
+fn lines_of(s: &str) -> Vec<&str> {
+    s.lines().collect()
+}
+
+#[test]
+fn a_table_cell_that_reads_as_another_type_is_quoted() {
+    let dir = session("cells");
+    let (out, err) = agent(
+        &dir,
+        r#"[{v: "null"}, {v: null}, {v: "true"}, {v: true}, {v: "1"}, {v: 1}, {v: ""}, {v: "@x"}, {v: " pad"}, {v: "a\tb"}, {v: "ok"}]"#,
+    );
+    assert_eq!(
+        lines_of(&out),
+        vec![
+            "v", "\"null\"", "null", "\"true\"", "true", "\"1\"", "1", "\"\"", "\"@x\"",
+            "\" pad\"", "\"a\tb\"", "ok"
+        ],
+        "stderr: {err}"
+    );
+}
+
+#[test]
+fn an_ordinary_string_cell_stays_bare() {
+    let dir = session("bare");
+    let (out, err) = agent(&dir, r#"[{v: "abc"}, {v: "x y"}]"#);
+    assert_eq!(lines_of(&out), vec!["v", "abc", "x y"], "stderr: {err}");
+}
+
+#[test]
+fn a_first_row_cell_that_spells_a_directive_is_quoted() {
+    let dir = session("directive");
+    let (out, err) = agent(&dir, r#"[{a: "@same"}, {a: "@const"}]"#);
+    assert_eq!(
+        lines_of(&out),
+        vec!["a", "\"@same\"", "\"@const\""],
+        "stderr: {err}"
+    );
+    assert!(!out.lines().any(|l| l.starts_with("@same")), "{out}");
+    let (out, err) = agent(
+        &dir,
+        r#"([{a: "@same"}, {a: "@const"}] | aecon | aecon_decode) == [{a: "@same"}, {a: "@const"}]"#,
+    );
+    assert_eq!(out.trim(), "true", "stderr: {err}");
+}
