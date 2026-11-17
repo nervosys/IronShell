@@ -584,6 +584,43 @@ impl<'a> Lexer<'a> {
                                 q.push(char::from_u32(v).unwrap_or('\0'));
                             }
                         }
+                        // \uHHHH and \UHHHHHHHH: a Unicode code point of up to
+                        // four or eight hex digits; none at all is literal.
+                        'u' | 'U' => {
+                            let max = if e == 'u' { 4 } else { 8 };
+                            let mut v = 0u32;
+                            let mut n = 0;
+                            while n < max {
+                                match self.peek().and_then(|d| d.to_digit(16)) {
+                                    Some(d) => {
+                                        v = v * 16 + d;
+                                        self.i += 1;
+                                        n += 1;
+                                    }
+                                    None => break,
+                                }
+                            }
+                            match (n, char::from_u32(v)) {
+                                (0, _) | (_, None) => {
+                                    q.push('\\');
+                                    q.push(e);
+                                }
+                                (_, Some(ch)) => q.push(ch),
+                            }
+                        }
+                        // \cX: the control character, X with its high bits cleared
+                        // (\c? is DEL).
+                        'c' => match self.peek() {
+                            Some(x) if x.is_ascii() => {
+                                self.i += 1;
+                                q.push(if x == '?' {
+                                    '\x7f'
+                                } else {
+                                    char::from(x as u8 & 0x1f)
+                                });
+                            }
+                            _ => q.push_str("\\c"),
+                        },
                         other => {
                             q.push('\\');
                             q.push(other);
@@ -1928,7 +1965,7 @@ impl Shell {
             match part {
                 Part::Lit(s, quoted) => {
                     let s = if idx == 0 && tilde {
-                        let home = self.var("HOME").unwrap_or_default();
+                        let home = self.tilde_home(s[1..].starts_with('/'));
                         format!("{home}{}", &s[1..])
                     } else {
                         s.clone()
@@ -2381,21 +2418,50 @@ impl Shell {
         s
     }
 
+    /// What `~` stands for. On Windows the home directory has backslashes, so
+    /// before a `/` they become `/`, and `~/x` is one uniform path.
+    fn tilde_home(&self, before_slash: bool) -> String {
+        let home = self.var("HOME").unwrap_or_default();
+        if cfg!(windows) && before_slash {
+            home.replace('\\', "/")
+        } else {
+            home
+        }
+    }
+
+    /// An unquoted literal of an assignment value with its tildes expanded: a
+    /// leading `~` (when `lead`) and a `~` after a `:` or `=`, each ending at a
+    /// `/`, a `:` or the end, as bash expands them in `x=a:~/q`.
+    fn assign_tildes(&self, s: &str, lead: bool) -> String {
+        let chars: Vec<char> = s.chars().collect();
+        let mut out = String::new();
+        for (i, &c) in chars.iter().enumerate() {
+            let starts =
+                c == '~' && ((i == 0 && lead) || (i > 0 && matches!(chars[i - 1], ':' | '=')));
+            let next = chars.get(i + 1);
+            if starts && next.is_none_or(|n| matches!(n, '/' | ':')) {
+                out.push_str(&self.tilde_home(next == Some(&'/')));
+            } else {
+                out.push(c);
+            }
+        }
+        out
+    }
+
     /// The value of an assignment (`x=word`). Bash does no field splitting,
     /// globbing or trimming here: the expansions are joined as text. A command
     /// substitution loses only its trailing newlines (see [`Shell::substitute`]).
     fn expand_assign(&mut self, w: &Word, stdin: &mut Input) -> String {
-        let tilde =
-            matches!(w.first(), Some(Part::Lit(s, false)) if s == "~" || s.starts_with("~/"));
+        let tilde = matches!(w.first(), Some(Part::Lit(s, false))
+            if s == "~" || s.starts_with("~/") || s.starts_with("~:"));
         let mut out = String::new();
         for (idx, part) in w.iter().enumerate() {
             match part {
-                Part::Lit(s, _) => {
-                    if idx == 0 && tilde {
-                        out.push_str(&self.var("HOME").unwrap_or_default());
-                        out.push_str(&s[1..]);
-                    } else {
+                Part::Lit(s, quoted) => {
+                    if *quoted {
                         out.push_str(s);
+                    } else {
+                        out.push_str(&self.assign_tildes(s, idx == 0 && tilde));
                     }
                 }
                 Part::Len(name) => {
@@ -2921,7 +2987,13 @@ impl Shell {
             }
             "cd" => {
                 let target = match args.first() {
-                    Some(t) if t == "-" => self.var("OLDPWD").unwrap_or_default(),
+                    Some(t) if t == "-" => match self.var("OLDPWD").filter(|d| !d.is_empty()) {
+                        Some(d) => d,
+                        None => {
+                            sink.eline(&format!("{SHELL_NAME}: cd: OLDPWD not set"));
+                            return Flow::Next(1);
+                        }
+                    },
                     Some(t) => t.clone(),
                     None => self.var("HOME").unwrap_or_default(),
                 };

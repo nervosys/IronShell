@@ -193,3 +193,53 @@ fn item7_cut_accepts_an_array_of_ints() {
             .contains("an Array of Ints")
     );
 }
+
+// ---- items 8-10: ish -b ----
+
+/// (status, stdout with CRLF folded, stderr) of `ish -b -c script`.
+fn ish_b(script: &str, home: Option<&str>) -> (i32, String, String) {
+    let dir = scratch_dir();
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_ish"));
+    cmd.args(["-b", "-c", script])
+        .current_dir(&dir)
+        .env("IRONSHELL_SESSION_DIR", &dir)
+        .env("NO_COLOR", "1")
+        .env_remove("IRONSHELL_ALLOW_SH")
+        .env_remove("IRONSHELL_MODE")
+        .env_remove("OLDPWD");
+    if let Some(h) = home {
+        cmd.env("HOME", h);
+    }
+    let out = cmd.output().expect("run ish");
+    let _ = std::fs::remove_dir_all(&dir);
+    (
+        out.status.code().unwrap_or(-1),
+        String::from_utf8_lossy(&out.stdout).replace("\r\n", "\n"),
+        String::from_utf8_lossy(&out.stderr).into_owned(),
+    )
+}
+
+#[test]
+fn item8_ansi_c_quoting_decodes_unicode_and_control_escapes() {
+    let (code, out, err) = ish_b(r"printf '%s' $'\u00e9|\U0001F600|\cA|\c?|\u'", None);
+    assert_eq!(code, 0, "{err}");
+    assert_eq!(out, "\u{e9}|\u{1F600}|\u{1}|\u{7f}|\\u");
+}
+
+#[test]
+fn item9_cd_dash_without_a_previous_directory_says_so() {
+    let (code, out, err) = ish_b("cd -", None);
+    assert_eq!(code, 1, "{err}");
+    assert_eq!(out, "");
+    assert!(err.contains("cd: OLDPWD not set"), "{err}");
+}
+
+#[test]
+fn item10_tilde_slash_is_uniform_and_expands_in_assignments() {
+    let home = r"C:\h\u";
+    let want = if cfg!(windows) { "C:/h/u" } else { home };
+    let (_, out, err) = ish_b("echo ~/x", Some(home));
+    assert_eq!(out, format!("{want}/x\n"), "{err}");
+    let (_, out, err) = ish_b("x=a:~/q:~; echo $x", Some(home));
+    assert_eq!(out, format!("a:{want}/q:{home}\n"), "{err}");
+}
