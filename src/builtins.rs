@@ -39383,17 +39383,35 @@ fn bi_startup_list(_args: Vec<Value>, _input: Option<Value>) -> Result<Value> {
 
 /// The file operands of a zip call: every argument after the archive, each of
 /// which must be a string. At least one is required.
+/// The refusal of an archive member that is not a String. An Array of names is
+/// the likely slip, so its hint shows the call with the names as separate
+/// arguments.
+fn member_arg_error(builtin: &str, expected: &str, v: &Value) -> anyhow::Error {
+    if matches!(v, Value::Array(_)) {
+        let archive = if builtin == "tar_create" {
+            "a.tar"
+        } else {
+            "a.zip"
+        };
+        return crate::safety::bad_arg_with_hint(
+            builtin,
+            expected,
+            "Array",
+            &format!(
+                "pass the names as separate arguments, not an Array: {builtin}(\"{archive}\", \"src\", \"b.txt\")"
+            ),
+        );
+    }
+    crate::safety::bad_arg(builtin, expected, v.type_name())
+}
+
 fn zip_file_args(builtin: &str, args: &[Value]) -> Result<Vec<String>> {
     let files = args
         .iter()
         .skip(1)
         .map(|v| match v {
             Value::Str(s) => Ok(s.clone()),
-            other => Err(crate::safety::bad_arg(
-                builtin,
-                "a file name: String",
-                other.type_name(),
-            )),
+            other => Err(member_arg_error(builtin, "a file name: String", other)),
         })
         .collect::<Result<Vec<String>>>()?;
     if files.is_empty() {
@@ -40436,10 +40454,10 @@ fn bi_tar_create(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
         match v {
             Value::Str(s) => files.push(s.clone()),
             other => {
-                return Err(crate::safety::bad_arg(
+                return Err(member_arg_error(
                     "tar_create",
                     &format!("args[{i}]: a member path string"),
-                    other.type_name(),
+                    other,
                 ))
             }
         }

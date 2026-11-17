@@ -118,3 +118,29 @@ fn crypto_hmac_with_the_algorithm_first_says_the_argument_order() {
     let ok = ish_in(&proj, r#"crypto_hmac("msg", "key", "sha256") | len"#);
     assert!(ok.status.success(), "{}", text(&ok));
 }
+
+#[test]
+fn an_array_of_archive_members_gets_a_hint_for_separate_arguments() {
+    let dir = scratch("array_members");
+    let proj = dir.join("proj");
+    std::fs::write(proj.join("b.txt"), b"x").expect("file");
+    for (call, example) in [
+        (
+            r#"zip_create("a.zip", ["b.txt"])"#,
+            r#"zip_create("a.zip", "src", "b.txt")"#,
+        ),
+        (
+            r#"tar_create("a.tar", ["b.txt"])"#,
+            r#"tar_create("a.tar", "src", "b.txt")"#,
+        ),
+    ] {
+        let out = ish_in(&proj, call);
+        assert!(!out.status.success(), "{call}");
+        let t = text(&out);
+        assert!(t.contains("separate arguments"), "{t}");
+        assert!(t.contains(example), "{t}");
+    }
+    std::fs::write(proj.join("a.zip"), b"").expect("file");
+    let t = text(&ish_in(&proj, r#"zip_add("a.zip", ["b.txt"])"#));
+    assert!(t.contains("separate arguments"), "{t}");
+}
