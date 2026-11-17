@@ -9148,7 +9148,7 @@ fn bi_ls(args: Vec<Value>, _input: Option<Value>) -> Result<Value> {
 
     // `ls("src/*.rs")` lists the matches themselves, as `ls src/*.rs` does.
     let paths: Vec<std::path::PathBuf> =
-        if crate::posix::has_glob_meta(&path_str) && !std::path::Path::new(&path_str).exists() {
+        if has_glob_syntax(&path_str) && !std::path::Path::new(&path_str).exists() {
             expand_glob_for("ls", &path_str)?
                 .into_iter()
                 .map(std::path::PathBuf::from)
@@ -9293,7 +9293,7 @@ fn read_named_files(builtin: &str, path_str: &str) -> Result<String> {
 /// Each file a path names, with its text, in order: a glob names every file it
 /// matches, and any other path names itself. `read_named_files` joins these.
 fn read_named_file_list(builtin: &str, path_str: &str) -> Result<Vec<(String, String)>> {
-    if crate::posix::has_glob_meta(path_str) && !std::path::Path::new(path_str).exists() {
+    if has_glob_syntax(path_str) && !std::path::Path::new(path_str).exists() {
         let paths = expand_glob_for(builtin, path_str)?;
         let files: Vec<&String> = paths
             .iter()
@@ -33531,10 +33531,79 @@ fn fold_glob_case(pattern: &str) -> String {
         .join("/")
 }
 
+/// Expand the first `{a,b,...}` group of `pattern` that has a top-level comma,
+/// recursively, into every pattern it stands for, in order. A group with no
+/// comma (`{}`, `{a}`) and an unmatched brace stay literal.
+fn brace_alternatives(pattern: &str) -> Vec<String> {
+    let chars: Vec<char> = pattern.chars().collect();
+    let mut i = 0;
+    while i < chars.len() {
+        if chars[i] == '{' {
+            // Find the matching close, noting the commas at this nesting level.
+            let mut depth = 0usize;
+            let mut commas = Vec::new();
+            let mut close = None;
+            for (j, &c) in chars.iter().enumerate().skip(i) {
+                match c {
+                    '{' => depth += 1,
+                    '}' => {
+                        depth -= 1;
+                        if depth == 0 {
+                            close = Some(j);
+                            break;
+                        }
+                    }
+                    ',' if depth == 1 => commas.push(j),
+                    _ => {}
+                }
+            }
+            if let (Some(close), false) = (close, commas.is_empty()) {
+                let prefix: String = chars[..i].iter().collect();
+                let suffix: String = chars[close + 1..].iter().collect();
+                let mut starts = vec![i + 1];
+                starts.extend(commas.iter().map(|c| c + 1));
+                let mut ends = commas.clone();
+                ends.push(close);
+                let mut out = Vec::new();
+                for (s, e) in starts.into_iter().zip(ends) {
+                    let alt: String = chars[s..e].iter().collect();
+                    out.extend(brace_alternatives(&format!("{prefix}{alt}{suffix}")));
+                }
+                return out;
+            }
+        }
+        i += 1;
+    }
+    vec![pattern.to_string()]
+}
+
+/// True when a path string is a glob: it has a wildcard, or a `{a,b}` group.
+fn has_glob_syntax(s: &str) -> bool {
+    crate::posix::has_glob_meta(s) || brace_alternatives(s).len() > 1
+}
+
 /// Expand a glob for a typed builtin: `**` is recursive, results sort by
 /// bytes, and a literal directory prefix that does not exist is E_NOT_FOUND
-/// rather than an empty answer that reads like "no files".
+/// rather than an empty answer that reads like "no files". A `{a,b}` group
+/// matches either alternative (`*.{rs,py}`); a path matched twice appears once.
 fn expand_glob_for(builtin: &str, pattern: &str) -> Result<Vec<String>> {
+    let alternatives = brace_alternatives(pattern);
+    if alternatives.len() <= 1 {
+        return expand_glob_one(builtin, pattern);
+    }
+    let mut seen = std::collections::HashSet::new();
+    let mut out = Vec::new();
+    for alt in alternatives {
+        for p in expand_glob_one(builtin, &alt)? {
+            if seen.insert(p.clone()) {
+                out.push(p);
+            }
+        }
+    }
+    Ok(out)
+}
+
+fn expand_glob_one(builtin: &str, pattern: &str) -> Result<Vec<String>> {
     crate::security::check_share_egress(builtin, pattern)?;
     // Windows callers may write either separator; globbing is done on `/`.
     let pattern = pattern.replace(char::from(92), "/");

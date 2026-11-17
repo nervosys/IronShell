@@ -9705,11 +9705,12 @@ pub static SIGNATURES: &[Signature] = &[
         subject: None,
         params: &[req("pattern", Ty::Str, "a glob such as src/*.rs or src/**/*.rs")],
         returns: "Array",
-        doc: "Paths matching a glob, sorted; ** matches any depth of directories, and a directory in the pattern that does not exist is E_NOT_FOUND. At most 1,000,000 entries; more is E_BUDGET_EXCEEDED.",
+        doc: "Paths matching a glob, sorted; ** matches any depth of directories, `{a,b}` matches either alternative (`**/*.{rs,py}`; nested groups work, and a path matched twice appears once), and a directory in the pattern that does not exist is E_NOT_FOUND. At most 1,000,000 entries; more is E_BUDGET_EXCEEDED.",
         examples: &[
             (r#"(glob("src/*.rs") | len) > 10"#, r#"true"#),
             (r#"(glob("src/**/*.rs") | len) > (glob("src/*.rs") | len)"#, r#"true"#),
             (r#"glob("Cargo.tom?")"#, r#"["Cargo.toml"]"#),
+            (r#"glob("Cargo.{toml,lock}")"#, r#"["Cargo.toml", "Cargo.lock"]"#),
         ],
     },
     Signature {
