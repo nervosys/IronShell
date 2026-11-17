@@ -13,6 +13,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `tar_create`, `zip_create` and `zip_add` skip the workspace's `.ironshell` state folder (journal and audit log) unless it is named as a member.
 - `rm` removes a symlink or junction that sits inside the workspace without following it; `rmdir(link, true)` stays refused; `rm` refuses a trailing separator; removing a dangling link or a link out of the workspace is recorded as irreversible, and the approval request says so.
 - Reading `x.txt:stream` is refused on Windows as writing it is, and `--explain` judges an exec builtin's path arguments (`db.sqlite_exec` on a database outside the workspace is deny), as the run does.
+- `ish -b` runs `rm` (`-r`, `-R`, `-f`) and `rmdir` in process under the workspace jail: a link is removed, never followed, and `rm -rf jx/` can no longer delete through a junction what lies outside the workspace (a GNU `rm` on PATH did, outside agent mode). Under the jail an `rm` flag the subset lacks is refused (status 2), not handed to a PATH program; AGENTS.md says that other external programs are not confined outside agent mode.
+- A zip holding a symlink entry is refused (E_POLICY_DENY) and `archive_test` is false for it; `tar_create` and `zip_create` skip a link that leads out of the archived folder and name it on stderr.
+- `--explain` judges every `tar_create`/`zip_create` member as a path the run reads, and reports `rm` of a name ending in a separator, `.` or `..` as refused.
 
 ### Changed
 
@@ -31,6 +34,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - AECON tables never print a row as an empty line: `@prefix`/`@suffix` are not used when a cell equals the shared run, and `@same` keeps a row's first cell.
 - `${...}` interpolation of an Array or Record quotes the Strings inside it (`[1, "a"]`).
 - An unknown `let` type annotation is E_BAD_ARG naming the closest type; `Array<Int>` and `String?` are E_PARSE listing the supported forms.
+- An annotated binding keeps its declared type when assigned again (`let mut m: Int = 1; m = "x"` is E_BAD_ARG); `mut m: Int = 1` is accepted as `let mut m: Int = 1`.
+- `count_by` takes a builtin as the key, counts 1 and 1.0 as one key, and counts a row without the field under null.
+- `to_json(x, indent)` takes a Bool or an Int from 0 to 16 and refuses anything else.
+- file.replace and file.patch report `path` as written in agent mode too.
+- `glob` with an unbalanced brace is E_BAD_ARG, and a one-alternative group (`*.{rs}`) means its alternative.
 
 ### Added
 
@@ -43,6 +51,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `grep(..., {extended: true})` takes an extended regex; grep is BRE by default.
 - A builtin works as a callback (`map(len)`, `sort_by(len)`, `where`, `each`, `any`, `all`, `group_by`).
 - `to_json(x, true)` indents by two spaces.
+- `group_by` rows carry `Key`, the key with its type, beside the text `Name`.
+- `zip_list` rows carry `path` and `kind` as `tar_list`'s do.
+- `journal()` rows carry `step`, the call they belong to; `undo(n)` counts calls.
 
 ### Fixed
 
@@ -63,6 +74,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Messages: reading a UTF-16 file says it is UTF-16, and a binary file's error points at `crypto_hash_file`; `crypto_hmac` with the algorithm first states its argument order; `zip_create`, `zip_add` and `tar_create` given an Array say to pass names as separate arguments; `proc.info(0)` explains why 0 is refused; a missing handle names the session directory.
 - Messages: a field read on a non-Record says what the value is; a wrong-arity callback says the lambda takes the element; `grep` with `recursive` names `search.grep`; `-c` followed by extra arguments says the shell probably split the code at a quote; extraction write failures say "cannot write"; a refused extraction destination is named as given.
 - AGENTS.md: every sql row's columns come back in sorted key order; `/`, `!`, `if` and `&&`/`||` rules; the `@type` directive; `error`'s message parameter.
+- zip_create and zip_add no longer store the archive being written inside itself.
+- An archive written into a folder that does not exist names the folder; a tar read error is no longer described as a signal, and tar_extract of a zip points to zip_extract.
+- `undo` of a removed link reports the journal's reason (a link it cannot restore), not the jail's.
+- AECON quotes a string cell that reads as a radix number (`"0x1"`).
+- `ish -b`: find names the operand it does not support (`-o`, `-exec`); an unmatched glob operand is reported in GNU words; command not found for cp, mv, xargs and unzip says they are outside the in-process subset.
+- Hints for `reduce(max, 0)`, `map(str)` and `map(split)` say what to write instead; the annotation type lists name Lambda.
 
 ## [14.0.5] - 2026-11-16
 
