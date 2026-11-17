@@ -8661,7 +8661,7 @@ fn bi_kg_relate(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
         )
     } else {
         return Err(crate::safety::arg_err(
-            "kg_relate: requires source_id, target_id, and relation_type",
+            "kg_relate: requires source, target, and relation",
         ));
     };
 
@@ -11549,6 +11549,11 @@ fn bi_from_csv(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
 /// column type inference `from_csv` has. `open("x.tsv")` reads tab-separated
 /// text through this with a tab delimiter and no quoting (TSV has none).
 fn parse_delimited(builtin: &str, text: &str, builder: &mut csv::ReaderBuilder) -> Result<Value> {
+    if builtin == "from_csv" {
+        if let Some(e) = csv_quote_error(builtin, text) {
+            return Err(e);
+        }
+    }
     let mut reader = builder.from_reader(text.as_bytes());
     let headers: Vec<String> = reader
         .headers()
@@ -11636,9 +11641,24 @@ fn csv_row_error(builtin: &str, text: &str, e: &csv::Error) -> anyhow::Error {
 /// A quote opens a field only at a field's start; inside one, `""` is a literal
 /// quote and a lone `"` closes it.
 fn csv_unterminated_quote_line(text: &str) -> Option<usize> {
+    match csv_quote_problem(text) {
+        Some(CsvQuoteProblem::Unterminated(line)) => Some(line),
+        _ => None,
+    }
+}
+
+/// What is wrong with a CSV text's quoting: a quoted field the text ends
+/// inside, or text right after a closing quote (`"x"y`), each with its line.
+enum CsvQuoteProblem {
+    Unterminated(usize),
+    AfterClose(usize),
+}
+
+fn csv_quote_problem(text: &str) -> Option<CsvQuoteProblem> {
     let mut line = 1usize;
     let mut open_line = 0usize;
     let mut in_quotes = false;
+    let mut after_close = false;
     let mut field_start = true;
     let mut chars = text.chars().peekable();
     while let Some(c) = chars.next() {
@@ -11649,12 +11669,20 @@ fn csv_unterminated_quote_line(text: &str) -> Option<usize> {
                 }
                 '"' => {
                     in_quotes = false;
+                    after_close = true;
                     field_start = false;
                 }
                 '\n' => line += 1,
                 _ => {}
             }
             continue;
+        }
+        if after_close {
+            // Only a delimiter or a line end may follow a closing quote.
+            if !matches!(c, ',' | '\n' | '\r') {
+                return Some(CsvQuoteProblem::AfterClose(line));
+            }
+            after_close = false;
         }
         match c {
             '"' if field_start => {
@@ -11670,9 +11698,25 @@ fn csv_unterminated_quote_line(text: &str) -> Option<usize> {
         }
     }
     if in_quotes {
-        Some(open_line)
+        Some(CsvQuoteProblem::Unterminated(open_line))
     } else {
         None
+    }
+}
+
+/// The refusal for a `from_csv` text whose quoting is wrong, before it is read.
+fn csv_quote_error(builtin: &str, text: &str) -> Option<anyhow::Error> {
+    match csv_quote_problem(text)? {
+        CsvQuoteProblem::Unterminated(line) => Some(crate::safety::bad_arg_in(
+            builtin,
+            format!("{builtin}: unterminated quoted field starting on line {line}"),
+            "close the quote with a matching \", or double a literal quote inside a quoted field (\"\")",
+        )),
+        CsvQuoteProblem::AfterClose(line) => Some(crate::safety::bad_arg_in(
+            builtin,
+            format!("{builtin}: unexpected text after a closing quote on line {line}"),
+            "a quoted field ends at its closing quote: put a comma or a line end after it, or double a literal quote inside the field (\"\")",
+        )),
     }
 }
 
@@ -12523,12 +12567,30 @@ fn bi_ai_suggest(args: Vec<Value>, input: Option<Value>, _env: &mut Env) -> Resu
 /// an error code in the subject means.
 fn bi_ai_explain(args: Vec<Value>, input: Option<Value>, _env: &mut Env) -> Result<Value> {
     let subject = hint_subject("explain", &args, input)?;
-    if let Some(sig) = crate::signature::signature_of(subject.trim()) {
+    // The name help() would resolve: a module-qualified spelling (`file.read`),
+    // an underscore one (`file_read`) or an alias names its builtin.
+    let mut name = subject.trim().to_string();
+    if crate::signature::signature_of(&name).is_none() && !is_dispatched(&name) {
+        let described = crate::agent_api::ontology_describe_json(&name);
+        if let Some(canonical) = described.get("builtin").and_then(|v| v.as_str()) {
+            name = canonical.to_string();
+        }
+    }
+    // `file_read` is the underscore spelling of the member `file.read`.
+    if crate::signature::signature_of(&name).is_none() && !is_dispatched(&name) {
+        if let Some(member) = name
+            .split_once('_')
+            .and_then(|(m, f)| crate::modules::builtin_for_member(m, f))
+        {
+            name = member;
+        }
+    }
+    if let Some(sig) = crate::signature::signature_of(&name) {
         return Ok(hint_signature_record(sig));
     }
-    if is_dispatched(subject.trim()) {
+    if is_dispatched(&name) {
         let mut r = BTreeMap::new();
-        r.insert("name".to_string(), Value::Str(subject.trim().to_string()));
+        r.insert("name".to_string(), Value::Str(name.clone()));
         r.insert(
             "doc".to_string(),
             Value::Str(
@@ -12541,11 +12603,13 @@ fn bi_ai_explain(args: Vec<Value>, input: Option<Value>, _env: &mut Env) -> Resu
     if subject.contains("E_") {
         return bi_diagnose(vec![hint_error_value(&subject)], None);
     }
-    Err(crate::safety::not_found(
-        "explain",
-        "builtin or error code",
-        subject.trim(),
-    ))
+    let mut e = crate::safety::not_found("explain", "builtin or error code", subject.trim());
+    if let Some(se) = e.downcast_mut::<crate::safety::SafetyError>() {
+        se.hint = "complete(\"prefix\") lists the builtin names that start with a prefix; \
+                   ontology_manifest() lists the categories"
+            .to_string();
+    }
+    Err(e)
 }
 
 /// complete(partial): builtin names that start with `partial`, sorted,
@@ -77354,7 +77418,7 @@ fn bi_awk_process(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
 
 /// cut — Extract columns/fields from text (cross-platform, native Rust).
 /// Usage: cut(delimiter, fields, input_text) or piped: text | cut(delimiter, fields)
-/// fields is a string like "1,3" or "1-3" (1-based)
+/// fields is a string like "1,3" or "1-3" (1-based), an Int, or an Array of Ints
 fn bi_cut_columns(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
     if input.is_some() && args.len() > 2 {
         return Err(crate::safety::arg_err(
@@ -77372,9 +77436,24 @@ fn bi_cut_columns(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
     let fields_spec = match args.get(1) {
         Some(Value::Str(s)) => s.clone(),
         Some(Value::Int(n)) => n.to_string(),
+        // [1, 3] is "1,3": an Array of Ints names the fields one by one.
+        Some(Value::Array(items)) if !items.is_empty() => {
+            let mut parts = Vec::with_capacity(items.len());
+            for item in items {
+                match item {
+                    Value::Int(n) => parts.push(n.to_string()),
+                    _ => {
+                        return Err(crate::safety::arg_err(
+                            "cut fields is an Int, an Array of Ints, or a String like \"1,3\" or \"1-3\"",
+                        ))
+                    }
+                }
+            }
+            parts.join(",")
+        }
         _ => {
             return Err(crate::safety::arg_err(
-                "cut requires a fields specification (e.g., '1,3' or '1-3')",
+                "cut fields is an Int, an Array of Ints, or a String like \"1,3\" or \"1-3\"",
             ))
         }
     };

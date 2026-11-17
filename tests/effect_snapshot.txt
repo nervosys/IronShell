@@ -610,7 +610,7 @@ input_multiselect	Pure
 input_number	Pure
 input_progress	Pure
 input_read_char	Pure
-input_read_line	Pure
+input_read_line	Exec
 input_read_password	Exec
 input_select	Pure
 input_spinner	Pure
@@ -1052,7 +1052,7 @@ project_structure	ReadLocal
 project_test_files	ReadLocal
 project_type	ReadLocal
 project_version	ReadLocal
-prompt	Pure
+prompt	Exec
 prompt_user	WriteLocal
 ps	ReadLocal
 ps_add	Pure
@@ -1075,7 +1075,7 @@ rbac_logout	WriteLocal
 rbac_principal	Privileged
 rbac_register	Privileged
 rbac_session	ReadLocal
-read_line	Pure
+read_line	Exec
 read_text	ReadLocal
 readelf	ReadLocal
 readelf_headers	ReadLocal

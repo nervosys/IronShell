@@ -1309,7 +1309,7 @@ fn short_value(value: &Value) -> String {
     }
 }
 
-/// The unknown-module error for `name.member` when `name` is an unbound
+/// The unknown-name error for `name.member` when `name` is an unbound
 /// identifier that is neither a module nor a builtin. Without it the access
 /// reached the record check with Null and was refused as "expected a Record".
 fn unbound_receiver_error(object: &Expr, field: &str, env: &Env) -> Option<anyhow::Error> {
@@ -1332,7 +1332,9 @@ fn unbound_receiver_error(object: &Expr, field: &str, env: &Env) -> Option<anyho
         } else {
             mapped
         };
-        Some(crate::safety::unknown_module(name, candidates))
+        // The same error a bare `x` gets: `x` is neither a variable, a builtin
+        // nor a module, whatever follows it.
+        Some(crate::safety::unknown_name(name, candidates))
     }
     #[cfg(not(feature = "native"))]
     {

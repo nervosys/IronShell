@@ -38,6 +38,12 @@ fn scratch() -> &'static PathBuf {
     })
 }
 
+/// Held for the whole of each test that starts a server. Every server takes
+/// the process working directory into the same workspace, and `serve` moves
+/// it out first, so a test that started a server while another was mid-run
+/// pulled that one's working directory out from under its relative paths.
+static SERIAL: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 /// Serializes "go to the scratch directory, then start a server", so every
 /// server starts outside its workspace whatever the other tests are doing.
 static START: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
@@ -140,6 +146,7 @@ fn assert_error_shape(body: &Value, code: &str) {
 
 #[tokio::test]
 async fn a_relative_path_written_is_read_back_when_started_outside_the_workspace() {
+    let _serial = SERIAL.lock().await;
     let port = serve().await;
     let ws = scratch().join("ws");
 
@@ -291,6 +298,7 @@ fn the_schema_prefix_is_stripped_only_from_a_name_that_is_no_builtin() {
 
 #[tokio::test]
 async fn call_and_execute_and_pipeline_take_the_advertised_tool_names() {
+    let _serial = SERIAL.lock().await;
     let port = serve().await;
 
     let res = client()
@@ -375,6 +383,7 @@ fn an_unrecognised_websocket_frame_is_answered_with_an_error_naming_the_shapes()
 
 #[tokio::test]
 async fn http_layer_failures_are_json_in_the_api_error_shape() {
+    let _serial = SERIAL.lock().await;
     let port = serve().await;
     let c = client();
 
@@ -497,6 +506,7 @@ fn a_framework_failure_maps_to_a_code_and_cuts_the_echo() {
 
 #[tokio::test]
 async fn call_with_no_body_and_no_content_type_takes_empty_arguments() {
+    let _serial = SERIAL.lock().await;
     let port = serve().await;
     let res = client()
         .post(url(port, "/api/v1/call/now_iso"))
@@ -523,6 +533,7 @@ async fn call_with_no_body_and_no_content_type_takes_empty_arguments() {
 
 #[tokio::test]
 async fn pipeline_failures_carry_a_real_code() {
+    let _serial = SERIAL.lock().await;
     let port = serve().await;
     let c = client();
 
@@ -584,6 +595,7 @@ fn a_streamed_error_event_carries_an_error_object() {
 
 #[tokio::test]
 async fn builtins_category_accepts_module_names_and_refuses_unknown_ones() {
+    let _serial = SERIAL.lock().await;
     let port = serve().await;
     let c = client();
     for category in ["file", "sys", "math", "FileSystem"] {
@@ -626,6 +638,7 @@ async fn builtins_category_accepts_module_names_and_refuses_unknown_ones() {
 
 #[tokio::test]
 async fn the_authorization_scheme_is_case_insensitive() {
+    let _serial = SERIAL.lock().await;
     assert_eq!(bearer_token("Bearer abc"), Some("abc"));
     assert_eq!(bearer_token("bearer abc"), Some("abc"));
     assert_eq!(bearer_token("BEARER abc"), Some("abc"));

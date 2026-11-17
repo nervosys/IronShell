@@ -1724,10 +1724,24 @@ pub(crate) fn named_args_to_positional(
         ));
     }
 
+    let variadic_last = signature.is_some_and(|s| s.params.last().is_some_and(|p| p.variadic));
+    // min/max list subject (the Array a pipeline would pipe in) and `values`
+    // (the numbers of a direct call). {"values": [3, 1, 2]} names the same Array
+    // as the subject, so it is passed as that one Array when no subject is given.
+    if variadic_last
+        && has_subject
+        && positions.len() == 2
+        && signature.is_some_and(|s| s.subject == Some(crate::signature::Ty::Array))
+        && slots[0].is_none()
+    {
+        if let Some(JsonValue::Array(items)) = slots[1].take() {
+            slots[0] = Some(JsonValue::Array(items));
+        }
+    }
+
     let Some(last) = slots.iter().rposition(Option::is_some) else {
         return Ok(Vec::new());
     };
-    let variadic_last = signature.is_some_and(|s| s.params.last().is_some_and(|p| p.variadic));
     let mut out = Vec::with_capacity(last + 1);
     for (i, (slot, (name, _))) in slots.into_iter().zip(&positions).enumerate() {
         if i > last {
@@ -2446,13 +2460,13 @@ fn get_builtin_definitions() -> Vec<BuiltinDefinition> {
             name: "ai".to_string(),
             description: "Query AI model with a prompt".to_string(),
             category: "AI".to_string(),
-            signature: "ai(prompt?: String, config?: Record) -> String".to_string(),
+            signature: "ai(prompt: String, config?: Record) -> String".to_string(),
             parameters: vec![
                 ParameterDefinition {
                     name: "prompt".to_string(),
                     param_type: "String".to_string(),
                     description: "The prompt to send to the AI; with piped input the piped string is the prompt".to_string(),
-                    required: false,
+                    required: true,
                     default: None,
                 },
                 ParameterDefinition {
@@ -3867,6 +3881,14 @@ fn ontology_describe_inner(query: &str, modules: bool) -> JsonValue {
         let mut record = module_describe_record(q, &defs);
         let same_name = ontology_describe_inner(q, false);
         if same_name.get("builtin").is_some() && same_name.get("error").is_none() {
+            // The builtin's `parameters` and `signature` are also read from the
+            // top of the record, so `help("ai").parameters` works as it does for
+            // a builtin that shares no module's name; `members` stays.
+            for key in ["parameters", "signature"] {
+                if let Some(v) = same_name.get(key) {
+                    record[key] = v.clone();
+                }
+            }
             record["builtin"] = same_name;
         }
         return record;

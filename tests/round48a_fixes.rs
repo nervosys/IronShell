@@ -1,0 +1,269 @@
+//! Round 48a: schema, naming, CSV, help and `ish -b` fixes.
+
+use iron_shell::value::Value;
+use serde_json::{json, Value as Json};
+use std::io::Write;
+use std::process::{Command, Stdio};
+use std::sync::atomic::{AtomicUsize, Ordering};
+
+static COUNTER: AtomicUsize = AtomicUsize::new(0);
+
+fn run(src: &str) -> Value {
+    let mut env = iron_shell::modules::env_with_modules();
+    let stmts = iron_shell::parser::parse_program(src).expect("parses");
+    iron_shell::eval::eval_program(&stmts, &mut env).expect("runs")
+}
+
+fn text(src: &str) -> String {
+    match run(src) {
+        Value::Str(s) => s,
+        other => format!("{other:?}"),
+    }
+}
+
+fn scratch_dir() -> std::path::PathBuf {
+    let n = COUNTER.fetch_add(1, Ordering::SeqCst);
+    let dir = std::env::temp_dir().join(format!("ae_r48a_{}_{}", std::process::id(), n));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("scratch dir");
+    dir
+}
+
+/// Run `ish <args>` with `stdin`; the exit code, stdout and stderr.
+fn run_ish(args: &[&str], stdin: &[u8]) -> (Option<i32>, String, String) {
+    let dir = scratch_dir();
+    let mut child = Command::new(env!("CARGO_BIN_EXE_ish"))
+        .args(args)
+        .env("IRONSHELL_SESSION_DIR", &dir)
+        .env_remove("IRONSHELL_DETERMINISTIC")
+        .env_remove("IRONSHELL_TOKEN_BUDGET")
+        .current_dir(&dir)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn ish");
+    child
+        .stdin
+        .take()
+        .expect("stdin")
+        .write_all(stdin)
+        .expect("write stdin");
+    let out = child.wait_with_output().expect("wait for ish");
+    let _ = std::fs::remove_dir_all(&dir);
+    (
+        out.status.code(),
+        String::from_utf8_lossy(&out.stdout).into_owned(),
+        String::from_utf8_lossy(&out.stderr).into_owned(),
+    )
+}
+
+fn execute(request: &str) -> Json {
+    let (code, out, err) = run_ish(&["agent", "execute"], request.as_bytes());
+    assert_eq!(code, Some(0), "stderr: {err}");
+    serde_json::from_str(&out).unwrap_or_else(|e| panic!("stdout is not JSON ({e}): {out}"))
+}
+
+// ---- item 1: required parameters are declared required ----
+
+#[test]
+fn item1_required_params_are_not_optional_in_the_schema() {
+    for (name, required) in [
+        ("ai", vec!["prompt"]),
+        ("error", vec!["message"]),
+        ("kg_add", vec!["type", "name"]),
+        ("kg_relate", vec!["source", "target", "relation"]),
+        ("rag_index", vec!["content"]),
+        ("semantic_cache", vec!["query", "response"]),
+        ("trace", vec!["label_or_value"]),
+    ] {
+        let sig = iron_shell::signature::signature_of(name).expect(name);
+        for want in required {
+            let p = sig.params.iter().find(|p| p.name == want).expect(want);
+            assert!(p.required, "{name}.{want} should be required");
+        }
+    }
+}
+
+#[test]
+fn item1_piped_forms_still_work() {
+    assert_eq!(
+        text(r#"(try { "boom" | error() } catch e { e.message })"#),
+        "boom"
+    );
+    assert_eq!(
+        text(r#"(try { kg_relate("a", "b") } catch e { e.error.code })"#),
+        "E_BAD_ARG"
+    );
+}
+
+// ---- item 2: variadic named binding ----
+
+#[test]
+fn item2_values_names_the_array_of_min_and_max() {
+    let v = execute(r#"{"action":"call","builtin":"min","args":{"values":[3,1,2]}}"#);
+    assert_eq!(v["success"], json!(true), "{v}");
+    assert_eq!(v["result"], json!(1), "{v}");
+    let v = execute(r#"{"action":"call","builtin":"max","args":{"values":[3,1,2]}}"#);
+    assert_eq!(v["result"], json!(3), "{v}");
+}
+
+// ---- item 3: x.y with an undefined x ----
+
+#[test]
+fn item3_an_undefined_receiver_is_an_unknown_name() {
+    assert_eq!(
+        text(r#"try { zzzz_r48.parse("x") } catch e { e.code }"#),
+        "E_UNKNOWN_NAME"
+    );
+    assert_eq!(
+        text(r#"try { zzzz_r48.field } catch e { e.code }"#),
+        "E_UNKNOWN_NAME"
+    );
+    assert!(text(r#"try { zzzz_r48.parse(1) } catch e { e.hint }"#)
+        .contains("`zzzz_r48` is not a variable, builtin or module"));
+}
+
+// ---- item 4: from_csv quoting ----
+
+#[test]
+fn item4_from_csv_refuses_a_quote_left_open_at_the_end() {
+    for src in [
+        r#"try { from_csv("a,b\n1,\"x\n") } catch e { e.error.code }"#,
+        r#"try { from_csv("a\n\"x") } catch e { e.error.code }"#,
+    ] {
+        assert_eq!(text(src), "E_BAD_ARG", "{src}");
+    }
+    assert!(text(r#"try { from_csv("a\n\"x") } catch e { e.message }"#)
+        .contains("unterminated quoted field starting on line 2"));
+}
+
+#[test]
+fn item4_from_csv_refuses_text_after_a_closing_quote() {
+    let msg = text(r#"try { from_csv("a\n\"x\"y\n") } catch e { e.message }"#);
+    assert!(
+        msg.contains("unexpected text after a closing quote on line 2"),
+        "{msg}"
+    );
+    // Well-formed quoting still reads.
+    assert_eq!(
+        text(r#"from_csv("a,b\n\"x,1\",\"he said \"\"hi\"\"\"\n") | map(fn(r) => r.b) | first"#),
+        "he said \"hi\""
+    );
+}
+
+// ---- item 5: explain resolves names as help does ----
+
+#[test]
+fn item5_explain_resolves_module_and_underscore_spellings() {
+    let dotted = text(r#"explain("file.read").name"#);
+    let under = text(r#"explain("file_read").name"#);
+    assert!(!dotted.is_empty());
+    assert_eq!(dotted, under);
+    assert_eq!(
+        text(r#"try { explain("zz_no_such_thing_r48") } catch e { e.error.code }"#),
+        "E_NOT_FOUND"
+    );
+    assert!(
+        text(r#"try { explain("zz_no_such_thing_r48") } catch e { e.error.hint }"#)
+            .contains("complete(")
+    );
+}
+
+// ---- item 6: help of a name that is a module and a builtin ----
+
+#[test]
+fn item6_help_ai_has_top_level_parameters_and_members() {
+    assert_eq!(text(r#"(help("ai").parameters)[0].name"#), "prompt");
+    assert!(text(r#"help("ai").signature"#).contains("ai("));
+    assert!(matches!(run(r#"help("ai").members"#), Value::Array(_)));
+    assert!(matches!(run(r#"help("ai").builtin"#), Value::Record(_)));
+}
+
+// ---- item 7: cut takes an Array of Ints as its fields ----
+
+#[test]
+fn item7_cut_accepts_an_array_of_ints() {
+    assert_eq!(
+        run(r#"cut(",", [1, 3], "a,b,c")"#),
+        Value::Array(vec![Value::Str("a,c".into())])
+    );
+    assert!(
+        text(r#"try { cut(",", [1, "x"], "a,b,c") } catch e { e.message }"#)
+            .contains("an Array of Ints")
+    );
+}
+
+// ---- items 8-10: ish -b ----
+
+/// (status, stdout with CRLF folded, stderr) of `ish -b -c script`.
+fn ish_b(script: &str, home: Option<&str>) -> (i32, String, String) {
+    let dir = scratch_dir();
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_ish"));
+    cmd.args(["-b", "-c", script])
+        .current_dir(&dir)
+        .env("IRONSHELL_SESSION_DIR", &dir)
+        .env("NO_COLOR", "1")
+        .env_remove("IRONSHELL_ALLOW_SH")
+        .env_remove("IRONSHELL_MODE")
+        .env_remove("OLDPWD");
+    if let Some(h) = home {
+        cmd.env("HOME", h);
+    }
+    let out = cmd.output().expect("run ish");
+    let _ = std::fs::remove_dir_all(&dir);
+    (
+        out.status.code().unwrap_or(-1),
+        String::from_utf8_lossy(&out.stdout).replace("\r\n", "\n"),
+        String::from_utf8_lossy(&out.stderr).into_owned(),
+    )
+}
+
+#[test]
+fn item8_ansi_c_quoting_decodes_unicode_and_control_escapes() {
+    let (code, out, err) = ish_b(r"printf '%s' $'\u00e9|\U0001F600|\cA|\c?|\u'", None);
+    assert_eq!(code, 0, "{err}");
+    assert_eq!(out, "\u{e9}|\u{1F600}|\u{1}|\u{7f}|\\u");
+}
+
+#[test]
+fn item9_cd_dash_without_a_previous_directory_says_so() {
+    let (code, out, err) = ish_b("cd -", None);
+    assert_eq!(code, 1, "{err}");
+    assert_eq!(out, "");
+    assert!(err.contains("cd: OLDPWD not set"), "{err}");
+}
+
+#[test]
+fn item10_tilde_slash_is_uniform_and_expands_in_assignments() {
+    let home = r"C:\h\u";
+    let want = if cfg!(windows) { "C:/h/u" } else { home };
+    let (_, out, err) = ish_b("echo ~/x", Some(home));
+    assert_eq!(out, format!("{want}/x\n"), "{err}");
+    let (_, out, err) = ish_b("x=a:~/q:~; echo $x", Some(home));
+    assert_eq!(out, format!("a:{want}/q:{home}\n"), "{err}");
+}
+
+// ---- item 11: documentation ----
+
+#[test]
+fn item11_sort_and_platform_normalize_path_docs() {
+    assert_eq!(text(r#"help("sort").category"#), "Array");
+    assert!(text(r#"help("sort").description"#).contains("split into lines"));
+    assert!(text(r#"help("platform_normalize_path").description"#).contains("does not resolve"));
+    assert!(text(r#"help("platform_normalize_path").description"#).contains("path_normalize"));
+}
+
+// ---- item 12: input_read_line needs a UI ----
+
+#[test]
+fn item12_input_read_line_is_classed_like_the_other_interactive_reads() {
+    assert_eq!(
+        format!("{:?}", iron_shell::safety::effect_of("input_read_line")),
+        format!("{:?}", iron_shell::safety::effect_of("input_read_password"))
+    );
+    assert_eq!(
+        format!("{:?}", iron_shell::safety::effect_of("input_read_line")),
+        "Exec"
+    );
+}

@@ -825,6 +825,7 @@ fn classified_effect(name: &str) -> Option<Effect> {
         | "gui_type_text"
         | "hyperfine_bench"
         | "input_editor"
+        | "input_read_line"
         | "input_read_password"
         | "jq_filter"
         | "just_run"

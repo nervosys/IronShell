@@ -44,7 +44,8 @@ fn tilde_expands_to_the_home_directory_without_home() {
     assert!(!out.trim().is_empty(), "~ must not be empty");
     assert_eq!(out.trim_end(), home);
     let (_, out, _) = ish(&d, "echo ~/x", true);
-    assert_eq!(out.trim_end(), format!("{home}/x"));
+    // A Windows home directory has backslashes; before a `/` they are `/`.
+    assert_eq!(out.trim_end(), format!("{}/x", home.replace('\\', "/")));
     let (_, out, _) = ish(&d, "echo $HOME", true);
     assert_eq!(out.trim_end(), home);
 }

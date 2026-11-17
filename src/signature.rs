@@ -779,9 +779,9 @@ pub static SIGNATURES: &[Signature] = &[
     },
     Signature {
         name: "cut", category: None, subject_required: false, aliases: &["cut_columns"], subject: None,
-        params: &[req("delimiter", Ty::Str, "literal delimiter, including empty or multi-character strings"), req("fields", Ty::Any, "positive Int or comma-separated positive indices and ascending inclusive ranges"), opt("text", Ty::Str, "required direct text; omitted with piped String")], returns: "Array<String>",
+        params: &[req("delimiter", Ty::Str, "literal delimiter, including empty or multi-character strings"), req("fields", Ty::Any, "positive Int, an Array of positive Ints, or a String of comma-separated positive indices and ascending inclusive ranges"), opt("text", Ty::Str, "required direct text; omitted with piped String")], returns: "Array<String>",
         doc: "Extract fields from each text line. Direct cut(delimiter,fields,text), or text | cut(delimiter,fields). Fields are one-based; preserve specification order and duplicates, and omit missing fields. Trim whitespace around comma-separated specifications; reject zero, negative, malformed, descending or unrepresentable fields. Bound expanded selections to 10000 entries before allocation. Split on a literal delimiter and join selected fields with it. Normalize line endings and omit a trailing empty line. Refuse conflicting direct text and pipeline input.",
-        examples: &[(r#"cut(",", "3,1,3", "a,b,c")"#, r#"["c,a,c"]"#), (r#""a::b::c\nx::y" | cut("::", "2-3")"#, r#"["b::c", "y"]"#), (r#""a,b" | cut(",", 1)"#, r#"["a"]"#)],
+        examples: &[(r#"cut(",", "3,1,3", "a,b,c")"#, r#"["c,a,c"]"#), (r#""a::b::c\nx::y" | cut("::", "2-3")"#, r#"["b::c", "y"]"#), (r#""a,b" | cut(",", 1)"#, r#"["a"]"#), (r#"cut(",", [3, 1], "a,b,c")"#, r#"["c,a"]"#)],
     },
     Signature {
         name: "tail", category: None, subject_required: false, aliases: &[], subject: Some(Ty::Any),
@@ -1840,7 +1840,7 @@ pub static SIGNATURES: &[Signature] = &[
         aliases: &[],
         subject: None,
         params: &[
-            opt("label_or_value", Ty::Any, "the label (a String) when two arguments are given, otherwise the value"),
+            req("label_or_value", Ty::Any, "the label (a String) when two arguments are given, otherwise the value"),
             opt("value", Ty::Any, "the value, when a label is given"),
         ],
         returns: "Any",
@@ -2393,7 +2393,7 @@ pub static SIGNATURES: &[Signature] = &[
         aliases: &[],
         subject: None,
         params: &[
-            opt(
+            req(
                 "prompt",
                 Ty::Str,
                 "the prompt; with piped input the piped string is the prompt and this argument is ignored",
@@ -2413,14 +2413,14 @@ pub static SIGNATURES: &[Signature] = &[
     },
     Signature {
         name: "sort",
-        category: None,
+        category: Some("Array"),
         subject_required: false,
         aliases: &[],
         subject: Some(Ty::Sequence),
         params: &[],
         returns: "Array",
-        doc: "Sort an array ascending by natural ordering.",
-        examples: &[("[3, 1, 2] | sort", "[1, 2, 3]")],
+        doc: "Sort an array ascending by natural ordering. A String subject is split into lines first, and the sorted lines come back as an Array of Strings.",
+        examples: &[("[3, 1, 2] | sort", "[1, 2, 3]"), (r#""b\na\nc" | sort"#, r#"["a", "b", "c"]"#)],
     },
     Signature {
         name: "first",
@@ -7593,9 +7593,10 @@ pub static SIGNATURES: &[Signature] = &[
         subject: None,
         params: &[req("path", Ty::Str, "a path with either separator")],
         returns: "String",
-        doc: "Convert backslash separators to forward slashes.",
+        doc: "Convert backslash separators to forward slashes, and nothing else: it does not resolve . or .. segments or collapse repeated separators (use path_normalize for that).",
         examples: &[
             (r#"platform_normalize_path("src/main.rs")"#, r#"src/main.rs"#),
+            (r#"platform_normalize_path("a\\b\\..\\c")"#, r#"a/b/../c"#),
         ],
     },
     Signature {
@@ -7699,7 +7700,7 @@ pub static SIGNATURES: &[Signature] = &[
         aliases: &[],
         subject: None,
         params: &[
-            opt("message", Ty::Str, "the message the caught error carries, as given; omitted, it is the pipeline input"),
+            req("message", Ty::Str, "the message the caught error carries, as given; omitted, it is the pipeline input"),
             opt("extra", Ty::Record, "fields added to the caught error record, such as {field: \"age\"}; code, message, retryable, builtin, error, did_you_mean and approval cannot be set; hint replaces the default hint, and expected and got are shown"),
         ],
         returns: "Null",
@@ -8309,8 +8310,8 @@ pub static SIGNATURES: &[Signature] = &[
         aliases: &["add_entity"],
         subject: None,
         params: &[
-            opt("type", Ty::Str, "the entity type, e.g. person"),
-            opt("name", Ty::Str, "the entity name"),
+            req("type", Ty::Str, "the entity type, e.g. person"),
+            req("name", Ty::Str, "the entity name"),
             opt("properties", Ty::Record, "optional Record of String properties"),
         ],
         returns: "Record",
@@ -8327,9 +8328,9 @@ pub static SIGNATURES: &[Signature] = &[
         aliases: &["add_relation"],
         subject: None,
         params: &[
-            opt("source", Ty::Str, "the id of an existing entity"),
-            opt("target", Ty::Str, "the id of an existing entity"),
-            opt("relation", Ty::Str, "the relation type"),
+            req("source", Ty::Str, "the id of an existing entity"),
+            req("target", Ty::Str, "the id of an existing entity"),
+            req("relation", Ty::Str, "the relation type"),
             opt("properties", Ty::Record, "optional Record of String properties"),
         ],
         returns: "Record",
@@ -8385,7 +8386,7 @@ pub static SIGNATURES: &[Signature] = &[
         aliases: &["index_docs"],
         subject: None,
         params: &[
-            opt("content", Ty::Any, "the document text (a string); piped, it is the subject instead"),
+            req("content", Ty::Any, "the document text (a string); piped, it is the subject instead"),
             opt("source", Ty::Any, "a string naming the source; defaults to unknown"),
             opt("metadata", Ty::Any, "optional Record of metadata"),
         ],
@@ -8625,8 +8626,8 @@ pub static SIGNATURES: &[Signature] = &[
         aliases: &["cache_ai"],
         subject: None,
         params: &[
-            opt("query", Ty::Str, "the prompt to cache, 1 to 4096 bytes"),
-            opt("response", Ty::Str, "the response to store, at most 256 KiB"),
+            req("query", Ty::Str, "the prompt to cache, 1 to 4096 bytes"),
+            req("response", Ty::Str, "the response to store, at most 256 KiB"),
         ],
         returns: "Record",
         doc: "Store a response under a query in the process-local semantic cache, which holds at most 1000 entries (the oldest is evicted) and answers a later query by lexical similarity above a threshold, for at most an hour. Returns {cached: true, total_entries, total_hits}. Takes query and response as arguments, or a piped Record {query, response}. Refused with E_BAD_ARG for a missing or empty query, or more than two arguments, and with E_BUDGET_EXCEEDED for a response over 256 KiB.",
@@ -15541,6 +15542,17 @@ fn subject_refusal(
     crate::safety::bad_arg(name, &expected, got.type_name())
 }
 
+/// Builtins whose required parameters may instead arrive as the piped value.
+const PIPED_FILLS_REQUIRED: &[&str] = &[
+    "ai",
+    "error",
+    "kg_add",
+    "kg_relate",
+    "rag_index",
+    "semantic_cache",
+    "trace",
+];
+
 pub fn validate(name: &str, args: &[Value], input: Option<&Value>) -> anyhow::Result<()> {
     let Some(sig) = signature_of(name) else {
         return Ok(());
@@ -15649,7 +15661,11 @@ pub fn validate(name: &str, args: &[Value], input: Option<&Value>) -> anyhow::Re
     }
 
     let required = sig.params.iter().filter(|p| p.required).count();
-    if supplied < required {
+    // These take their required value from the pipeline when it is piped (a
+    // prompt, a message, a Record of fields), so the count of arguments is the
+    // body's to judge then.
+    let piped_fills = input.is_some() && PIPED_FILLS_REQUIRED.contains(&sig.name);
+    if supplied < required && !piped_fills {
         // `in` is a pipe stage far more often than a call with two arguments,
         // so the missing collection is the one thing worth saying in words.
         if name == "in" {
