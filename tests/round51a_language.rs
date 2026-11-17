@@ -154,7 +154,7 @@ fn a7_hints_say_what_is_wrong() {
     assert!(!se.hint.starts_with("from_yaml takes"), "{}", se.hint);
 
     let se = refusal(r#"[{a: 1}] | sql("select 1; select 2")"#);
-    assert!(se.hint.contains("one statement"), "{}", se.hint);
+    assert!(se.hint.contains("one sql call per query"), "{}", se.hint);
     assert!(!se.hint.starts_with("tables:"), "{}", se.hint);
 }
 

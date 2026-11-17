@@ -1164,12 +1164,12 @@ fn agentic_binary_refuses_overflowing_payload_lengths_without_panicking() {
 
 #[test]
 fn product_overflow_and_non_numeric_cells_are_coded_refusals() {
-    for values in [
-        vec![Value::Int(i64::MAX), Value::Int(2)],
-        vec![Value::Str("x".into())],
+    for (values, code) in [
+        (vec![Value::Int(i64::MAX), Value::Int(2)], "E_BAD_VALUE"),
+        (vec![Value::Str("x".into())], "E_BAD_ARG"),
     ] {
         let error = call("product", vec![Value::Array(values)], &mut Env::new()).unwrap_err();
-        assert!(error.to_string().contains("E_BAD_ARG"), "{error}");
+        assert!(error.to_string().contains(code), "{error}");
     }
 }
 
