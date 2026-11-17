@@ -25471,7 +25471,13 @@ pub fn render_agent(v: &Value, budget: Option<usize>) -> Option<String> {
         // A bare `null` prints as `null`, so it is not mistaken for no output.
         Value::Null => Some("null".to_string()),
         Value::Str(s) => {
-            if aecon_top_str_needs_quote(s) {
+            // A string over the handle threshold is kept and referenced like any
+            // other large result, not printed whole.
+            let whole = crate::handles::take_show_whole();
+            let t = crate::handles::threshold_bytes();
+            if !whole && t > 0 && s.len() > t {
+                Some(handled(Value::Str(s.clone()), s.len()))
+            } else if aecon_top_str_needs_quote(s) {
                 Some(json_quote(s))
             } else {
                 Some(s.clone())

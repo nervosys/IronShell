@@ -421,6 +421,20 @@ pub fn clear() {
     forget_tally();
 }
 
+/// Characters of a string field a record preview shows.
+const PREVIEW_FIELD_CHARS: usize = 60;
+
+/// Characters of a string result a preview shows.
+const PREVIEW_STR_CHARS: usize = 200;
+
+/// The first `max` characters of `s`, with `…` appended when something was cut.
+fn truncated(s: &str, max: usize) -> String {
+    match s.char_indices().nth(max) {
+        Some((at, _)) => format!("{}…", &s[..at]),
+        None => s.to_string(),
+    }
+}
+
 /// The first few elements of a value, for a preview that shows the shape
 /// without the bulk.
 pub fn preview_of(v: &Value) -> Value {
@@ -432,10 +446,17 @@ pub fn preview_of(v: &Value) -> Value {
         Value::Record(m) => {
             let mut out = BTreeMap::new();
             for (k, val) in m.iter().take(PREVIEW_ROWS) {
-                out.insert(k.clone(), Value::Str(crate::shapes::observe(val)));
+                // A string shows its start, so the field can be recognised; any
+                // other value shows its shape.
+                let shown = match val {
+                    Value::Str(s) => truncated(s, PREVIEW_FIELD_CHARS),
+                    other => crate::shapes::observe(other),
+                };
+                out.insert(k.clone(), Value::Str(shown));
             }
             Value::Record(out)
         }
+        Value::Str(s) => Value::Str(truncated(s, PREVIEW_STR_CHARS)),
         other => other.clone(),
     }
 }
