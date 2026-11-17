@@ -173,6 +173,7 @@ grep("TODO\\|FIXME", "src/*.rs")       # grep is BRE (as grep without -E): a bar
 # SQL over values or files (read-only, in-process)
 open("issues.json") | sql("select user, count(*) as n from t group by user")
 sql_value("issues.json", "select count(*) from issues where state = 'open'")
+open("issues.json") | count_by(.user)  # [{key, count}] sorted by count descending; the short form of group_by + sort_by("Count", "desc")
 # SQL stores a Bool as 1/0, so Bool values come back from sql as 1 and 0; select * returns each row's columns in sorted key order
 
 # Check effects before running

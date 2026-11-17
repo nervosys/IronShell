@@ -809,6 +809,8 @@ lazy_static::lazy_static! {
         // JSON lines (1213-1214)
         map.insert("from_jsonl", 1213);
         map.insert("to_jsonl", 1214);
+        // Counting rows by a key (1215)
+        map.insert("count_by", 1215);
         // 500-519: Database
         map.insert("db_sqlite_open", 500);
         map.insert("db_sqlite_query", 501);
@@ -3905,6 +3907,8 @@ static BUILTIN_DISPATCH: &[fn(Vec<Value>, Option<Value>, &mut Env) -> Result<Val
     // JSON lines
     |args, input, _| bi_from_jsonl(args, input), // 1213
     |args, input, _| bi_to_jsonl(args, input),   // 1214
+    // Counting rows by a key
+    |args, input, env| bi_count_by(args, input, env), // 1215
 ];
 
 /// The dispatch row that serves `name`, if the fast table has one.
@@ -11077,6 +11081,100 @@ fn bi_group_object(args: Vec<Value>, input: Option<Value>, env: &mut Env) -> Res
             "group_by: the rows must be an Array",
         )),
     }
+}
+
+/// count_by(key): how many rows have each key, as {key, count} records sorted by
+/// count descending, then by the key's text. The key is a field name String or a
+/// lambda (`.field` arrives as one), read as `group_by` reads it; the subject is
+/// piped or the first argument. Rows share a count only when the key's text and
+/// type both match; a row without the field counts under the key "".
+fn bi_count_by(args: Vec<Value>, input: Option<Value>, env: &mut Env) -> Result<Value> {
+    let (input, args) = match input {
+        Some(v) => (v, args),
+        None => {
+            let mut args = args;
+            if args.is_empty() {
+                return Err(crate::safety::bad_arg_with_hint(
+                    "count_by",
+                    "an Array of rows and a key",
+                    "nothing",
+                    r#"pass the rows and a key: count_by(rows, "field") or rows | count_by(.field)"#,
+                ));
+            }
+            let subject = args.remove(0);
+            (subject, args)
+        }
+    };
+    if args.len() != 1 {
+        return Err(crate::safety::bad_arg_with_hint(
+            "count_by",
+            "one key: a field name String or a lambda",
+            &format!("{} arguments", args.len()),
+            r#"pass the key: rows | count_by("field") or rows | count_by(fn(r) => r.field)"#,
+        ));
+    }
+    let property = match &args[0] {
+        Value::Str(s) => Some(s),
+        Value::Lambda(_) => None,
+        other => {
+            return Err(crate::safety::bad_arg_with_hint(
+                "count_by",
+                "a field name String or a lambda as the key",
+                other.type_name(),
+                r#"pass the key: rows | count_by("field") or rows | count_by(.field)"#,
+            ))
+        }
+    };
+    let rows = match input {
+        Value::Array(arr) => arr,
+        other => {
+            return Err(crate::safety::bad_arg(
+                "count_by",
+                "an Array of rows",
+                other.type_name(),
+            ))
+        }
+    };
+
+    let mut keys: Vec<Value> = Vec::with_capacity(rows.len());
+    match property {
+        Some(property) => {
+            for item in &rows {
+                keys.push(get_property_value(item, property));
+            }
+        }
+        None => {
+            let lam = need_lambda(&args[0], "count_by")?;
+            with_param_slots(lam, env, |env| {
+                for item in rows {
+                    keys.push(call_lambda_one(lam, item, env, false)?.0);
+                }
+                Ok(())
+            })?;
+        }
+    }
+
+    // One entry per (text, type) key: the first key seen, and its count.
+    let mut counts: BTreeMap<(String, &'static str), (Value, i64)> = BTreeMap::new();
+    for key in keys {
+        let slot = (value_to_string(&key), key.type_name());
+        counts.entry(slot).or_insert((key, 0)).1 += 1;
+    }
+    let mut ordered: Vec<((String, &'static str), (Value, i64))> = counts.into_iter().collect();
+    // BTreeMap order is by text then type, so a stable sort on count alone
+    // leaves ties in that order.
+    ordered.sort_by(|a, b| b.1 .1.cmp(&a.1 .1));
+    Ok(Value::Array(
+        ordered
+            .into_iter()
+            .map(|(_, (key, count))| {
+                Value::Record(BTreeMap::from([
+                    ("key".to_string(), key),
+                    ("count".to_string(), Value::Int(count)),
+                ]))
+            })
+            .collect(),
+    ))
 }
 
 /// Measure-Object: PowerShell-style count and, for one property, its statistics.

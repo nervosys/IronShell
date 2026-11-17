@@ -366,6 +366,7 @@ fn is_builtin(name: &str) -> bool {
             | "where"
             | "select"
             | "group_by"
+            | "count_by"
             | "agg"
             | "http_get"
             | "ls"
@@ -569,7 +570,7 @@ fn type_builtin_call(
             }
             Ok(Type::Any)
         }
-        "group_by" => Ok(Type::Any),
+        "group_by" | "count_by" => Ok(Type::Any),
         "agg" => Ok(Type::Any),
         // Shape-preserving array transforms: reorder/slice/dedup keep element type.
         "sort" | "uniq" | "take" | "head" | "tail" => {

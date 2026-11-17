@@ -2273,6 +2273,34 @@ pub static SIGNATURES: &[Signature] = &[
         ],
     },
     Signature {
+        name: "count_by",
+        category: None,
+        subject_required: false,
+        aliases: &[],
+        subject: Some(Ty::Array),
+        params: &[req("key", Ty::Any, "field name String to count on, or a lambda (or .field) called per row whose result is the key")],
+        returns: "Array",
+        doc: r#"Count rows by a key, as {key, count} records sorted by count descending, then by the key's text: `rows | count_by(.state)`, `rows | count_by("state")`, `rows | count_by(fn(r) => r.user)`. The subject is piped or the first argument. The key keeps its type (Int 1 and String "1" are counted apart), and a row without the field counts under the key "". It is the short form of `group_by(key) | map(...) | sort_by("count", "desc")`."#,
+        examples: &[
+            (
+                r#"[{u: "a"}, {u: "b"}, {u: "b"}] | count_by("u")"#,
+                r#"[{count: 2, key: "b"}, {count: 1, key: "a"}]"#,
+            ),
+            (
+                r#"[{u: "b"}, {u: "a"}] | count_by(.u) | map(fn(r) => r.key)"#,
+                r#"["a", "b"]"#,
+            ),
+            (
+                r#"count_by([1, 2, 1, 1], fn(x) => x) | first | fn(r) => r.count"#,
+                "3",
+            ),
+            (
+                r#"(try { [1] | count_by() } catch e { e.error.code })"#,
+                "E_BAD_ARG",
+            ),
+        ],
+    },
+    Signature {
         name: "avg",
         category: None,
         subject_required: false,
