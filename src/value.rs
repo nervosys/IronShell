@@ -252,13 +252,13 @@ impl Value {
             Value::Bool(b) => b.to_string(),
             Value::Null => "null".to_string(),
             Value::Array(arr) => {
-                let items: Vec<String> = arr.iter().map(|v| v.nested_display_string()).collect();
+                let items: Vec<String> = arr.iter().map(|v| v.to_display_string()).collect();
                 format!("[{}]", items.join(", "))
             }
             Value::Record(rec) => {
                 let items: Vec<String> = rec
                     .iter()
-                    .map(|(k, v)| format!("{}: {}", k, v.nested_display_string()))
+                    .map(|(k, v)| format!("{}: {}", k, v.to_display_string()))
                     .collect();
                 format!("{{{}}}", items.join(", "))
             }
@@ -271,12 +271,30 @@ impl Value {
         }
     }
 
-    /// A value inside an Array or Record: a String is a quoted literal, as
-    /// `plain_text` shows it, so `[1, "a"]` is not read back as `[1, a]`.
-    fn nested_display_string(&self) -> String {
+    /// The text a `${...}` hole inserts: as `to_display_string`, but a String
+    /// inside an Array or Record is a quoted literal, so `[1, "a"]` is not
+    /// read back as `[1, a]`. A top-level String stays raw.
+    pub fn to_interpolation_string(&self) -> String {
+        match self {
+            Value::Array(arr) => {
+                let items: Vec<String> = arr.iter().map(|v| v.nested_interpolation()).collect();
+                format!("[{}]", items.join(", "))
+            }
+            Value::Record(rec) => {
+                let items: Vec<String> = rec
+                    .iter()
+                    .map(|(k, v)| format!("{}: {}", k, v.nested_interpolation()))
+                    .collect();
+                format!("{{{}}}", items.join(", "))
+            }
+            other => other.to_display_string(),
+        }
+    }
+
+    fn nested_interpolation(&self) -> String {
         match self {
             Value::Str(s) => quote_str(s),
-            other => other.to_display_string(),
+            other => other.to_interpolation_string(),
         }
     }
 

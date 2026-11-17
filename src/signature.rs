@@ -116,7 +116,10 @@ impl Ty {
             Ty::Bool => matches!(v, Value::Bool(_)),
             Ty::Array => matches!(v, Value::Array(_)),
             Ty::Record => matches!(v, Value::Record(_) | Value::Table(_)),
-            Ty::Lambda => matches!(v, Value::Lambda(_) | Value::AsyncLambda(_)),
+            Ty::Lambda => matches!(
+                v,
+                Value::Lambda(_) | Value::AsyncLambda(_) | Value::Builtin(_)
+            ),
             Ty::Sequence => matches!(v, Value::Array(_) | Value::Str(_) | Value::Uri(_)),
         }
     }

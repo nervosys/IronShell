@@ -3046,7 +3046,7 @@ fn interpolate_string(s: &str, env: &mut Env) -> Result<Value> {
                     // an array or a record printed Rust's Debug —
                     // `"x: ${r}"` came out as
                     // `x: Record({"a": Int(1)})`.
-                    result.push_str(&val.to_display_string());
+                    result.push_str(&val.to_interpolation_string());
                     // Held to the string limit as the hole is added, not only
                     // at the end, so a doubling hole fails at 8 MB.
                     if result.len() > MAX_STRING_BYTES {

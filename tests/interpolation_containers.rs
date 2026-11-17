@@ -1,5 +1,5 @@
 //! A String inside an Array or Record is quoted when the container is turned
-//! into text, so `[1, "a"]` is not read back as `[1, a]`. A top-level String
+//! into text by interpolation, so `[1, "a"]` is not read back as `[1, a]`. A top-level String
 //! stays raw.
 
 use iron_shell::value::Value;
@@ -26,6 +26,6 @@ fn a_top_level_string_stays_unquoted() {
 }
 
 #[test]
-fn str_renders_containers_the_same_way() {
-    assert_eq!(text(r#"str([1, "a"])"#), r#"[1, "a"]"#);
+fn str_keeps_its_plain_form() {
+    assert_eq!(text(r#"str([1, "a"])"#), "[1, a]");
 }
