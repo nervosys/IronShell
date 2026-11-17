@@ -169,3 +169,13 @@ fn item5_explain_resolves_module_and_underscore_spellings() {
             .contains("complete(")
     );
 }
+
+// ---- item 6: help of a name that is a module and a builtin ----
+
+#[test]
+fn item6_help_ai_has_top_level_parameters_and_members() {
+    assert_eq!(text(r#"help("ai").parameters | first | .name"#), "prompt");
+    assert!(text(r#"help("ai").signature"#).contains("ai("));
+    assert!(matches!(run(r#"help("ai").members"#), Value::Array(_)));
+    assert!(matches!(run(r#"help("ai").builtin"#), Value::Record(_)));
+}

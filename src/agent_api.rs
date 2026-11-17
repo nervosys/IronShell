@@ -3880,6 +3880,14 @@ fn ontology_describe_inner(query: &str, modules: bool) -> JsonValue {
         let mut record = module_describe_record(q, &defs);
         let same_name = ontology_describe_inner(q, false);
         if same_name.get("builtin").is_some() && same_name.get("error").is_none() {
+            // The builtin's `parameters` and `signature` are also read from the
+            // top of the record, so `help("ai").parameters` works as it does for
+            // a builtin that shares no module's name; `members` stays.
+            for key in ["parameters", "signature"] {
+                if let Some(v) = same_name.get(key) {
+                    record[key] = v.clone();
+                }
+            }
             record["builtin"] = same_name;
         }
         return record;
