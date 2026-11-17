@@ -240,7 +240,7 @@ fn explain_denies_sh_when_the_guard_refuses_it() {
     let s = Scratch::new("explain");
     let out = s.ish(&["--explain", "-c", "sh(\"ls\")"]);
     let t = stdout(&out);
-    assert!(t.contains("\"decision\": \"deny\""), "{t}");
+    assert!(t.contains("\"decision\":\"deny\""), "{t}");
     assert!(!t.contains("\"approve\""), "{t}");
 }
 

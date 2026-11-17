@@ -180,6 +180,7 @@ fn explain_names_a_module_member_that_does_not_exist() {
     let (out, err, _) = run(&["--explain"], "file.delete(\"x\")");
     let all = format!("{out}{err}");
     assert!(all.contains("unknown builtin file.delete"), "{all}");
+    assert!(!all.contains("\"decision\":\"allow\""), "{all}");
     assert!(!all.contains("\"decision\": \"allow\""), "{all}");
 }
 

@@ -305,6 +305,19 @@ enum AgentApiCommands {
     Interactive,
 }
 
+/// An `--explain` report as text: indented for a person at a terminal, one
+/// compact line when stdout is a pipe or file, or in agent mode, where the
+/// reader is a program and the whitespace is tokens.
+fn explain_text(report: &serde_json::Value) -> Result<String> {
+    use std::io::IsTerminal as _;
+    let agent = iron_shell::safety::current_mode() == iron_shell::safety::Mode::Agent;
+    if agent || !io::stdout().is_terminal() {
+        Ok(serde_json::to_string(report)?)
+    } else {
+        Ok(serde_json::to_string_pretty(report)?)
+    }
+}
+
 fn main() -> Result<()> {
     iron_shell::tls::install_provider();
     // Everything runs on a thread with a large stack (finding 13). The
@@ -675,7 +688,7 @@ fn run(mut cli: Cli) -> Result<()> {
         // decision is the one the run gets.
         if cli.bash {
             let report = iron_shell::explain::explain_posix(&code)?;
-            println!("{}", serde_json::to_string_pretty(&report.to_json())?);
+            println!("{}", explain_text(&report.to_json())?);
             return Ok(());
         }
         // A file that does not parse is reported as a run reports it: the
@@ -694,7 +707,7 @@ fn run(mut cli: Cli) -> Result<()> {
             _ => None,
         };
         let report = iron_shell::explain::explain(&code)?;
-        println!("{}", serde_json::to_string_pretty(&report.to_json())?);
+        println!("{}", explain_text(&report.to_json())?);
         return Ok(());
     }
 
