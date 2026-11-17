@@ -5173,6 +5173,20 @@ fn jailed_builtin(name: &str, args: Vec<crate::value::Value>) -> Result<(), Stri
 fn rm_utility(name: &str, args: &[String], sink: &mut Sink) -> Util {
     let remove_dirs = name == "rmdir";
     let Some((flags, operands)) = short_flags(args, if remove_dirs { "" } else { "rRf" }) else {
+        // Under the workspace jail an rm the subset cannot run is refused,
+        // not handed to a PATH program the jail cannot confine (a GNU rm
+        // follows `jx/` through a link out of the workspace).
+        if crate::safety::jail_enforced(crate::safety::current_mode()) {
+            let flag = args
+                .iter()
+                .find(|a| a.len() > 1 && a.starts_with('-') && *a != "--")
+                .cloned()
+                .unwrap_or_else(|| "this form".to_string());
+            sink.eline(&format!(
+                "{SHELL_NAME}: {name}: the in-process {name} does not support {flag}, and under the workspace jail no external {name} is run in its place; use -r, -R or -f"
+            ));
+            return Util::Done(2);
+        }
         return Util::Decline;
     };
     let recursive = flags.contains(&'r') || flags.contains(&'R');

@@ -201,19 +201,16 @@ fn rm_in_the_subset_removes_a_link_and_never_follows_it() {
 }
 
 #[test]
-fn rm_in_the_subset_declines_a_flag_it_does_not_model() {
+fn rm_in_the_subset_refuses_a_flag_it_does_not_model_under_the_jail() {
     let s = Scratch::new("c1flag");
     std::fs::write(s.ws.join("a.txt"), "a").unwrap();
-    // -i is not in the subset: it runs a GNU rm if one is on PATH, else it
-    // exits 2 naming the flag. Either way it never runs a non-GNU program.
+    // Under the workspace jail an unmodelled flag is refused (status 2), never
+    // handed to a PATH rm the jail cannot confine.
     let out = s.sh("rm -I a.txt");
     let shown = text(&out);
-    if !out.status.success() {
-        assert!(
-            shown.contains("the in-process rm does not support -I") || shown.contains("rm"),
-            "{shown}"
-        );
-    }
+    assert_eq!(out.status.code(), Some(2), "{shown}");
+    assert!(shown.contains("does not support -I"), "{shown}");
+    assert!(s.ws.join("a.txt").is_file(), "{shown}");
 }
 
 // ── C2: --explain judges the members of an archive as the run does ──
