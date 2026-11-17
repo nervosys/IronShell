@@ -40248,11 +40248,12 @@ impl ExtractTrail {
 /// Whether an I/O error, or one it wraps (the tar crate wraps the cause in its
 /// own error), carries the OS error `code`.
 fn io_error_has_code(e: &std::io::Error, code: i32) -> bool {
-    use std::error::Error as _;
     if e.raw_os_error() == Some(code) {
         return true;
     }
-    let mut cause = e.get_ref().and_then(|inner| inner.source());
+    let mut cause: Option<&(dyn std::error::Error + 'static)> = e
+        .get_ref()
+        .map(|inner| inner as &(dyn std::error::Error + 'static));
     while let Some(c) = cause {
         if let Some(io) = c.downcast_ref::<std::io::Error>() {
             if io.raw_os_error() == Some(code) {
