@@ -4507,7 +4507,75 @@ pub(crate) fn drive_relative_absolute(_path: &Path) -> Option<PathBuf> {
 /// is correct across platforms (Windows verbatim `\\?\` prefixes, POSIX symlink
 /// targets) and cannot be escaped by `..` traversal.
 pub fn within_workspace(path: &str) -> bool {
+    // `rm` of a link removes the link itself and never follows it, so inside
+    // its scope a link is judged by where it sits, not by where it points.
+    if LINK_LEAF_OK.with(|c| c.get()) {
+        if let Some(parent) = link_leaf_parent(path) {
+            return within_root(&parent, &workspace_root());
+        }
+    }
     within_root(path, &workspace_root())
+}
+
+thread_local! {
+    /// Set while `rm` runs: a path whose last component is a link is judged by
+    /// its parent folder (see [`within_workspace`]).
+    static LINK_LEAF_OK: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Keeps [`within_workspace`] judging a link's own place, not its target, until
+/// dropped. Taken by the dispatcher for `rm`, which removes only the link.
+pub struct LinkLeafScope(bool);
+
+/// Start a [`LinkLeafScope`].
+pub fn link_leaf_scope() -> LinkLeafScope {
+    LinkLeafScope(LINK_LEAF_OK.with(|c| c.replace(true)))
+}
+
+impl Drop for LinkLeafScope {
+    fn drop(&mut self) {
+        LINK_LEAF_OK.with(|c| c.set(self.0));
+    }
+}
+
+/// Whether `path` itself is a symbolic link, or on Windows a junction. The link
+/// is not followed: `symlink_metadata` reads the entry. A path with a trailing
+/// separator names what the link points at, so it is not a link here.
+pub fn is_link(path: &str) -> bool {
+    !names_a_remote_share(path)
+        && std::fs::symlink_metadata(path).is_ok_and(|m| m.file_type().is_symlink())
+}
+
+/// The folder a link sits in, when `path` names a link. `None` otherwise.
+fn link_leaf_parent(path: &str) -> Option<String> {
+    if !is_link(path) {
+        return None;
+    }
+    let p = Path::new(path);
+    p.file_name()?;
+    let parent = p.parent()?;
+    if parent.as_os_str().is_empty() {
+        return Some(".".to_string());
+    }
+    Some(parent.to_string_lossy().into_owned())
+}
+
+/// `e` with a hint to use `rm` when it refused `rmdir(link, true)`: the call
+/// would recurse into the link's target, which the jail does not allow; `rm`
+/// removes only the link.
+pub fn with_link_hint(builtin: &str, path: &str, e: anyhow::Error) -> anyhow::Error {
+    if builtin != "rmdir" || !is_link(path) {
+        return e;
+    }
+    match e.downcast::<SafetyError>() {
+        Ok(mut se) => {
+            if se.code == ErrorCode::OutsideWorkspace {
+                se.hint = "this is a link that points outside the workspace, and rmdir would recurse into its target; remove only the link with rm(path)".to_string();
+            }
+            anyhow::Error::new(se)
+        }
+        Err(other) => other,
+    }
 }
 
 /// [`within_workspace`] for an arbitrary root: whether `path` resolves inside it.

@@ -712,6 +712,7 @@ pub fn read_jail_dispatch(builtin: &str, args: &[crate::value::Value], piped: bo
         // Judged where the builtin will open it: a relative path is the
         // workspace's when the jail is on, as `resolve_path_str` places it.
         check_read_jail(builtin, &resolved)
+            .map_err(|e| crate::safety::with_link_hint(builtin, &resolved, e))
     };
     let Some(sig) = crate::signature::signature_of(builtin) else {
         for s in args.iter().filter_map(|a| match a {

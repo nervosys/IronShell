@@ -4572,6 +4572,9 @@ fn call_with_input_inner(
     // Builtins that guard themselves are skipped so one action is not admitted
     // twice. The read jail comes first, so no approval token is issued for a
     // path the jail refuses.
+    // `rm` removes a link itself and never follows it, so for its duration a
+    // link is judged by where it sits (see `safety::within_workspace`).
+    let _link_scope = (name == "rm").then(crate::safety::link_leaf_scope);
     crate::security::read_jail_dispatch(name, &args, input.is_some())?;
     crate::safety::guard_dispatch(name, &args)?;
 
@@ -69042,12 +69045,32 @@ pub fn bi_rm(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
             &format!("'{written}' is a directory; remove it with rmdir(\"{written}\", true)"),
         ));
     }
+    // A link is removed itself and never followed. A transaction snapshot would
+    // read what it points at (a whole folder tree for a junction), and cannot
+    // restore a link, so a link is not removed inside one.
+    let link = crate::safety::is_link(&path);
+    if link {
+        refuse_in_transaction("rm", "removing a link cannot be rolled back")?;
+    }
     crate::tx::snapshot(&path); // record pre-delete state if a transaction is active
                                 // `force` excuses a file that is already gone, as `rm -f` does, and nothing
                                 // else. It used to turn every failure -- a directory, a locked file, a
                                 // permission refusal -- into a success string, so a delete that did not
                                 // happen read as one that had.
-    match std::fs::remove_file(&path) {
+    let removed = if link {
+        // On Windows a junction or directory link is removed as a directory:
+        // remove_dir takes off the reparse point, never the target's contents.
+        std::fs::remove_file(&path).or_else(|e| {
+            if cfg!(windows) {
+                std::fs::remove_dir(&path)
+            } else {
+                Err(e)
+            }
+        })
+    } else {
+        std::fs::remove_file(&path)
+    };
+    match removed {
         Ok(()) => Ok(Value::Str(format!("removed: {}", path))),
         Err(e) if force && e.kind() == std::io::ErrorKind::NotFound => {
             Ok(Value::Str(format!("already absent: {}", path)))

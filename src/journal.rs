@@ -775,6 +775,15 @@ fn candidate_paths(builtin: &str, args: &[Value]) -> Vec<String> {
 /// respected.
 fn capture(path: &str, used: usize) -> Result<Before, String> {
     let p = Path::new(path);
+    // A link that points out of the workspace is not read through: capturing it
+    // would copy the target's bytes (or tree) into the journal, and undo would
+    // write them back as a file at the link's own path.
+    if crate::safety::jail_enforced(crate::safety::current_mode())
+        && crate::safety::is_link(path)
+        && !crate::safety::within_root(path, &crate::safety::workspace_root())
+    {
+        return Err("path is a link out of the workspace; it is not captured".into());
+    }
     if p.is_file() {
         let size = std::fs::metadata(p)
             .map(|m| m.len() as usize)

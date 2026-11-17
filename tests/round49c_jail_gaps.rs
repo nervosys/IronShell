@@ -141,3 +141,97 @@ fn arguments_after_c_hint_at_a_split_quote() {
     assert!(shown.contains("split it at a quote"), "{shown}");
     assert!(shown.contains(".ish file"), "{shown}");
 }
+
+// ── Item 6: rm removes a link inside the workspace, never what it points at ──
+
+#[cfg(unix)]
+fn link_dir(target: &Path, link: &Path) -> bool {
+    std::os::unix::fs::symlink(target, link).expect("symlink");
+    true
+}
+
+/// A junction, made with `mklink /J`: it needs no privilege.
+#[cfg(windows)]
+fn link_dir(target: &Path, link: &Path) -> bool {
+    match Command::new("cmd")
+        .args(["/C", "mklink", "/J"])
+        .arg(link)
+        .arg(target)
+        .output()
+    {
+        Ok(o) if o.status.success() => true,
+        other => {
+            eprintln!("skipped: mklink /J failed: {other:?}");
+            false
+        }
+    }
+}
+
+impl Scratch {
+    /// Jailed by `IRONSHELL_WORKSPACE` alone (no agent mode, so no approval).
+    fn jailed(&self, expr: &str) -> Output {
+        Command::new(env!("CARGO_BIN_EXE_ish"))
+            .args(["-c", expr])
+            .current_dir(&self.ws)
+            .env("NO_COLOR", "1")
+            .env("IRONSHELL_SESSION_DIR", &self.session)
+            .env("IRONSHELL_WORKSPACE", &self.ws)
+            .env_remove("IRONSHELL_MODE")
+            .output()
+            .expect("run ish")
+    }
+}
+
+#[test]
+fn rm_removes_a_link_in_the_workspace_and_leaves_its_target() {
+    let s = Scratch::new("rmlink");
+    std::fs::write(s.outside.join("keep.txt"), "keep").unwrap();
+    let jx = s.ws.join("jx");
+    if !link_dir(&s.outside, &jx) {
+        return;
+    }
+    let out = s.jailed(r#"rm("jx")"#);
+    let shown = text(&out);
+    assert!(out.status.success(), "{shown}");
+    assert!(
+        std::fs::symlink_metadata(&jx).is_err(),
+        "link remains: {shown}"
+    );
+    assert!(
+        s.outside.join("keep.txt").is_file(),
+        "target damaged: {shown}"
+    );
+}
+
+#[test]
+fn rmdir_recursive_on_a_link_out_of_the_workspace_is_refused_with_a_hint() {
+    let s = Scratch::new("rmdirlink");
+    std::fs::write(s.outside.join("keep.txt"), "keep").unwrap();
+    let jx = s.ws.join("jx");
+    if !link_dir(&s.outside, &jx) {
+        return;
+    }
+    let out = s.jailed(r#"rmdir("jx", true)"#);
+    let shown = text(&out);
+    assert!(!out.status.success(), "{shown}");
+    assert!(shown.contains("E_OUTSIDE_WORKSPACE"), "{shown}");
+    assert!(shown.contains("rm(path)"), "{shown}");
+    assert!(
+        s.outside.join("keep.txt").is_file(),
+        "target damaged: {shown}"
+    );
+}
+
+#[test]
+fn rm_of_a_file_through_a_link_out_of_the_workspace_is_still_refused() {
+    let s = Scratch::new("rmthrough");
+    std::fs::write(s.outside.join("keep.txt"), "keep").unwrap();
+    if !link_dir(&s.outside, &s.ws.join("jx")) {
+        return;
+    }
+    let out = s.jailed(r#"rm("jx/keep.txt")"#);
+    let shown = text(&out);
+    assert!(!out.status.success(), "{shown}");
+    assert!(shown.contains("E_OUTSIDE_WORKSPACE"), "{shown}");
+    assert!(s.outside.join("keep.txt").is_file(), "{shown}");
+}

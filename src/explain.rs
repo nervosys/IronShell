@@ -775,6 +775,9 @@ fn jail_refusal(
     ) {
         return None;
     }
+    // `rm` removes a link itself, so a link inside the workspace is judged by
+    // where it sits, as the run judges it.
+    let _link_scope = (builtin == "rm").then(crate::safety::link_leaf_scope);
     // `Exec` is judged too: `read_jail_dispatch` judges the path parameters of
     // an Exec builtin (`db_sqlite_exec`'s `db`), so the run refuses an outside
     // path there as well.
