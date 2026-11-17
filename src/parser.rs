@@ -1856,7 +1856,22 @@ impl Parser {
             }
             let name = self.need_ident("expected identifier after let")?;
             let ty = if self.match_tok(Tok::Colon) {
-                Some(self.need_ident("expected type after ':'")?)
+                let ty = self.need_ident("expected type after ':'")?;
+                if !self.check(Tok::Equal) && !self.check(Tok::ColonEqual) {
+                    let at = self.peek();
+                    return Err(anyhow::Error::new(HintedSyntax {
+                        msg: format!(
+                            "unsupported type annotation after `{ty}` at line {}, column {}",
+                            at.line, at.col
+                        ),
+                        hint: "a let annotation is one bare type name: Int, Float, String, \
+                               Bool, Array, Record or Null, as in `let x: Int = 1`. Generic \
+                               forms (Array<Int>) and optional forms (String?) are not \
+                               supported; write `let a: Array = [...]`"
+                            .to_string(),
+                    }));
+                }
+                Some(ty)
             } else {
                 None
             };

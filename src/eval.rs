@@ -2900,14 +2900,45 @@ pub(crate) fn caught_error_record(wire: &serde_json::Value) -> serde_json::Value
 /// The check an annotated `let` makes: the value must have the declared type.
 ///
 /// Only the type names the language has a value for are checked (`Int`,
-/// `Float`, `String`, `Bool`, `Array`, `Record`, `Null`). Any other annotation
-/// is not checked, as it has never been. An Int is not accepted where a Float is
-/// declared: the language does not widen at a binding, so the hint says to write
-/// the decimal point.
+/// `Float`, `String`, `Bool`, `Array`, `Record`, `Null`). The names of the other
+/// kinds of value (`Lambda`, `Uri`, ...) are accepted and not checked. A name
+/// that is no type at all is refused, with the closest type named. An Int is not
+/// accepted where a Float is declared: the language does not widen at a binding,
+/// so the hint says to write the decimal point.
 fn check_declared_type(name: &str, declared: &str, value: &Value) -> Result<()> {
+    const CHECKED: [&str; 7] = ["Int", "Float", "String", "Bool", "Array", "Record", "Null"];
+    const UNCHECKED: [&str; 7] = [
+        "Uri",
+        "Table",
+        "Lambda",
+        "AsyncLambda",
+        "Future",
+        "Error",
+        "Builtin",
+    ];
     let expected = match declared {
-        "Int" | "Float" | "String" | "Bool" | "Array" | "Record" | "Null" => declared,
-        _ => return Ok(()),
+        d if CHECKED.contains(&d) => d,
+        d if UNCHECKED.contains(&d) => return Ok(()),
+        _ => {
+            let near = crate::builtins::nearest_names(
+                declared,
+                CHECKED.iter().chain(UNCHECKED.iter()).copied(),
+            );
+            let mut hint = format!(
+                "`{name}: {declared}` is not a type; annotate with one of {} \
+                 (a bare name: no `Array<Int>` and no `?`), or remove the annotation",
+                CHECKED.join(", ")
+            );
+            if let Some(first) = near.first() {
+                hint = format!("did you mean {first}? {hint}");
+            }
+            return Err(crate::safety::bad_arg_with_hint(
+                &format!("let {name}"),
+                "a known type name",
+                declared,
+                &hint,
+            ));
+        }
     };
     let actual = value.type_name();
     if actual == expected {

@@ -76,10 +76,32 @@ fn a_matching_annotation_binds_as_before() {
 }
 
 #[test]
-fn an_unknown_annotation_is_not_checked() {
-    let (out, err, code) = run_script("unknown", "let z: Widget = 1\nz\n");
-    assert_eq!(code, 0, "{err}");
-    assert_eq!(out, "1");
+fn an_unknown_annotation_is_refused_naming_the_closest_type() {
+    let (_, err, code) = run_script("unknown", "let z: Widget = 1\nz\n");
+    assert_ne!(code, 0);
+    assert!(err.contains("E_BAD_ARG"), "{err}");
+    assert!(err.contains("Int, Float, String"), "no list of types: {err}");
+
+    let (_, err, code) = run_script("typo", "let x: Strng = 1\nx\n");
+    assert_ne!(code, 0);
+    assert!(err.contains("did you mean String"), "{err}");
+
+    let (_, err, code) = run_script("lower", "let x: int = \"a\"\nx\n");
+    assert_ne!(code, 0);
+    assert!(err.contains("did you mean Int"), "{err}");
+}
+
+#[test]
+fn generic_and_optional_annotations_get_a_hint_listing_the_forms() {
+    for (tag, src) in [
+        ("generic", "let a: Array<Int> = [\"x\"]\na\n"),
+        ("optional", "let a: String? = null\na\n"),
+    ] {
+        let (_, err, code) = run_script(tag, src);
+        assert_ne!(code, 0);
+        assert!(err.contains("E_PARSE"), "{err}");
+        assert!(err.contains("Int, Float, String"), "no list of forms: {err}");
+    }
 }
 
 #[test]
