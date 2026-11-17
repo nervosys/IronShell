@@ -71579,6 +71579,10 @@ fn create_new_output(builtin: &str, path: &str) -> Result<std::fs::File> {
                     &format!("{path} already exists"),
                     "remove it first; the existing file is not overwritten",
                 )
+            } else if e.kind() == std::io::ErrorKind::NotFound {
+                // A missing folder is the usual cause: name it, as the other
+                // writers do, instead of "no file at <the file being made>".
+                crate::safety::fs_write_error(builtin, path, &e)
             } else {
                 crate::safety::fs_error(builtin, path, &e)
             }
