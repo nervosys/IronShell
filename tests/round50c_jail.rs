@@ -161,7 +161,7 @@ fn rm_in_the_subset_refuses_a_path_outside_the_workspace() {
     let s = Scratch::new("c1outside");
     let victim = s.outside.join("keep.txt");
     std::fs::write(&victim, "keep").unwrap();
-    let script = format!("rm -f '{}'", victim.display().to_string().replace('\', "/"));
+    let script = format!("rm -f '{}'", victim.display().to_string().replace('\\', "/"));
     let out = s.sh(&script);
     assert!(!out.status.success(), "{}", text(&out));
     assert!(victim.exists(), "outside file was removed: {}", text(&out));
