@@ -3565,8 +3565,13 @@ fn resolve_program(
     } else if let Some(part) = why {
         part.to_string()
     } else {
-        match argv[1..].iter().find(|a| a.len() > 1 && a.starts_with('-')) {
-            Some(flag) => flag.clone(),
+        match unsupported_flag(name, &argv[1..]).or_else(|| {
+            argv[1..]
+                .iter()
+                .find(|a| a.len() > 1 && a.starts_with('-'))
+                .cloned()
+        }) {
+            Some(flag) => flag,
             None => "this form".to_string(),
         }
     };
@@ -3575,22 +3580,17 @@ fn resolve_program(
     let mut msg = format!(
         "{SHELL_NAME}: {name}: the in-process {name} does not support {what}; a GNU-compatible {name} on PATH would run it, and none was found"
     );
+    if let Some(alt) = ish_alternative(name) {
+        msg.push('\n');
+        msg.push_str(&alt);
+    }
     if let Some(hint) = windows_tools_hint() {
         msg.push('\n');
         msg.push_str(&hint);
     }
     Err((2, msg))
-    if let Some(alt) = ish_alternative(name) {
-        msg.push('\n');
-        msg.push_str(&alt);
-    }
 }
 
-/// On Windows, the refusal for a sed command the subset declines when no sed is
-/// on PATH. `resolve_program` gives the same refusal, but only after the exec
-/// gate has asked for approval of a program that is not installed; this gives
-/// it first. `None` when this is not that case. A sed that is on PATH still goes
-/// through the gate, which then checks that it is GNU.
 /// The hint line naming the ish builtin that does what the subset's missing
 /// `name` would, for a command the subset does not run: `cp` and `mv` are
 /// builtins of that name, and `find`'s `-name` with `-o` is `glob` with a
@@ -3605,6 +3605,11 @@ fn ish_alternative(name: &str) -> Option<String> {
     Some(format!("  hint: in ish, use {alt} (ish -c '...')"))
 }
 
+/// On Windows, the refusal for a sed command the subset declines when no sed is
+/// on PATH. `resolve_program` gives the same refusal, but only after the exec
+/// gate has asked for approval of a program that is not installed; this gives
+/// it first. `None` when this is not that case. A sed that is on PATH still goes
+/// through the gate, which then checks that it is GNU.
 fn sed_missing_refusal(argv: &[String], why: Option<&str>) -> Option<String> {
     if !cfg!(windows) || argv[0] != "sed" {
         return None;
@@ -5083,7 +5088,7 @@ fn tee(args: &[String], stdin: &mut Input, sink: &mut Sink) -> Util {
         let resolved = match check_write_in_place(f) {
             Ok(p) => p,
             Err(msg) => {
-                sink.eline(&msg);
+                sink.eline(&gnu_refusal(&format!("tee: {f}"), &msg));
                 status = 1;
                 continue;
             }
@@ -5135,7 +5140,10 @@ fn mkdir(args: &[String], sink: &mut Sink) -> Util {
         let resolved = match check_write(d) {
             Ok(p) => p,
             Err(msg) => {
-                sink.eline(&msg);
+                sink.eline(&gnu_refusal(
+                    &format!("mkdir: cannot create directory '{d}'"),
+                    &msg,
+                ));
                 status = 1;
                 continue;
             }
@@ -5178,7 +5186,7 @@ fn touch(args: &[String], sink: &mut Sink) -> Util {
         let resolved = match check_write_in_place(f) {
             Ok(p) => p,
             Err(msg) => {
-                sink.eline(&msg);
+                sink.eline(&gnu_refusal(&format!("touch: cannot touch '{f}'"), &msg));
                 status = 1;
                 continue;
             }
@@ -5208,11 +5216,108 @@ fn touch(args: &[String], sink: &mut Sink) -> Util {
 /// Run a builtin by name, as the jailed `rm` and `rmdir` of the language run, so
 /// the workspace jail, the approval gate and the journal judge it as they judge
 /// a call from a script.
-fn jailed_builtin(name: &str, args: Vec<crate::value::Value>) -> Result<(), String> {
+fn jailed_builtin(name: &str, args: Vec<crate::value::Value>) -> anyhow::Result<()> {
     let mut env = crate::env::Env::new();
-    crate::builtins::call(name, args, &mut env)
-        .map(|_| ())
-        .map_err(|e| e.to_string())
+    crate::builtins::call(name, args, &mut env).map(|_| ())
+}
+
+/// A guarded builtin's refusal, as the text a GNU tool prints after `lead`
+/// (`mkdir: cannot create directory '../x'`). `msg` is the refusal as
+/// `check_write` returns it, the JSON a builtin error renders as. A jail refusal
+/// is `outside the workspace`, with the operand as written (the JSON names the
+/// resolved path and a hint for the builtin API, which a script cannot use).
+/// An approval request keeps its JSON: it carries the token that approves it.
+/// Anything that is not that JSON is returned as it is.
+fn gnu_refusal(lead: &str, msg: &str) -> String {
+    let Ok(json) = serde_json::from_str::<serde_json::Value>(msg) else {
+        return msg.to_string();
+    };
+    let err = &json["error"];
+    match err["code"].as_str() {
+        None | Some("E_NEEDS_APPROVAL") => msg.to_string(),
+        Some("E_OUTSIDE_WORKSPACE") => format!("{lead}: outside the workspace"),
+        Some(_) => match err["message"].as_str() {
+            Some(m) => {
+                let builtin = err["builtin"].as_str().unwrap_or("");
+                let m = m.strip_prefix(&format!("{builtin}: ")).unwrap_or(m);
+                format!("{lead}: {m}")
+            }
+            None => msg.to_string(),
+        },
+    }
+}
+
+/// What a failed `rm` or `rmdir` of `operand` prints, and the status it leaves:
+/// GNU text, as the other in-process tools print theirs, with no JSON. A request
+/// for approval is the exception, and is the same refusal `cp` gets from the
+/// exec gate (status 75, the JSON with the token), naming `name`, not the
+/// `rmdir` builtin that an `rm -r` of a directory runs.
+fn rm_failure(name: &str, operand: &str, e: &anyhow::Error) -> (i32, String) {
+    use crate::safety::ErrorCode;
+    let verb = if name == "rmdir" {
+        "failed to remove"
+    } else {
+        "cannot remove"
+    };
+    let lead = format!("{name}: {verb} '{operand}'");
+    let Some(se) = e.downcast_ref::<crate::safety::SafetyError>() else {
+        return (1, format!("{lead}: {e}"));
+    };
+    let prose = se
+        .message
+        .strip_prefix(&format!("{}: ", se.builtin))
+        .unwrap_or(&se.message)
+        .to_string();
+    match se.code {
+        ErrorCode::NeedsApproval => {
+            let mut shown = se.clone();
+            if shown.builtin != name {
+                shown.message =
+                    shown
+                        .message
+                        .replacen(&format!("{}:", shown.builtin), &format!("{name}:"), 1);
+                shown.builtin = name.to_string();
+            }
+            (ErrorCode::NeedsApproval.exit_code(), shown.to_string())
+        }
+        ErrorCode::PolicyDeny => (
+            ErrorCode::PolicyDeny.exit_code(),
+            format!("{lead}: {prose}"),
+        ),
+        ErrorCode::OutsideWorkspace => (1, format!("{lead}: outside the workspace")),
+        ErrorCode::BadState if se.message.contains("is not empty") => {
+            (1, format!("{lead}: Directory not empty"))
+        }
+        ErrorCode::NotFound => (1, format!("{lead}: No such file or directory")),
+        ErrorCode::OsDenied => (1, format!("{lead}: Permission denied")),
+        _ => (1, format!("{lead}: {prose}")),
+    }
+}
+
+/// The first flag of `args` that in-process `rm` (letters `rRf`) or `rmdir` (no
+/// letters) does not run, as written: a long option whole, and for a cluster of
+/// short ones the one bad letter (`-rI` names `-I`, not `-rI`). `None` when
+/// every flag is supported, or for another command.
+fn unsupported_flag(name: &str, args: &[String]) -> Option<String> {
+    let allowed = match name {
+        "rm" => "rRf",
+        "rmdir" => "",
+        _ => return None,
+    };
+    for a in args {
+        if a == "--" {
+            break;
+        }
+        if a.starts_with("--") {
+            return Some(a.split('=').next().unwrap_or(a).to_string());
+        }
+        if a.len() > 1 && a.starts_with('-') {
+            if let Some(c) = a[1..].chars().find(|c| !allowed.contains(*c)) {
+                return Some(format!("-{c}"));
+            }
+        }
+    }
+    None
 }
 
 /// `rm [-r|-R] [-f] [--] FILE...` and `rmdir DIR...`, in process.
@@ -5231,11 +5336,7 @@ fn rm_utility(name: &str, args: &[String], sink: &mut Sink) -> Util {
         // not handed to a PATH program the jail cannot confine (a GNU rm
         // follows `jx/` through a link out of the workspace).
         if crate::safety::jail_enforced(crate::safety::current_mode()) {
-            let flag = args
-                .iter()
-                .find(|a| a.len() > 1 && a.starts_with('-') && *a != "--")
-                .cloned()
-                .unwrap_or_else(|| "this form".to_string());
+            let flag = unsupported_flag(name, args).unwrap_or_else(|| "this form".to_string());
             sink.eline(&format!(
                 "{SHELL_NAME}: {name}: the in-process {name} does not support {flag}, and under the workspace jail no external {name} is run in its place; use -r, -R or -f"
             ));
@@ -5256,21 +5357,37 @@ fn rm_utility(name: &str, args: &[String], sink: &mut Sink) -> Util {
     }
     let mut status = 0;
     for operand in &operands {
-        if let Err(msg) = rm_operand(name, operand, recursive, force) {
+        if let Err((code, msg)) = rm_operand(name, operand, recursive, force) {
             sink.eline(&msg);
-            status = 1;
+            status = code;
+            // A request for approval or a policy refusal ends the command, as
+            // the exec gate's refusal of `cp` does; it is not one operand's.
+            if code != 1 {
+                break;
+            }
         }
     }
     Util::Done(status)
 }
 
-/// Remove one operand of `rm` or `rmdir`; the error is the line to print.
-fn rm_operand(name: &str, operand: &str, recursive: bool, force: bool) -> Result<(), String> {
+/// Remove one operand of `rm` or `rmdir`; the error is the status and the line
+/// to print (see [`rm_failure`]).
+fn rm_operand(
+    name: &str,
+    operand: &str,
+    recursive: bool,
+    force: bool,
+) -> Result<(), (i32, String)> {
     use crate::value::Value;
+    let verb = if name == "rmdir" {
+        "failed to remove"
+    } else {
+        "cannot remove"
+    };
     if operand.ends_with(['/', '\\']) || crate::safety::path_ends_in_dot_component(operand) {
-        return Err(format!(
-            "{name}: cannot remove '{operand}': a trailing separator, `.` or `..` is refused, because it names what a link points at; name it without"
-        ));
+        return Err((1, format!(
+            "{name}: {verb} '{operand}': a trailing separator, `.` or `..` is refused, because it names what a link points at; name it without"
+        )));
     }
     let remote = crate::safety::names_a_remote_share(operand);
     let meta = if remote {
@@ -5283,39 +5400,41 @@ fn rm_operand(name: &str, operand: &str, recursive: bool, force: bool) -> Result
             if force && name == "rm" {
                 return Ok(());
             }
-            return Err(format!(
-                "{name}: cannot remove '{operand}': No such file or directory"
+            return Err((
+                1,
+                format!("{name}: {verb} '{operand}': No such file or directory"),
             ));
         }
     }
     let is_link = !remote && crate::safety::is_link(operand);
     let is_dir = matches!(&meta, Some(Ok(m)) if m.is_dir());
-    let fail = |why: String| format!("{name}: cannot remove '{operand}': {why}");
+    let fail = |why: &str| (1, format!("{name}: {verb} '{operand}': {why}"));
+    let failed = |e: anyhow::Error| rm_failure(name, operand, &e);
     if name == "rmdir" {
         if is_link || !is_dir {
-            return Err(fail("Not a directory".into()));
+            return Err(fail("Not a directory"));
         }
         return jailed_builtin(
             "rmdir",
             vec![Value::Str(operand.to_string()), Value::Bool(false)],
         )
-        .map_err(fail);
+        .map_err(failed);
     }
     if is_dir && !is_link {
         if !recursive {
-            return Err(fail("Is a directory".into()));
+            return Err(fail("Is a directory"));
         }
         return jailed_builtin(
             "rmdir",
             vec![Value::Str(operand.to_string()), Value::Bool(true)],
         )
-        .map_err(fail);
+        .map_err(failed);
     }
     jailed_builtin(
         "rm",
         vec![Value::Str(operand.to_string()), Value::Bool(force)],
     )
-    .map_err(fail)
+    .map_err(failed)
 }
 
 /// The characters of a `tr` set: ranges (`a-z`), the classes `[:upper:]`,
@@ -6885,7 +7004,7 @@ fn sed_in_place(
         let resolved = match check_write_in_place(f) {
             Ok(p) => p,
             Err(msg) => {
-                sink.eline(&msg);
+                sink.eline(&gnu_refusal(&format!("sed: {f}"), &msg));
                 status = 1;
                 continue;
             }
@@ -6912,7 +7031,7 @@ fn sed_in_place(
             let backup = match check_write_in_place(&format!("{f}{suffix}")) {
                 Ok(p) => p,
                 Err(msg) => {
-                    sink.eline(&msg);
+                    sink.eline(&gnu_refusal(&format!("sed: {f}{suffix}"), &msg));
                     status = 1;
                     continue;
                 }
@@ -7926,6 +8045,18 @@ pub fn write_operands(head: &str, args: &[String]) -> Option<Vec<String>> {
     }
 }
 
+/// The paths in-process `rm` and `rmdir` remove, for `--explain`: each operand is
+/// a `delete`, judged by the jail as the run judges it. `None` for any other
+/// command, or when the utility declines its flags (which the run refuses under
+/// the jail).
+pub fn remove_operands(head: &str, args: &[String]) -> Option<Vec<String>> {
+    match head {
+        "rm" => short_flags(args, "rRf").map(|(_, ops)| ops),
+        "rmdir" => short_flags(args, "").map(|(_, ops)| ops),
+        _ => None,
+    }
+}
+
 /// The file operands an in-process utility reads, for `--explain`: each one is
 /// judged by the workspace jail as the run judges it when it opens the file. `-`
 /// (standard input) is among them as given. `None` when the utility's operand
@@ -8073,18 +8204,6 @@ fn sed_operands(args: &[String]) -> Option<Vec<String>> {
             s if sed_inplace_suffix(s).is_some() => {}
             "-e" => {
                 i += 1;
-/// The paths in-process `rm` and `rmdir` remove, for `--explain`: each operand is
-/// a `delete`, judged by the jail as the run judges it. `None` for any other
-/// command, or when the utility declines its flags (which the run refuses under
-/// the jail).
-pub fn remove_operands(head: &str, args: &[String]) -> Option<Vec<String>> {
-    match head {
-        "rm" => short_flags(args, "rRf").map(|(_, ops)| ops),
-        "rmdir" => short_flags(args, "").map(|(_, ops)| ops),
-        _ => None,
-    }
-}
-
                 if i >= args.len() {
                     return None;
                 }
