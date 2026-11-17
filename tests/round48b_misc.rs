@@ -144,3 +144,14 @@ fn an_array_of_archive_members_gets_a_hint_for_separate_arguments() {
     let t = text(&ish_in(&proj, r#"zip_add("a.zip", ["b.txt"])"#));
     assert!(t.contains("separate arguments"), "{t}");
 }
+
+#[test]
+fn lines_splits_on_a_lone_cr_as_well() {
+    let dir = scratch("lines_cr");
+    let proj = dir.join("proj");
+    let out = ish_in(&proj, r#""a\rb\r\nc\n\nd" | lines | len"#);
+    assert!(out.status.success(), "{}", text(&out));
+    assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "5");
+    let out = ish_in(&proj, r#""a\r" | lines | len"#);
+    assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "1");
+}

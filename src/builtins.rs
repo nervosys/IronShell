@@ -33404,7 +33404,8 @@ fn bi_fs_glob(args: Vec<Value>, _input: Option<Value>) -> Result<Value> {
 }
 
 /// lines(text): split text into lines, without their terminators; a final
-/// newline does not add an empty line, and a CR before LF is dropped.
+/// terminator does not add an empty line. A terminator is LF, CRLF or a lone CR,
+/// as Python's splitlines reads them.
 fn bi_lines(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
     let text = match (input, args.first()) {
         (Some(Value::Str(s)), _) => s,
@@ -33419,12 +33420,23 @@ fn bi_lines(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
     };
     let cr = char::from(13);
     let nl = char::from(10);
-    let mut out: Vec<Value> = text
-        .split(nl)
-        .map(|l| Value::Str(l.strip_suffix(cr).unwrap_or(l).to_string()))
-        .collect();
-    if text.is_empty() || text.ends_with(nl) {
-        out.pop();
+    let mut out: Vec<Value> = Vec::new();
+    let mut line = String::new();
+    let mut chars = text.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == nl {
+            out.push(Value::Str(std::mem::take(&mut line)));
+        } else if c == cr {
+            if chars.peek() == Some(&nl) {
+                chars.next();
+            }
+            out.push(Value::Str(std::mem::take(&mut line)));
+        } else {
+            line.push(c);
+        }
+    }
+    if !line.is_empty() {
+        out.push(Value::Str(line));
     }
     Ok(Value::Array(out))
 }

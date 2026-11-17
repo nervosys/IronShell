@@ -3424,11 +3424,12 @@ pub static SIGNATURES: &[Signature] = &[
         subject: Some(Ty::Str),
         params: &[opt("text", Ty::Str, "the text, when it is not piped in")],
         returns: "Array",
-        doc: "Split text into lines without their terminators; a final newline adds no empty line.",
+        doc: "Split text into lines without their terminators; a final terminator adds no empty line. A terminator is LF, CRLF or a lone CR, as Python's splitlines reads them.",
         examples: &[
             (r#""a\nb" | lines"#, r#"["a", "b"]"#),
             (r#"lines("a\nb\n") | len"#, "2"),
             (r#""x\r\ny" | lines | last"#, r#""y""#),
+            (r#""a\rb\r\nc\n" | lines"#, r#"["a", "b", "c"]"#),
         ],
     },
     Signature {
