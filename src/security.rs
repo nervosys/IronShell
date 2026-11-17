@@ -819,7 +819,13 @@ pub fn judged_path_literals(
                             let Some(i) = n.checked_sub(offset) else {
                                 return false;
                             };
-                            match sig.params.get(i) {
+                            // A variadic last parameter covers every argument
+                            // after it, as the run's own check does.
+                            match sig
+                                .params
+                                .get(i)
+                                .or_else(|| sig.params.last().filter(|p| p.variadic))
+                            {
                                 Some(p) => p.name,
                                 None => return false,
                             }
@@ -892,6 +898,9 @@ const EXTRA_PATH_PARAMS: &[(&str, &str)] = &[
     ("file_diff", "path1"),
     ("file_diff", "path2"),
     ("fs_glob", "pattern"),
+    // The files a tar is made from, read by the run: a member that is a link out
+    // of the workspace is refused, so `--explain` judges them as the run does.
+    ("tar_create", "members"),
 ];
 
 /// Builtins whose subject, the first argument of a direct call, is a path.

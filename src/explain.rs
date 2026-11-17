@@ -862,6 +862,23 @@ fn glob_refusal(builtin: &str, positional: Option<&Vec<Option<String>>>) -> Opti
     )
 }
 
+/// The refusal of `rm` given a name with a trailing separator, or ending in `.`
+/// or `..`: E_BAD_ARG, worded as the run words it, since such a name is what a
+/// link points at. The run refuses it before the approval gate, so `approve`
+/// would misstate it. `None` for any other builtin.
+fn rm_separator_refusal(builtin: &str, positional: Option<&Vec<Option<String>>>) -> Option<String> {
+    if builtin != "rm" {
+        return None;
+    }
+    let name = positional?.first()?.as_ref()?;
+    if !name.ends_with(['/', '\\']) && !crate::safety::path_ends_in_dot_component(name) {
+        return None;
+    }
+    Some(format!(
+        "rm names a file or link with no trailing separator, `.` or `..`, and '{name}' has one (the run refuses it with E_BAD_ARG); name it without, or use rmdir for a directory"
+    ))
+}
+
 /// The refusal of an archive extraction whose archive is named by a literal and
 /// can be read here: an entry that lands outside the destination or the
 /// workspace, through a link already on disk or by its name. The archive is read
@@ -934,6 +951,7 @@ pub fn explain(code: &str) -> Result<Value> {
                     .or_else(|| name_refusal(b, effect, w.positional.get(&i)))
                     .or_else(|| jail_refusal(b, effect, literals, piped))
                     .or_else(|| glob_refusal(b, w.positional.get(&i)))
+                    .or_else(|| rm_separator_refusal(b, w.positional.get(&i)))
                     .or_else(|| extraction_refusal(b, &plain));
                 let decision = if refused.is_some() {
                     "deny"

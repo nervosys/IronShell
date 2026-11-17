@@ -212,3 +212,43 @@ fn rm_in_the_subset_declines_a_flag_it_does_not_model() {
         );
     }
 }
+
+// ── C2: --explain judges the members of an archive as the run does ──
+
+#[test]
+fn explain_denies_a_tar_or_zip_member_that_is_a_link_out_of_the_workspace() {
+    let s = Scratch::new("c2");
+    std::fs::write(s.outside.join("keep.txt"), "keep").unwrap();
+    std::fs::write(s.ws.join("ok.txt"), "ok").unwrap();
+    let jx = s.ws.join("jx");
+    if !link_dir(&s.outside, &jx) {
+        return;
+    }
+    for call in [
+        r#"tar_create("o.tar", "jx")"#,
+        r#"tar_create("o.tar", "ok.txt", "jx")"#,
+        r#"zip_create("o.zip", "jx")"#,
+        r#"zip_create("o.zip", "ok.txt", "jx")"#,
+    ] {
+        let out = s.jailed(&["--explain", "-c", call]);
+        let shown = text(&out);
+        assert!(shown.contains("deny"), "{call}: {shown}");
+    }
+    let out = s.jailed(&["--explain", "-c", r#"tar_create("o.tar", "ok.txt")"#]);
+    assert!(!text(&out).contains("deny"), "{}", text(&out));
+}
+
+// ── C3: --explain reports rm of a trailing-separator name as refused ──
+
+#[test]
+fn explain_denies_rm_with_a_trailing_separator() {
+    let s = Scratch::new("c3");
+    for call in [r#"rm("jx/")"#, r#"rm("d/.")"#, r#"rm("d/..")"#] {
+        let out = s.jailed(&["--explain", "-c", call]);
+        let shown = text(&out);
+        assert!(shown.contains("deny"), "{call}: {shown}");
+        assert!(shown.contains("E_BAD_ARG"), "{call}: {shown}");
+    }
+    let out = s.jailed(&["--explain", "-c", r#"rm("jx")"#]);
+    assert!(!text(&out).contains("deny"), "{}", text(&out));
+}
