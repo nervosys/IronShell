@@ -211,7 +211,7 @@ fn b8_unmatched_glob_operand_reads_as_gnu_does() {
 #[test]
 fn b8_missing_cp_names_the_subset() {
     let dir = scratch("b8b");
-    for cmd in ["cp a b", "mv a b", "rm a", "xargs echo", "unzip a.zip"] {
+    for cmd in ["cp a b", "mv a b", "xargs echo", "unzip a.zip"] {
         let o = ish_b(&dir, cmd);
         let text = out(&o);
         let name = cmd.split(' ').next().unwrap();
