@@ -8649,7 +8649,7 @@ fn bi_kg_relate(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
         )
     } else {
         return Err(crate::safety::arg_err(
-            "kg_relate: requires source_id, target_id, and relation_type",
+            "kg_relate: requires source, target, and relation",
         ));
     };
 

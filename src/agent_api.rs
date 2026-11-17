@@ -1724,10 +1724,23 @@ pub(crate) fn named_args_to_positional(
         ));
     }
 
+    let variadic_last = signature.is_some_and(|s| s.params.last().is_some_and(|p| p.variadic));
+    // min/max list subject (the Array a pipeline would pipe in) and alues`n    // (the numbers of a direct call). {"values": [3, 1, 2]} names the same Array
+    // as the subject, so it is passed as that one Array when no subject is given.
+    if variadic_last
+        && has_subject
+        && positions.len() == 2
+        && signature.is_some_and(|s| s.subject == Some(crate::signature::Ty::Array))
+        && slots[0].is_none()
+    {
+        if let Some(JsonValue::Array(items)) = slots[1].take() {
+            slots[0] = Some(JsonValue::Array(items));
+        }
+    }
+
     let Some(last) = slots.iter().rposition(Option::is_some) else {
         return Ok(Vec::new());
     };
-    let variadic_last = signature.is_some_and(|s| s.params.last().is_some_and(|p| p.variadic));
     let mut out = Vec::with_capacity(last + 1);
     for (i, (slot, (name, _))) in slots.into_iter().zip(&positions).enumerate() {
         if i > last {
