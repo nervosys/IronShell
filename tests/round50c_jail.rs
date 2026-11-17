@@ -161,7 +161,10 @@ fn rm_in_the_subset_refuses_a_path_outside_the_workspace() {
     let s = Scratch::new("c1outside");
     let victim = s.outside.join("keep.txt");
     std::fs::write(&victim, "keep").unwrap();
-    let script = format!("rm -f '{}'", victim.display().to_string().replace('\\', "/"));
+    let script = format!(
+        "rm -f '{}'",
+        victim.display().to_string().replace('\\', "/")
+    );
     let out = s.sh(&script);
     assert!(!out.status.success(), "{}", text(&out));
     assert!(victim.exists(), "outside file was removed: {}", text(&out));
@@ -251,4 +254,27 @@ fn explain_denies_rm_with_a_trailing_separator() {
     }
     let out = s.jailed(&["--explain", "-c", r#"rm("jx")"#]);
     assert!(!text(&out).contains("deny"), "{}", text(&out));
+}
+
+// ── C4: undo of a removed link says the journal could not restore it ──
+
+#[test]
+fn undo_of_a_removed_link_gives_the_journals_reason_not_the_jails() {
+    let s = Scratch::new("c4");
+    std::fs::write(s.outside.join("keep.txt"), "keep").unwrap();
+    let jx = s.ws.join("jx");
+    if !link_dir(&s.outside, &jx) {
+        return;
+    }
+    let out = s.journaled(&["-c", r#"rm("jx")"#]);
+    assert!(out.status.success(), "{}", text(&out));
+    assert!(std::fs::symlink_metadata(&jx).is_err(), "link remains");
+    let out = s.journaled(&["-c", "undo()"]);
+    let shown = text(&out);
+    assert!(
+        !shown.contains("outside the workspace jail"),
+        "wrong reason: {shown}"
+    );
+    assert!(shown.contains("link the journal cannot restore"), "{shown}");
+    assert!(s.outside.join("keep.txt").is_file(), "{shown}");
 }

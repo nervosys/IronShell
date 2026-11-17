@@ -1302,9 +1302,13 @@ fn undo_at(s: &mut State, index: usize, force: bool, out: &mut Vec<Rewound>) -> 
     let seq = s.journal.get(index).map(|e| e.seq);
     // Checked before anything is taken: a step left alone stays in the
     // journal, and nothing older is undone past it, so the order is kept.
+    // A step recorded as not reversible writes nothing, so the jail has nothing
+    // to refuse: it is reported below with the reason it was recorded with (a
+    // link the journal cannot restore), not as outside the workspace.
     if let Some(why) = s
         .journal
         .get(index)
+        .filter(|e| !matches!(e.before, Before::Irreversible(_)))
         .and_then(|e| crate::safety::rewind_refused(&e.path))
     {
         let what = s
@@ -1655,6 +1659,7 @@ pub fn redo(n: usize) -> Vec<Outcome> {
         if let Some(why) = s
             .redo
             .last()
+            .filter(|r| !matches!(r.after, Before::Irreversible(_)))
             .and_then(|r| crate::safety::rewind_refused(&r.path))
         {
             let what = s.redo.last().map(|r| r.path.clone()).unwrap_or_default();
