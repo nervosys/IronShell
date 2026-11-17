@@ -139,3 +139,31 @@ fn a_first_row_cell_that_spells_a_directive_is_quoted() {
     );
     assert_eq!(out.trim(), "true", "stderr: {err}");
 }
+
+#[test]
+fn a_record_key_that_needs_it_is_quoted() {
+    let dir = session("reckeys");
+    let (out, err) = agent(
+        &dir,
+        r#"json.parse('{"a b":1,"c=d":"x y","":2,"plain":3}')"#,
+    );
+    assert_eq!(
+        out.trim(),
+        r#"{""=2 "a b"=1 "c=d"="x y" plain=3}"#,
+        "stderr: {err}"
+    );
+}
+
+#[test]
+fn a_table_header_key_that_needs_it_is_quoted_and_round_trips() {
+    let dir = session("hdrkeys");
+    let rows = r#"json.parse('[{"a b":1,"c=d":2,"k z":7},{"a b":3,"c=d":4,"k z":7}]')"#;
+    let (out, err) = agent(&dir, rows);
+    assert_eq!(
+        lines_of(&out),
+        vec!["\"a b\"\t\"c=d\"", "@const \"k z\"=7", "1\t2", "3\t4"],
+        "stderr: {err}"
+    );
+    let (out, err) = agent(&dir, &format!("({rows} | aecon | aecon_decode) == {rows}"));
+    assert_eq!(out.trim(), "true", "stderr: {err}");
+}

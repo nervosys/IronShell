@@ -23954,6 +23954,46 @@ fn aecon_atom(v: &Value) -> String {
     }
 }
 
+/// A column or record key as AECON writes it: bare when it is plain, JSON-quoted
+/// when it is empty or holds a tab, newline, space, `=` or `"`, or opens with a
+/// character that has a meaning of its own, since the header line splits on tabs
+/// and a record entry reads `key=value` split on spaces.
+fn aecon_key(k: &str) -> String {
+    let plain = !k.is_empty()
+        && !k.contains(['\t', '\n', '\r', ' ', '=', '"'])
+        && !k.starts_with(['@', '[', '{']);
+    if plain {
+        k.to_string()
+    } else {
+        serde_json::to_string(k).unwrap_or_else(|_| format!("{k:?}"))
+    }
+}
+
+/// Reverse [`aecon_key`] for one name: a JSON-quoted name is parsed, any other
+/// is taken as written.
+fn aecon_unquote_key(s: &str) -> String {
+    if s.starts_with('"') {
+        if let Ok(k) = serde_json::from_str::<String>(s) {
+            return k;
+        }
+    }
+    s.to_string()
+}
+
+/// Split `s` at the first `sep` that follows a leading name, which may be a
+/// JSON-quoted string holding the separator itself. `None` when `sep` is absent.
+fn aecon_split_key<'a>(s: &'a str, sep: &str) -> Option<(String, &'a str)> {
+    if s.starts_with('"') {
+        let mut stream = serde_json::Deserializer::from_str(s).into_iter::<String>();
+        if let Some(Ok(k)) = stream.next() {
+            if let Some(rest) = s[stream.byte_offset()..].strip_prefix(sep) {
+                return Some((k, rest));
+            }
+        }
+    }
+    s.split_once(sep).map(|(k, rest)| (k.to_string(), rest))
+}
+
 /// Whether a string cell must be JSON-quoted to read back as that string: it is
 /// empty, would read as `null`/`true`/`false` or a number, opens with a character
 /// that has a meaning of its own (`@` directive, `"` quote, `[` `{` composite),
@@ -24506,10 +24546,16 @@ fn aecon_render(v: &Value) -> String {
             // `@type` (lossless type tags) metadata lines, then positional
             // tab-separated rows. No `@aecon rows=N cols=` prefix — the header is
             // self-describing and ~7 tokens cheaper per result than the verbose form.
-            let mut out = var_keys.join("\t");
+            let named = |ks: &[String]| -> String {
+                ks.iter()
+                    .map(|k| aecon_key(k))
+                    .collect::<Vec<_>>()
+                    .join("\t")
+            };
+            let mut out = named(&var_keys);
             if !nest_keys.is_empty() {
                 out.push_str("\n@nest ");
-                out.push_str(&nest_keys.join("\t"));
+                out.push_str(&named(&nest_keys));
             }
             if !const_keys.is_empty() {
                 let consts: Vec<String> = const_keys
@@ -24517,7 +24563,7 @@ fn aecon_render(v: &Value) -> String {
                     .map(|k| {
                         format!(
                             "{}={}",
-                            k,
+                            aecon_key(k),
                             aecon_atom(rows[0].get(k).unwrap_or(&Value::Null))
                         )
                     })
@@ -24526,29 +24572,29 @@ fn aecon_render(v: &Value) -> String {
                 out.push_str(&consts.join("\t"));
             }
             for (col, distinct) in &dict_cols {
-                out.push_str(&format!("\n@dict {}: ", col));
+                out.push_str(&format!("\n@dict {}: ", aecon_key(col)));
                 out.push_str(&distinct.join("\t"));
             }
             for (col, prefix) in &prefix_cols {
-                out.push_str(&format!("\n@prefix {}: {}", col, prefix));
+                out.push_str(&format!("\n@prefix {}: {}", aecon_key(col), prefix));
             }
             for (col, suffix) in &suffix_cols {
-                out.push_str(&format!("\n@suffix {}: {}", col, suffix));
+                out.push_str(&format!("\n@suffix {}: {}", aecon_key(col), suffix));
             }
             if !same_cols.is_empty() {
                 out.push_str("\n@same ");
-                out.push_str(&same_cols.join("\t"));
+                out.push_str(&named(&same_cols));
             }
             if !delta_cols.is_empty() {
                 out.push_str("\n@delta: ");
-                let names: Vec<&str> = delta_cols.keys().map(|s| s.as_str()).collect();
-                out.push_str(&names.join("\t"));
+                let names: Vec<String> = delta_cols.keys().cloned().collect();
+                out.push_str(&named(&names));
             }
             if !type_tags.is_empty() {
                 out.push_str("\n@type ");
                 let tags: Vec<String> = type_tags
                     .iter()
-                    .map(|(k, t)| format!("{}:{}", k, t))
+                    .map(|(k, t)| format!("{}:{}", aecon_key(k), t))
                     .collect();
                 out.push_str(&tags.join("\t"));
             }
@@ -24564,7 +24610,7 @@ fn aecon_render(v: &Value) -> String {
         Value::Record(m) => {
             let pairs: Vec<String> = m
                 .iter()
-                .map(|(k, val)| format!("{}={}", k, aecon_item(val)))
+                .map(|(k, val)| format!("{}={}", aecon_key(k), aecon_item(val)))
                 .collect();
             format!("{{{}}}", pairs.join(" "))
         }
@@ -24734,7 +24780,7 @@ fn aecon_decode(s: &str) -> Result<Value> {
     if !header.contains('\t') && (header.starts_with('{') || header.starts_with('[')) {
         return Ok(aecon_decode_atom(header));
     }
-    let var_keys: Vec<String> = header.split('\t').map(|s| s.to_string()).collect();
+    let var_keys: Vec<String> = header.split('\t').map(aecon_unquote_key).collect();
 
     // `@const` is decoded *after* the metadata loop because `@type` (which can
     // correct a const's inferred type) is emitted after it; collect the raw
@@ -24752,42 +24798,44 @@ fn aecon_decode(s: &str) -> Result<Value> {
     for (i, line) in lines.iter().enumerate().skip(1) {
         if let Some(rest) = line.strip_prefix("@const ") {
             for kv in rest.split('\t') {
-                if let Some((k, v)) = kv.split_once('=') {
-                    const_raw.push((k.to_string(), v.to_string()));
+                if let Some((k, v)) = aecon_split_key(kv, "=") {
+                    const_raw.push((k, v.to_string()));
                 }
             }
         } else if let Some(rest) = line.strip_prefix("@dict ") {
-            if let Some((col, vals)) = rest.split_once(": ") {
-                dicts.insert(
-                    col.to_string(),
-                    vals.split('\t').map(|s| s.to_string()).collect(),
-                );
+            if let Some((col, vals)) = aecon_split_key(rest, ": ") {
+                dicts.insert(col, vals.split('\t').map(|s| s.to_string()).collect());
             }
         } else if let Some(rest) = line.strip_prefix("@prefix ") {
-            if let Some((col, p)) = rest.split_once(": ") {
-                prefixes.insert(col.to_string(), p.to_string());
+            if let Some((col, p)) = aecon_split_key(rest, ": ") {
+                prefixes.insert(col, p.to_string());
             }
         } else if let Some(rest) = line.strip_prefix("@suffix ") {
-            if let Some((col, p)) = rest.split_once(": ") {
-                suffixes.insert(col.to_string(), p.to_string());
+            if let Some((col, p)) = aecon_split_key(rest, ": ") {
+                suffixes.insert(col, p.to_string());
             }
         } else if let Some(rest) = line.strip_prefix("@same ") {
             for c in rest.split('\t') {
-                same_set.insert(c.to_string());
+                same_set.insert(aecon_unquote_key(c));
             }
         } else if let Some(rest) = line.strip_prefix("@nest ") {
             for c in rest.split('\t') {
-                nest_set.insert(c.to_string());
+                nest_set.insert(aecon_unquote_key(c));
             }
         } else if let Some(rest) = line.strip_prefix("@delta: ") {
             for c in rest.split('\t') {
-                delta_set.insert(c.to_string());
+                delta_set.insert(aecon_unquote_key(c));
             }
         } else if let Some(rest) = line.strip_prefix("@type ") {
             for spec in rest.split('\t') {
-                if let Some((col, tag)) = spec.rsplit_once(':') {
+                let split = if spec.starts_with('"') {
+                    aecon_split_key(spec, ":")
+                } else {
+                    spec.rsplit_once(':').map(|(c, t)| (c.to_string(), t))
+                };
+                if let Some((col, tag)) = split {
                     if let Some(c) = tag.chars().next() {
-                        type_tags.insert(col.to_string(), c);
+                        type_tags.insert(col, c);
                     }
                 }
             }
