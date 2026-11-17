@@ -16787,7 +16787,10 @@ fn float_to_int_checked(name: &str, whole: f64) -> Result<Value> {
     {
         return Err(crate::safety::value_not_representable(
             name,
-            format!("{name}: {whole} has no Int value"),
+            format!(
+                "{name}: {} has no Int value",
+                crate::value::float_text(whole)
+            ),
             "an Int holds whole numbers from -9223372036854775808 to 9223372036854775807",
         ));
     }
@@ -17325,7 +17328,7 @@ fn bi_int(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
             {
                 return Err(crate::safety::value_not_representable(
                     "int",
-                    format!("int: {f} has no Int value"),
+                    format!("int: {} has no Int value", crate::value::float_text(f)),
                     "an Int holds whole numbers from -9223372036854775808 to 9223372036854775807",
                 ));
             }

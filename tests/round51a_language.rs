@@ -157,3 +157,14 @@ fn a7_hints_say_what_is_wrong() {
     assert!(se.hint.contains("one statement"), "{}", se.hint);
     assert!(!se.hint.starts_with("tables:"), "{}", se.hint);
 }
+
+// A8
+#[test]
+fn a8_a_float_with_no_int_value_prints_in_display_form() {
+    for src in ["math.round(1e300)", "math.floor(1e19)", "int(1e300)"] {
+        let se = refusal(src);
+        assert!(se.message.len() < 80, "{src}: {}", se.message);
+        assert!(se.message.contains("has no Int value"), "{}", se.message);
+    }
+    assert!(refusal("math.round(1e300)").message.contains("1e300"));
+}
