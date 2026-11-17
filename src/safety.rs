@@ -8069,7 +8069,23 @@ pub fn windows_read_name_refusal(builtin: &str, path: &str) -> Option<SafetyErro
 /// judges that), but the message says "write" when the builtin writes, so
 /// `file.write("a.txt.")` is not told its read would land on another name.
 pub fn windows_param_name_refusal(builtin: &str, path: &str, writes: bool) -> Option<SafetyError> {
-    windows_name_problem(builtin, path, false, if writes { "write" } else { "read" })
+    windows_name_problem_ex(
+        builtin,
+        path,
+        false,
+        if writes { "write" } else { "read" },
+        true,
+    )
+}
+
+/// Whether `part` (one path component) names an NTFS alternate data stream:
+/// `name:stream`, with text on both sides of a `:`. A scheme (`https:`) or a
+/// bare drive has nothing after the colon, so it is not one.
+fn names_a_stream(part: &str) -> bool {
+    match part.split_once(':') {
+        Some((name, stream)) => !name.is_empty() && !stream.is_empty(),
+        None => false,
+    }
 }
 
 /// `E_BAD_ARG` for a path that names an existing file and then carries a
@@ -8112,6 +8128,18 @@ pub fn windows_trailing_separator_refusal(builtin: &str, path: &str) -> Option<S
 }
 
 fn windows_name_problem(builtin: &str, path: &str, write: bool, verb: &str) -> Option<SafetyError> {
+    windows_name_problem_ex(builtin, path, write, verb, false)
+}
+
+/// [`windows_name_problem`]; `streams` also refuses a `name:stream` component
+/// when `write` is false, so a read cannot name a hidden stream either.
+fn windows_name_problem_ex(
+    builtin: &str,
+    path: &str,
+    write: bool,
+    verb: &str,
+    streams: bool,
+) -> Option<SafetyError> {
     if let Some(name) = reserved_device_name(path) {
         return Some(reserved_device_error(builtin, &name));
     }
@@ -8158,7 +8186,7 @@ fn windows_name_problem(builtin: &str, path: &str, write: bool, verb: &str) -> O
                 extra: serde_json::Map::new(),
             });
         }
-        if write && part.contains(':') {
+        if (write && part.contains(':')) || (streams && names_a_stream(part)) {
             return Some(SafetyError {
                 code: ErrorCode::BadArg,
                 message: format!(
