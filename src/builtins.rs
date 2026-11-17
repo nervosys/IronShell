@@ -24420,10 +24420,14 @@ fn aecon_render(v: &Value) -> String {
                 };
                 // A residue opening with `@` or `"` would read as a directive or a
                 // quoted cell on its own line, so such a column stays unfactored.
+                // A value equal to prefix+suffix would leave an empty remainder,
+                // and a row of empty cells prints as a blank line that a client
+                // trimming lines loses, so such a column stays unfactored.
                 let ps_cost = if (lcp.is_empty() && lcs.is_empty())
                     || residue
                         .iter()
                         .any(|r| r.starts_with('@') || r.starts_with('"'))
+                    || residue.iter().any(|r| r.len() == lcs.len())
                 {
                     usize::MAX
                 } else {
@@ -24611,6 +24615,7 @@ fn aecon_render(v: &Value) -> String {
                 if set_saved <= set_cost {
                     same_cols.clear();
                 }
+                let before_same = matrix.clone();
                 // Reverse order: each comparison must see the previous row's
                 // *un-elided* cell.
                 for ci in same_cols
@@ -24624,6 +24629,14 @@ fn aecon_render(v: &Value) -> String {
                         {
                             matrix[ri][ci].clear();
                         }
+                    }
+                }
+                // A row with every cell elided would print as a blank (or tabs
+                // only) line that a client trimming lines loses: write its first
+                // cell out. The decoder reads an explicit cell as itself.
+                for (row, orig) in matrix.iter_mut().zip(&before_same) {
+                    if row.iter().all(|c| c.is_empty()) {
+                        row[0] = orig[0].clone();
                     }
                 }
             }
