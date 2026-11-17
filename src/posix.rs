@@ -3449,7 +3449,8 @@ fn has_shell_shebang(path: &str) -> bool {
 /// PATH, because a `sort.exe` that is not GNU would be the wrong program.
 const SUBSET_NAMES: &[&str] = &[
     "echo", "printf", "test", "[", "cat", "tee", "head", "tail", "wc", "grep", "sort", "uniq",
-    "cut", "sed", "ls", "find", "date", "basename", "dirname", "seq", "mkdir", "touch", "tr",
+    "cut", "sed", "ls", "find", "date", "basename", "dirname", "seq", "mkdir", "touch", "tr", "rm",
+    "rmdir",
 ];
 
 /// The GNU-compatible program called `name` on PATH, if there is one (Windows).
@@ -4292,6 +4293,7 @@ fn utility(name: &str, args: &[String], stdin: &mut Input, sink: &mut Sink) -> U
         "tee" => tee(args, stdin, sink),
         "mkdir" => mkdir(args, sink),
         "touch" => touch(args, sink),
+        "rm" | "rmdir" => rm_utility(name, args, sink),
         "tr" => tr(args, stdin, sink),
         "head" => head_tail(true, args, stdin, sink),
         "tail" => head_tail(false, args, stdin, sink),
@@ -5173,6 +5175,119 @@ fn touch(args: &[String], sink: &mut Sink) -> Util {
         }
     }
     Util::Done(status)
+}
+
+/// Run a builtin by name, as the jailed `rm` and `rmdir` of the language run, so
+/// the workspace jail, the approval gate and the journal judge it as they judge
+/// a call from a script.
+fn jailed_builtin(name: &str, args: Vec<crate::value::Value>) -> Result<(), String> {
+    let mut env = crate::env::Env::new();
+    crate::builtins::call(name, args, &mut env)
+        .map(|_| ())
+        .map_err(|e| e.to_string())
+}
+
+/// `rm [-r|-R] [-f] [--] FILE...` and `rmdir DIR...`, in process.
+///
+/// They run on the code of the `rm` and `rmdir` builtins, so a path outside the
+/// workspace is refused, a removal is journalled when the journal is on, and a
+/// link (a symlink, or a junction on Windows) is removed itself and never
+/// followed. A name with a trailing separator, or ending in `.` or `..`, is
+/// refused as `rm()` refuses it, since it names what a link points at. `-r` of a
+/// real directory removes it as `rmdir(path, true)` does. Any other flag
+/// declines, so a GNU program on PATH, if one is found, runs it.
+fn rm_utility(name: &str, args: &[String], sink: &mut Sink) -> Util {
+    let remove_dirs = name == "rmdir";
+    let Some((flags, operands)) = short_flags(args, if remove_dirs { "" } else { "rRf" }) else {
+        // Under the workspace jail an rm the subset cannot run is refused,
+        // not handed to a PATH program the jail cannot confine (a GNU rm
+        // follows `jx/` through a link out of the workspace).
+        if crate::safety::jail_enforced(crate::safety::current_mode()) {
+            let flag = args
+                .iter()
+                .find(|a| a.len() > 1 && a.starts_with('-') && *a != "--")
+                .cloned()
+                .unwrap_or_else(|| "this form".to_string());
+            sink.eline(&format!(
+                "{SHELL_NAME}: {name}: the in-process {name} does not support {flag}, and under the workspace jail no external {name} is run in its place; use -r, -R or -f"
+            ));
+            return Util::Done(2);
+        }
+        return Util::Decline;
+    };
+    let recursive = flags.contains(&'r') || flags.contains(&'R');
+    let force = flags.contains(&'f');
+    if operands.is_empty() {
+        if force && !remove_dirs {
+            return Util::Done(0);
+        }
+        sink.eline(&format!(
+            "{name}: missing operand\nTry '{name} --help' for more information."
+        ));
+        return Util::Done(1);
+    }
+    let mut status = 0;
+    for operand in &operands {
+        if let Err(msg) = rm_operand(name, operand, recursive, force) {
+            sink.eline(&msg);
+            status = 1;
+        }
+    }
+    Util::Done(status)
+}
+
+/// Remove one operand of `rm` or `rmdir`; the error is the line to print.
+fn rm_operand(name: &str, operand: &str, recursive: bool, force: bool) -> Result<(), String> {
+    use crate::value::Value;
+    if operand.ends_with(['/', '\\']) || crate::safety::path_ends_in_dot_component(operand) {
+        return Err(format!(
+            "{name}: cannot remove '{operand}': a trailing separator, `.` or `..` is refused, because it names what a link points at; name it without"
+        ));
+    }
+    let remote = crate::safety::names_a_remote_share(operand);
+    let meta = if remote {
+        None
+    } else {
+        Some(std::fs::symlink_metadata(operand))
+    };
+    if let Some(Err(e)) = &meta {
+        if e.kind() == std::io::ErrorKind::NotFound {
+            if force && name == "rm" {
+                return Ok(());
+            }
+            return Err(format!(
+                "{name}: cannot remove '{operand}': No such file or directory"
+            ));
+        }
+    }
+    let is_link = !remote && crate::safety::is_link(operand);
+    let is_dir = matches!(&meta, Some(Ok(m)) if m.is_dir());
+    let fail = |why: String| format!("{name}: cannot remove '{operand}': {why}");
+    if name == "rmdir" {
+        if is_link || !is_dir {
+            return Err(fail("Not a directory".into()));
+        }
+        return jailed_builtin(
+            "rmdir",
+            vec![Value::Str(operand.to_string()), Value::Bool(false)],
+        )
+        .map_err(fail);
+    }
+    if is_dir && !is_link {
+        if !recursive {
+            return Err(fail("Is a directory".into()));
+        }
+        return jailed_builtin(
+            "rmdir",
+            vec![Value::Str(operand.to_string()), Value::Bool(true)],
+        )
+        .map_err(fail);
+    }
+    jailed_builtin(
+        "rm",
+        vec![Value::Str(operand.to_string()), Value::Bool(force)],
+    )
+    .map_err(fail)
 }
 
 /// The characters of a `tr` set: ranges (`a-z`), the classes `[:upper:]`,
