@@ -3051,10 +3051,10 @@ pub static SIGNATURES: &[Signature] = &[
         subject_required: false,
         aliases: &["to-json"],
         subject: Some(Ty::Any),
-        params: &[opt_range("indent", Ty::Int, 0, 8, "spaces per nesting level, 0 to 8; 0 is compact")],
+        params: &[opt("indent", Ty::Any, "an Int, spaces per nesting level, 0 to 8 (0 is compact); or a Bool: true indents by 2, false is compact")],
         returns: "String",
-        doc: "Render a value as JSON text, compact, or indented by 1 to 8 spaces per level with an indent argument (0 is compact). The value is piped in or passed as the argument: to_json(v) or to_json(v, indent). A NaN or an infinity has no JSON form, so it is E_BAD_VALUE and the refusal names its path, such as value[0].v; it is not written as 0 or null.",
-        examples: &[(r#"[1, 2] | to_json"#, r#""[1,2]""#), (r#"to_json([1, 2])"#, r#""[1,2]""#), (r#"to_json([1, 2], 2) | lines | len"#, "4"), (r#"to_json([1, 2], 0)"#, r#""[1,2]""#), (r#"(try { to_json(from_toml("a = nan")) } catch e { e.error.code })"#, "E_BAD_VALUE")],
+        doc: "Render a value as JSON text, compact, or indented by 1 to 8 spaces per level with an indent argument (0 is compact; true is 2 spaces and false is compact; an Int outside 0 to 8 is E_BAD_ARG). The value is piped in or passed as the argument: to_json(v) or to_json(v, indent). A NaN or an infinity has no JSON form, so it is E_BAD_VALUE and the refusal names its path, such as value[0].v; it is not written as 0 or null.",
+        examples: &[(r#"[1, 2] | to_json"#, r#""[1,2]""#), (r#"to_json([1, 2])"#, r#""[1,2]""#), (r#"to_json([1, 2], 2) | lines | len"#, "4"), (r#"to_json([1, 2], 0)"#, r#""[1,2]""#), (r#"to_json([1, 2], true) | lines | len"#, "4"), (r#"to_json([1, 2], false)"#, r#""[1,2]""#), (r#"(try { to_json([1], 9) } catch e { e.error.code })"#, "E_BAD_ARG"), (r#"(try { to_json(from_toml("a = nan")) } catch e { e.error.code })"#, "E_BAD_VALUE")],
     },
     Signature {
         name: "ls",
