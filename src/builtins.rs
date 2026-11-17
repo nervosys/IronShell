@@ -4851,6 +4851,28 @@ fn expect_string<'a>(name: &str, v: &'a Value) -> Result<&'a str> {
     }
 }
 
+/// A callback argument as a lambda value: a Builtin (`sort_by(len)`) becomes
+/// `fn(x) => f(x)` with the builtin captured as `f`, so it is called with the
+/// element as its one argument. Any other value is passed through unchanged.
+fn callable(v: &Value) -> std::borrow::Cow<'_, Value> {
+    match v {
+        Value::Builtin(_) => {
+            let mut captured = BTreeMap::new();
+            captured.insert("__cb_f".to_string(), v.clone());
+            std::borrow::Cow::Owned(Value::Lambda(Lambda {
+                params: vec!["__cb_x".to_string()],
+                body: Box::new(crate::ast::Expr::Call {
+                    callee: Box::new(crate::ast::Expr::Ident("__cb_f".to_string())),
+                    args: vec![crate::ast::Expr::Ident("__cb_x".to_string())],
+                    named: Vec::new(),
+                }),
+                captured,
+            }))
+        }
+        other => std::borrow::Cow::Borrowed(other),
+    }
+}
+
 fn need_lambda<'a>(v: &'a Value, name: &str) -> Result<&'a Lambda> {
     if let Value::Lambda(l) = v {
         Ok(l)
@@ -5549,7 +5571,8 @@ fn bi_map(args: Vec<Value>, input: Option<Value>, env: &mut Env) -> Result<Value
     } else {
         arg("map", &args, 1, "a lambda")?
     };
-    let lam = need_lambda(lam_val, "map")?;
+    let lam_val = callable(lam_val);
+    let lam = need_lambda(&lam_val, "map")?;
     // The array is owned here -- piped or the first argument -- so it is
     // consumed, not copied. This cloned the whole input before starting and
     // then every element again for the lambda.
@@ -5600,7 +5623,8 @@ fn bi_where(args: Vec<Value>, input: Option<Value>, env: &mut Env) -> Result<Val
     } else {
         arg("where", &args, 1, "a lambda")?
     };
-    let lam = need_lambda(lam_val, "where")?;
+    let lam_val = callable(lam_val);
+    let lam = need_lambda(&lam_val, "where")?;
     // See `bi_map`: the array is consumed. Each element is moved into the
     // predicate and handed back, so a kept element is never copied.
     let arr_val = match input {
@@ -11006,7 +11030,7 @@ fn bi_group_object(args: Vec<Value>, input: Option<Value>, env: &mut Env) -> Res
     // lambdas by the time they arrive here.
     let property = match &args[0] {
         Value::Str(s) => Some(s),
-        Value::Lambda(_) => None,
+        Value::Lambda(_) | Value::Builtin(_) => None,
         _ => {
             return Err(crate::safety::arg_err(
                 "group_by: the key must be a field name String or a lambda",
@@ -11028,7 +11052,8 @@ fn bi_group_object(args: Vec<Value>, input: Option<Value>, env: &mut Env) -> Res
                     }
                 }
                 None => {
-                    let lam = need_lambda(&args[0], "group_by")?;
+                    let lam_val = callable(&args[0]);
+                    let lam = need_lambda(&lam_val, "group_by")?;
                     with_param_slots(lam, env, |env| {
                         for item in arr {
                             let key = call_lambda_one(lam, item.clone(), env, false)?.0;
@@ -15309,6 +15334,7 @@ fn bi_any(args: Vec<Value>, input: Option<Value>, env: &mut Env) -> Result<Value
 
     if let Some(pred_val) = predicate {
         // Use predicate function
+        let pred_val = callable(&pred_val);
         let predicate = need_lambda(&pred_val, "any")?;
 
         for val in arr {
@@ -15366,6 +15392,7 @@ fn bi_all(args: Vec<Value>, input: Option<Value>, env: &mut Env) -> Result<Value
 
     if let Some(pred_val) = predicate {
         // Use predicate function
+        let pred_val = callable(&pred_val);
         let predicate = need_lambda(&pred_val, "all")?;
 
         for val in arr {
@@ -28126,13 +28153,14 @@ fn bi_sort_by(args: Vec<Value>, input: Option<Value>, env: &mut Env) -> Result<V
     // the lambda form.
     let is_direction = |v: &Value| matches!(v, Value::Str(s) if s.eq_ignore_ascii_case("asc") || s.eq_ignore_ascii_case("desc"));
     let key = match positional.first() {
-        Some(v) if matches!(v, Value::Lambda(_)) => Some(v),
+        Some(v) if matches!(v, Value::Lambda(_) | Value::Builtin(_)) => Some(v),
         Some(v) if matches!(v, Value::Str(_)) && !(positional.len() == 1 && is_direction(v)) => {
             Some(v)
         }
         _ => None,
     };
-    let (lambda, field) = match key {
+    let key = key.map(callable);
+    let (lambda, field) = match key.as_deref() {
         Some(Value::Lambda(l)) => (Some(l), None),
         Some(Value::Str(s)) => (None, Some(s)),
         _ => {
@@ -28743,9 +28771,14 @@ fn bi_each(args: Vec<Value>, input: Option<Value>, env: &mut Env) -> Result<Valu
         })
         .ok_or_else(|| crate::safety::arg_err("each requires array input"))?;
 
-    let lambda = args
+    let callbacks: Vec<std::borrow::Cow<'_, Value>> = args
         .iter()
-        .find_map(|v| match v {
+        .filter(|v| matches!(v, Value::Lambda(_) | Value::Builtin(_)))
+        .map(callable)
+        .collect();
+    let lambda = callbacks
+        .iter()
+        .find_map(|v| match &**v {
             Value::Lambda(l) => Some(l),
             _ => None,
         })
