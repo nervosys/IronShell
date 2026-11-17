@@ -9,8 +9,9 @@
 //! gives the same answer on Linux, macOS and Windows. Every result uses `/`,
 //! on every platform. That departs from Python's `os.path`, which follows the
 //! host's separator: an agent's answer should not change with the machine it
-//! runs on. A drive is kept as a root (`C:/`). A UNC prefix is not special, so
-//! `\\server\share\x` is `/server/share/x`.
+//! runs on. A drive is kept as a root (`C:/`). A UNC path keeps its leading
+//! double separator, as Python's ntpath and posixpath keep one:
+//! `\\server\share\x` is `//server/share/x`.
 
 use crate::value::Value;
 use anyhow::Result;
@@ -21,8 +22,9 @@ fn is_sep(c: char) -> bool {
 }
 
 /// The root a path starts with, as text, and the rest of the path after it.
-/// The root is `/` for an absolute path, `C:/` for a drive-absolute one, and
-/// empty for a relative one.
+/// The root is `/` for an absolute path, `//` for a UNC path (exactly two
+/// separators, then a name), `C:/` for a drive-absolute one, and empty for a
+/// relative one.
 fn split_root(path: &str) -> (String, &str) {
     let bytes = path.as_bytes();
     if bytes.len() >= 3
@@ -31,6 +33,12 @@ fn split_root(path: &str) -> (String, &str) {
         && is_sep(bytes[2] as char)
     {
         return (format!("{}:/", bytes[0] as char), &path[3..]);
+    }
+    let mut chars = path.chars();
+    if let (Some(a), Some(b), Some(c)) = (chars.next(), chars.next(), chars.next()) {
+        if is_sep(a) && is_sep(b) && !is_sep(c) {
+            return ("//".to_string(), path);
+        }
     }
     if path.starts_with(is_sep) {
         return ("/".to_string(), path);
@@ -315,4 +323,29 @@ pub fn bi_path_split(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
     Ok(Value::Array(
         split_text(&path).into_iter().map(Value::Str).collect(),
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // String inputs only: a UNC path is never handed to a filesystem call.
+    #[test]
+    fn a_unc_path_keeps_its_leading_double_slash() {
+        assert_eq!(dirname_of(r"\srv\sh\f.txt"), "//srv/sh");
+        assert_eq!(dirname_of("//srv/sh/f.txt"), "//srv/sh");
+        assert_eq!(normalize_text(r"\srv\sh\f.txt"), "//srv/sh/f.txt");
+        assert_eq!(normalize_text(r"\srv\sh\.\a\..\f.txt"), "//srv/sh/f.txt");
+        assert_eq!(normalize_text(r"\srv\.."), "//");
+        assert_eq!(split_text(r"\srv\sh"), vec!["//", "srv", "sh"]);
+    }
+
+    #[test]
+    fn other_leading_separators_are_one_root() {
+        assert_eq!(dirname_of("/a/b"), "/a");
+        assert_eq!(dirname_of("///a/b"), "/a");
+        assert_eq!(normalize_text("///a//b"), "/a/b");
+        assert_eq!(normalize_text("//"), "/");
+        assert_eq!(normalize_text("/a"), "/a");
+    }
 }

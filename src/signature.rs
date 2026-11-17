@@ -8094,11 +8094,12 @@ pub static SIGNATURES: &[Signature] = &[
         subject: Some(Ty::Str),
         params: &[],
         returns: "String",
-        doc: "Everything above the last component of a path. A relative path with one component has the directory \".\"; the parent of a root is the root. Text only.",
+        doc: "Everything above the last component of a path. A relative path with one component has the directory \".\"; the parent of a root is the root. A UNC path keeps its leading //. Text only.",
         examples: &[
             (r#"path_dirname("a/b/c.txt")"#, r#""a/b""#),
             (r#"path_dirname("c.txt")"#, r#"".""#),
             (r#"path_dirname("/a")"#, r#""/""#),
+            (r#"path_dirname("//srv/sh/f.txt")"#, r#""//srv/sh""#),
         ],
     },
     Signature {
@@ -8137,11 +8138,12 @@ pub static SIGNATURES: &[Signature] = &[
         subject: Some(Ty::Str),
         params: &[],
         returns: "String",
-        doc: "Remove . parts, repeated separators and name/.. pairs, with / separators on every platform. Lexical: the disk is never read. A relative path keeps the .. it cannot resolve; an empty result is \".\".",
+        doc: "Remove . parts, repeated separators and name/.. pairs, with / separators on every platform. Lexical: the disk is never read. A relative path keeps the .. it cannot resolve; an empty result is \".\". A UNC path keeps its leading //.",
         examples: &[
             (r#"path_normalize("a/./b/../c//d/")"#, r#""a/c/d""#),
             (r#"path_normalize("../x/../../y")"#, r#""../../y""#),
             (r#"path_normalize("/../a")"#, r#""/a""#),
+            (r#"path_normalize("//srv/sh/./f.txt")"#, r#""//srv/sh/f.txt""#),
         ],
     },
     Signature {
