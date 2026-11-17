@@ -53,3 +53,35 @@ fn glob_with_a_trailing_slash_returns_only_directories() {
     assert!(deep.contains("deep"), "{deep}");
     assert!(!deep.contains(".txt"), "{deep}");
 }
+
+#[test]
+fn a_utf16_file_is_named_as_utf16_not_as_a_bad_byte() {
+    let dir = scratch("utf16");
+    let proj = dir.join("proj");
+    let mut le: Vec<u8> = vec![0xFF, 0xFE];
+    for u in "hi\n".encode_utf16() {
+        le.extend_from_slice(&u.to_le_bytes());
+    }
+    std::fs::write(proj.join("le.txt"), &le).expect("file");
+    let mut be: Vec<u8> = vec![0xFE, 0xFF];
+    for u in "hi\n".encode_utf16() {
+        be.extend_from_slice(&u.to_be_bytes());
+    }
+    std::fs::write(proj.join("be.txt"), &be).expect("file");
+    std::fs::write(proj.join("bin.dat"), [0x00u8, 0x9F, 0x92, 0x96]).expect("file");
+    for call in ["file.read", "open", "cat"] {
+        let out = ish_in(&proj, &format!(r#"{call}("le.txt")"#));
+        assert!(!out.status.success());
+        let t = text(&out);
+        assert!(
+            t.contains("is UTF-16 text (little-endian BOM)"),
+            "{call}: {t}"
+        );
+        assert!(t.contains("Set-Content -Encoding utf8"), "{call}: {t}");
+    }
+    let t = text(&ish_in(&proj, r#"file.read("be.txt")"#));
+    assert!(t.contains("is UTF-16 text (big-endian BOM)"), "{t}");
+    let t = text(&ish_in(&proj, r#"file.read("bin.dat")"#));
+    assert!(t.contains("is not UTF-8 text"), "{t}");
+    assert!(t.contains("crypto_hash_file"), "{t}");
+}

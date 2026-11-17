@@ -9425,13 +9425,29 @@ fn read_text_capped_at(builtin: &str, path: &std::path::Path, max: u64) -> Resul
 fn decode_text(builtin: &str, path: &std::path::Path, bytes: Vec<u8>) -> Result<String> {
     String::from_utf8(bytes).map_err(|e| {
         let offset = e.utf8_error().valid_up_to();
+        let shown = crate::safety::strip_verbatim_prefix(path).display().to_string();
+        // A UTF-16 file (Notepad and PowerShell 5 write them) starts with a BOM.
+        let utf16 = match e.as_bytes() {
+            [0xFF, 0xFE, ..] => Some("little-endian"),
+            [0xFE, 0xFF, ..] => Some("big-endian"),
+            _ => None,
+        };
+        if let Some(order) = utf16 {
+            return crate::safety::value_not_representable(
+                builtin,
+                format!(
+                    "{builtin}: `{shown}` is UTF-16 text ({order} BOM); convert it to UTF-8 first, e.g. in PowerShell: Get-Content f | Set-Content -Encoding utf8 f"
+                ),
+                "the file is UTF-16 text; it is refused, not decoded; convert it to UTF-8 first",
+            );
+        }
         crate::safety::value_not_representable(
             builtin,
             format!(
                 "{builtin}: `{}` is not UTF-8 text: the first byte that is not UTF-8 is at byte offset {offset}",
                 crate::safety::strip_verbatim_prefix(path).display()
             ),
-            "the file is not UTF-8 text; convert it to UTF-8 first",
+            "the file is not UTF-8 text; convert it to UTF-8 first; for a checksum of a binary file use crypto_hash_file(path)",
         )
     })
 }
