@@ -42,3 +42,32 @@ fn agent_output_that_was_redacted_says_so_on_stderr() {
     assert!(stderr.contains("redacted from the output"), "{stderr}");
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn a_brace_glob_sorts_across_alternatives() {
+    let dir = std::env::temp_dir().join(format!("ish_r51c_glob_{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    for name in ["a.py", "b.rs", "c.py", "d.rs"] {
+        std::fs::write(dir.join(name), "x").unwrap();
+    }
+    let pattern = format!(
+        "{}/*.{{rs,py}}",
+        dir.to_string_lossy().replace(char::from(92), "/")
+    );
+    let v = try_run(&format!("glob(\"{pattern}\")")).expect("glob runs");
+    let iron_shell::value::Value::Array(items) = v else {
+        panic!("not an array");
+    };
+    let names: Vec<String> = items
+        .iter()
+        .map(|i| {
+            i.to_display_string()
+                .rsplit('/')
+                .next()
+                .unwrap()
+                .to_string()
+        })
+        .collect();
+    assert_eq!(names, ["a.py", "b.rs", "c.py", "d.rs"]);
+    let _ = std::fs::remove_dir_all(&dir);
+}

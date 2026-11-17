@@ -33991,7 +33991,8 @@ fn has_glob_syntax(s: &str) -> bool {
 /// Expand a glob for a typed builtin: `**` is recursive, results sort by
 /// bytes, and a literal directory prefix that does not exist is E_NOT_FOUND
 /// rather than an empty answer that reads like "no files". A `{a,b}` group
-/// matches either alternative (`*.{rs,py}`); a path matched twice appears once.
+/// matches either alternative (`*.{rs,py}`); a path matched twice appears once,
+/// and the combined result is sorted by bytes, not grouped by alternative.
 fn expand_glob_for(builtin: &str, pattern: &str) -> Result<Vec<String>> {
     // `glob` reads braces strictly: an unbalanced one is a mistyped pattern,
     // not a name to look for, and a one-alternative group is the alternative.
@@ -34023,6 +34024,9 @@ fn expand_glob_for(builtin: &str, pattern: &str) -> Result<Vec<String>> {
             }
         }
     }
+    // Each alternative came back sorted on its own; sort the whole answer by
+    // bytes, as a single non-brace glob returns it, not grouped by alternative.
+    out.sort();
     Ok(out)
 }
 
