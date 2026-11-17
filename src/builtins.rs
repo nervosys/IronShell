@@ -4092,6 +4092,12 @@ fn mapped_spelling(name: &str) -> Vec<String> {
         "normpath" => vec!["path_normalize".to_string()],
         "abspath" => vec!["path_is_absolute".to_string(), "fs_realpath".to_string()],
         "join_path" | "joinpath" | "path_combine" => vec!["path_join".to_string()],
+        // A file's digest is crypto_hash_file(path[, algorithm]); a keyed one is
+        // crypto_hmac(data, key[, algorithm]).
+        "file_hash" | "hash_file" | "sha256sum" | "checksum" | "file_checksum" => {
+            vec!["crypto_hash_file".to_string()]
+        }
+        "hmac" => vec!["crypto_hmac".to_string()],
         _ => Vec::new(),
     }
 }

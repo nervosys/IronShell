@@ -85,3 +85,21 @@ fn a_utf16_file_is_named_as_utf16_not_as_a_bad_byte() {
     assert!(t.contains("is not UTF-8 text"), "{t}");
     assert!(t.contains("crypto_hash_file"), "{t}");
 }
+
+#[test]
+fn file_digest_and_hmac_spellings_name_the_crypto_builtins() {
+    for name in [
+        "file_hash",
+        "hash_file",
+        "sha256sum",
+        "checksum",
+        "file_checksum",
+    ] {
+        let dym = iron_shell::builtins::did_you_mean(name);
+        assert_eq!(dym, vec!["crypto_hash_file".to_string()], "{name}");
+    }
+    assert_eq!(
+        iron_shell::builtins::did_you_mean("hmac"),
+        vec!["crypto_hmac".to_string()]
+    );
+}
