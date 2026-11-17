@@ -9761,7 +9761,7 @@ pub static SIGNATURES: &[Signature] = &[
             (r#"(glob("src/*.rs") | len) > 10"#, r#"true"#),
             (r#"(glob("src/**/*.rs") | len) > (glob("src/*.rs") | len)"#, r#"true"#),
             (r#"glob("Cargo.tom?")"#, r#"["Cargo.toml"]"#),
-            (r#"glob("Cargo.{toml,lock}")"#, r#"["Cargo.toml", "Cargo.lock"]"#),
+            (r#"glob("Cargo.{toml,lock}")"#, r#"["Cargo.lock", "Cargo.toml"]"#),
             (r#"glob("Cargo.{toml}")"#, r#"["Cargo.toml"]"#),
             (r#"(try { glob("**/{*.rs,*.py") } catch e { e.error.code })"#, "E_BAD_ARG"),
         ],
