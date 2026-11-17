@@ -17328,7 +17328,7 @@ fn bi_int(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
             {
                 return Err(crate::safety::value_not_representable(
                     "int",
-                    format!("int: {} has no Int value", crate::value::float_text(f)),
+                    format!("int: {} has no Int value", crate::value::float_text(*f)),
                     "an Int holds whole numbers from -9223372036854775808 to 9223372036854775807",
                 ));
             }
