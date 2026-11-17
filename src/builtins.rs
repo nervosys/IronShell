@@ -33346,10 +33346,14 @@ fn expand_glob_for(builtin: &str, pattern: &str) -> Result<Vec<String>> {
     if over {
         return Err(walk_over(builtin, WALK_MAX_ENTRIES));
     }
+    // A pattern ending in `/` matches directories only, as Python's glob does;
+    // the match keeps its trailing slash.
+    let dirs_only = pattern.ends_with('/');
     // A match that resolves outside the workspace (through a link, say) is not
     // returned.
     Ok(paths
         .into_iter()
+        .filter(|p| !dirs_only || std::path::Path::new(p.trim_end_matches('/')).is_dir())
         .filter(|p| !crate::security::outside_read_jail(p))
         .collect())
 }
