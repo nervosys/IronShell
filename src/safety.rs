@@ -4546,8 +4546,19 @@ pub fn is_link(path: &str) -> bool {
         && std::fs::symlink_metadata(path).is_ok_and(|m| m.file_type().is_symlink())
 }
 
+/// Whether the last component of `path`, as written, is `.` or `..`.
+pub fn path_ends_in_dot_component(path: &str) -> bool {
+    let last = path.rsplit(['/', '\\']).next().unwrap_or("");
+    last == "." || last == ".."
+}
+
 /// The folder a link sits in, when `path` names a link. `None` otherwise.
 fn link_leaf_parent(path: &str) -> Option<String> {
+    // Only a path whose last component, as written, is a name: `jx/.` and
+    // `jx/..` name what the link points at, though `Path` drops the `.`.
+    if path_ends_in_dot_component(path) {
+        return None;
+    }
     // A relative path is placed where `within_root` places it (the workspace
     // root), not against the process's working directory.
     let abs = absolute_form(path);

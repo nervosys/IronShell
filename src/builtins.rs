@@ -69230,10 +69230,10 @@ pub fn bi_rm(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
     let force = fs_flag("rm", "force", args.get(1))?;
     // A trailing separator names what a link points at, not the link, so it
     // could be read as a request to follow it. Refused before anything else.
-    if path.ends_with(['/', '\\']) {
+    if path.ends_with(['/', '\\']) || crate::safety::path_ends_in_dot_component(&path) {
         return Err(crate::safety::bad_arg_with_hint(
             "rm",
-            "a file or link name with no trailing separator",
+            "a file or link name with no trailing separator, `.` or `..`",
             &format!("'{path}'"),
             "name the file or link without a trailing / or \\; to remove a directory use rmdir",
         ));
