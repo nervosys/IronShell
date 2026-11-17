@@ -30531,7 +30531,7 @@ fn pid_arg(builtin: &str, v: Option<&Value>) -> Result<i64> {
         Some(p) if p > 0 && p <= i64::from(u32::MAX) => Ok(p),
         _ => Err(crate::safety::bad_arg(
             builtin,
-            "a process id: a positive integer (0 and negatives address groups of processes)",
+            "a process id greater than 0 (0 and negative ids name process groups on Unix and are not single processes)",
             &v.map(|v| v.to_display_string())
                 .unwrap_or_else(|| "nothing".into()),
         )),
