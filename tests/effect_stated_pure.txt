@@ -134,7 +134,6 @@ input_multiselect
 input_number
 input_progress
 input_read_char
-input_read_line
 input_select
 input_spinner
 input_table

@@ -253,3 +253,17 @@ fn item11_sort_and_platform_normalize_path_docs() {
     assert!(text(r#"help("platform_normalize_path").description"#).contains("does not resolve"));
     assert!(text(r#"help("platform_normalize_path").description"#).contains("path_normalize"));
 }
+
+// ---- item 12: input_read_line needs a UI ----
+
+#[test]
+fn item12_input_read_line_is_classed_like_the_other_interactive_reads() {
+    assert_eq!(
+        format!("{:?}", iron_shell::safety::effect_of("input_read_line")),
+        format!("{:?}", iron_shell::safety::effect_of("input_read_password"))
+    );
+    assert_eq!(
+        format!("{:?}", iron_shell::safety::effect_of("input_read_line")),
+        "Exec"
+    );
+}

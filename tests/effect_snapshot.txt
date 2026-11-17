@@ -610,7 +610,7 @@ input_multiselect	Pure
 input_number	Pure
 input_progress	Pure
 input_read_char	Pure
-input_read_line	Pure
+input_read_line	Exec
 input_read_password	Exec
 input_select	Pure
 input_spinner	Pure
