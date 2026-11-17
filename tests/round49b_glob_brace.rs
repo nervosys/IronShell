@@ -37,7 +37,8 @@ fn brace_alternation_matches_either_extension() {
     let dir = scratch("ext");
     assert_eq!(
         run(&dir, r#"glob("**/*.{rs,py}")"#),
-        r#"["a.rs","b.py","src/d.rs"]"#
+        // Each alternative's matches in turn, as bash's brace expansion orders them.
+        r#"["a.rs","src/d.rs","b.py"]"#
     );
 }
 
