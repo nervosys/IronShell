@@ -943,6 +943,19 @@ pub fn explain(code: &str) -> Result<Value> {
                     "effect".to_string(),
                     Value::Str(effect.as_str().to_string()),
                 );
+                // The path arguments the run's jail would judge, as written.
+                if matches!(
+                    effect,
+                    Effect::ReadLocal | Effect::WriteLocal | Effect::Destructive
+                ) {
+                    let paths = crate::security::judged_path_literals(b, literals, piped);
+                    if !paths.is_empty() {
+                        r.insert(
+                            "paths".to_string(),
+                            Value::Array(paths.into_iter().map(Value::Str).collect()),
+                        );
+                    }
+                }
                 r.insert("decision".to_string(), Value::Str(decision.to_string()));
                 if let Some(hint) = refused {
                     r.insert("hint".to_string(), Value::Str(hint));

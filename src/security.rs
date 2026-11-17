@@ -773,6 +773,23 @@ pub fn outside_path_literal(
     literals: &[(LiteralSlot, String)],
     piped: bool,
 ) -> Option<String> {
+    judged_path_literals(builtin, literals, piped)
+        .into_iter()
+        .find(|s| {
+            let exists = !crate::safety::names_a_remote_share(s) && Path::new(s.as_str()).exists();
+            let judged = if exists { s.as_str() } else { glob_base(s) };
+            outside_read_jail_as_agent(judged)
+        })
+}
+
+/// The literal String arguments of a call that the jail judges as paths when
+/// the call runs, as written, in order: what `--explain` shows as the call's
+/// `paths`.
+pub fn judged_path_literals(
+    builtin: &str,
+    literals: &[(LiteralSlot, String)],
+    piped: bool,
+) -> Vec<String> {
     // `sql` and `sql_value` take a source file first only when a query follows
     // it; with one argument that argument is the query.
     let sql_source = !piped
@@ -826,12 +843,8 @@ pub fn outside_path_literal(
         .into_iter()
         .filter(|s| !s.is_empty() && s.len() <= 4096 && !s.contains(['\n', '\0']))
         .filter(|s| !(TAKES_REMOTE.contains(&builtin) && (is_url(s) || is_remote_spec(s))))
-        .find(|s| {
-            let exists = !crate::safety::names_a_remote_share(s) && Path::new(s.as_str()).exists();
-            let judged = if exists { s.as_str() } else { glob_base(s) };
-            outside_read_jail_as_agent(judged)
-        })
         .cloned()
+        .collect()
 }
 
 /// Whether the argument at `slot` of a call to `builtin` is one the jail

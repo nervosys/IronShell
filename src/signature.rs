@@ -2276,6 +2276,34 @@ pub static SIGNATURES: &[Signature] = &[
         ],
     },
     Signature {
+        name: "count_by",
+        category: None,
+        subject_required: false,
+        aliases: &[],
+        subject: Some(Ty::Array),
+        params: &[req("key", Ty::Any, "field name String to count on, or a lambda (or .field) called per row whose result is the key")],
+        returns: "Array",
+        doc: r#"Count rows by a key, as {key, count} records sorted by count descending, then by the key's text: `rows | count_by(.state)`, `rows | count_by("state")`, `rows | count_by(fn(r) => r.user)`. The subject is piped or the first argument. The key keeps its type (Int 1 and String "1" are counted apart), and a row without the field counts under the key "". It is the short form of `group_by(key) | map(...) | sort_by("count", "desc")`."#,
+        examples: &[
+            (
+                r#"[{u: "a"}, {u: "b"}, {u: "b"}] | count_by("u")"#,
+                r#"[{count: 2, key: "b"}, {count: 1, key: "a"}]"#,
+            ),
+            (
+                r#"[{u: "b"}, {u: "a"}] | count_by(.u) | map(fn(r) => r.key)"#,
+                r#"["a", "b"]"#,
+            ),
+            (
+                r#"count_by([1, 2, 1, 1], fn(x) => x) | first | fn(r) => r.count"#,
+                "3",
+            ),
+            (
+                r#"(try { [1] | count_by() } catch e { e.error.code })"#,
+                "E_BAD_ARG",
+            ),
+        ],
+    },
+    Signature {
         name: "avg",
         category: None,
         subject_required: false,
@@ -3026,10 +3054,10 @@ pub static SIGNATURES: &[Signature] = &[
         subject_required: false,
         aliases: &["to-json"],
         subject: Some(Ty::Any),
-        params: &[opt_range("indent", Ty::Int, 0, 8, "spaces per nesting level, 0 to 8; 0 is compact")],
+        params: &[opt("indent", Ty::Any, "an Int, spaces per nesting level, 0 to 8 (0 is compact); or a Bool: true indents by 2, false is compact")],
         returns: "String",
-        doc: "Render a value as JSON text, compact, or indented by 1 to 8 spaces per level with an indent argument (0 is compact). The value is piped in or passed as the argument: to_json(v) or to_json(v, indent). A NaN or an infinity has no JSON form, so it is E_BAD_VALUE and the refusal names its path, such as value[0].v; it is not written as 0 or null.",
-        examples: &[(r#"[1, 2] | to_json"#, r#""[1,2]""#), (r#"to_json([1, 2])"#, r#""[1,2]""#), (r#"to_json([1, 2], 2) | lines | len"#, "4"), (r#"to_json([1, 2], 0)"#, r#""[1,2]""#), (r#"(try { to_json(from_toml("a = nan")) } catch e { e.error.code })"#, "E_BAD_VALUE")],
+        doc: "Render a value as JSON text, compact, or indented by 1 to 8 spaces per level with an indent argument (0 is compact; true is 2 spaces and false is compact; an Int outside 0 to 8 is E_BAD_ARG). The value is piped in or passed as the argument: to_json(v) or to_json(v, indent). A NaN or an infinity has no JSON form, so it is E_BAD_VALUE and the refusal names its path, such as value[0].v; it is not written as 0 or null.",
+        examples: &[(r#"[1, 2] | to_json"#, r#""[1,2]""#), (r#"to_json([1, 2])"#, r#""[1,2]""#), (r#"to_json([1, 2], 2) | lines | len"#, "4"), (r#"to_json([1, 2], 0)"#, r#""[1,2]""#), (r#"to_json([1, 2], true) | lines | len"#, "4"), (r#"to_json([1, 2], false)"#, r#""[1,2]""#), (r#"(try { to_json([1], 9) } catch e { e.error.code })"#, "E_BAD_ARG"), (r#"(try { to_json(from_toml("a = nan")) } catch e { e.error.code })"#, "E_BAD_VALUE")],
     },
     Signature {
         name: "ls",
@@ -3298,10 +3326,10 @@ pub static SIGNATURES: &[Signature] = &[
         subject_required: false,
         aliases: &[],
         subject: None,
-        params: &[req("pattern", Ty::Str, "a basic regular expression: ^ and $ anchor, . is any character; + ? | ( ) { } are literal unless backslashed (\\+ \\? \\| \\( \\) \\{ \\}); there is no grep -E, so use regex_match for extended syntax"), opt("path", Ty::Str, "file to search; omit to search the piped text"), opt("options", Ty::Record, "{line_numbers: true} returns {file, line, text} records instead of lines; line counts from 1 in each file, and file is null for piped text")],
+        params: &[req("pattern", Ty::Str, "a basic regular expression: ^ and $ anchor, . is any character; + ? | ( ) { } are literal unless backslashed (\\+ \\? \\| \\( \\) \\{ \\}); so TODO|FIXME matches nothing; write TODO\\|FIXME, or pass {extended: true}"), opt("path", Ty::Str, "file or glob to search; omit to search the piped text"), opt("options", Ty::Record, "{line_numbers: true} returns {file, line, text} records instead of lines; line counts from 1 in each file, and file is null for piped text; {extended: true} reads the pattern as an extended regex (grep -E: bare | + ? ( ) { })")],
         returns: "Array",
-        doc: "Lines matching a basic regular expression; a back-reference such as \\1 is refused, and a pattern that does not compile says why. With {line_numbers: true} each match is a record {file, line, text} instead, the line numbered from 1 within its file (null for piped text).",
-        examples: &[(r#"grep("fn main", "src/main.rs") | len"#, "1"), (r#"(grep("fn", "src/main.rs") | len) > 0"#, "true"), (r#"grep("^version", "Cargo.toml") | len"#, "1"), (r#"grep("^version", "Cargo.toml", {line_numbers: true}) | first | fn(r) => r.file"#, r#""Cargo.toml""#), (r#""a\nb\na" | grep("a", {line_numbers: true}) | last | fn(r) => r.line"#, "3")],
+        doc: "Lines matching a basic regular expression (BRE, as grep without -E: `|` is literal, so `grep(\"TODO|FIXME\", f)` matches nothing; write `\\|` or pass {extended: true}). There is no recursive option; grep a glob (`src/**/*.rs`) or use search.grep. A back-reference such as \\1 is refused, and a pattern that does not compile says why. With {line_numbers: true} each match is a record {file, line, text} instead, the line numbered from 1 within its file (null for piped text).",
+        examples: &[(r#"grep("fn main", "src/main.rs") | len"#, "1"), (r#"(grep("fn", "src/main.rs") | len) > 0"#, "true"), (r#"grep("^version", "Cargo.toml") | len"#, "1"), (r#"grep("^version", "Cargo.toml", {line_numbers: true}) | first | fn(r) => r.file"#, r#""Cargo.toml""#), (r#""a\nb\na" | grep("a", {line_numbers: true}) | last | fn(r) => r.line"#, "3"), (r#""TODO x\nok\nFIXME y" | grep("TODO\\|FIXME") | len"#, "2"), (r#""TODO x\nok\nFIXME y" | grep("TODO|FIXME", {extended: true}) | len"#, "2"), (r#""TODO|FIXME\nTODO" | grep("TODO|FIXME") | len"#, "1")],
     },
     Signature {
         name: "find",
@@ -9708,11 +9736,12 @@ pub static SIGNATURES: &[Signature] = &[
         subject: None,
         params: &[req("pattern", Ty::Str, "a glob such as src/*.rs or src/**/*.rs")],
         returns: "Array",
-        doc: "Paths matching a glob, sorted; ** matches any depth of directories, and a directory in the pattern that does not exist is E_NOT_FOUND. At most 1,000,000 entries; more is E_BUDGET_EXCEEDED.",
+        doc: "Paths matching a glob, sorted; ** matches any depth of directories, `{a,b}` matches either alternative (`**/*.{rs,py}`; nested groups work, and a path matched twice appears once), and a directory in the pattern that does not exist is E_NOT_FOUND. At most 1,000,000 entries; more is E_BUDGET_EXCEEDED.",
         examples: &[
             (r#"(glob("src/*.rs") | len) > 10"#, r#"true"#),
             (r#"(glob("src/**/*.rs") | len) > (glob("src/*.rs") | len)"#, r#"true"#),
             (r#"glob("Cargo.tom?")"#, r#"["Cargo.toml"]"#),
+            (r#"glob("Cargo.{toml,lock}")"#, r#"["Cargo.toml", "Cargo.lock"]"#),
         ],
     },
     Signature {
@@ -11310,7 +11339,7 @@ pub static SIGNATURES: &[Signature] = &[
             },
         ],
         returns: "Bool",
-        doc: "Create a tar archive at a new path from the given members, and return true. The archive is streamed to a new file, so an existing one is refused rather than truncated; in agent mode or when a workspace is set (`--workspace` or IRONSHELL_WORKSPACE) it is jailed to the workspace, and it is capped in size and deadlined; a partial archive is removed on failure. Names that could be read as options are refused. Piped input is refused. A member inside the current directory is stored by its relative path as written (normalised, never with `..`); one outside it, or the current directory itself, under its last path component, with its tree below that for a folder, so no absolute path is stored (zip_create stores every member under its last component). The journal step for the call is the archive it creates.",
+        doc: "Create a tar archive at a new path from the given members, and return true. The archive is streamed to a new file, so an existing one is refused rather than truncated; in agent mode or when a workspace is set (`--workspace` or IRONSHELL_WORKSPACE) it is jailed to the workspace, and it is capped in size and deadlined; a partial archive is removed on failure. Names that could be read as options are refused. Piped input is refused. A member inside the current directory is stored by its relative path as written (normalised, never with `..`); one outside it under its last path component, with its tree below that for a folder, so no absolute path is stored. The member `.` (the current directory) stores its contents directly (`src/main.rs`, not `proj/src/main.rs`), as `tar -cf x .` does. A folder named `.ironshell` (IronShell's own state: journal, audit log) found while walking a folder is skipped; name it as a member to archive it. (zip_create stores every other member under its last component.) The journal step for the call is the archive it creates.",
         examples: &[
             (r#"(try { tar_create("a.tar") } catch e { e.error.code })"#, "E_BAD_ARG"),
             (r#"(try { tar_create("-x.tar", "f") } catch e { e.error.code })"#, "E_BAD_ARG"),
@@ -12102,7 +12131,7 @@ pub static SIGNATURES: &[Signature] = &[
             rest("files", Ty::Str, "one or more files to add"),
         ],
         returns: "Bool",
-        doc: "Create a zip archive from files and folders, in-process on every platform. A folder is stored with everything in it, empty folders included; each member is stored under its last path component (tar_create keeps a relative path inside the current directory as written, and uses the last component only for a member outside it). An existing archive is refused (use zip_add); a missing member is E_NOT_FOUND; two members with one stored name are E_BAD_ARG. A failed run removes the archive it started.",
+        doc: "Create a zip archive from files and folders, in-process on every platform. A folder is stored with everything in it, empty folders included; each member is stored under its last path component, except `.` (the current directory), whose contents are stored directly; a folder named `.ironshell` (IronShell's own state) found inside a folder being walked is skipped, and archived only when named as a member (tar_create keeps a relative path inside the current directory as written, and uses the last component only for a member outside it). An existing archive is refused (use zip_add); a missing member is E_NOT_FOUND; two members with one stored name are E_BAD_ARG. A failed run removes the archive it started.",
         examples: &[
             (r#"(try { zip_create("out.zip", "no-such-file.txt") } catch e { e.error.code })"#, "E_NOT_FOUND"),
             (r#"(try { zip_create("out.zip") } catch e { e.error.code })"#, "E_BAD_ARG"),

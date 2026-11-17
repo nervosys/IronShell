@@ -66,6 +66,7 @@ concat
 consensus_net
 consensus_vote
 contains
+count_by
 crossover_strategy
 crypto_hex_decode
 crypto_hex_encode

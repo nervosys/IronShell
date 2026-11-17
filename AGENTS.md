@@ -167,12 +167,14 @@ open("issues.json") | where(fn(r) => (r.title | lower | contains("x")) || (r.bod
 # `|.field` projects, `open` parses by extension (JSON, JSONL, TOML, YAML, CSV, TSV)
 open("issues.json") | where(.state == "open" && .comments > 5) |.number
 open("Cargo.toml").package.version
-cat("src/*.rs") | lines | len          # globs in cat/ls; glob("src/**/*.rs")
+cat("src/*.rs") | lines | len          # globs in cat/ls; glob("src/**/*.rs"); {a,b} alternation: glob("**/*.{rs,py}")
+grep("TODO\\|FIXME", "src/*.rs")       # grep is BRE (as grep without -E): a bare | + ? ( ) { } is literal, so "TODO|FIXME" matches nothing; write \\| or pass {extended: true}; no recursive option, grep a glob
 
 # SQL over values or files (read-only, in-process)
 open("issues.json") | sql("select user, count(*) as n from t group by user")
 sql_value("issues.json", "select count(*) from issues where state = 'open'")
-# SQL stores a Bool as 1/0, so Bool values come back from sql as 1 and 0; select * returns each row's columns in sorted key order
+open("issues.json") | count_by(.user)  # [{key, count}] sorted by count descending; the short form of group_by + sort_by("Count", "desc")
+# SQL stores a Bool as 1/0, so Bool values come back from sql as 1 and 0; every sql row (not only select *) has its columns in sorted key order, because a Record sorts its keys: to control the order prefix the aliases (a_region, b_rev) or write the table with to_csv(rows, [cols])
 
 # Check effects before running
 explain_effects("rm(\"x\")")            # or: ish --explain -c '...'

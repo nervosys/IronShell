@@ -233,6 +233,7 @@ consensus_net	Pure
 consensus_vote	Pure
 contains	Pure
 copy_file	WriteLocal
+count_by	Pure
 cp	WriteLocal
 create_role	Privileged
 cron_add	Exec

@@ -809,6 +809,8 @@ lazy_static::lazy_static! {
         // JSON lines (1213-1214)
         map.insert("from_jsonl", 1213);
         map.insert("to_jsonl", 1214);
+        // Counting rows by a key (1215)
+        map.insert("count_by", 1215);
         // 500-519: Database
         map.insert("db_sqlite_open", 500);
         map.insert("db_sqlite_query", 501);
@@ -3905,6 +3907,8 @@ static BUILTIN_DISPATCH: &[fn(Vec<Value>, Option<Value>, &mut Env) -> Result<Val
     // JSON lines
     |args, input, _| bi_from_jsonl(args, input), // 1213
     |args, input, _| bi_to_jsonl(args, input),   // 1214
+    // Counting rows by a key
+    |args, input, env| bi_count_by(args, input, env), // 1215
 ];
 
 /// The dispatch row that serves `name`, if the fast table has one.
@@ -9172,7 +9176,7 @@ fn bi_ls(args: Vec<Value>, _input: Option<Value>) -> Result<Value> {
 
     // `ls("src/*.rs")` lists the matches themselves, as `ls src/*.rs` does.
     let paths: Vec<std::path::PathBuf> =
-        if crate::posix::has_glob_meta(&path_str) && !std::path::Path::new(&path_str).exists() {
+        if has_glob_syntax(&path_str) && !std::path::Path::new(&path_str).exists() {
             expand_glob_for("ls", &path_str)?
                 .into_iter()
                 .map(std::path::PathBuf::from)
@@ -9317,7 +9321,7 @@ fn read_named_files(builtin: &str, path_str: &str) -> Result<String> {
 /// Each file a path names, with its text, in order: a glob names every file it
 /// matches, and any other path names itself. `read_named_files` joins these.
 fn read_named_file_list(builtin: &str, path_str: &str) -> Result<Vec<(String, String)>> {
-    if crate::posix::has_glob_meta(path_str) && !std::path::Path::new(path_str).exists() {
+    if has_glob_syntax(path_str) && !std::path::Path::new(path_str).exists() {
         let paths = expand_glob_for(builtin, path_str)?;
         let files: Vec<&String> = paths
             .iter()
@@ -10029,7 +10033,7 @@ fn bi_grep(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
         .any(|arg| matches!(arg, Value::Str(s) if s == "-v" || s == "--invert-match"));
 
     // The options Record, when there is one, is read before the source is.
-    let line_numbers = grep_line_numbers(&args)?;
+    let (line_numbers, extended) = grep_options(&args)?;
 
     // Each source is its file's name (None for piped text) and its text. A
     // glob searches each file on its own, so a match can name the file.
@@ -10085,13 +10089,19 @@ fn bi_grep(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
     // now what grep takes: a POSIX basic regular expression.
     // A back-reference (\1 to \9) is the one BRE form the translation refuses.
     // Any other failure is the regex compiler's, and its reason is what to fix.
-    let translated = crate::posix::bre_to_regex(pattern).ok_or_else(|| {
-        crate::safety::bad_arg_in(
-            "grep",
-            format!("grep: {pattern:?} has a back-reference, which grep does not support"),
-            "remove the \\1 to \\9 back-reference; to match an extended regex, use regex_match",
-        )
-    })?;
+    // With {extended: true} the pattern is an extended regular expression
+    // (grep -E): it is handed to the regex engine as written.
+    let translated = if extended {
+        pattern.clone()
+    } else {
+        crate::posix::bre_to_regex(pattern).ok_or_else(|| {
+            crate::safety::bad_arg_in(
+                "grep",
+                format!("grep: {pattern:?} has a back-reference, which grep does not support"),
+                "remove the \\1 to \\9 back-reference; to match an extended regex, pass {extended: true}",
+            )
+        })?
+    };
     let re = regex::RegexBuilder::new(&translated)
         .case_insensitive(case_insensitive)
         .build()
@@ -10108,7 +10118,7 @@ fn bi_grep(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
             crate::safety::bad_arg_in(
                 "grep",
                 format!("grep: {pattern:?} is not a valid regular expression: {reason}"),
-                "grep takes a basic regular expression: + ? | ( ) { } are literal unless backslashed, so write \\( and \\| for groups and alternatives; for an extended regex, use regex_match",
+                "grep takes a basic regular expression: + ? | ( ) { } are literal unless backslashed, so write \\( and \\| for groups and alternatives, or pass {extended: true} to write them bare (TODO|FIXME)",
             )
         })?;
     let mut matching: Vec<Value> = Vec::new();
@@ -10135,37 +10145,47 @@ fn bi_grep(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
     Ok(Value::Array(matching))
 }
 
-/// The options Record of `grep`, when one is given after the pattern. Its only
-/// key is `line_numbers`, a Bool; any other key or value is a bad argument.
-fn grep_line_numbers(args: &[Value]) -> Result<bool> {
+/// The options Record of `grep`, when one is given after the pattern: its keys
+/// are `line_numbers` and `extended`, both Bools (`extended` reads the pattern
+/// as an extended regular expression, as `grep -E` does). Any other key or
+/// value is a bad argument. Returns `(line_numbers, extended)`.
+fn grep_options(args: &[Value]) -> Result<(bool, bool)> {
     let mut line_numbers = false;
+    let mut extended = false;
     for arg in args.iter().skip(1) {
         if let Value::Record(options) = arg {
             for (key, value) in options {
                 match (key.as_str(), value) {
                     ("line_numbers", Value::Bool(on)) => line_numbers = *on,
-                    ("line_numbers", other) => {
+                    ("extended", Value::Bool(on)) => extended = *on,
+                    ("line_numbers" | "extended", other) => {
                         return Err(crate::safety::bad_arg_in(
                             "grep",
-                            format!(
-                                "grep: line_numbers must be a Bool, got {}",
-                                other.type_name()
-                            ),
-                            "pass {line_numbers: true} or {line_numbers: false}",
+                            format!("grep: {key} must be a Bool, got {}", other.type_name()),
+                            &format!("pass {{{key}: true}} or {{{key}: false}}"),
+                        ))
+                    }
+                    ("recursive" | "r" | "R", _) => {
+                        return Err(crate::safety::bad_arg_in(
+                            "grep",
+                            format!("grep: unknown option {key}; grep searches one file or glob"),
+                            "for a recursive search use a glob, grep(\"TODO\", \"src/**/*.rs\"), or search.grep(pattern) (search_grep), which walks the project",
                         ))
                     }
                     _ => {
                         return Err(crate::safety::bad_arg_in(
                             "grep",
-                            format!("grep: unknown option {key}; grep takes line_numbers"),
-                            "the options Record takes one key: {line_numbers: true}",
+                            format!(
+                                "grep: unknown option {key}; grep takes line_numbers and extended"
+                            ),
+                            "the options Record takes line_numbers and extended: {line_numbers: true, extended: true}",
                         ))
                     }
                 }
             }
         }
     }
-    Ok(line_numbers)
+    Ok((line_numbers, extended))
 }
 
 /// The files `grep(pattern, path)` searches, each with its text. The path is
@@ -11086,6 +11106,100 @@ fn bi_group_object(args: Vec<Value>, input: Option<Value>, env: &mut Env) -> Res
             "group_by: the rows must be an Array",
         )),
     }
+}
+
+/// count_by(key): how many rows have each key, as {key, count} records sorted by
+/// count descending, then by the key's text. The key is a field name String or a
+/// lambda (`.field` arrives as one), read as `group_by` reads it; the subject is
+/// piped or the first argument. Rows share a count only when the key's text and
+/// type both match; a row without the field counts under the key "".
+fn bi_count_by(args: Vec<Value>, input: Option<Value>, env: &mut Env) -> Result<Value> {
+    let (input, args) = match input {
+        Some(v) => (v, args),
+        None => {
+            let mut args = args;
+            if args.is_empty() {
+                return Err(crate::safety::bad_arg_with_hint(
+                    "count_by",
+                    "an Array of rows and a key",
+                    "nothing",
+                    r#"pass the rows and a key: count_by(rows, "field") or rows | count_by(.field)"#,
+                ));
+            }
+            let subject = args.remove(0);
+            (subject, args)
+        }
+    };
+    if args.len() != 1 {
+        return Err(crate::safety::bad_arg_with_hint(
+            "count_by",
+            "one key: a field name String or a lambda",
+            &format!("{} arguments", args.len()),
+            r#"pass the key: rows | count_by("field") or rows | count_by(fn(r) => r.field)"#,
+        ));
+    }
+    let property = match &args[0] {
+        Value::Str(s) => Some(s),
+        Value::Lambda(_) => None,
+        other => {
+            return Err(crate::safety::bad_arg_with_hint(
+                "count_by",
+                "a field name String or a lambda as the key",
+                other.type_name(),
+                r#"pass the key: rows | count_by("field") or rows | count_by(.field)"#,
+            ))
+        }
+    };
+    let rows = match input {
+        Value::Array(arr) => arr,
+        other => {
+            return Err(crate::safety::bad_arg(
+                "count_by",
+                "an Array of rows",
+                other.type_name(),
+            ))
+        }
+    };
+
+    let mut keys: Vec<Value> = Vec::with_capacity(rows.len());
+    match property {
+        Some(property) => {
+            for item in &rows {
+                keys.push(get_property_value(item, property));
+            }
+        }
+        None => {
+            let lam = need_lambda(&args[0], "count_by")?;
+            with_param_slots(lam, env, |env| {
+                for item in rows {
+                    keys.push(call_lambda_one(lam, item, env, false)?.0);
+                }
+                Ok(())
+            })?;
+        }
+    }
+
+    // One entry per (text, type) key: the first key seen, and its count.
+    let mut counts: BTreeMap<(String, &'static str), (Value, i64)> = BTreeMap::new();
+    for key in keys {
+        let slot = (value_to_string(&key), key.type_name());
+        counts.entry(slot).or_insert((key, 0)).1 += 1;
+    }
+    let mut ordered: Vec<((String, &'static str), (Value, i64))> = counts.into_iter().collect();
+    // BTreeMap order is by text then type, so a stable sort on count alone
+    // leaves ties in that order.
+    ordered.sort_by(|a, b| b.1 .1.cmp(&a.1 .1));
+    Ok(Value::Array(
+        ordered
+            .into_iter()
+            .map(|(_, (key, count))| {
+                Value::Record(BTreeMap::from([
+                    ("key".to_string(), key),
+                    ("count".to_string(), Value::Int(count)),
+                ]))
+            })
+            .collect(),
+    ))
 }
 
 /// Measure-Object: PowerShell-style count and, for one property, its statistics.
@@ -33577,10 +33691,79 @@ fn fold_glob_case(pattern: &str) -> String {
         .join("/")
 }
 
+/// Expand the first `{a,b,...}` group of `pattern` that has a top-level comma,
+/// recursively, into every pattern it stands for, in order. A group with no
+/// comma (`{}`, `{a}`) and an unmatched brace stay literal.
+fn brace_alternatives(pattern: &str) -> Vec<String> {
+    let chars: Vec<char> = pattern.chars().collect();
+    let mut i = 0;
+    while i < chars.len() {
+        if chars[i] == '{' {
+            // Find the matching close, noting the commas at this nesting level.
+            let mut depth = 0usize;
+            let mut commas = Vec::new();
+            let mut close = None;
+            for (j, &c) in chars.iter().enumerate().skip(i) {
+                match c {
+                    '{' => depth += 1,
+                    '}' => {
+                        depth -= 1;
+                        if depth == 0 {
+                            close = Some(j);
+                            break;
+                        }
+                    }
+                    ',' if depth == 1 => commas.push(j),
+                    _ => {}
+                }
+            }
+            if let (Some(close), false) = (close, commas.is_empty()) {
+                let prefix: String = chars[..i].iter().collect();
+                let suffix: String = chars[close + 1..].iter().collect();
+                let mut starts = vec![i + 1];
+                starts.extend(commas.iter().map(|c| c + 1));
+                let mut ends = commas.clone();
+                ends.push(close);
+                let mut out = Vec::new();
+                for (s, e) in starts.into_iter().zip(ends) {
+                    let alt: String = chars[s..e].iter().collect();
+                    out.extend(brace_alternatives(&format!("{prefix}{alt}{suffix}")));
+                }
+                return out;
+            }
+        }
+        i += 1;
+    }
+    vec![pattern.to_string()]
+}
+
+/// True when a path string is a glob: it has a wildcard, or a `{a,b}` group.
+fn has_glob_syntax(s: &str) -> bool {
+    crate::posix::has_glob_meta(s) || brace_alternatives(s).len() > 1
+}
+
 /// Expand a glob for a typed builtin: `**` is recursive, results sort by
 /// bytes, and a literal directory prefix that does not exist is E_NOT_FOUND
-/// rather than an empty answer that reads like "no files".
+/// rather than an empty answer that reads like "no files". A `{a,b}` group
+/// matches either alternative (`*.{rs,py}`); a path matched twice appears once.
 fn expand_glob_for(builtin: &str, pattern: &str) -> Result<Vec<String>> {
+    let alternatives = brace_alternatives(pattern);
+    if alternatives.len() <= 1 {
+        return expand_glob_one(builtin, pattern);
+    }
+    let mut seen = std::collections::HashSet::new();
+    let mut out = Vec::new();
+    for alt in alternatives {
+        for p in expand_glob_one(builtin, &alt)? {
+            if seen.insert(p.clone()) {
+                out.push(p);
+            }
+        }
+    }
+    Ok(out)
+}
+
+fn expand_glob_one(builtin: &str, pattern: &str) -> Result<Vec<String>> {
     crate::security::check_share_egress(builtin, pattern)?;
     // Windows callers may write either separator; globbing is done on `/`.
     let pattern = pattern.replace(char::from(92), "/");
@@ -39668,6 +39851,16 @@ fn zip_file_args(builtin: &str, args: &[Value]) -> Result<Vec<String>> {
     Ok(files)
 }
 
+/// The name of IronShell's own state folder (journal, audit log, sessions).
+const STATE_DIR_NAME: &str = ".ironshell";
+
+/// True for a folder entry named `.ironshell`. An archive walk skips it, so
+/// `tar_create("all.tar.gz", ".")` does not carry the journal and audit log
+/// (absolute paths, the principal). Naming it as a member archives it.
+fn is_state_dir(k: &std::fs::DirEntry) -> bool {
+    k.file_name() == STATE_DIR_NAME && k.path().is_dir()
+}
+
 /// What a zip write has taken in so far: the entry names (a name may be stored
 /// once), the source bytes read, and the entry count.
 struct ZipBuild {
@@ -39727,6 +39920,9 @@ fn zip_add_tree(
         }
         kids.sort_by_key(|k| k.file_name());
         for k in kids {
+            if is_state_dir(&k) {
+                continue;
+            }
             let p = k.path();
             let is_link = std::fs::symlink_metadata(&p)
                 .map(|m| m.file_type().is_symlink())
@@ -39776,8 +39972,33 @@ fn zip_write_archive(
         bytes: 0,
         entries: 0,
     };
+    let cwd = crate::journal::normalized_path(&crate::safety::resolve_path_str("."));
     for m in members {
         let p = std::path::Path::new(m);
+        // The current folder itself: its contents are stored directly, as
+        // `zip -r x .` does, not under the folder's own name.
+        if crate::journal::normalized_path(m) == cwd {
+            let mut kids = Vec::new();
+            for k in std::fs::read_dir(p).map_err(|e| crate::safety::fs_error(builtin, m, &e))? {
+                kids.push(k.map_err(|e| crate::safety::fs_error(builtin, m, &e))?);
+            }
+            kids.sort_by_key(|k| k.file_name());
+            for k in kids {
+                if is_state_dir(&k) {
+                    continue;
+                }
+                let kp = k.path();
+                let is_link = std::fs::symlink_metadata(&kp)
+                    .map(|md| md.file_type().is_symlink())
+                    .unwrap_or(false);
+                if is_link && kp.is_dir() {
+                    continue;
+                }
+                let leaf = k.file_name().to_string_lossy().into_owned();
+                zip_add_tree(builtin, &mut w, &kp, &leaf, &mut st)?;
+            }
+            continue;
+        }
         let leaf = p
             .file_name()
             .map(|n| n.to_string_lossy().into_owned())
@@ -40851,6 +41072,9 @@ fn tar_add_tree<W: std::io::Write>(
         }
         kids.sort_by_key(|k| k.file_name());
         for k in kids {
+            if is_state_dir(&k) {
+                continue;
+            }
             let leaf = k.file_name().to_string_lossy().into_owned();
             let child = if name.is_empty() {
                 leaf
@@ -40918,8 +41142,9 @@ fn tar_write_members<W: std::io::Write>(
 /// How `tar_create` stores one member: the directory tar is run from, and the
 /// name it stores. A member inside the current directory is stored as its path
 /// from it (normalised, so `./a/../b` is `b`, and never with `..`); one outside
-/// it, or the current directory itself, under its last component, with its tree
-/// below that for a folder. The name never starts with `-`, so tar reads it as a
+/// it, under its last component, with its tree below that for a folder; the
+/// current directory itself (`.`) has its contents stored directly, with no
+/// folder name above them. The name never starts with `-`, so tar reads it as a
 /// name, and always uses `/`.
 fn tar_member_name(member: &str) -> (String, String) {
     let base = crate::journal::normalized_path(&crate::safety::resolve_path_str("."));
@@ -40931,6 +41156,11 @@ fn tar_member_name(member: &str) -> (String, String) {
         .filter(|rel| rel.components().next().is_some())
     {
         Some(rel) => (base.clone(), rel.to_path_buf()),
+        // The current folder itself: its contents are stored directly, as
+        // `tar -cf x .` does, not under the folder's own name.
+        None if abs_path == std::path::Path::new(&base) => {
+            (base.clone(), std::path::PathBuf::from("."))
+        }
         None => match (abs_path.parent(), abs_path.file_name()) {
             (Some(parent), Some(last)) => (
                 parent.to_string_lossy().into_owned(),
