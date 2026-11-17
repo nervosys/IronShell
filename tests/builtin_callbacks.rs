@@ -27,18 +27,18 @@ fn map_takes_a_builtin() {
 
 #[test]
 fn where_any_all_each_and_group_by_take_a_builtin() {
-    // `exists` tests a path: Cargo.toml is in the crate root, where tests run.
+    // `path_is_absolute` answers a Bool from a String alone (text only, no I/O).
     assert_eq!(
-        run("[\"Cargo.toml\", \"no_such_zz\"] | where(exists)"),
-        strs(&["Cargo.toml"]),
+        run("[\"/abs\", \"rel\"] | where(path_is_absolute)"),
+        strs(&["/abs"]),
         "where"
     );
     assert_eq!(
-        run("[\"Cargo.toml\", \"no_such_zz\"] | any(exists)"),
+        run("[\"/abs\", \"rel\"] | any(path_is_absolute)"),
         Value::Bool(true)
     );
     assert_eq!(
-        run("[\"Cargo.toml\", \"no_such_zz\"] | all(exists)"),
+        run("[\"/abs\", \"rel\"] | all(path_is_absolute)"),
         Value::Bool(false)
     );
     assert_eq!(run("[\"a\", \"b\"] | each(len)"), strs(&["a", "b"]));
