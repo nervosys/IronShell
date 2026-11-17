@@ -174,8 +174,22 @@ fn item5_explain_resolves_module_and_underscore_spellings() {
 
 #[test]
 fn item6_help_ai_has_top_level_parameters_and_members() {
-    assert_eq!(text(r#"help("ai").parameters | first | .name"#), "prompt");
+    assert_eq!(text(r#"(help("ai").parameters)[0].name"#), "prompt");
     assert!(text(r#"help("ai").signature"#).contains("ai("));
     assert!(matches!(run(r#"help("ai").members"#), Value::Array(_)));
     assert!(matches!(run(r#"help("ai").builtin"#), Value::Record(_)));
+}
+
+// ---- item 7: cut takes an Array of Ints as its fields ----
+
+#[test]
+fn item7_cut_accepts_an_array_of_ints() {
+    assert_eq!(
+        run(r#"cut(",", [1, 3], "a,b,c")"#),
+        Value::Array(vec![Value::Str("a,c".into())])
+    );
+    assert!(
+        text(r#"try { cut(",", [1, "x"], "a,b,c") } catch e { e.message }"#)
+            .contains("an Array of Ints")
+    );
 }

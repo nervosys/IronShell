@@ -77098,7 +77098,7 @@ fn bi_awk_process(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
 
 /// cut — Extract columns/fields from text (cross-platform, native Rust).
 /// Usage: cut(delimiter, fields, input_text) or piped: text | cut(delimiter, fields)
-/// fields is a string like "1,3" or "1-3" (1-based)
+/// fields is a string like "1,3" or "1-3" (1-based), an Int, or an Array of Ints
 fn bi_cut_columns(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
     if input.is_some() && args.len() > 2 {
         return Err(crate::safety::arg_err(
@@ -77116,9 +77116,24 @@ fn bi_cut_columns(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
     let fields_spec = match args.get(1) {
         Some(Value::Str(s)) => s.clone(),
         Some(Value::Int(n)) => n.to_string(),
+        // [1, 3] is "1,3": an Array of Ints names the fields one by one.
+        Some(Value::Array(items)) if !items.is_empty() => {
+            let mut parts = Vec::with_capacity(items.len());
+            for item in items {
+                match item {
+                    Value::Int(n) => parts.push(n.to_string()),
+                    _ => {
+                        return Err(crate::safety::arg_err(
+                            "cut fields is an Int, an Array of Ints, or a String like \"1,3\" or \"1-3\"",
+                        ))
+                    }
+                }
+            }
+            parts.join(",")
+        }
         _ => {
             return Err(crate::safety::arg_err(
-                "cut requires a fields specification (e.g., '1,3' or '1-3')",
+                "cut fields is an Int, an Array of Ints, or a String like \"1,3\" or \"1-3\"",
             ))
         }
     };

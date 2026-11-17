@@ -779,9 +779,9 @@ pub static SIGNATURES: &[Signature] = &[
     },
     Signature {
         name: "cut", category: None, subject_required: false, aliases: &["cut_columns"], subject: None,
-        params: &[req("delimiter", Ty::Str, "literal delimiter, including empty or multi-character strings"), req("fields", Ty::Any, "positive Int or comma-separated positive indices and ascending inclusive ranges"), opt("text", Ty::Str, "required direct text; omitted with piped String")], returns: "Array<String>",
+        params: &[req("delimiter", Ty::Str, "literal delimiter, including empty or multi-character strings"), req("fields", Ty::Any, "positive Int, an Array of positive Ints, or a String of comma-separated positive indices and ascending inclusive ranges"), opt("text", Ty::Str, "required direct text; omitted with piped String")], returns: "Array<String>",
         doc: "Extract fields from each text line. Direct cut(delimiter,fields,text), or text | cut(delimiter,fields). Fields are one-based; preserve specification order and duplicates, and omit missing fields. Trim whitespace around comma-separated specifications; reject zero, negative, malformed, descending or unrepresentable fields. Bound expanded selections to 10000 entries before allocation. Split on a literal delimiter and join selected fields with it. Normalize line endings and omit a trailing empty line. Refuse conflicting direct text and pipeline input.",
-        examples: &[(r#"cut(",", "3,1,3", "a,b,c")"#, r#"["c,a,c"]"#), (r#""a::b::c\nx::y" | cut("::", "2-3")"#, r#"["b::c", "y"]"#), (r#""a,b" | cut(",", 1)"#, r#"["a"]"#)],
+        examples: &[(r#"cut(",", "3,1,3", "a,b,c")"#, r#"["c,a,c"]"#), (r#""a::b::c\nx::y" | cut("::", "2-3")"#, r#"["b::c", "y"]"#), (r#""a,b" | cut(",", 1)"#, r#"["a"]"#), (r#"cut(",", [3, 1], "a,b,c")"#, r#"["c,a"]"#)],
     },
     Signature {
         name: "tail", category: None, subject_required: false, aliases: &[], subject: Some(Ty::Any),
