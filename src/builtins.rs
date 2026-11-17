@@ -25992,6 +25992,13 @@ fn journal_rows(entries: &[crate::journal::Entry]) -> Vec<Value> {
             // `id` is the value undo({id: N}) takes; `seq` is the same number.
             m.insert("id".to_string(), Value::Int(e.seq as i64));
             m.insert("seq".to_string(), Value::Int(e.seq as i64));
+            // The call the row belongs to: rows of one call (a move or an
+            // extraction changes several paths) share a step, and `undo(n)`
+            // counts steps. A call that changed one path is its own step.
+            m.insert(
+                "step".to_string(),
+                Value::Int(e.group.unwrap_or(e.seq) as i64),
+            );
             m.insert("builtin".to_string(), Value::Str(e.builtin.clone()));
             m.insert("effect".to_string(), Value::Str(e.effect.clone()));
             if !e.path.is_empty() {

@@ -124,12 +124,18 @@ fn b4_zip_create_of_dot_does_not_store_itself_and_zip_list_has_path_and_kind() {
     let text = out(&o);
     assert!(o.status.success(), "{text}");
     assert!(text.contains("src/main.rs:file"), "{text}");
-    assert!(text.contains("src:dir") || text.contains("src/:dir"), "{text}");
+    assert!(
+        text.contains("src:dir") || text.contains("src/:dir"),
+        "{text}"
+    );
     assert!(!text.contains("r.zip"), "{text}");
     // zip_add of the folder holding the archive skips the archive too.
     let o = ish_in(&dir, r#"zip_add("out/r.zip", "out")"#);
     assert!(o.status.success(), "{}", out(&o));
-    let o = ish_in(&dir, r#"zip_list("out/r.zip") | map(fn(e) => e.name) | join(",")"#);
+    let o = ish_in(
+        &dir,
+        r#"zip_list("out/r.zip") | map(fn(e) => e.name) | join(",")"#,
+    );
     assert!(!out(&o).contains("r.zip"), "{}", out(&o));
 }
 
@@ -150,5 +156,36 @@ fn b6_file_replace_reports_the_path_as_written_in_both_modes() {
             agent,
         );
         assert!(o.status.success(), "{}", out(&o));
+    }
+}
+
+#[test]
+fn b7_journal_rows_carry_the_step_of_their_call() {
+    let dir = scratch("b7");
+    let code = r#"file.write("a.txt", "x"); file.write("b.txt", "y"); mv("a.txt", "c.txt"); journal().entries | map(fn(e) => "${e.builtin}:${e.step}") | join(",")"#;
+    let o = Command::new(env!("CARGO_BIN_EXE_ish"))
+        .args(["-c", code])
+        .current_dir(dir.join("proj"))
+        .env("IRONSHELL_SESSION_DIR", dir.join("session"))
+        .env("IRONSHELL_JOURNAL", "on")
+        .env("NO_COLOR", "1")
+        .env_remove("IRONSHELL_MODE")
+        .env_remove("IRONSHELL_AGENT")
+        .env_remove("IRONSHELL_WORKSPACE")
+        .output()
+        .expect("run ish");
+    let text = out(&o);
+    assert!(o.status.success(), "{text}");
+    // Every row has a step; the move's two rows share one.
+    let rows: Vec<&str> = text.trim().trim_matches('"').split(',').collect();
+    assert!(rows.len() >= 3, "{text}");
+    let steps: Vec<&str> = rows.iter().filter_map(|r| r.rsplit(':').next()).collect();
+    assert_eq!(steps.len(), rows.len(), "{text}");
+    let moves: Vec<&&str> = rows
+        .iter()
+        .filter(|r| r.starts_with("mv:") || r.starts_with("file_move:"))
+        .collect();
+    if moves.len() == 2 {
+        assert_eq!(moves[0], moves[1], "{text}");
     }
 }
