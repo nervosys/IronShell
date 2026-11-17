@@ -5845,6 +5845,30 @@ fn bi_values(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
     }
 }
 
+/// An aggregate's Float result (`sum`, `avg`, `product`), refused with the
+/// `E_BAD_VALUE` that `+` raises when it is not finite.
+fn aggregate_float(name: &str, x: f64) -> Result<Value> {
+    if x.is_finite() {
+        Ok(Value::Float(x))
+    } else {
+        Err(crate::safety::value_not_representable(
+            name,
+            format!("{name}: float overflow: the result is not a finite number"),
+            "the largest Float is about 1.8e308; scale the values down, or split the computation",
+        ))
+    }
+}
+
+/// The `E_BAD_VALUE` for an aggregate whose Int result does not fit in 64
+/// bits, the code `+` uses for the same overflow.
+fn aggregate_int_overflow(name: &str) -> anyhow::Error {
+    crate::safety::value_not_representable(
+        name,
+        format!("{name}: integer overflow: the result does not fit in a 64-bit Int"),
+        "write one element as a Float (2.0, not 2) to get a Float result, or split the computation",
+    )
+}
+
 fn bi_sum(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
     let arr = if let Some(input_val) = input {
         input_val
@@ -5868,13 +5892,9 @@ fn bi_sum(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
                         if has_float {
                             float_sum += n as f64;
                         } else {
-                            int_sum = int_sum.checked_add(n).ok_or_else(|| {
-                                crate::safety::bad_arg(
-                                    "sum",
-                                    "a sum within Int range",
-                                    "integer overflow",
-                                )
-                            })?;
+                            int_sum = int_sum
+                                .checked_add(n)
+                                .ok_or_else(|| aggregate_int_overflow("sum"))?;
                         }
                     }
                     Value::Float(f) => {
@@ -5894,7 +5914,7 @@ fn bi_sum(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
             }
 
             if has_float {
-                Ok(Value::Float(float_sum))
+                aggregate_float("sum", float_sum)
             } else {
                 Ok(Value::Int(int_sum))
             }
@@ -6027,7 +6047,7 @@ fn bi_avg(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
                 }
             }
 
-            Ok(Value::Float(sum / items.len() as f64))
+            aggregate_float("avg", sum / items.len() as f64)
         }
         _ => Err(crate::safety::arg_err(format!(
             "avg: requires an Array, got {}",
@@ -6223,13 +6243,9 @@ fn bi_product(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
                         if has_float {
                             float_product *= n as f64;
                         } else {
-                            int_product = int_product.checked_mul(n).ok_or_else(|| {
-                                crate::safety::bad_arg(
-                                    "product",
-                                    "a product within Int range",
-                                    "integer overflow",
-                                )
-                            })?;
+                            int_product = int_product
+                                .checked_mul(n)
+                                .ok_or_else(|| aggregate_int_overflow("product"))?;
                         }
                     }
                     Value::Float(f) => {
@@ -6250,7 +6266,7 @@ fn bi_product(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
             }
 
             if has_float {
-                Ok(Value::Float(float_product))
+                aggregate_float("product", float_product)
             } else {
                 Ok(Value::Int(int_product))
             }
@@ -8351,7 +8367,7 @@ fn bi_aggregate_results(args: Vec<Value>, input: Option<Value>) -> Result<Value>
                     }
                 }
             }
-            Ok(Value::Float(sum))
+            aggregate_float("aggregate_results", sum)
         }
         "count" => Ok(Value::Int(results.len() as i64)),
         "first" | "last" => {

@@ -27,7 +27,6 @@ math.sum([m, 1])",
     ] {
         let err = try_run(src).expect_err(src);
         let text = err.to_string();
-        assert!(text.contains("sum within Int range"), "{src}: {text}");
         assert!(text.contains("integer overflow"), "{src}: {text}");
     }
 }
