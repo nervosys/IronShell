@@ -25918,11 +25918,19 @@ fn undo_force(builtin: &str, args: &[Value]) -> Result<bool> {
                         ))
                     }
                     // Read by undo_id, which takes the id of one step.
-                    ("id", _) if builtin == "undo" => {}
+                    ("id" | "step", _) if builtin == "undo" => {}
                     _ => {
-                        return Err(crate::safety::arg_err(format!(
-                            "{builtin} unknown option {key}"
-                        )))
+                        let valid = if builtin == "undo" {
+                            "id, step and force"
+                        } else {
+                            "force"
+                        };
+                        return Err(crate::safety::bad_arg_with_hint(
+                            builtin,
+                            &format!("an option among {valid}"),
+                            key,
+                            &format!("{builtin} takes the options {valid}"),
+                        ));
                     }
                 }
             }
@@ -25948,6 +25956,47 @@ fn undo_id(builtin: &str, args: &[Value]) -> Result<Option<usize>> {
         let Value::Record(options) = arg else {
             continue;
         };
+        // `{step: N}` names a step as journal()'s `step` field shows it: the
+        // rows of one call share it. Any row of the step undoes the whole
+        // step, so it is turned into the id of the step's first row.
+        if builtin == "undo" {
+            if let Some(value) = options.get("step") {
+                if options.contains_key("id") {
+                    return Err(crate::safety::arg_err(
+                        "undo takes {id: n} or {step: n}, not both",
+                    ));
+                }
+                let step = match value {
+                    Value::Int(n) if *n >= 1 => *n as usize,
+                    Value::Str(s) => s
+                        .trim()
+                        .parse::<usize>()
+                        .ok()
+                        .filter(|n| *n >= 1)
+                        .ok_or_else(|| {
+                            crate::safety::bad_arg(
+                                builtin,
+                                "step: the Int step a journal row shows, from 1",
+                                &value.to_display_string(),
+                            )
+                        })?,
+                    _ => {
+                        return Err(crate::safety::bad_arg(
+                            builtin,
+                            "step: the Int step a journal row shows, from 1",
+                            &value.to_display_string(),
+                        ))
+                    }
+                };
+                let seq = crate::journal::entries()
+                    .iter()
+                    .find(|e| e.group.unwrap_or(e.seq) == step)
+                    .map(|e| e.seq)
+                    .ok_or_else(|| crate::safety::journal_step_not_found(builtin, step))?;
+                id = Some(seq);
+                continue;
+            }
+        }
         let Some(value) = options.get("id") else {
             continue;
         };
