@@ -3335,6 +3335,9 @@ impl Shell {
                         "{SHELL_NAME}: {name} is not part of ish -b's in-process subset, so it runs only as a program of that name on PATH, and none was found"
                     ));
                 }
+                if let Some(alt) = ish_alternative(name) {
+                    sink.eline(&alt);
+                }
                 if let Some(hint) = windows_tools_hint() {
                     sink.eline(&hint);
                 }
@@ -3536,7 +3539,14 @@ fn resolve_program(
     if !cfg!(windows) {
         return match path_program(name) {
             Some(p) => Ok(p.to_string_lossy().into_owned()),
-            None => Err((127, format!("{SHELL_NAME}: {name}: command not found"))),
+            None => {
+                let mut msg = format!("{SHELL_NAME}: {name}: command not found");
+                if let Some(alt) = ish_alternative(name) {
+                    msg.push('\n');
+                    msg.push_str(&alt);
+                }
+                Err((127, msg))
+            }
         };
     }
     if let Some(p) = gnu_program(name) {
@@ -3570,6 +3580,10 @@ fn resolve_program(
         msg.push_str(&hint);
     }
     Err((2, msg))
+    if let Some(alt) = ish_alternative(name) {
+        msg.push('\n');
+        msg.push_str(&alt);
+    }
 }
 
 /// On Windows, the refusal for a sed command the subset declines when no sed is
@@ -3577,6 +3591,20 @@ fn resolve_program(
 /// gate has asked for approval of a program that is not installed; this gives
 /// it first. `None` when this is not that case. A sed that is on PATH still goes
 /// through the gate, which then checks that it is GNU.
+/// The hint line naming the ish builtin that does what the subset's missing
+/// `name` would, for a command the subset does not run: `cp` and `mv` are
+/// builtins of that name, and `find`'s `-name` with `-o` is `glob` with a
+/// `{a,b}` alternation. `None` for any other name.
+fn ish_alternative(name: &str) -> Option<String> {
+    let alt = match name {
+        "cp" => r#"cp("a", "b")"#,
+        "mv" => r#"mv("a", "b")"#,
+        "find" => r#"glob("**/*.{rs,py}")"#,
+        _ => return None,
+    };
+    Some(format!("  hint: in ish, use {alt} (ish -c '...')"))
+}
+
 fn sed_missing_refusal(argv: &[String], why: Option<&str>) -> Option<String> {
     if !cfg!(windows) || argv[0] != "sed" {
         return None;
