@@ -24,3 +24,21 @@ fn undo_takes_id_or_step_not_both() {
     let e = try_run("undo({id: 1, step: 1})").unwrap_err().to_string();
     assert!(e.contains("not both"), "{e}");
 }
+
+#[test]
+fn agent_output_that_was_redacted_says_so_on_stderr() {
+    let dir = std::env::temp_dir().join(format!("ish_r51c_redact_{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_ish"))
+        .args(["--agent", "-c", r#""password=hunter2hunter2""#])
+        .env("IRONSHELL_SESSION_DIR", &dir)
+        .env_remove("IRONSHELL_REDACT")
+        .output()
+        .expect("runs ish");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(!stdout.contains("hunter2hunter2"), "{stdout}");
+    assert!(stdout.contains("[REDACTED]"), "{stdout}");
+    assert!(stderr.contains("redacted from the output"), "{stderr}");
+    let _ = std::fs::remove_dir_all(&dir);
+}

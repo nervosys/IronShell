@@ -25802,7 +25802,18 @@ pub fn render_agent(v: &Value, budget: Option<usize>) -> Option<String> {
     // Owned when redacted, so a handle can take it without a copy. With
     // redaction off the caller's value is borrowed and a handle copies it once.
     let v = if crate::safety::redaction_enabled() {
-        std::borrow::Cow::Owned(redact_value(v))
+        let _ = take_redacted_count();
+        let redacted = redact_value(v);
+        // Say so on stderr, so a `[REDACTED]` in the output is not mistaken for
+        // the file's own text. The output itself is unchanged.
+        let n = take_redacted_count();
+        if n > 0 {
+            eprintln!(
+                "ish: {n} secret{} redacted from the output as [REDACTED]; IRONSHELL_REDACT=off shows raw values",
+                if n == 1 { "" } else { "s" }
+            );
+        }
+        std::borrow::Cow::Owned(redacted)
     } else {
         std::borrow::Cow::Borrowed(v)
     };
@@ -26368,6 +26379,24 @@ pub fn handle_summary_for_agent(v: &Value) -> Option<Value> {
     Some(Value::Record(out))
 }
 
+thread_local! {
+    /// How many values `redact_value` replaced on this thread since the count
+    /// was last taken, so the agent can be told that its output was scrubbed.
+    static REDACTED_COUNT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// Count one redaction when `changed`.
+fn note_redacted(changed: bool) {
+    if changed {
+        REDACTED_COUNT.with(|c| c.set(c.get() + 1));
+    }
+}
+
+/// The redactions counted since the last call, and reset the count.
+fn take_redacted_count() -> usize {
+    REDACTED_COUNT.with(|c| c.replace(0))
+}
+
 /// Recursively redact known secret shapes from a value before it is rendered to
 /// an agent. Scalar strings are shape-scrubbed (API-key prefixes, JWTs, PEM
 /// blocks, URL credentials, `key=secret` assignments) via `safety::redact_str`;
@@ -26377,11 +26406,13 @@ pub fn handle_summary_for_agent(v: &Value) -> Option<Value> {
 pub fn redact_value(v: &Value) -> Value {
     match v {
         Value::Str(s) => {
-            let (r, _) = crate::safety::redact_str(s);
+            let (r, changed) = crate::safety::redact_str(s);
+            note_redacted(changed);
             Value::Str(r)
         }
         Value::Uri(s) => {
-            let (r, _) = crate::safety::redact_str(s);
+            let (r, changed) = crate::safety::redact_str(s);
+            note_redacted(changed);
             Value::Uri(r)
         }
         Value::Array(items) => Value::Array(items.iter().map(redact_value).collect()),
@@ -26402,6 +26433,7 @@ fn redact_field_map(
     let mut out = std::collections::BTreeMap::new();
     for (k, val) in m {
         if crate::safety::is_secret_name(k) && redactable_by_name(val) {
+            note_redacted(true);
             out.insert(
                 k.clone(),
                 Value::Str(crate::safety::REDACTION_MARKER.to_string()),
