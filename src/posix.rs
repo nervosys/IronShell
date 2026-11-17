@@ -3330,7 +3330,7 @@ impl Shell {
             Ok(c) => c,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
                 sink.eline(&format!("{SHELL_NAME}: {name}: command not found"));
-                if matches!(&*name, "cp" | "mv" | "rm" | "xargs" | "unzip") {
+                if matches!(name, "cp" | "mv" | "rm" | "xargs" | "unzip") {
                     sink.eline(&format!(
                         "{SHELL_NAME}: {name} is not part of ish -b's in-process subset, so it runs only as a program of that name on PATH, and none was found"
                     ));
