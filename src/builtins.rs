@@ -5564,6 +5564,12 @@ fn bi_map(args: Vec<Value>, input: Option<Value>, env: &mut Env) -> Result<Value
     // own `v.clone()`) to keep the retry path alive. The lambda knows its own
     // arity, so ask it once.
     let two_arg = lam.params.len() == 2;
+    // The output is as long as the input: refuse before allocating it when the
+    // memory budget cannot hold it.
+    crate::memory::reserve(
+        "map",
+        items.len().saturating_mul(std::mem::size_of::<Value>()),
+    )?;
     let mut out = Vec::with_capacity(items.len());
     if items.is_empty() {
         return Ok(Value::Array(out));
@@ -16042,6 +16048,10 @@ fn bi_range(args: Vec<Value>, _input: Option<Value>) -> Result<Value> {
         ));
     }
 
+    crate::memory::reserve(
+        "range",
+        (count as usize).saturating_mul(std::mem::size_of::<Value>()),
+    )?;
     let mut result = Vec::with_capacity(count as usize);
     for i in 0..count {
         // Each element lies between start and end, so it fits in i64.

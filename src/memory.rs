@@ -117,6 +117,29 @@ pub fn check() -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Fail with `E_BUDGET_EXCEEDED` when allocating `bytes` more would take live
+/// bytes past the budget. Called before a large collection is allocated, so the
+/// refusal comes first and the system allocator is never asked for what the
+/// budget would not allow (a failed allocation aborts the process).
+pub fn reserve(builtin: &str, bytes: usize) -> anyhow::Result<()> {
+    let limit = LIMIT.load(Ordering::Relaxed);
+    if limit == usize::MAX {
+        return Ok(());
+    }
+    let live = LIVE.load(Ordering::Relaxed);
+    if live.saturating_add(bytes) > limit {
+        return Err(crate::safety::budget_exceeded(
+            builtin,
+            format!(
+                "allocating {bytes} bytes with {live} already live would pass the memory budget of {} MB",
+                limit / (1024 * 1024)
+            ),
+            "work on the data in smaller pieces, or raise the budget with --memory-limit MB or IRONSHELL_MEMORY_LIMIT_MB",
+        ));
+    }
+    Ok(())
+}
+
 #[cold]
 fn over(limit: usize) -> anyhow::Error {
     crate::safety::budget_exceeded(

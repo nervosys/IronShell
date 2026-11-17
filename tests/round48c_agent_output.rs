@@ -76,3 +76,21 @@ fn deterministic_floats_keep_their_point_in_exponent_form() {
         assert_eq!(out.trim(), want, "{code}: {err}");
     }
 }
+
+#[test]
+fn a_big_map_near_the_memory_limit_is_refused_not_aborted() {
+    let dir = session("memlimit");
+    let (out, err) = ish(
+        &dir,
+        &[
+            "--agent",
+            "--memory-limit",
+            "300",
+            "-c",
+            "arr.range(4000000) | map(fn(i) => i * 2) | len",
+        ],
+    );
+    let all = format!("{out}{err}");
+    assert!(all.contains("E_BUDGET_EXCEEDED"), "{all}");
+    assert!(!all.contains("memory allocation of"), "{all}");
+}
