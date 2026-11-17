@@ -151,3 +151,21 @@ fn item4_from_csv_refuses_text_after_a_closing_quote() {
         "he said \"hi\""
     );
 }
+
+// ---- item 5: explain resolves names as help does ----
+
+#[test]
+fn item5_explain_resolves_module_and_underscore_spellings() {
+    let dotted = text(r#"explain("file.read").name"#);
+    let under = text(r#"explain("file_read").name"#);
+    assert!(!dotted.is_empty());
+    assert_eq!(dotted, under);
+    assert_eq!(
+        text(r#"try { explain("zz_no_such_thing_r48") } catch e { e.error.code }"#),
+        "E_NOT_FOUND"
+    );
+    assert!(
+        text(r#"try { explain("zz_no_such_thing_r48") } catch e { e.error.hint }"#)
+            .contains("complete(")
+    );
+}

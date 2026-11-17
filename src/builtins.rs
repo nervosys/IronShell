@@ -12539,12 +12539,21 @@ fn bi_ai_suggest(args: Vec<Value>, input: Option<Value>, _env: &mut Env) -> Resu
 /// an error code in the subject means.
 fn bi_ai_explain(args: Vec<Value>, input: Option<Value>, _env: &mut Env) -> Result<Value> {
     let subject = hint_subject("explain", &args, input)?;
-    if let Some(sig) = crate::signature::signature_of(subject.trim()) {
+    // The name help() would resolve: a module-qualified spelling (`file.read`),
+    // an underscore one (`file_read`) or an alias names its builtin.
+    let mut name = subject.trim().to_string();
+    if crate::signature::signature_of(&name).is_none() && !is_dispatched(&name) {
+        let described = crate::agent_api::ontology_describe_json(&name);
+        if let Some(canonical) = described.get("builtin").and_then(|v| v.as_str()) {
+            name = canonical.to_string();
+        }
+    }
+    if let Some(sig) = crate::signature::signature_of(&name) {
         return Ok(hint_signature_record(sig));
     }
-    if is_dispatched(subject.trim()) {
+    if is_dispatched(&name) {
         let mut r = BTreeMap::new();
-        r.insert("name".to_string(), Value::Str(subject.trim().to_string()));
+        r.insert("name".to_string(), Value::Str(name.clone()));
         r.insert(
             "doc".to_string(),
             Value::Str(
@@ -12557,11 +12566,13 @@ fn bi_ai_explain(args: Vec<Value>, input: Option<Value>, _env: &mut Env) -> Resu
     if subject.contains("E_") {
         return bi_diagnose(vec![hint_error_value(&subject)], None);
     }
-    Err(crate::safety::not_found(
-        "explain",
-        "builtin or error code",
-        subject.trim(),
-    ))
+    let mut e = crate::safety::not_found("explain", "builtin or error code", subject.trim());
+    if let Some(se) = e.downcast_mut::<crate::safety::SafetyError>() {
+        se.hint = "complete(\"prefix\") lists the builtin names that start with a prefix; \
+                   ontology_manifest() lists the categories"
+            .to_string();
+    }
+    Err(e)
 }
 
 /// complete(partial): builtin names that start with `partial`, sorted,
