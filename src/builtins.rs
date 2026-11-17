@@ -39870,6 +39870,9 @@ struct ZipBuild {
     names: std::collections::HashSet<String>,
     bytes: u64,
     entries: usize,
+    /// Canonical paths of the archive being written (and its temporary file),
+    /// which are never stored in themselves.
+    skip: Vec<std::path::PathBuf>,
 }
 
 fn zip_write_error(builtin: &str, e: impl std::fmt::Display) -> anyhow::Error {
@@ -39938,6 +39941,14 @@ fn zip_add_tree(
         }
         return Ok(());
     }
+    // The archive being written is never stored in itself.
+    if !st.skip.is_empty() {
+        if let Ok(canon) = std::fs::canonicalize(fs_path) {
+            if st.skip.contains(&canon) {
+                return Ok(());
+            }
+        }
+    }
     zip_claim_name(builtin, st, entry_name)?;
     #[cfg(unix)]
     let opts = {
@@ -39968,12 +39979,17 @@ fn zip_write_archive(
     out: std::fs::File,
     old: Option<&str>,
     members: &[String],
+    skip: &[&str],
 ) -> Result<()> {
     let mut w = zip::ZipWriter::new(out);
     let mut st = ZipBuild {
         names: std::collections::HashSet::new(),
         bytes: 0,
         entries: 0,
+        skip: skip
+            .iter()
+            .filter_map(|p| std::fs::canonicalize(p).ok())
+            .collect(),
     };
     let cwd = crate::journal::normalized_path(&crate::safety::resolve_path_str("."));
     for m in members {
@@ -40100,7 +40116,7 @@ fn bi_zip_create(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
     // The archive is new (refused above if it exists), so rollback removes it.
     crate::tx::snapshot(&archive);
     let out = create_new_output("zip_create", &archive)?;
-    if let Err(e) = zip_write_archive("zip_create", out, None, &members) {
+    if let Err(e) = zip_write_archive("zip_create", out, None, &members, &[archive.as_str()]) {
         remove_partial(&archive);
         return Err(e);
     }
@@ -41102,7 +41118,13 @@ fn bi_zip_add(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
         .create_new(true)
         .open(&tmp)
         .map_err(|e| crate::safety::fs_error("zip_add", &tmp, &e))?;
-    if let Err(e) = zip_write_archive("zip_add", out, Some(&archive), &members) {
+    if let Err(e) = zip_write_archive(
+        "zip_add",
+        out,
+        Some(&archive),
+        &members,
+        &[archive.as_str(), tmp.as_str()],
+    ) {
         remove_partial(&tmp);
         return Err(e);
     }
@@ -41717,6 +41739,16 @@ fn bi_zip_list(args: Vec<Value>, _input: Option<Value>) -> Result<Value> {
             .name()
             .map(|n| n.into_owned())
             .unwrap_or_else(|_| String::from_utf8_lossy(f.name_raw()).into_owned());
+        // `path` and `kind` are tar_list's row keys, so one loop reads either.
+        let kind = if f.is_dir() {
+            "dir"
+        } else if f.unix_mode().is_some_and(|m| m & 0o170000 == 0o120000) {
+            "link"
+        } else {
+            "file"
+        };
+        r.insert("path".to_string(), Value::Str(name.clone()));
+        r.insert("kind".to_string(), Value::Str(kind.to_string()));
         r.insert("name".to_string(), Value::Str(name));
         r.insert("size".to_string(), Value::Int(f.size() as i64));
         r.insert(

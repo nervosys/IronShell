@@ -110,3 +110,25 @@ fn b3_tar_extract_of_a_zip_says_zip_and_never_a_signal() {
     assert!(!o.status.success(), "{text}");
     assert!(!text.contains("signal"), "{text}");
 }
+
+#[test]
+fn b4_zip_create_of_dot_does_not_store_itself_and_zip_list_has_path_and_kind() {
+    let dir = scratch("b4");
+    std::fs::create_dir_all(dir.join("proj").join("out")).expect("out dir");
+    let made = ish_in(&dir, r#"zip_create("out/r.zip", ".")"#);
+    assert!(made.status.success(), "{}", out(&made));
+    let o = ish_in(
+        &dir,
+        r#"zip_list("out/r.zip") | map(fn(e) => e.path + ":" + e.kind) | join(",")"#,
+    );
+    let text = out(&o);
+    assert!(o.status.success(), "{text}");
+    assert!(text.contains("src/main.rs:file"), "{text}");
+    assert!(text.contains("src:dir") || text.contains("src/:dir"), "{text}");
+    assert!(!text.contains("r.zip"), "{text}");
+    // zip_add of the folder holding the archive skips the archive too.
+    let o = ish_in(&dir, r#"zip_add("out/r.zip", "out")"#);
+    assert!(o.status.success(), "{}", out(&o));
+    let o = ish_in(&dir, r#"zip_list("out/r.zip") | map(fn(e) => e.name) | join(",")"#);
+    assert!(!out(&o).contains("r.zip"), "{}", out(&o));
+}

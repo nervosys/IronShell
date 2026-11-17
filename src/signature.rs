@@ -11285,9 +11285,11 @@ pub static SIGNATURES: &[Signature] = &[
         subject: None,
         params: &[req("path", Ty::Str, "a .zip file")],
         returns: "Array",
-        doc: "Entries of a zip archive as {name, size, compressed_size, dir}. A file that is not a zip is refused.",
+        doc: "Entries of a zip archive as {name, path, kind, size, compressed_size, dir}. path is the same String as name and kind is \"file\", \"dir\" or \"link\", the keys tar_list's rows carry, so one loop reads either listing; name and dir stay for older scripts. A file that is not a zip is refused.",
         examples: &[
             (r#"zip_list("tests/fixtures/archives/sample.zip") | map(fn(e) => e.name)"#, r#"["README.txt", "src/files.rs"]"#),
+            (r#"zip_list("tests/fixtures/archives/sample.zip") | map(fn(e) => e.path)"#, r#"["README.txt", "src/files.rs"]"#),
+            (r#"zip_list("tests/fixtures/archives/sample.zip") | map(fn(e) => e.kind)"#, r#"["file", "file"]"#),
         ],
     },
     Signature {
