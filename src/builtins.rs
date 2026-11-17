@@ -5886,7 +5886,7 @@ fn bi_sum(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
             let mut float_sum: f64 = 0.0;
             let mut has_float = false;
 
-            for item in items {
+            for (index, item) in items.into_iter().enumerate() {
                 match item {
                     Value::Int(n) => {
                         if has_float {
@@ -5905,10 +5905,18 @@ fn bi_sum(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
                         float_sum += f;
                     }
                     _ => {
-                        return Err(crate::safety::arg_err(format!(
-                            "sum: array must contain only numbers, got {}",
-                            item.type_name()
-                        )))
+                        return Err(crate::safety::bad_arg_in(
+                            "sum",
+                            format!(
+                                "sum: array must contain only numbers, got {} at index {index}",
+                                item.type_name()
+                            ),
+                            &format!(
+                                "every element must be an Int or a Float; element {index} is a {}: \
+                                 convert it first (int(x) or float(x)) or filter it out",
+                                item.type_name()
+                            ),
+                        ))
                     }
                 }
             }
@@ -6034,15 +6042,23 @@ fn bi_avg(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
             }
 
             let mut sum: f64 = 0.0;
-            for item in &items {
+            for (index, item) in items.iter().enumerate() {
                 match item {
                     Value::Int(n) => sum += *n as f64,
                     Value::Float(f) => sum += *f,
                     _ => {
-                        return Err(crate::safety::arg_err(format!(
-                            "avg: array must contain only numbers, got {}",
-                            item.type_name()
-                        )))
+                        return Err(crate::safety::bad_arg_in(
+                            "avg",
+                            format!(
+                                "avg: array must contain only numbers, got {} at index {index}",
+                                item.type_name()
+                            ),
+                            &format!(
+                                "every element must be an Int or a Float; element {index} is a {}: \
+                                 convert it first (int(x) or float(x)) or filter it out",
+                                item.type_name()
+                            ),
+                        ))
                     }
                 }
             }
@@ -12247,11 +12263,7 @@ fn bi_to_csv(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
                     }
                     keys.into_iter().collect()
                 }
-                (None, Some(_)) => {
-                    return Err(crate::safety::arg_err(
-                        "to_csv: input must be an array of records",
-                    ))
-                }
+                (None, Some(first)) => return Err(csv_row_refusal(0, first)),
             };
 
             let mut csv_output = String::new();
@@ -12317,15 +12329,39 @@ fn bi_to_csv(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
                         .collect::<Result<Vec<_>>>()?;
                     csv_output.push_str(&csv_line(row));
                     csv_output.push('\n');
+                } else {
+                    return Err(csv_row_refusal(index, item));
                 }
             }
 
             Ok(Value::Str(csv_output))
         }
-        _ => Err(crate::safety::arg_err(
-            "to_csv: input must be an array of records",
+        other => Err(crate::safety::bad_arg_in(
+            "to_csv",
+            format!(
+                "to_csv: input must be an array of records, got {}",
+                other.type_name()
+            ),
+            "pass an Array of Records, such as [{id: 1, name: \"a\"}]; wrap one Record in [ ]",
         )),
     }
+}
+
+/// The refusal for a `to_csv` row that is not a Record: it names the row, and
+/// says how to turn plain values into rows.
+fn csv_row_refusal(index: usize, row: &Value) -> anyhow::Error {
+    crate::safety::bad_arg_in(
+        "to_csv",
+        format!(
+            "to_csv: input must be an array of records, got {} at index {index}",
+            row.type_name()
+        ),
+        &format!(
+            "every row must be a Record such as {{id: 1}}; row {index} is a {}. To write plain \
+             values as one column, map them to Records first: map(fn(x) => {{value: x}})",
+            row.type_name()
+        ),
+    )
 }
 
 /// One CSV line from its escaped fields. A line of one empty field would be
@@ -12460,7 +12496,19 @@ fn bi_from_yaml(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
                         "the document uses {construct}, which is outside IronShell's YAML subset; convert it to JSON and use from_json, or rewrite it without that construct"
                     ),
                 ),
-                None => crate::safety::arg_err(message),
+                None => {
+                    let hint = if message.contains("duplicate key") {
+                        "a mapping repeats a key, and YAML allows each key once per mapping: \
+                         the message names the key and its line; remove or rename one of them"
+                            .to_string()
+                    } else {
+                        "from_yaml reads a mapping (`key: value` lines) or a sequence (`- item` \
+                         lines) at the top level, indented with spaces; the message names the \
+                         line it could not read"
+                            .to_string()
+                    };
+                    crate::safety::bad_arg_in("from_yaml", message, &hint)
+                }
             }
         }
     })

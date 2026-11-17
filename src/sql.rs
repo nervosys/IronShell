@@ -586,6 +586,13 @@ fn run(
                 format!("the query ran past its {}s budget", QUERY_BUDGET.as_secs()),
                 "narrow the query, or bound a recursive CTE with LIMIT",
             );
+        } else if text.contains("Multiple statements") {
+            (
+                "sql takes one statement per call: the query holds more than one".to_string(),
+                "remove the text after the first `;`, or make one sql call per query (a query \
+                 can still use WITH or a subquery to combine steps)"
+                    .to_string(),
+            )
         } else if text.contains("no such table") {
             // Several tables come in as a Record of Arrays, one field per
             // table; a piped Array is only ever the table `t`.

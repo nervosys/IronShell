@@ -133,3 +133,27 @@ fn a6_a_let_over_an_annotated_mut_says_let_not_assign() {
     let se = refusal(r#"mut m: Int = 1; m = "s""#);
     assert!(se.message.starts_with("assign m"), "{}", se.message);
 }
+
+// A7
+#[test]
+fn a7_hints_say_what_is_wrong() {
+    let generic = "takes";
+    let se = refusal(r#"sum(["a", "b"])"#);
+    assert!(se.message.contains("at index 0"), "{}", se.message);
+    assert!(!se.hint.contains(generic), "{}", se.hint);
+    assert!(se.hint.contains("element 0"), "{}", se.hint);
+
+    let se = refusal("to_csv([1, 2])");
+    assert!(se.hint.contains("Record"), "{}", se.hint);
+    assert!(!se.hint.starts_with("to_csv takes"), "{}", se.hint);
+
+    let se = refusal(r#"from_yaml("a: 1\na: 2\n")"#);
+    assert!(se.hint.contains("repeats a key"), "{}", se.hint);
+
+    let se = refusal(r#"from_yaml("just text")"#);
+    assert!(!se.hint.starts_with("from_yaml takes"), "{}", se.hint);
+
+    let se = refusal(r#"[{a: 1}] | sql("select 1; select 2")"#);
+    assert!(se.hint.contains("one statement"), "{}", se.hint);
+    assert!(!se.hint.starts_with("tables:"), "{}", se.hint);
+}
