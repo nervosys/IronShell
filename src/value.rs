@@ -252,13 +252,13 @@ impl Value {
             Value::Bool(b) => b.to_string(),
             Value::Null => "null".to_string(),
             Value::Array(arr) => {
-                let items: Vec<String> = arr.iter().map(|v| v.to_display_string()).collect();
+                let items: Vec<String> = arr.iter().map(|v| v.nested_display_string()).collect();
                 format!("[{}]", items.join(", "))
             }
             Value::Record(rec) => {
                 let items: Vec<String> = rec
                     .iter()
-                    .map(|(k, v)| format!("{}: {}", k, v.to_display_string()))
+                    .map(|(k, v)| format!("{}: {}", k, v.nested_display_string()))
                     .collect();
                 format!("{{{}}}", items.join(", "))
             }
@@ -268,6 +268,15 @@ impl Value {
             Value::Future(_) => "<future>".to_string(),
             Value::Error(msg) => format!("Error: {}", msg),
             Value::Builtin(b) => format!("<builtin:{}>", b.name),
+        }
+    }
+
+    /// A value inside an Array or Record: a String is a quoted literal, as
+    /// `plain_text` shows it, so `[1, "a"]` is not read back as `[1, a]`.
+    fn nested_display_string(&self) -> String {
+        match self {
+            Value::Str(s) => quote_str(s),
+            other => other.to_display_string(),
         }
     }
 
