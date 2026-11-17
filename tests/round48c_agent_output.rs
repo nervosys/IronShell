@@ -110,7 +110,7 @@ fn a_table_cell_that_reads_as_another_type_is_quoted() {
         lines_of(&out),
         vec![
             "v", "\"null\"", "null", "\"true\"", "true", "\"1\"", "1", "\"\"", "\"@x\"",
-            "\" pad\"", "\"a\tb\"", "ok"
+            "\" pad\"", "\"a\\tb\"", "ok"
         ],
         "stderr: {err}"
     );
