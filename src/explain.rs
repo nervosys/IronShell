@@ -771,10 +771,13 @@ fn jail_refusal(
 ) -> Option<String> {
     if !matches!(
         effect,
-        Effect::ReadLocal | Effect::WriteLocal | Effect::Destructive
+        Effect::ReadLocal | Effect::WriteLocal | Effect::Destructive | Effect::Exec
     ) {
         return None;
     }
+    // `Exec` is judged too: `read_jail_dispatch` judges the path parameters of
+    // an Exec builtin (`db_sqlite_exec`'s `db`), so the run refuses an outside
+    // path there as well.
     crate::security::outside_path_literal(builtin, literals, piped).map(|s| {
         format!(
             "'{s}' is outside the workspace root, so the run refuses it with E_OUTSIDE_WORKSPACE"
