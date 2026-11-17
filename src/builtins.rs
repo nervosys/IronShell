@@ -40470,72 +40470,161 @@ fn bi_tar_create(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
 
     let out = guard_local_write("tar_create", &archive)?;
     // Each member is stored under a relative name (see `tar_member_name`), so
-    // extraction does not recreate the absolute tree it came from. tar is told
-    // where to find each one with `-C`.
+    // extraction does not recreate the absolute tree it came from. The archive
+    // is written in-process (the tar and flate2 crates): the system tar, bsdtar
+    // on Windows, crashes on some non-ASCII member names; the names are
+    // stored as UTF-8.
     let placed: Vec<(String, String)> = members.iter().map(|m| tar_member_name(m)).collect();
-    let mut argv: Vec<&str> = vec!["-c", "-f", "-"];
-    let mut dir_now: Option<&str> = None;
-    for (dir, name) in &placed {
-        if dir_now != Some(dir.as_str()) {
-            argv.push("-C");
-            argv.push(dir.as_str());
-            dir_now = Some(dir.as_str());
-        }
-        argv.push(name.as_str());
-    }
-    // A .tar.gz or .tgz name gets a gzipped stream, which tar_list and
-    // tar_extract read back. The plain tar stream was written under that name.
-    let written = if archive_kind(&archive) == Some("tar.gz") {
-        tool_to_new_gzip_file("tar_create", "tar", &argv, &out)
-    } else {
-        tool_to_new_file("tar_create", "tar", &argv, &out)
-    };
-    if let Err(mut e) = written {
-        // Windows bsdtar crashes (exit -1073741819) on some non-ASCII names. The
-        // crash can come from a name inside a folder member, so the trees are
-        // walked, but only once a crash is seen.
-        if let Some(se) = e.downcast_mut::<crate::safety::SafetyError>() {
-            let crashed = se
-                .got
-                .strip_prefix("exited ")
-                .and_then(|c| c.parse::<i64>().ok())
-                .is_some_and(|c| !(0..=255).contains(&c));
-            let non_ascii = placed.iter().any(|(d, n)| !d.is_ascii() || !n.is_ascii())
-                || members
-                    .iter()
-                    .any(|m| tree_has_non_ascii_name(std::path::Path::new(m)));
-            if crashed && non_ascii {
-                se.hint = "tar crashed on a member name with non-ASCII characters; use zip_create(archive, members) for an archive of such names, or rename the files".to_string();
-            }
-        }
+    let file = create_new_output("tar_create", &out)?;
+    let written = tar_write_archive(
+        &out,
+        file,
+        archive_kind(&archive) == Some("tar.gz"),
+        &members,
+        &placed,
+    );
+    if let Err(e) = written {
+        remove_partial(&out);
         return Err(e);
     }
     Ok(Value::Bool(true))
 }
 
-/// Whether `root`, or a file or folder under it, has a name with a non-ASCII
-/// character. Symbolic links are not followed, and a remote share is not walked
-/// (its names are not local, and a probe of one stalls).
-fn tree_has_non_ascii_name(root: &std::path::Path) -> bool {
-    if crate::safety::names_a_remote_share(&root.to_string_lossy()) {
-        return false;
+/// The marker `CappedWriter` raises, so the size refusal can be told from a
+/// failed write.
+const TAR_CAP_MARK: &str = "archive size cap reached";
+
+/// A writer that refuses to pass on more than `FILE_OUTPUT_CAP` bytes.
+struct CappedWriter<W: std::io::Write> {
+    inner: W,
+    written: u64,
+}
+
+impl<W: std::io::Write> std::io::Write for CappedWriter<W> {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        if self.written.saturating_add(buf.len() as u64) > FILE_OUTPUT_CAP {
+            return Err(std::io::Error::other(TAR_CAP_MARK));
+        }
+        let n = self.inner.write(buf)?;
+        self.written = self.written.saturating_add(n as u64);
+        Ok(n)
     }
-    let mut pending = vec![root.to_path_buf()];
-    while let Some(path) = pending.pop() {
-        if path
-            .file_name()
-            .is_some_and(|n| !n.to_string_lossy().is_ascii())
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.inner.flush()
+    }
+}
+
+/// The error for a failed write while `tar_create` builds its archive.
+fn tar_io_error(path: &str, e: &std::io::Error) -> anyhow::Error {
+    if e.to_string() == TAR_CAP_MARK {
+        return crate::safety::budget_exceeded(
+            "tar_create",
+            format!("the archive is over {FILE_OUTPUT_CAP} bytes"),
+            "nothing was written; archive fewer or smaller members",
+        );
+    }
+    crate::safety::fs_error("tar_create", path, e)
+}
+
+/// The state of one `tar_create` walk: the entries added so far, and the
+/// archive's own path, which is never stored in itself.
+struct TarBuild {
+    entries: usize,
+    skip: Option<std::path::PathBuf>,
+}
+
+/// Add `fs_path`, a file, a link or a whole folder, to `b` under `name`
+/// (`/`-separated, relative; empty for the current folder itself, whose
+/// contents are stored directly). Symbolic links are stored as links, not
+/// followed.
+fn tar_add_tree<W: std::io::Write>(
+    b: &mut tar::Builder<W>,
+    fs_path: &std::path::Path,
+    name: &str,
+    st: &mut TarBuild,
+) -> Result<()> {
+    const B: &str = "tar_create";
+    let shown = fs_path.to_string_lossy().into_owned();
+    let meta =
+        std::fs::symlink_metadata(fs_path).map_err(|e| crate::safety::fs_error(B, &shown, &e))?;
+    st.entries += 1;
+    if st.entries > WALK_MAX_ENTRIES {
+        return Err(walk_over(B, WALK_MAX_ENTRIES));
+    }
+    if meta.is_dir() {
+        if !name.is_empty() {
+            b.append_dir(format!("{name}/"), fs_path)
+                .map_err(|e| tar_io_error(&shown, &e))?;
+        }
+        let mut kids = Vec::new();
+        for k in std::fs::read_dir(fs_path).map_err(|e| crate::safety::fs_error(B, &shown, &e))? {
+            kids.push(k.map_err(|e| crate::safety::fs_error(B, &shown, &e))?);
+        }
+        kids.sort_by_key(|k| k.file_name());
+        for k in kids {
+            let leaf = k.file_name().to_string_lossy().into_owned();
+            let child = if name.is_empty() {
+                leaf
+            } else {
+                format!("{name}/{leaf}")
+            };
+            tar_add_tree(b, &k.path(), &child, st)?;
+        }
+        return Ok(());
+    }
+    if let Some(skip) = &st.skip {
+        if fs_path.file_name() == skip.file_name()
+            && std::fs::canonicalize(fs_path).ok().as_ref() == Some(skip)
         {
-            return true;
-        }
-        if !std::fs::symlink_metadata(&path).is_ok_and(|m| m.is_dir()) {
-            continue;
-        }
-        if let Ok(entries) = std::fs::read_dir(&path) {
-            pending.extend(entries.flatten().map(|entry| entry.path()));
+            return Ok(());
         }
     }
-    false
+    b.append_path_with_name(fs_path, name)
+        .map_err(|e| tar_io_error(&shown, &e))
+}
+
+/// Write the members into the new archive file `out`, gzipped when `gzip`.
+fn tar_write_archive(
+    out_path: &str,
+    out: std::fs::File,
+    gzip: bool,
+    members: &[String],
+    placed: &[(String, String)],
+) -> Result<()> {
+    let mut st = TarBuild {
+        entries: 0,
+        skip: std::fs::canonicalize(out_path).ok(),
+    };
+    let capped = CappedWriter {
+        inner: out,
+        written: 0,
+    };
+    if gzip {
+        let enc = flate2::write::GzEncoder::new(capped, flate2::Compression::default());
+        let enc = tar_write_members(enc, members, placed, &mut st, out_path)?;
+        enc.finish().map_err(|e| tar_io_error(out_path, &e))?;
+    } else {
+        tar_write_members(capped, members, placed, &mut st, out_path)?;
+    }
+    Ok(())
+}
+
+fn tar_write_members<W: std::io::Write>(
+    w: W,
+    members: &[String],
+    placed: &[(String, String)],
+    st: &mut TarBuild,
+    out_path: &str,
+) -> Result<W> {
+    let mut b = tar::Builder::new(w);
+    b.follow_symlinks(false);
+    for (m, (_, name)) in members.iter().zip(placed) {
+        let name = name.strip_prefix("./").unwrap_or(name);
+        let name = if name == "." { "" } else { name };
+        tar_add_tree(&mut b, std::path::Path::new(m), name, st)?;
+    }
+    b.into_inner().map_err(|e| tar_io_error(out_path, &e))
 }
 
 /// How `tar_create` stores one member: the directory tar is run from, and the
@@ -40624,6 +40713,7 @@ fn bi_tar_extract(args: Vec<Value>, _input: Option<Value>) -> Result<Value> {
             );
         }
     };
+    let mut extract_root = ".".to_string();
     if let Some(d) = dest {
         crate::safety::reject_option_like("tar_extract", std::slice::from_ref(&d))?;
         // The central check judges only paths that already exist. A `-C`
@@ -40637,10 +40727,18 @@ fn bi_tar_extract(args: Vec<Value>, _input: Option<Value>) -> Result<Value> {
         journal_step(&d);
         std::fs::create_dir_all(&d).map_err(|e| crate::safety::fs_error("tar_extract", &d, &e))?;
         cmd.args(["-C", &d]);
+        extract_root = d;
     } else {
         check_archive_protected("tar_extract", ".", &members)?;
         check_archive_landing("tar_extract", ".", &members, archive_jail_enforced())?;
         journal_step(".");
+    }
+    // A plain or gzip tar is extracted in-process (the tar crate), after the
+    // checks above: the system tar (bsdtar on Windows) fails partway on a valid
+    // archive with a non-ASCII member name. A bzip2, xz or zstd stream still
+    // goes to the tar program.
+    if tar_extract_in_process(&archive, &extract_root)? {
+        return Ok(Value::Bool(true));
     }
     // Archives can be large; extraction is bounded by the long deadline.
     let output = bounded_cmd_output("tar_extract", "tar", cmd, TOOL_LONG_DEADLINE_SECS)?;
@@ -40653,6 +40751,60 @@ fn bi_tar_extract(args: Vec<Value>, _input: Option<Value>) -> Result<Value> {
         ));
     }
     Ok(Value::Bool(true))
+}
+
+/// Extracts a plain or gzip-compressed tar into `root`, in-process, and says
+/// whether it did: a bzip2, xz or zstd stream is left to the tar program
+/// (`false`). Each entry is unpacked with `unpack_in`, which refuses a name that
+/// climbs out of `root`; the entry names and link targets were already judged by
+/// `check_archive_entries`, and the declared sizes are held to the same budget.
+fn tar_extract_in_process(archive: &str, root: &str) -> Result<bool> {
+    use std::io::{Read, Seek, SeekFrom};
+    const B: &str = "tar_extract";
+    let mut file =
+        std::fs::File::open(archive).map_err(|e| crate::safety::fs_error(B, archive, &e))?;
+    let mut magic = [0u8; 2];
+    let n = file
+        .read(&mut magic)
+        .map_err(|e| crate::safety::fs_error(B, archive, &e))?;
+    file.seek(SeekFrom::Start(0))
+        .map_err(|e| crate::safety::fs_error(B, archive, &e))?;
+    let reader: Box<dyn Read> = if n == 2 && magic == [0x1f, 0x8b] {
+        Box::new(flate2::read::GzDecoder::new(file))
+    } else if n == 2 && tar_stream_decompressor(magic).is_some() {
+        return Ok(false);
+    } else {
+        Box::new(file)
+    };
+    std::fs::create_dir_all(root).map_err(|e| crate::safety::fs_error(B, root, &e))?;
+    let mut ar = tar::Archive::new(reader);
+    let entries = ar.entries().map_err(|e| {
+        crate::safety::tool_failed(B, "tar", None, &format!("not a tar archive: {e}"))
+    })?;
+    let mut count: usize = 0;
+    let mut total: u64 = 0;
+    for entry in entries {
+        let mut entry = entry.map_err(|e| {
+            crate::safety::tool_failed(B, "tar", None, &format!("unreadable entry: {e}"))
+        })?;
+        count += 1;
+        if count > WALK_MAX_ENTRIES {
+            return Err(walk_over(B, WALK_MAX_ENTRIES));
+        }
+        total = total.saturating_add(entry.size());
+        check_archive_budget(B, total)?;
+        let name = entry
+            .path()
+            .map(|p| p.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        let unpacked = entry
+            .unpack_in(root)
+            .map_err(|e| crate::safety::fs_error(B, root, &e))?;
+        if !unpacked {
+            return Err(refuse_archive_entry(B, &name));
+        }
+    }
+    Ok(true)
 }
 
 /// What an archive's name says it is: "zip", "tar", "tar.gz", "gzip",
@@ -70578,41 +70730,6 @@ fn tool_to_new_file(builtin: &str, tool: &str, argv: &[&str], out_path: &str) ->
     result
 }
 
-/// Runs a tool whose stdout is a stream, and writes that stream gzipped to the
-/// new file `out_path` (in-process, flate2: no gzip program is needed). Like
-/// [`tool_to_new_file`], an existing file is refused and a failed run removes it.
-fn tool_to_new_gzip_file(builtin: &str, tool: &str, argv: &[&str], out_path: &str) -> Result<()> {
-    let file = create_new_output(builtin, out_path)?;
-    let sink = std::sync::Arc::new(std::sync::Mutex::new(Vec::<u8>::new()));
-    let mut cmd = crate::safety::child_command(tool);
-    cmd.args(argv);
-    let result = run_tool(
-        builtin,
-        tool,
-        cmd,
-        None,
-        sink.clone(),
-        LOCAL_DEADLINE_SECS,
-        FILE_OUTPUT_CAP,
-    )
-    .and_then(|(status, stderr)| tool_ok(builtin, tool, status, &stderr))
-    .and_then(|()| {
-        let bytes = std::mem::take(
-            &mut *sink
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner),
-        );
-        let mut enc = flate2::write::GzEncoder::new(file, flate2::Compression::default());
-        std::io::Write::write_all(&mut enc, &bytes)
-            .and_then(|()| enc.finish().map(|_| ()))
-            .map_err(|e| crate::safety::fs_error(builtin, out_path, &e))
-    });
-    if result.is_err() {
-        remove_partial(out_path);
-    }
-    result
-}
-
 /// Creates a new file for a tool's output. Existing files are refused, and the
 /// check and the create are one open, so a file that appears meanwhile is refused too.
 fn create_new_output(builtin: &str, path: &str) -> Result<std::fs::File> {
@@ -84541,28 +84658,5 @@ mod ai_local_generate_chat_tests {
         extra.insert("content".to_string(), Value::Str("hi".to_string()));
         extra.insert("name".to_string(), Value::Str("x".to_string()));
         assert_eq!(refused(vec![Value::Record(extra)]), BadArg);
-    }
-}
-
-#[cfg(test)]
-mod tar_non_ascii_walk_tests {
-    use super::tree_has_non_ascii_name;
-
-    /// A folder member whose non-ASCII name is inside it, one level down, is
-    /// found; an all-ASCII tree is not. The walk is what lets the zip_create
-    /// hint fire for such a member, since only the top-level name was checked.
-    #[test]
-    fn a_non_ascii_name_below_a_folder_member_is_found() {
-        let root = std::env::temp_dir().join(format!("ae_tar_walk_{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&root);
-        let nested = root.join("src").join("ascii");
-        std::fs::create_dir_all(&nested).expect("tree");
-        std::fs::write(nested.join("plain.txt"), b"x").expect("file");
-        assert!(!tree_has_non_ascii_name(&root), "all-ASCII tree");
-        std::fs::create_dir_all(root.join("src").join("\u{fc}n\u{ef}").as_path())
-            .expect("non-ASCII folder");
-        let found = tree_has_non_ascii_name(&root);
-        let _ = std::fs::remove_dir_all(&root);
-        assert!(found, "non-ASCII folder below the member was not found");
     }
 }
