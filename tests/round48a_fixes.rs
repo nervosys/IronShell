@@ -123,3 +123,31 @@ fn item3_an_undefined_receiver_is_an_unknown_name() {
     assert!(text(r#"try { zzzz_r48.parse(1) } catch e { e.hint }"#)
         .contains("`zzzz_r48` is not a variable, builtin or module"));
 }
+
+// ---- item 4: from_csv quoting ----
+
+#[test]
+fn item4_from_csv_refuses_a_quote_left_open_at_the_end() {
+    for src in [
+        r#"try { from_csv("a,b\n1,\"x\n") } catch e { e.error.code }"#,
+        r#"try { from_csv("a\n\"x") } catch e { e.error.code }"#,
+    ] {
+        assert_eq!(text(src), "E_BAD_ARG", "{src}");
+    }
+    assert!(text(r#"try { from_csv("a\n\"x") } catch e { e.message }"#)
+        .contains("unterminated quoted field starting on line 2"));
+}
+
+#[test]
+fn item4_from_csv_refuses_text_after_a_closing_quote() {
+    let msg = text(r#"try { from_csv("a\n\"x\"y\n") } catch e { e.message }"#);
+    assert!(
+        msg.contains("unexpected text after a closing quote on line 2"),
+        "{msg}"
+    );
+    // Well-formed quoting still reads.
+    assert_eq!(
+        text(r#"from_csv("a,b\n\"x,1\",\"he said \"\"hi\"\"\"\n") | map(fn(r) => r.b) | first"#),
+        "he said \"hi\""
+    );
+}

@@ -11521,6 +11521,11 @@ fn bi_from_csv(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
 /// column type inference `from_csv` has. `open("x.tsv")` reads tab-separated
 /// text through this with a tab delimiter and no quoting (TSV has none).
 fn parse_delimited(builtin: &str, text: &str, builder: &mut csv::ReaderBuilder) -> Result<Value> {
+    if builtin == "from_csv" {
+        if let Some(e) = csv_quote_error(builtin, text) {
+            return Err(e);
+        }
+    }
     let mut reader = builder.from_reader(text.as_bytes());
     let headers: Vec<String> = reader
         .headers()
@@ -11608,9 +11613,24 @@ fn csv_row_error(builtin: &str, text: &str, e: &csv::Error) -> anyhow::Error {
 /// A quote opens a field only at a field's start; inside one, `""` is a literal
 /// quote and a lone `"` closes it.
 fn csv_unterminated_quote_line(text: &str) -> Option<usize> {
+    match csv_quote_problem(text) {
+        Some(CsvQuoteProblem::Unterminated(line)) => Some(line),
+        _ => None,
+    }
+}
+
+/// What is wrong with a CSV text's quoting: a quoted field the text ends
+/// inside, or text right after a closing quote (`"x"y`), each with its line.
+enum CsvQuoteProblem {
+    Unterminated(usize),
+    AfterClose(usize),
+}
+
+fn csv_quote_problem(text: &str) -> Option<CsvQuoteProblem> {
     let mut line = 1usize;
     let mut open_line = 0usize;
     let mut in_quotes = false;
+    let mut after_close = false;
     let mut field_start = true;
     let mut chars = text.chars().peekable();
     while let Some(c) = chars.next() {
@@ -11621,12 +11641,20 @@ fn csv_unterminated_quote_line(text: &str) -> Option<usize> {
                 }
                 '"' => {
                     in_quotes = false;
+                    after_close = true;
                     field_start = false;
                 }
                 '\n' => line += 1,
                 _ => {}
             }
             continue;
+        }
+        if after_close {
+            // Only a delimiter or a line end may follow a closing quote.
+            if !matches!(c, ',' | '\n' | '\r') {
+                return Some(CsvQuoteProblem::AfterClose(line));
+            }
+            after_close = false;
         }
         match c {
             '"' if field_start => {
@@ -11642,9 +11670,25 @@ fn csv_unterminated_quote_line(text: &str) -> Option<usize> {
         }
     }
     if in_quotes {
-        Some(open_line)
+        Some(CsvQuoteProblem::Unterminated(open_line))
     } else {
         None
+    }
+}
+
+/// The refusal for a `from_csv` text whose quoting is wrong, before it is read.
+fn csv_quote_error(builtin: &str, text: &str) -> Option<anyhow::Error> {
+    match csv_quote_problem(text)? {
+        CsvQuoteProblem::Unterminated(line) => Some(crate::safety::bad_arg_in(
+            builtin,
+            format!("{builtin}: unterminated quoted field starting on line {line}"),
+            "close the quote with a matching \", or double a literal quote inside a quoted field (\"\")",
+        )),
+        CsvQuoteProblem::AfterClose(line) => Some(crate::safety::bad_arg_in(
+            builtin,
+            format!("{builtin}: unexpected text after a closing quote on line {line}"),
+            "a quoted field ends at its closing quote: put a comma or a line end after it, or double a literal quote inside the field (\"\")",
+        )),
     }
 }
 
