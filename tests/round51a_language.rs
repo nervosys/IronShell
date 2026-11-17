@@ -168,3 +168,17 @@ fn a8_a_float_with_no_int_value_prints_in_display_form() {
     }
     assert!(refusal("math.round(1e300)").message.contains("1e300"));
 }
+
+// A9
+#[test]
+fn a9_the_power_operator_is_one_token_in_the_word_call_hint() {
+    let e = iron_shell::parser::parse_program("print 2 ** 10").expect_err("must not parse");
+    let hint = e
+        .downcast_ref::<iron_shell::parser::ParseError>()
+        .map(|p| p.hint.clone())
+        .unwrap_or_default();
+    assert!(hint.contains("print(2) ** 10"), "{hint}");
+    assert!(hint.contains("print(2 ** 10)"), "{hint}");
+    assert!(!hint.contains("* *"), "{hint}");
+    assert!(e.to_string().contains("`**`"), "{e}");
+}
