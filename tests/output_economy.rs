@@ -399,8 +399,8 @@ fn agent_mode_renders_results_as_aecon_by_default() {
         render_agent(&Value::Str("hello".into()), None).as_deref(),
         Some("hello")
     );
-    // Null prints nothing.
-    assert!(render_agent(&Value::Null, None).is_none());
+    // Null prints `null`, so it cannot be mistaken for no output.
+    assert_eq!(render_agent(&Value::Null, None).as_deref(), Some("null"));
 
     // Under a tight token budget, a large array pages and carries one compact
     // `@page …` metadata line (the page itself is raw AECON, not a re-quoted blob).

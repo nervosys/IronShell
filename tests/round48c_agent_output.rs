@@ -167,3 +167,23 @@ fn a_table_header_key_that_needs_it_is_quoted_and_round_trips() {
     let (out, err) = agent(&dir, &format!("({rows} | aecon | aecon_decode) == {rows}"));
     assert_eq!(out.trim(), "true", "stderr: {err}");
 }
+
+#[test]
+fn top_level_null_and_empty_values_are_distinguishable() {
+    let dir = session("toplevel");
+    for (code, want) in [
+        ("null", "null"),
+        (r#""""#, r#""""#),
+        ("[{}]", "[{}]"),
+        ("[{}, {}]", "[{},{}]"),
+        ("[]", "[]"),
+        ("{}", "{}"),
+        (r#""hello""#, "hello"),
+        (r#""42""#, r#""42""#),
+        (r#""null""#, r#""null""#),
+        (r#""@handle h1""#, r#""@handle h1""#),
+    ] {
+        let (out, err) = agent(&dir, code);
+        assert_eq!(out.trim_end_matches('\n'), want, "{code}: {err}");
+    }
+}

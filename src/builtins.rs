@@ -24184,9 +24184,12 @@ fn aecon_render(v: &Value) -> String {
 
     if !rows.is_empty() {
         let keys: Vec<String> = header.unwrap_or_else(|| rows[0].keys().cloned().collect());
-        let homogeneous = rows
-            .iter()
-            .all(|r| r.len() == keys.len() && keys.iter().all(|k| r.contains_key(k)));
+        // Rows with no fields have no columns to put in a table: `[{}]` would print
+        // as one blank line, so it prints as the array it is.
+        let homogeneous = !keys.is_empty()
+            && rows
+                .iter()
+                .all(|r| r.len() == keys.len() && keys.iter().all(|k| r.contains_key(k)));
         if homogeneous {
             // Constant-column factoring: columns whose value is identical across
             // ALL rows are emitted once in a `@const` line rather than repeated
@@ -25424,6 +25427,15 @@ pub fn budget_value(value: &Value, max: usize, cursor: usize) -> Value {
     Value::Record(r)
 }
 
+/// Whether a bare top-level string must be JSON-quoted so it is not read as
+/// something else: empty, `null`/`true`/`false` or a number, or opening with `@`
+/// (a handle or directive line) or `"` (a quoted string). Text that merely
+/// starts with `[`, `{` or whitespace, or spans lines, stays raw: a file's
+/// contents are the common case, and the agent asked for them as written.
+fn aecon_top_str_needs_quote(s: &str) -> bool {
+    s.is_empty() || s.starts_with(['@', '"']) || aecon_str_is_ambiguous(s)
+}
+
 /// Render a result for **agent mode** (`IRONSHELL_MODE=agent`): compact, deterministic
 /// AECON instead of the human pretty-printer (no ANSI, keys emitted once, the
 /// four structural levers applied). `Null` prints nothing and a bare `Str` is
@@ -25443,9 +25455,28 @@ pub fn render_agent(v: &Value, budget: Option<usize>) -> Option<String> {
     } else {
         std::borrow::Cow::Borrowed(v)
     };
+    // Handing a large result back as a handle, or saying why it was not shown.
+    let handled = |value: Value, bytes: usize| -> String {
+        match render_handle(value, bytes) {
+            Ok(handle) => handle,
+            // At the handle cap the result is not sent: it is over the budget,
+            // which is why it was being handled. The refusal says so and how
+            // large it was, rather than flooding the output.
+            Err(e) => format!(
+                "@handle refused: {e}\nthe result ({bytes} bytes) is over the output budget and was not shown; release a handle with handle_drop(id) and run it again"
+            ),
+        }
+    };
     match v.as_ref() {
-        Value::Null => None,
-        Value::Str(s) => Some(s.clone()),
+        // A bare `null` prints as `null`, so it is not mistaken for no output.
+        Value::Null => Some("null".to_string()),
+        Value::Str(s) => {
+            if aecon_top_str_needs_quote(s) {
+                Some(json_quote(s))
+            } else {
+                Some(s.clone())
+            }
+        }
         _ => {
             let full = match budget {
                 Some(max) if max > 0 => render_budget_envelope(&budget_value(v.as_ref(), max, 0)),
@@ -25457,16 +25488,7 @@ pub fn render_agent(v: &Value, budget: Option<usize>) -> Option<String> {
             // reach, because it is the bytes never sent.
             let whole = crate::handles::take_show_whole();
             if !whole && crate::handles::worth_handling(v.as_ref(), full.len()) {
-                match render_handle(v.into_owned(), full.len()) {
-                    Ok(handle) => Some(handle),
-                    // At the handle cap the result is not sent: it is over the
-                    // budget, which is why it was being handled. The refusal says
-                    // so and how large it was, rather than flooding the output.
-                    Err(e) => Some(format!(
-                        "@handle refused: {e}\nthe result ({} bytes) is over the output budget and was not shown; release a handle with handle_drop(id) and run it again",
-                        full.len()
-                    )),
-                }
+                Some(handled(v.into_owned(), full.len()))
             } else {
                 Some(full)
             }
