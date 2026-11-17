@@ -174,7 +174,7 @@ grep("TODO\\|FIXME", "src/*.rs")       # grep is BRE (as grep without -E): a bar
 open("issues.json") | sql("select user, count(*) as n from t group by user")
 sql_value("issues.json", "select count(*) from issues where state = 'open'")
 open("issues.json") | count_by(.user)  # [{key, count}] sorted by count descending; the short form of group_by + sort_by("Count", "desc")
-# SQL stores a Bool as 1/0, so Bool values come back from sql as 1 and 0; select * returns each row's columns in sorted key order
+# SQL stores a Bool as 1/0, so Bool values come back from sql as 1 and 0; every sql row (not only select *) has its columns in sorted key order, because a Record sorts its keys: to control the order prefix the aliases (a_region, b_rev) or write the table with to_csv(rows, [cols])
 
 # Check effects before running
 explain_effects("rm(\"x\")")            # or: ish --explain -c '...'
