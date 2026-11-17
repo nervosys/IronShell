@@ -132,3 +132,23 @@ fn b4_zip_create_of_dot_does_not_store_itself_and_zip_list_has_path_and_kind() {
     let o = ish_in(&dir, r#"zip_list("out/r.zip") | map(fn(e) => e.name) | join(",")"#);
     assert!(!out(&o).contains("r.zip"), "{}", out(&o));
 }
+
+#[test]
+fn b6_file_replace_reports_the_path_as_written_in_both_modes() {
+    let dir = scratch("b6");
+    let src = "file.replace(\"src/main.rs\", \"main\", \"main2\").path";
+    for agent in [false, true] {
+        let o = ish_with(&dir, &["-c", src], agent);
+        let text = out(&o);
+        assert!(o.status.success(), "{text}");
+        assert!(text.contains("src/main.rs"), "{text}");
+        assert!(!text.contains("round50b_tools"), "{text}");
+        // Put the text back for the next mode.
+        let o = ish_with(
+            &dir,
+            &["-c", "file.replace(\"src/main.rs\", \"main2\", \"main\")"],
+            agent,
+        );
+        assert!(o.status.success(), "{}", out(&o));
+    }
+}

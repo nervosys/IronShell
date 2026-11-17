@@ -55781,6 +55781,7 @@ fn bi_file_patch(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
     };
     // Classified `ReadLocal` while the body wrote the file back in place.
     // `WriteLocal` is what the jail keys on, so this path went uncontained.
+    let path_as_written = path.clone();
     let path = guard_local_write(builtin, &path)?;
     require_edit_target(builtin, &path)?;
 
@@ -55956,7 +55957,10 @@ fn bi_file_patch(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
     let applied = if written { applied } else { Vec::new() };
 
     let mut result = BTreeMap::new();
-    result.insert("path".to_string(), Value::Str(path));
+    // The path as the caller wrote it, in every mode: agent mode resolves a
+    // relative path to an absolute one for the jail and the journal, which is
+    // not what the caller's own call named.
+    result.insert("path".to_string(), Value::Str(path_as_written));
     result.insert("applied".to_string(), Value::Array(applied.clone()));
     result.insert("failed".to_string(), Value::Array(failed.clone()));
     result.insert("success".to_string(), Value::Bool(failed.is_empty()));
