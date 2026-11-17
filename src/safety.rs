@@ -4515,7 +4515,88 @@ pub(crate) fn drive_relative_absolute(_path: &Path) -> Option<PathBuf> {
 /// is correct across platforms (Windows verbatim `\\?\` prefixes, POSIX symlink
 /// targets) and cannot be escaped by `..` traversal.
 pub fn within_workspace(path: &str) -> bool {
+    // `rm` of a link removes the link itself and never follows it, so inside
+    // its scope a link is judged by where it sits, not by where it points.
+    if LINK_LEAF_OK.with(|c| c.get()) {
+        if let Some(parent) = link_leaf_parent(path) {
+            return within_root(&parent, &workspace_root());
+        }
+    }
     within_root(path, &workspace_root())
+}
+
+thread_local! {
+    /// Set while `rm` runs: a path whose last component is a link is judged by
+    /// its parent folder (see [`within_workspace`]).
+    static LINK_LEAF_OK: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Keeps [`within_workspace`] judging a link's own place, not its target, until
+/// dropped. Taken by the dispatcher for `rm`, which removes only the link.
+pub struct LinkLeafScope(bool);
+
+/// Start a [`LinkLeafScope`].
+pub fn link_leaf_scope() -> LinkLeafScope {
+    LinkLeafScope(LINK_LEAF_OK.with(|c| c.replace(true)))
+}
+
+impl Drop for LinkLeafScope {
+    fn drop(&mut self) {
+        LINK_LEAF_OK.with(|c| c.set(self.0));
+    }
+}
+
+/// Whether `path` itself is a symbolic link, or on Windows a junction. The link
+/// is not followed: `symlink_metadata` reads the entry. A path with a trailing
+/// separator names what the link points at, so it is not a link here.
+pub fn is_link(path: &str) -> bool {
+    !names_a_remote_share(path)
+        && std::fs::symlink_metadata(path).is_ok_and(|m| m.file_type().is_symlink())
+}
+
+/// Whether the last component of `path`, as written, is `.` or `..`.
+pub fn path_ends_in_dot_component(path: &str) -> bool {
+    let last = path.rsplit(['/', '\\']).next().unwrap_or("");
+    last == "." || last == ".."
+}
+
+/// The folder a link sits in, when `path` names a link. `None` otherwise.
+fn link_leaf_parent(path: &str) -> Option<String> {
+    // Only a path whose last component, as written, is a name: `jx/.` and
+    // `jx/..` name what the link points at, though `Path` drops the `.`.
+    if path_ends_in_dot_component(path) {
+        return None;
+    }
+    // A relative path is placed where `within_root` places it (the workspace
+    // root), not against the process's working directory.
+    let abs = absolute_form(path);
+    if !is_link(&abs.to_string_lossy()) {
+        return None;
+    }
+    abs.file_name()?;
+    let parent = abs.parent()?;
+    if parent.as_os_str().is_empty() {
+        return Some(".".to_string());
+    }
+    Some(parent.to_string_lossy().into_owned())
+}
+
+/// `e` with a hint to use `rm` when it refused `rmdir(link, true)`: the call
+/// would recurse into the link's target, which the jail does not allow; `rm`
+/// removes only the link.
+pub fn with_link_hint(builtin: &str, path: &str, e: anyhow::Error) -> anyhow::Error {
+    if builtin != "rmdir" || !is_link(path) {
+        return e;
+    }
+    match e.downcast::<SafetyError>() {
+        Ok(mut se) => {
+            if se.code == ErrorCode::OutsideWorkspace {
+                se.hint = "this is a link that points outside the workspace, and rmdir would recurse into its target; remove only the link with rm(path)".to_string();
+            }
+            anyhow::Error::new(se)
+        }
+        Err(other) => other,
+    }
 }
 
 /// [`within_workspace`] for an arbitrary root: whether `path` resolves inside it.
@@ -8077,7 +8158,23 @@ pub fn windows_read_name_refusal(builtin: &str, path: &str) -> Option<SafetyErro
 /// judges that), but the message says "write" when the builtin writes, so
 /// `file.write("a.txt.")` is not told its read would land on another name.
 pub fn windows_param_name_refusal(builtin: &str, path: &str, writes: bool) -> Option<SafetyError> {
-    windows_name_problem(builtin, path, false, if writes { "write" } else { "read" })
+    windows_name_problem_ex(
+        builtin,
+        path,
+        false,
+        if writes { "write" } else { "read" },
+        true,
+    )
+}
+
+/// Whether `part` (one path component) names an NTFS alternate data stream:
+/// `name:stream`, with text on both sides of a `:`. A scheme (`https:`) or a
+/// bare drive has nothing after the colon, so it is not one.
+fn names_a_stream(part: &str) -> bool {
+    match part.split_once(':') {
+        Some((name, stream)) => !name.is_empty() && !stream.is_empty(),
+        None => false,
+    }
 }
 
 /// `E_BAD_ARG` for a path that names an existing file and then carries a
@@ -8120,6 +8217,18 @@ pub fn windows_trailing_separator_refusal(builtin: &str, path: &str) -> Option<S
 }
 
 fn windows_name_problem(builtin: &str, path: &str, write: bool, verb: &str) -> Option<SafetyError> {
+    windows_name_problem_ex(builtin, path, write, verb, false)
+}
+
+/// [`windows_name_problem`]; `streams` also refuses a `name:stream` component
+/// when `write` is false, so a read cannot name a hidden stream either.
+fn windows_name_problem_ex(
+    builtin: &str,
+    path: &str,
+    write: bool,
+    verb: &str,
+    streams: bool,
+) -> Option<SafetyError> {
     if let Some(name) = reserved_device_name(path) {
         return Some(reserved_device_error(builtin, &name));
     }
@@ -8166,7 +8275,7 @@ fn windows_name_problem(builtin: &str, path: &str, write: bool, verb: &str) -> O
                 extra: serde_json::Map::new(),
             });
         }
-        if write && part.contains(':') {
+        if (write && part.contains(':')) || (streams && names_a_stream(part)) {
             return Some(SafetyError {
                 code: ErrorCode::BadArg,
                 message: format!(

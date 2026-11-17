@@ -1,0 +1,372 @@
+//! Round 49c: gaps a regression test of the workspace jail found.
+//!
+//! One section per item; the CLI tests drive the real binary in a scratch
+//! directory with its own session directory.
+
+#![allow(dead_code)]
+
+use iron_shell::value::Value;
+use std::path::{Path, PathBuf};
+use std::process::{Command, Output};
+
+fn run(src: &str) -> Value {
+    let mut env = iron_shell::modules::env_with_modules();
+    let stmts = iron_shell::parser::parse_program(src).expect("parses");
+    iron_shell::eval::eval_program(&stmts, &mut env).expect("runs")
+}
+
+fn decision(code: &str) -> String {
+    let escaped = code.replace('\\', "\\\\").replace('"', "\\\"");
+    match run(&format!("explain_effects(\"{escaped}\").decision")) {
+        Value::Str(s) => s,
+        other => panic!("{other:?}"),
+    }
+}
+
+struct Scratch {
+    root: PathBuf,
+    ws: PathBuf,
+    outside: PathBuf,
+    session: PathBuf,
+}
+
+impl Scratch {
+    fn new(tag: &str) -> Scratch {
+        let root = std::env::temp_dir().join(format!("ae-r49c-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let s = Scratch {
+            ws: root.join("ws"),
+            outside: root.join("outside"),
+            session: root.join("session"),
+            root,
+        };
+        for p in [&s.ws, &s.outside, &s.session] {
+            std::fs::create_dir_all(p).unwrap();
+        }
+        s
+    }
+
+    /// Agent mode, `ws` the workspace.
+    fn agent(&self, expr: &str) -> Output {
+        Command::new(env!("CARGO_BIN_EXE_ish"))
+            .args(["--agent", "--workspace"])
+            .arg(&self.ws)
+            .args(["-c", expr])
+            .current_dir(&self.ws)
+            .env("NO_COLOR", "1")
+            .env("IRONSHELL_SESSION_DIR", &self.session)
+            .env_remove("IRONSHELL_MODE")
+            .env_remove("IRONSHELL_APPROVE_ALL")
+            .env_remove("IRONSHELL_APPROVE")
+            .env_remove("IRONSHELL_WORKSPACE")
+            .output()
+            .expect("run ish")
+    }
+
+    /// A plain `ish` with extra raw arguments.
+    fn plain(&self, args: &[&str]) -> Output {
+        Command::new(env!("CARGO_BIN_EXE_ish"))
+            .args(args)
+            .current_dir(&self.ws)
+            .env("NO_COLOR", "1")
+            .env("IRONSHELL_SESSION_DIR", &self.session)
+            .env_remove("IRONSHELL_MODE")
+            .env_remove("IRONSHELL_WORKSPACE")
+            .output()
+            .expect("run ish")
+    }
+}
+
+impl Drop for Scratch {
+    fn drop(&mut self) {
+        let jx = self.ws.join("jx");
+        if std::fs::symlink_metadata(&jx).is_ok() {
+            let _ = std::fs::remove_dir(&jx).or_else(|_| std::fs::remove_file(&jx));
+        }
+        let _ = std::fs::remove_dir_all(&self.root);
+    }
+}
+
+fn text(out: &Output) -> String {
+    format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    )
+}
+
+// ── Item 5: a read does not name an alternate data stream ──
+
+#[cfg(windows)]
+#[test]
+fn a_read_of_a_stream_name_is_refused_and_explain_agrees() {
+    let s = Scratch::new("ads");
+    let out = s.agent(r#"file.read("x.txt:ads")"#);
+    let shown = text(&out);
+    assert!(!out.status.success(), "{shown}");
+    assert!(shown.contains("E_BAD_ARG"), "{shown}");
+    assert!(shown.contains("alternate data stream"), "{shown}");
+    assert_eq!(decision(r#"file.read("x.txt:ads")"#), "deny");
+}
+
+#[test]
+fn an_ordinary_read_name_is_not_a_stream() {
+    assert_ne!(decision(r#"file.read("x.txt")"#), "deny");
+}
+
+// ── Item 4: explain judges an Exec builtin's path parameter ──
+
+#[test]
+fn explain_denies_sqlite_exec_on_an_outside_database() {
+    let outside = std::env::temp_dir().join("r49c-outside.db");
+    let lit = outside.to_string_lossy().replace('\\', "/");
+    assert_eq!(
+        decision(&format!(r#"db_sqlite_exec("{lit}", "select 1")"#)),
+        "deny"
+    );
+    assert_eq!(
+        decision(&format!(r#"db.sqlite_exec("{lit}", "select 1")"#)),
+        "deny"
+    );
+}
+
+// ── Item 7: extra arguments after -c say why they are probably there ──
+
+#[test]
+fn arguments_after_c_hint_at_a_split_quote() {
+    let s = Scratch::new("cargs");
+    let out = s.plain(&["-c", "1 + 1", "x"]);
+    let shown = text(&out);
+    assert!(shown.contains("arguments after -c are ignored"), "{shown}");
+    assert!(shown.contains("split it at a quote"), "{shown}");
+    assert!(shown.contains(".ish file"), "{shown}");
+}
+
+// ── Item 6: rm removes a link inside the workspace, never what it points at ──
+
+#[cfg(unix)]
+fn link_dir(target: &Path, link: &Path) -> bool {
+    std::os::unix::fs::symlink(target, link).expect("symlink");
+    true
+}
+
+/// A junction, made with `mklink /J`: it needs no privilege.
+#[cfg(windows)]
+fn link_dir(target: &Path, link: &Path) -> bool {
+    match Command::new("cmd")
+        .args(["/C", "mklink", "/J"])
+        .arg(link)
+        .arg(target)
+        .output()
+    {
+        Ok(o) if o.status.success() => true,
+        other => {
+            eprintln!("skipped: mklink /J failed: {other:?}");
+            false
+        }
+    }
+}
+
+impl Scratch {
+    /// Jailed by `IRONSHELL_WORKSPACE` alone (no agent mode, so no approval).
+    fn jailed(&self, expr: &str) -> Output {
+        Command::new(env!("CARGO_BIN_EXE_ish"))
+            .args(["-c", expr])
+            .current_dir(&self.ws)
+            .env("NO_COLOR", "1")
+            .env("IRONSHELL_SESSION_DIR", &self.session)
+            .env("IRONSHELL_WORKSPACE", &self.ws)
+            .env_remove("IRONSHELL_MODE")
+            .output()
+            .expect("run ish")
+    }
+}
+
+#[test]
+fn rm_removes_a_link_in_the_workspace_and_leaves_its_target() {
+    let s = Scratch::new("rmlink");
+    std::fs::write(s.outside.join("keep.txt"), "keep").unwrap();
+    let jx = s.ws.join("jx");
+    if !link_dir(&s.outside, &jx) {
+        return;
+    }
+    let out = s.jailed(r#"rm("jx")"#);
+    let shown = text(&out);
+    assert!(out.status.success(), "{shown}");
+    assert!(
+        std::fs::symlink_metadata(&jx).is_err(),
+        "link remains: {shown}"
+    );
+    assert!(
+        s.outside.join("keep.txt").is_file(),
+        "target damaged: {shown}"
+    );
+}
+
+#[test]
+fn rmdir_recursive_on_a_link_out_of_the_workspace_is_refused_with_a_hint() {
+    let s = Scratch::new("rmdirlink");
+    std::fs::write(s.outside.join("keep.txt"), "keep").unwrap();
+    let jx = s.ws.join("jx");
+    if !link_dir(&s.outside, &jx) {
+        return;
+    }
+    let out = s.jailed(r#"rmdir("jx", true)"#);
+    let shown = text(&out);
+    assert!(!out.status.success(), "{shown}");
+    assert!(shown.contains("E_OUTSIDE_WORKSPACE"), "{shown}");
+    assert!(shown.contains("rm(path)"), "{shown}");
+    assert!(
+        s.outside.join("keep.txt").is_file(),
+        "target damaged: {shown}"
+    );
+}
+
+#[test]
+fn rm_of_a_file_through_a_link_out_of_the_workspace_is_still_refused() {
+    let s = Scratch::new("rmthrough");
+    std::fs::write(s.outside.join("keep.txt"), "keep").unwrap();
+    if !link_dir(&s.outside, &s.ws.join("jx")) {
+        return;
+    }
+    let out = s.jailed(r#"rm("jx/keep.txt")"#);
+    let shown = text(&out);
+    assert!(!out.status.success(), "{shown}");
+    assert!(shown.contains("E_OUTSIDE_WORKSPACE"), "{shown}");
+    assert!(s.outside.join("keep.txt").is_file(), "{shown}");
+}
+
+// ── Items 1 to 3: archive extraction ──
+
+fn tar_with(path: &Path, entries: &[(&str, &str)]) {
+    let mut b = tar::Builder::new(std::fs::File::create(path).unwrap());
+    for (name, content) in entries {
+        let mut h = tar::Header::new_gnu();
+        h.set_size(content.len() as u64);
+        h.set_mode(0o644);
+        h.set_entry_type(tar::EntryType::Regular);
+        h.set_cksum();
+        b.append_data(&mut h, name, content.as_bytes()).unwrap();
+    }
+    b.finish().unwrap();
+}
+
+#[test]
+fn an_overlong_entry_name_is_refused_before_anything_is_written() {
+    let s = Scratch::new("longname");
+    let long = "n".repeat(300);
+    tar_with(&s.ws.join("long.tar"), &[(&format!("d/{long}"), "x")]);
+    let out = s.agent("tar_extract('long.tar', 'out')");
+    let shown = text(&out);
+    assert!(!out.status.success(), "{shown}");
+    assert!(shown.contains("E_BAD_ARG"), "{shown}");
+    assert!(!s.ws.join("out").exists(), "debris: {shown}");
+    assert!(!s.ws.join("d").exists(), "debris: {shown}");
+}
+
+#[test]
+fn a_failed_extraction_leaves_no_partial_tree_and_says_write() {
+    let s = Scratch::new("debris");
+    tar_with(
+        &s.ws.join("bad.tar"),
+        &[("d/a.txt", "x"), ("d/a.txt/b.txt", "y")],
+    );
+    let out = s.agent("tar_extract('bad.tar', 'out')");
+    let shown = text(&out);
+    assert!(!out.status.success(), "{shown}");
+    assert!(!shown.contains("to be readable"), "{shown}");
+    assert!(!s.ws.join("out").exists(), "debris left: {shown}");
+}
+
+#[test]
+fn a_destination_through_a_link_is_named_as_given() {
+    let s = Scratch::new("jxsub");
+    tar_with(&s.ws.join("t.tar"), &[("a.txt", "x")]);
+    if !link_dir(&s.outside, &s.ws.join("jx")) {
+        return;
+    }
+    let out = s.agent("tar_extract('t.tar', 'jx/sub')");
+    let shown = text(&out);
+    assert!(!out.status.success(), "{shown}");
+    assert!(shown.contains("E_OUTSIDE_WORKSPACE"), "{shown}");
+    assert!(shown.contains("jx/sub"), "{shown}");
+    assert!(!shown.contains("[...]/sub"), "{shown}");
+    assert!(!s.outside.join("sub").exists(), "{shown}");
+}
+
+#[test]
+fn explain_agrees_about_an_overlong_entry_name() {
+    let s = Scratch::new("explainlong");
+    let long = "n".repeat(300);
+    let archive = s.ws.join("long.tar");
+    tar_with(&archive, &[(&format!("d/{long}"), "x")]);
+    let lit = archive.to_string_lossy().replace('\\', "/");
+    assert_eq!(decision(&format!("tar_extract('{lit}', 'out')")), "deny");
+}
+
+// ── Follow-ups: rm and links, edge spellings ──
+
+#[test]
+fn rm_refuses_a_trailing_separator_and_spellings_that_reach_through_a_link() {
+    let s = Scratch::new("rmspell");
+    std::fs::write(s.outside.join("x"), "keep").unwrap();
+    std::fs::write(s.outside.join("keep.txt"), "keep").unwrap();
+    if !link_dir(&s.outside, &s.ws.join("jx")) {
+        return;
+    }
+    for expr in [
+        r#"rm("jx/")"#,
+        r#"rm("jx\\")"#,
+        r#"rm("jx/.")"#,
+        r#"rm("jx/../x")"#,
+    ] {
+        let out = s.jailed(expr);
+        let shown = text(&out);
+        assert!(!out.status.success(), "{expr}: {shown}");
+        assert!(
+            std::fs::symlink_metadata(s.ws.join("jx")).is_ok(),
+            "{expr}: the link was removed: {shown}"
+        );
+        assert!(s.outside.join("keep.txt").is_file(), "{expr}: {shown}");
+        assert!(s.outside.join("x").is_file(), "{expr}: {shown}");
+    }
+    // Refused either by rm's own check (E_BAD_ARG) or, where the OS follows
+    // the link at a trailing `/` (Unix), first by the jail.
+    let out = s.jailed(r#"rm("jx/")"#);
+    let shown = text(&out);
+    assert!(
+        shown.contains("E_BAD_ARG") || shown.contains("E_OUTSIDE_WORKSPACE"),
+        "{shown}"
+    );
+}
+
+#[test]
+fn a_dangling_link_in_the_workspace_is_removed_and_undo_does_not_recreate_it() {
+    let s = Scratch::new("dangling");
+    let gone = s.root.join("gone");
+    std::fs::create_dir_all(&gone).unwrap();
+    let jx = s.ws.join("jx");
+    if !link_dir(&gone, &jx) {
+        return;
+    }
+    std::fs::remove_dir(&gone).unwrap();
+    let out = Command::new(env!("CARGO_BIN_EXE_ish"))
+        .args(["-c", r#"rm("jx"); undo()"#])
+        .current_dir(&s.ws)
+        .env("NO_COLOR", "1")
+        .env("IRONSHELL_SESSION_DIR", &s.session)
+        .env("IRONSHELL_WORKSPACE", &s.ws)
+        .env("IRONSHELL_JOURNAL", "on")
+        .env_remove("IRONSHELL_MODE")
+        .output()
+        .expect("run ish");
+    let shown = text(&out);
+    assert!(
+        std::fs::symlink_metadata(&jx).is_err(),
+        "an undo of a link cannot recreate it, and must not pretend to: {shown}"
+    );
+    assert!(
+        !shown.contains("complete: true") && !shown.contains("complete=true"),
+        "{shown}"
+    );
+}

@@ -214,9 +214,11 @@ mod explain_names {
 }
 
 #[test]
-fn a_stream_name_is_left_to_the_write_guard() {
-    // The dispatcher lets `name:stream` through for a read and a write alike;
-    // `safety::guard` refuses it for a write.
-    assert!(windows_param_name_refusal("file_write", "f.txt:s", true).is_none());
-    assert!(windows_param_name_refusal("file_read", "f.txt:s", false).is_none());
+fn a_stream_name_is_refused_for_a_read_and_a_write_alike() {
+    // Round 49c: a read of `name:stream` is refused as a write of it is.
+    assert!(windows_param_name_refusal("file_write", "f.txt:s", true).is_some());
+    assert!(windows_param_name_refusal("file_read", "f.txt:s", false).is_some());
+    // A scheme or a drive is not a stream.
+    assert!(windows_param_name_refusal("file_read", "https://x/y", false).is_none());
+    assert!(windows_param_name_refusal("file_read", "C:\\x\\y.txt", false).is_none());
 }

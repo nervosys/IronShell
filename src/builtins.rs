@@ -4576,6 +4576,9 @@ fn call_with_input_inner(
     // Builtins that guard themselves are skipped so one action is not admitted
     // twice. The read jail comes first, so no approval token is issued for a
     // path the jail refuses.
+    // `rm` removes a link itself and never follows it, so for its duration a
+    // link is judged by where it sits (see `safety::within_workspace`).
+    let _link_scope = (name == "rm").then(crate::safety::link_leaf_scope);
     crate::security::read_jail_dispatch(name, &args, input.is_some())?;
     crate::safety::guard_dispatch(name, &args)?;
 
@@ -40154,6 +40157,17 @@ fn archive_entry_refusal(builtin: &str, name: &str, target: Option<&str>) -> Opt
     if archive_entry_escapes(name) {
         return Some(refuse_archive_entry(builtin, name));
     }
+    // A name no filesystem keeps (a component over 255) used to fail partway
+    // through the write; it is refused up front, as `--explain` predicts.
+    if let Some(part) = overlong_component(name) {
+        let shown: String = part.chars().take(24).collect();
+        return Some(crate::safety::bad_arg_with_hint(
+            builtin,
+            &format!("entry names whose components are at most {ARCHIVE_NAME_COMPONENT_MAX} characters"),
+            &format!("entry `{shown}...` with a component of {} characters", part.chars().count()),
+            "the archive was refused before anything was written; rename the entry to a shorter name",
+        ));
+    }
     // A member named like a Windows device would be written as a file that
     // cannot be deleted; a trailing dot or space is stripped onto another name.
     if cfg!(windows) {
@@ -40311,7 +40325,18 @@ pub fn explain_extraction_refusal(builtin: &str, archive: &str, dest: &str) -> O
         "tar_extract" => tar_archive_listing("tar_extract", archive),
         _ => return None,
     };
-    let (members, _) = listed.ok()?;
+    // A listing that is itself a policy refusal (a link entry in a format the
+    // external tar extracts) is the run's refusal too. Any other failure to
+    // read the archive is not predicted.
+    let (members, _) = match listed {
+        Ok(l) => l,
+        Err(e) => {
+            return e
+                .downcast_ref::<crate::safety::SafetyError>()
+                .filter(|s| s.code == crate::safety::ErrorCode::PolicyDeny)
+                .map(|s| s.message.clone())
+        }
+    };
     let canonical = if builtin == "tar_extract" {
         "tar_extract"
     } else {
@@ -40397,6 +40422,130 @@ fn extraction_journal_paths(
         }
     }
     out
+}
+
+/// The files and directories an extraction will create that do not exist yet,
+/// planned before anything is written, so a failed extraction can take back what
+/// it made and leave no partial tree. Only paths absent at planning time are
+/// listed: a file the archive overwrites, or a folder that was already there, is
+/// never removed.
+#[derive(Default)]
+struct ExtractTrail {
+    /// In creation order: each folder before what goes in it.
+    made: Vec<std::path::PathBuf>,
+}
+
+/// Append to `made` the folders of `dir`'s chain that do not exist yet,
+/// outermost first, skipping any already in `seen`.
+fn note_missing_dirs(
+    dir: &std::path::Path,
+    seen: &mut std::collections::HashSet<std::path::PathBuf>,
+    made: &mut Vec<std::path::PathBuf>,
+) {
+    let mut missing: Vec<std::path::PathBuf> = Vec::new();
+    let mut cursor = Some(dir);
+    while let Some(d) = cursor {
+        if d.as_os_str().is_empty() || std::fs::symlink_metadata(d).is_ok() {
+            break;
+        }
+        missing.push(d.to_path_buf());
+        cursor = d.parent();
+    }
+    for d in missing.into_iter().rev() {
+        if seen.insert(d.clone()) {
+            made.push(d);
+        }
+    }
+}
+
+impl ExtractTrail {
+    /// Plan the extraction of `entries` (name, is-a-directory) under `root`. A
+    /// name that would escape `root` is left out: the extractors refuse it.
+    fn plan(root: &std::path::Path, entries: impl Iterator<Item = (String, bool)>) -> Self {
+        let mut seen = std::collections::HashSet::new();
+        let mut made = Vec::new();
+        note_missing_dirs(root, &mut seen, &mut made);
+        for (name, is_dir) in entries {
+            if archive_entry_escapes(&name) {
+                continue;
+            }
+            let mut target = root.to_path_buf();
+            let mut any = false;
+            for part in name
+                .split(['/', '\\'])
+                .filter(|p| !p.is_empty() && *p != ".")
+            {
+                target.push(part);
+                any = true;
+            }
+            if !any {
+                continue;
+            }
+            if is_dir {
+                note_missing_dirs(&target, &mut seen, &mut made);
+                continue;
+            }
+            if let Some(parent) = target.parent() {
+                note_missing_dirs(parent, &mut seen, &mut made);
+            }
+            if std::fs::symlink_metadata(&target).is_err() && seen.insert(target.clone()) {
+                made.push(target);
+            }
+        }
+        ExtractTrail { made }
+    }
+
+    /// Remove what the extraction made, last created first. A folder goes only
+    /// while empty, and a link is removed itself, never followed.
+    fn undo(&self) {
+        for p in self.made.iter().rev() {
+            match std::fs::symlink_metadata(p) {
+                Ok(m) if m.is_dir() => {
+                    let _ = std::fs::remove_dir(p);
+                }
+                Ok(_) => {
+                    let _ = std::fs::remove_file(p).or_else(|_| std::fs::remove_dir(p));
+                }
+                Err(_) => {}
+            }
+        }
+    }
+}
+
+/// Whether an I/O error, or one it wraps (the tar crate wraps the cause in its
+/// own error), carries the OS error `code`.
+fn io_error_has_code(e: &std::io::Error, code: i32) -> bool {
+    if e.raw_os_error() == Some(code) {
+        return true;
+    }
+    let mut cause: Option<&(dyn std::error::Error + 'static)> = e
+        .get_ref()
+        .map(|inner| inner as &(dyn std::error::Error + 'static));
+    while let Some(c) = cause {
+        if let Some(io) = c.downcast_ref::<std::io::Error>() {
+            if io.raw_os_error() == Some(code) {
+                return true;
+            }
+        }
+        cause = c.source();
+    }
+    false
+}
+
+/// The longest name a single path component may have, in bytes on Unix and in
+/// UTF-16 units on Windows (`NAME_MAX`, and NTFS's limit).
+const ARCHIVE_NAME_COMPONENT_MAX: usize = 255;
+
+/// The entry's longest component over `ARCHIVE_NAME_COMPONENT_MAX`, if any.
+fn overlong_component(name: &str) -> Option<&str> {
+    name.split(['/', '\\']).find(|part| {
+        let len = if cfg!(windows) {
+            part.encode_utf16().count()
+        } else {
+            part.len()
+        };
+        len > ARCHIVE_NAME_COMPONENT_MAX
+    })
 }
 
 fn refuse_archive_entry(builtin: &str, name: &str) -> anyhow::Error {
@@ -40502,7 +40651,41 @@ fn tar_tool_entry_names(
         }
         names.push((line.to_string(), None));
     }
+    // `tar -tf` lists no link targets, and this archive is extracted by the
+    // same external tar, which does not judge them. A link entry is refused
+    // rather than extracted unchecked: a later member could be written through
+    // it, or it could point out of the destination.
+    let mut verbose = crate::safety::child_command("tar");
+    verbose.arg("-tvf").arg(archive);
+    let long = bounded_cmd_output(builtin, "tar", verbose, TOOL_DEADLINE_SECS)?;
+    // Fail closed: a verbose listing that does not complete cannot be checked.
+    if !long.status.success() {
+        return Err(crate::safety::tool_failed(
+            builtin,
+            "tar -tvf",
+            long.status.code(),
+            &format!(
+                "the link check could not list the archive, so nothing was extracted: {}",
+                String::from_utf8_lossy(&long.stderr)
+            ),
+        ));
+    }
+    if tar_verbose_lists_a_link(&String::from_utf8_lossy(&long.stdout)) {
+        return Err(crate::safety::policy_deny(
+            builtin,
+            format!("{builtin}: the archive holds a symbolic or hard link entry, and its targets cannot be checked for this format"),
+            "nothing was extracted; convert the archive to .tar.gz (the links are then checked before anything is written), or remove the link entries",
+        ));
+    }
     Ok((names, 0))
+}
+
+/// Whether a `tar -tv` listing has a symbolic link (`l`) or hard link (`h`)
+/// entry: GNU tar and bsdtar both open such a line with that type letter.
+fn tar_verbose_lists_a_link(listing: &str) -> bool {
+    listing
+        .lines()
+        .any(|l| matches!(l.as_bytes().first(), Some(b'l' | b'h')))
 }
 
 /// The program that decompresses a bzip2, xz or zstd stream, by its first two
@@ -40631,9 +40814,8 @@ fn tar_archive_listing(
             return Ok(listed);
         }
         // No decompressor on PATH, so the names come from the tar that will
-        // extract them. Link targets are not listed this way; the tool's own
-        // protection (GNU tar and bsdtar strip leading `/`, refuse `..`
-        // members, and delay symlinks) covers those.
+        // extract them. Link targets are not listed this way, so an archive
+        // with any link entry is refused (see `tar_tool_entry_names`).
         return tar_tool_entry_names(builtin, archive);
     } else {
         Box::new(file)
@@ -40708,10 +40890,22 @@ fn bi_zip_extract(args: Vec<Value>, _input: Option<Value>) -> Result<Value> {
     check_archive_budget("zip_extract", declared)?;
     crate::safety::reject_option_like("zip_extract", std::slice::from_ref(&archive))?;
     crate::safety::reject_option_like("zip_extract", std::slice::from_ref(&dest))?;
-    let dest = guard_local_write("zip_extract", &dest)?;
+    let dest = guard_extract_dest("zip_extract", &dest)?;
     check_archive_protected("zip_extract", &dest, &members)?;
     check_archive_landing("zip_extract", &dest, &members, archive_jail_enforced())?;
-    zip_extract_in_process(&archive, &dest)?;
+    // Symlink entries are not created, so they are not planned. A failed
+    // extraction removes what it made (see `ExtractTrail`).
+    let trail = ExtractTrail::plan(
+        std::path::Path::new(&dest),
+        members
+            .iter()
+            .filter(|(_, target)| target.is_none())
+            .map(|(n, _)| (n.clone(), n.ends_with('/') || n.ends_with('\\'))),
+    );
+    if let Err(e) = zip_extract_in_process(&archive, &dest) {
+        trail.undo();
+        return Err(e);
+    }
     Ok(Value::Bool(true))
 }
 
@@ -40758,7 +40952,7 @@ fn zip_extract_in_process(archive: &str, dest: &str) -> Result<()> {
             extraction_journal_paths(root, listed.into_iter()),
         );
     }
-    std::fs::create_dir_all(root).map_err(|e| crate::safety::fs_error(B, dest, &e))?;
+    std::fs::create_dir_all(root).map_err(|e| crate::safety::fs_write_error(B, dest, &e))?;
     let mut written: usize = 0;
     let mut links: usize = 0;
     let mut total: u64 = 0;
@@ -40789,7 +40983,7 @@ fn zip_extract_in_process(archive: &str, dest: &str) -> Result<()> {
         }
         if entry.is_dir() || name.ends_with('/') || name.ends_with('\\') {
             std::fs::create_dir_all(&target)
-                .map_err(|e| crate::safety::fs_error(B, &target, &e))?;
+                .map_err(|e| crate::safety::fs_write_error(B, &target, &e))?;
             written += 1;
             continue;
         }
@@ -40798,7 +40992,8 @@ fn zip_extract_in_process(archive: &str, dest: &str) -> Result<()> {
             continue;
         }
         if let Some(parent) = target.parent() {
-            std::fs::create_dir_all(parent).map_err(|e| crate::safety::fs_error(B, parent, &e))?;
+            std::fs::create_dir_all(parent)
+                .map_err(|e| crate::safety::fs_write_error(B, parent, &e))?;
         }
         let shown = target.to_string_lossy().into_owned();
         let mut out = std::fs::OpenOptions::new()
@@ -40806,7 +41001,7 @@ fn zip_extract_in_process(archive: &str, dest: &str) -> Result<()> {
             .create(true)
             .truncate(true)
             .open(&target)
-            .map_err(|e| crate::safety::fs_error(B, &shown, &e))?;
+            .map_err(|e| crate::safety::fs_write_error(B, &shown, &e))?;
         let room = ARCHIVE_EXTRACT_MAX_BYTES.saturating_sub(total);
         let n = std::io::copy(&mut (&mut entry).take(room.saturating_add(1)), &mut out)
             .map_err(|e| zip_not_an_archive(B, archive, e))?;
@@ -41232,43 +41427,82 @@ fn bi_tar_extract(args: Vec<Value>, _input: Option<Value>) -> Result<Value> {
         }
     };
     let mut extract_root = ".".to_string();
+    // What this call will create, planned before anything is written, so a
+    // failed extraction takes back its partial output (see `ExtractTrail`).
+    let trail: ExtractTrail;
+    let trail_names = || {
+        members
+            .iter()
+            .map(|(n, _)| (n.clone(), n.ends_with('/') || n.ends_with('\\')))
+            .collect::<Vec<_>>()
+    };
     if let Some(d) = dest {
         crate::safety::reject_option_like("tar_extract", std::slice::from_ref(&d))?;
         // The central check judges only paths that already exist. A `-C`
         // target usually does, but not always, so the destination is jailed
         // here where its meaning is known.
-        let d = guard_local_write("tar_extract", &d)?;
+        let d = guard_extract_dest("tar_extract", &d)?;
         check_archive_protected("tar_extract", &d, &members)?;
         check_archive_landing("tar_extract", &d, &members, archive_jail_enforced())?;
         // unzip and Expand-Archive create a missing destination; `tar -C` fails
         // on one ("could not chdir"), so it is created here, after the jail.
         journal_step(&d);
-        std::fs::create_dir_all(&d).map_err(|e| crate::safety::fs_error("tar_extract", &d, &e))?;
+        trail = ExtractTrail::plan(std::path::Path::new(&d), trail_names().into_iter());
+        if let Err(e) = std::fs::create_dir_all(&d) {
+            trail.undo();
+            return Err(crate::safety::fs_write_error("tar_extract", &d, &e));
+        }
         cmd.args(["-C", &d]);
         extract_root = d;
     } else {
         check_archive_protected("tar_extract", ".", &members)?;
         check_archive_landing("tar_extract", ".", &members, archive_jail_enforced())?;
         journal_step(".");
+        trail = ExtractTrail::plan(std::path::Path::new("."), trail_names().into_iter());
     }
-    // A plain or gzip tar is extracted in-process (the tar crate), after the
-    // checks above: the system tar (bsdtar on Windows) fails partway on a valid
-    // archive with a non-ASCII member name. A bzip2, xz or zstd stream still
-    // goes to the tar program.
-    if tar_extract_in_process(&archive, &extract_root)? {
-        return Ok(Value::Bool(true));
+    let extracted = (|| -> Result<Value> {
+        // A plain or gzip tar is extracted in-process (the tar crate), after the
+        // checks above: the system tar (bsdtar on Windows) fails partway on a
+        // valid archive with a non-ASCII member name. A bzip2, xz or zstd stream
+        // still goes to the tar program.
+        if tar_extract_in_process(&archive, &extract_root)? {
+            return Ok(Value::Bool(true));
+        }
+        // Archives can be large; extraction is bounded by the long deadline.
+        let output = bounded_cmd_output("tar_extract", "tar", cmd, TOOL_LONG_DEADLINE_SECS)?;
+        if !output.status.success() {
+            return Err(crate::safety::tool_failed(
+                "tar_extract",
+                "tar",
+                output.status.code(),
+                &String::from_utf8_lossy(&output.stderr),
+            ));
+        }
+        Ok(Value::Bool(true))
+    })();
+    // A failed extraction leaves nothing it made: the files and folders that were
+    // not there before are removed (an existing file it overwrote stays as it is).
+    if extracted.is_err() {
+        trail.undo();
     }
-    // Archives can be large; extraction is bounded by the long deadline.
-    let output = bounded_cmd_output("tar_extract", "tar", cmd, TOOL_LONG_DEADLINE_SECS)?;
-    if !output.status.success() {
-        return Err(crate::safety::tool_failed(
-            "tar_extract",
-            "tar",
-            output.status.code(),
-            &String::from_utf8_lossy(&output.stderr),
-        ));
-    }
-    Ok(Value::Bool(true))
+    extracted
+}
+
+/// The destination of an extraction, jailed as a write. The refusal names the
+/// path as the caller gave it (`jx/sub`), not the redacted tail of the resolved
+/// one, so a link or junction in the way can be found.
+fn guard_extract_dest(builtin: &str, given: &str) -> Result<String> {
+    guard_local_write(builtin, given).map_err(|e| {
+        let outside = matches!(
+            e.downcast_ref::<crate::safety::SafetyError>(),
+            Some(s) if s.code == crate::safety::ErrorCode::OutsideWorkspace
+        );
+        if outside && !std::path::Path::new(given).is_absolute() {
+            crate::safety::outside_workspace_shown(builtin, given, given)
+        } else {
+            e
+        }
+    })
 }
 
 /// Extracts a plain or gzip-compressed tar into `root`, in-process, and says
@@ -41294,13 +41528,15 @@ fn tar_extract_in_process(archive: &str, root: &str) -> Result<bool> {
     } else {
         Box::new(file)
     };
-    std::fs::create_dir_all(root).map_err(|e| crate::safety::fs_error(B, root, &e))?;
+    std::fs::create_dir_all(root).map_err(|e| crate::safety::fs_write_error(B, root, &e))?;
     let mut ar = tar::Archive::new(reader);
     let entries = ar.entries().map_err(|e| {
         crate::safety::tool_failed(B, "tar", None, &format!("not a tar archive: {e}"))
     })?;
     let mut count: usize = 0;
     let mut total: u64 = 0;
+    let mut extracted: usize = 0;
+    let mut skipped_links: usize = 0;
     for entry in entries {
         let mut entry = entry.map_err(|e| {
             crate::safety::tool_failed(B, "tar", None, &format!("unreadable entry: {e}"))
@@ -41315,12 +41551,29 @@ fn tar_extract_in_process(archive: &str, root: &str) -> Result<bool> {
             .path()
             .map(|p| p.to_string_lossy().into_owned())
             .unwrap_or_default();
-        let unpacked = entry
-            .unpack_in(root)
-            .map_err(|e| crate::safety::fs_error(B, root, &e))?;
+        let is_symlink = entry.header().entry_type().is_symlink();
+        let unpacked = match entry.unpack_in(root) {
+            Ok(done) => done,
+            // On Windows a symbolic link needs a privilege most sessions lack.
+            // Such an entry is skipped, as `zip_extract` skips every symlink
+            // entry, rather than failing after earlier entries were written.
+            Err(e) if cfg!(windows) && is_symlink && io_error_has_code(&e, 1314) => {
+                skipped_links += 1;
+                continue;
+            }
+            Err(e) => return Err(crate::safety::fs_write_error(B, root, &e)),
+        };
         if !unpacked {
             return Err(refuse_archive_entry(B, &name));
         }
+        extracted += 1;
+    }
+    if extracted == 0 && skipped_links > 0 {
+        return Err(crate::safety::bad_state_with_hint(
+            B,
+            "the archive holds only symbolic links, which this session may not create",
+            "nothing was written; enable Developer Mode or the symbolic-link privilege, or extract it elsewhere",
+        ));
     }
     Ok(true)
 }
@@ -69251,6 +69504,16 @@ pub fn bi_rm(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
         ));
     }
     let force = fs_flag("rm", "force", args.get(1))?;
+    // A trailing separator names what a link points at, not the link, so it
+    // could be read as a request to follow it. Refused before anything else.
+    if path.ends_with(['/', '\\']) || crate::safety::path_ends_in_dot_component(&path) {
+        return Err(crate::safety::bad_arg_with_hint(
+            "rm",
+            "a file or link name with no trailing separator, `.` or `..`",
+            &format!("'{path}'"),
+            "name the file or link without a trailing / or \\; to remove a directory use rmdir",
+        ));
+    }
     // rm names one file and expands nothing: a `*` or `?` that names no file is a
     // glob the caller expected expanded. Left to the jail it was called "outside
     // the workspace" (the name cannot be resolved), which it is not.
@@ -69318,12 +69581,32 @@ pub fn bi_rm(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
             &format!("'{written}' is a directory; remove it with rmdir(\"{written}\", true)"),
         ));
     }
+    // A link is removed itself and never followed. A transaction snapshot would
+    // read what it points at (a whole folder tree for a junction), and cannot
+    // restore a link, so a link is not removed inside one.
+    let link = crate::safety::is_link(&path);
+    if link {
+        refuse_in_transaction("rm", "removing a link cannot be rolled back")?;
+    }
     crate::tx::snapshot(&path); // record pre-delete state if a transaction is active
                                 // `force` excuses a file that is already gone, as `rm -f` does, and nothing
                                 // else. It used to turn every failure -- a directory, a locked file, a
                                 // permission refusal -- into a success string, so a delete that did not
                                 // happen read as one that had.
-    match std::fs::remove_file(&path) {
+    let removed = if link {
+        // On Windows a junction or directory link is removed as a directory:
+        // remove_dir takes off the reparse point, never the target's contents.
+        std::fs::remove_file(&path).or_else(|e| {
+            if cfg!(windows) {
+                std::fs::remove_dir(&path)
+            } else {
+                Err(e)
+            }
+        })
+    } else {
+        std::fs::remove_file(&path)
+    };
+    match removed {
         Ok(()) => Ok(Value::Str(format!("removed: {}", path))),
         Err(e) if force && e.kind() == std::io::ErrorKind::NotFound => {
             Ok(Value::Str(format!("already absent: {}", path)))
@@ -84478,6 +84761,121 @@ mod archive_prescan_tests {
         assert!(result.is_err(), "escaping symlink must be refused");
         assert!(!dest.join("a").exists(), "nothing may be written");
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_tar_listing_with_a_link_entry_is_seen() {
+        let nl = "\n";
+        let gnu = [
+            "-rw-r--r-- u/g 3 2026-01-01 00:00 a.txt",
+            "lrwxrwxrwx u/g 0 2026-01-01 00:00 l -> /etc",
+        ]
+        .join(nl);
+        assert!(super::tar_verbose_lists_a_link(&gnu));
+        let bsd = [
+            "-rw-r--r--  0 u g 3 Jan  1 00:00 a.txt",
+            "hrw-r--r--  0 u g 0 Jan  1 00:00 h link to a.txt",
+        ]
+        .join(nl);
+        assert!(super::tar_verbose_lists_a_link(&bsd));
+        let plain = [
+            "-rw-r--r-- u/g 3 2026-01-01 00:00 a.txt",
+            "drwxr-xr-x u/g 0 2026-01-01 00:00 d/",
+        ]
+        .join(nl);
+        assert!(!super::tar_verbose_lists_a_link(&plain));
+    }
+
+    #[test]
+    fn an_overlong_entry_name_is_refused_up_front_as_bad_arg() {
+        let long = "a".repeat(300);
+        assert!(super::overlong_component(&format!("d/{long}")).is_some());
+        assert!(super::overlong_component("d/ok.txt").is_none());
+        let e = super::archive_entry_refusal("tar_extract", &format!("d/{long}"), None)
+            .expect("refused");
+        let s = e
+            .downcast_ref::<crate::safety::SafetyError>()
+            .expect("coded");
+        assert_eq!(s.code, crate::safety::ErrorCode::BadArg);
+    }
+
+    #[test]
+    fn a_failed_tar_extraction_leaves_nothing_it_made() {
+        let root = std::env::temp_dir().join(format!("ae-r49c-debris-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let archive = root.join("bad.tar");
+        {
+            // `d/a.txt` is a file, then `d/a.txt/b.txt` needs it to be a folder.
+            let mut b = tar::Builder::new(std::fs::File::create(&archive).unwrap());
+            for name in ["d/a.txt", "d/a.txt/b.txt"] {
+                let mut h = tar::Header::new_gnu();
+                h.set_path(name).unwrap();
+                h.set_size(1);
+                h.set_mode(0o644);
+                h.set_cksum();
+                b.append(&h, &b"x"[..]).unwrap();
+            }
+            b.finish().unwrap();
+        }
+        let out = root.join("out");
+        let result = bi_tar_extract(
+            vec![
+                Value::Str(archive.display().to_string()),
+                Value::Str(out.display().to_string()),
+            ],
+            None,
+        );
+        let err = result.expect_err("the second entry cannot be written");
+        let text = format!("{err}");
+        assert!(!text.contains("cannot read"), "{text}");
+        assert!(!out.exists(), "debris left: {out:?}");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn the_extract_trail_keeps_what_was_already_there() {
+        let root = std::env::temp_dir().join(format!("ae-r49c-trail-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("old")).unwrap();
+        std::fs::write(root.join("old").join("keep.txt"), "k").unwrap();
+        let trail = super::ExtractTrail::plan(
+            &root,
+            [
+                ("old/keep.txt", false),
+                ("old/new.txt", false),
+                ("fresh/x.txt", false),
+            ]
+            .into_iter()
+            .map(|(n, d)| (n.to_string(), d)),
+        );
+        std::fs::create_dir_all(root.join("fresh")).unwrap();
+        std::fs::write(root.join("fresh").join("x.txt"), "x").unwrap();
+        std::fs::write(root.join("old").join("new.txt"), "n").unwrap();
+        trail.undo();
+        assert!(root.join("old").join("keep.txt").is_file());
+        assert!(!root.join("old").join("new.txt").exists());
+        assert!(!root.join("fresh").exists());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn an_os_code_is_found_inside_a_wrapped_io_error() {
+        #[derive(Debug)]
+        struct Wrap(std::io::Error);
+        impl std::fmt::Display for Wrap {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                write!(f, "failed to unpack")
+            }
+        }
+        impl std::error::Error for Wrap {
+            fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+                Some(&self.0)
+            }
+        }
+        let wrapped = std::io::Error::other(Wrap(std::io::Error::from_raw_os_error(1314)));
+        assert!(super::io_error_has_code(&wrapped, 1314));
+        assert!(!super::io_error_has_code(&wrapped, 5));
     }
 }
 

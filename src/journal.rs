@@ -773,8 +773,29 @@ fn candidate_paths(builtin: &str, args: &[Value]) -> Vec<String> {
 /// The current state of `path`, captured for the journal, or the reason it
 /// cannot be. `used` is the bytes already held, so the session-wide budget is
 /// respected.
+/// Whether `path` is a link the journal must not capture: a dangling one, or
+/// under the jail one that points out of the workspace.
+fn uncapturable_link(path: &str) -> bool {
+    if !crate::safety::is_link(path) {
+        return false;
+    }
+    if !Path::new(path).exists() {
+        return true;
+    }
+    crate::safety::jail_enforced(crate::safety::current_mode())
+        && !crate::safety::within_root(path, &crate::safety::workspace_root())
+}
+
 fn capture(path: &str, used: usize) -> Result<Before, String> {
     let p = Path::new(path);
+    // A link that points out of the workspace is not read through: capturing it
+    // would copy the target's bytes (or tree) into the journal, and undo would
+    // write them back as a file at the link's own path. A dangling link has no
+    // bytes to keep and the journal cannot restore a link, so it is irreversible
+    // too, not "absent" (undo would claim success and recreate nothing).
+    if uncapturable_link(path) {
+        return Err("path is a link the journal cannot restore; it is not captured".into());
+    }
     if p.is_file() {
         let size = std::fs::metadata(p)
             .map(|m| m.len() as usize)
@@ -986,6 +1007,9 @@ pub fn record_group(builtin: &str, effect: Effect, paths: Vec<String>) {
 /// is asked for says `reversible` only when the journal will restore the file.
 pub fn would_capture(path: &str) -> bool {
     if !enabled() {
+        return false;
+    }
+    if uncapturable_link(path) {
         return false;
     }
     let Ok(meta) = std::fs::metadata(path) else {
