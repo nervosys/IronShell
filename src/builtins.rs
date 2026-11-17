@@ -26100,6 +26100,13 @@ fn journal_rows(entries: &[crate::journal::Entry]) -> Vec<Value> {
             // `id` is the value undo({id: N}) takes; `seq` is the same number.
             m.insert("id".to_string(), Value::Int(e.seq as i64));
             m.insert("seq".to_string(), Value::Int(e.seq as i64));
+            // The call the row belongs to: rows of one call (a move or an
+            // extraction changes several paths) share a step, and `undo(n)`
+            // counts steps. A call that changed one path is its own step.
+            m.insert(
+                "step".to_string(),
+                Value::Int(e.group.unwrap_or(e.seq) as i64),
+            );
             m.insert("builtin".to_string(), Value::Str(e.builtin.clone()));
             m.insert("effect".to_string(), Value::Str(e.effect.clone()));
             if !e.path.is_empty() {
@@ -33848,6 +33855,53 @@ fn brace_alternatives(pattern: &str) -> Vec<String> {
     vec![pattern.to_string()]
 }
 
+/// What is unbalanced about the braces of `pattern`: `an unclosed {` or
+/// `a } with no {`, or `None`. A brace inside a `[...]` class is a literal.
+fn unbalanced_brace(pattern: &str) -> Option<&'static str> {
+    let mut depth = 0usize;
+    let mut in_class = false;
+    for c in pattern.chars() {
+        match c {
+            '[' => in_class = true,
+            ']' => in_class = false,
+            '{' if !in_class => depth += 1,
+            '}' if !in_class => {
+                if depth == 0 {
+                    return Some("a } with no matching {");
+                }
+                depth -= 1;
+            }
+            _ => {}
+        }
+    }
+    (depth > 0).then_some("an unclosed {")
+}
+
+/// `pattern` with each `{x}` group that holds one alternative (no comma, no
+/// nested brace, not empty) replaced by `x`, as zsh and globset read it. `{}`
+/// stays as written.
+fn single_alternative_braces(pattern: &str) -> String {
+    let chars: Vec<char> = pattern.chars().collect();
+    let mut out = String::with_capacity(pattern.len());
+    let mut i = 0;
+    while i < chars.len() {
+        if chars[i] == '{' {
+            if let Some(len) = chars[i + 1..]
+                .iter()
+                .position(|c| matches!(c, '{' | '}' | ','))
+                .filter(|&len| len > 0 && chars[i + 1 + len] == '}')
+            {
+                out.extend(&chars[i + 1..i + 1 + len]);
+                i += len + 2;
+                continue;
+            }
+        }
+        out.push(chars[i]);
+        i += 1;
+    }
+    out
+}
+
 /// True when a path string is a glob: it has a wildcard, or a `{a,b}` group.
 fn has_glob_syntax(s: &str) -> bool {
     crate::posix::has_glob_meta(s) || brace_alternatives(s).len() > 1
@@ -33858,6 +33912,23 @@ fn has_glob_syntax(s: &str) -> bool {
 /// rather than an empty answer that reads like "no files". A `{a,b}` group
 /// matches either alternative (`*.{rs,py}`); a path matched twice appears once.
 fn expand_glob_for(builtin: &str, pattern: &str) -> Result<Vec<String>> {
+    // `glob` reads braces strictly: an unbalanced one is a mistyped pattern,
+    // not a name to look for, and a one-alternative group is the alternative.
+    let unbraced;
+    let pattern = if builtin == "glob" {
+        if let Some(what) = unbalanced_brace(pattern) {
+            return Err(crate::safety::bad_arg_with_hint(
+                builtin,
+                "a pattern whose { } braces balance",
+                &format!("{what} in {pattern}"),
+                "close every `{` with a `}` (`**/*.{rs,py}`)",
+            ));
+        }
+        unbraced = single_alternative_braces(pattern);
+        unbraced.as_str()
+    } else {
+        pattern
+    };
     let alternatives = brace_alternatives(pattern);
     if alternatives.len() <= 1 {
         return expand_glob_one(builtin, pattern);
@@ -39978,6 +40049,9 @@ struct ZipBuild {
     names: std::collections::HashSet<String>,
     bytes: u64,
     entries: usize,
+    /// Canonical paths of the archive being written (and its temporary file),
+    /// which are never stored in themselves.
+    skip: Vec<std::path::PathBuf>,
 }
 
 fn zip_write_error(builtin: &str, e: impl std::fmt::Display) -> anyhow::Error {
@@ -40046,6 +40120,14 @@ fn zip_add_tree(
         }
         return Ok(());
     }
+    // The archive being written is never stored in itself.
+    if !st.skip.is_empty() {
+        if let Ok(canon) = std::fs::canonicalize(fs_path) {
+            if st.skip.contains(&canon) {
+                return Ok(());
+            }
+        }
+    }
     zip_claim_name(builtin, st, entry_name)?;
     #[cfg(unix)]
     let opts = {
@@ -40076,12 +40158,17 @@ fn zip_write_archive(
     out: std::fs::File,
     old: Option<&str>,
     members: &[String],
+    skip: &[&str],
 ) -> Result<()> {
     let mut w = zip::ZipWriter::new(out);
     let mut st = ZipBuild {
         names: std::collections::HashSet::new(),
         bytes: 0,
         entries: 0,
+        skip: skip
+            .iter()
+            .filter_map(|p| std::fs::canonicalize(p).ok())
+            .collect(),
     };
     let cwd = crate::journal::normalized_path(&crate::safety::resolve_path_str("."));
     for m in members {
@@ -40208,7 +40295,7 @@ fn bi_zip_create(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
     // The archive is new (refused above if it exists), so rollback removes it.
     crate::tx::snapshot(&archive);
     let out = create_new_output("zip_create", &archive)?;
-    if let Err(e) = zip_write_archive("zip_create", out, None, &members) {
+    if let Err(e) = zip_write_archive("zip_create", out, None, &members, &[archive.as_str()]) {
         remove_partial(&archive);
         return Err(e);
     }
@@ -40699,9 +40786,9 @@ fn zip_archive_entries(
     let mut out = Vec::with_capacity(zip.len());
     let mut declared: u64 = 0;
     for i in 0..zip.len() {
-        let mut entry = zip.by_index(i).map_err(|e| {
-            crate::safety::tool_failed(builtin, "zip", None, &format!("unreadable entry: {e}"))
-        })?;
+        let mut entry = zip
+            .by_index(i)
+            .map_err(|e| archive_read_error(builtin, "zip", &format!("unreadable entry: {e}")))?;
         declared = declared.saturating_add(entry.size());
         let name = entry
             .name()
@@ -40895,6 +40982,37 @@ fn tar_archive_entries(builtin: &str, archive: &str) -> Result<Vec<(String, Opti
     Ok(tar_archive_listing(builtin, archive)?.0)
 }
 
+/// A tar or zip archive the shell read itself and could not: `E_TOOL_FAILED`
+/// without a status, since no program ran and nothing was killed.
+fn archive_read_error(builtin: &str, kind: &str, detail: &str) -> anyhow::Error {
+    let hint = if kind == "zip" {
+        "the zip archive is damaged or truncated; re-create it, or check it with zip_test"
+    } else {
+        "the tar archive is damaged or truncated (or is not a tar file); re-create it, or check it with archive_test"
+    };
+    crate::safety::tool_failed_in_process(
+        builtin,
+        &format!("reading the {kind} archive"),
+        detail,
+        hint,
+    )
+}
+
+/// The refusal for a zip archive handed to a tar builtin: the file starts with
+/// `PK`, so it is a zip, and the zip builtin of the same job reads it.
+fn tar_given_a_zip(builtin: &str, archive: &str) -> anyhow::Error {
+    let use_instead = if builtin == "tar_extract" {
+        "zip_extract"
+    } else {
+        "zip_list"
+    };
+    crate::safety::bad_value_in(
+        builtin,
+        format!("{builtin}: `{archive}` is a zip archive, not a tar archive"),
+        &format!("use {use_instead} for a zip archive"),
+    )
+}
+
 /// The entries of a tar archive, and the total of their declared sizes. A plain
 /// or gzip-compressed tar is read in-process. A bzip2, xz or zstd stream is read
 /// in-process through its decompressor; where that program is not installed,
@@ -40925,6 +41043,8 @@ fn tar_archive_listing(
         // extract them. Link targets are not listed this way, so an archive
         // with any link entry is refused (see `tar_tool_entry_names`).
         return tar_tool_entry_names(builtin, archive);
+    } else if n == 2 && &magic == b"PK" {
+        return Err(tar_given_a_zip(builtin, archive));
     } else {
         Box::new(file)
     };
@@ -40938,18 +41058,17 @@ fn read_tar_entries<R: std::io::Read>(
     reader: R,
 ) -> Result<(Vec<(String, Option<String>)>, u64)> {
     let mut ar = tar::Archive::new(reader);
-    let entries = ar.entries().map_err(|e| {
-        crate::safety::tool_failed(builtin, "tar", None, &format!("not a tar archive: {e}"))
-    })?;
+    let entries = ar
+        .entries()
+        .map_err(|e| archive_read_error(builtin, "tar", &format!("not a tar archive: {e}")))?;
     let mut out = Vec::new();
     let mut declared: u64 = 0;
     for entry in entries {
         if out.len() >= WALK_MAX_ENTRIES {
             return Err(walk_over(builtin, WALK_MAX_ENTRIES));
         }
-        let entry = entry.map_err(|e| {
-            crate::safety::tool_failed(builtin, "tar", None, &format!("unreadable entry: {e}"))
-        })?;
+        let entry = entry
+            .map_err(|e| archive_read_error(builtin, "tar", &format!("unreadable entry: {e}")))?;
         declared = declared.saturating_add(entry.size());
         let name = entry
             .path()
@@ -41178,7 +41297,13 @@ fn bi_zip_add(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
         .create_new(true)
         .open(&tmp)
         .map_err(|e| crate::safety::fs_error("zip_add", &tmp, &e))?;
-    if let Err(e) = zip_write_archive("zip_add", out, Some(&archive), &members) {
+    if let Err(e) = zip_write_archive(
+        "zip_add",
+        out,
+        Some(&archive),
+        &members,
+        &[archive.as_str(), tmp.as_str()],
+    ) {
         remove_partial(&tmp);
         return Err(e);
     }
@@ -41633,22 +41758,23 @@ fn tar_extract_in_process(archive: &str, root: &str) -> Result<bool> {
         Box::new(flate2::read::GzDecoder::new(file))
     } else if n == 2 && tar_stream_decompressor(magic).is_some() {
         return Ok(false);
+    } else if n == 2 && &magic == b"PK" {
+        return Err(tar_given_a_zip(B, archive));
     } else {
         Box::new(file)
     };
     std::fs::create_dir_all(root).map_err(|e| crate::safety::fs_write_error(B, root, &e))?;
     let mut ar = tar::Archive::new(reader);
-    let entries = ar.entries().map_err(|e| {
-        crate::safety::tool_failed(B, "tar", None, &format!("not a tar archive: {e}"))
-    })?;
+    let entries = ar
+        .entries()
+        .map_err(|e| archive_read_error(B, "tar", &format!("not a tar archive: {e}")))?;
     let mut count: usize = 0;
     let mut total: u64 = 0;
     let mut extracted: usize = 0;
     let mut skipped_links: usize = 0;
     for entry in entries {
-        let mut entry = entry.map_err(|e| {
-            crate::safety::tool_failed(B, "tar", None, &format!("unreadable entry: {e}"))
-        })?;
+        let mut entry =
+            entry.map_err(|e| archive_read_error(B, "tar", &format!("unreadable entry: {e}")))?;
         count += 1;
         if count > WALK_MAX_ENTRIES {
             return Err(walk_over(B, WALK_MAX_ENTRIES));
@@ -41792,6 +41918,16 @@ fn bi_zip_list(args: Vec<Value>, _input: Option<Value>) -> Result<Value> {
             .name()
             .map(|n| n.into_owned())
             .unwrap_or_else(|_| String::from_utf8_lossy(f.name_raw()).into_owned());
+        // `path` and `kind` are tar_list's row keys, so one loop reads either.
+        let kind = if f.is_dir() {
+            "dir"
+        } else if f.unix_mode().is_some_and(|m| m & 0o170000 == 0o120000) {
+            "link"
+        } else {
+            "file"
+        };
+        r.insert("path".to_string(), Value::Str(name.clone()));
+        r.insert("kind".to_string(), Value::Str(kind.to_string()));
         r.insert("name".to_string(), Value::Str(name));
         r.insert("size".to_string(), Value::Int(f.size() as i64));
         r.insert(
@@ -55824,6 +55960,7 @@ fn bi_file_patch(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
     };
     // Classified `ReadLocal` while the body wrote the file back in place.
     // `WriteLocal` is what the jail keys on, so this path went uncontained.
+    let path_as_written = path.clone();
     let path = guard_local_write(builtin, &path)?;
     require_edit_target(builtin, &path)?;
 
@@ -55999,7 +56136,10 @@ fn bi_file_patch(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
     let applied = if written { applied } else { Vec::new() };
 
     let mut result = BTreeMap::new();
-    result.insert("path".to_string(), Value::Str(path));
+    // The path as the caller wrote it, in every mode: agent mode resolves a
+    // relative path to an absolute one for the jail and the journal, which is
+    // not what the caller's own call named.
+    result.insert("path".to_string(), Value::Str(path_as_written));
     result.insert("applied".to_string(), Value::Array(applied.clone()));
     result.insert("failed".to_string(), Value::Array(failed.clone()));
     result.insert("success".to_string(), Value::Bool(failed.is_empty()));
@@ -71687,6 +71827,10 @@ fn create_new_output(builtin: &str, path: &str) -> Result<std::fs::File> {
                     &format!("{path} already exists"),
                     "remove it first; the existing file is not overwritten",
                 )
+            } else if e.kind() == std::io::ErrorKind::NotFound {
+                // A missing folder is the usual cause: name it, as the other
+                // writers do, instead of "no file at <the file being made>".
+                crate::safety::fs_write_error(builtin, path, &e)
             } else {
                 crate::safety::fs_error(builtin, path, &e)
             }

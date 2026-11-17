@@ -2023,6 +2023,28 @@ pub fn tool_failed(
     tool_failed_text(builtin, command, status_text, stderr, None)
 }
 
+/// `E_TOOL_FAILED` for a read that the shell did itself and that failed: no
+/// program ran, so nothing was killed and no status exists. `what` names the
+/// work (`reading the tar archive`), `detail` is the reader's own error.
+pub fn tool_failed_in_process(
+    builtin: &str,
+    what: &str,
+    detail: &str,
+    hint: &str,
+) -> anyhow::Error {
+    anyhow::Error::new(SafetyError {
+        code: ErrorCode::ToolFailed,
+        message: format!("{builtin}: {what} failed: {}", detail.trim()),
+        builtin: builtin.to_string(),
+        hint: hint.to_string(),
+        approval: None,
+        did_you_mean: Vec::new(),
+        expected: "a readable archive".to_string(),
+        got: detail.trim().to_string(),
+        extra: serde_json::Map::new(),
+    })
+}
+
 /// [`tool_failed`] whose hint is `hint` in place of the one that says the tool
 /// is installed but rejected the work. For a failure whose cause the tool's own
 /// stderr names, such as a SQL statement that does not parse.

@@ -9756,12 +9756,14 @@ pub static SIGNATURES: &[Signature] = &[
         subject: None,
         params: &[req("pattern", Ty::Str, "a glob such as src/*.rs or src/**/*.rs")],
         returns: "Array",
-        doc: "Paths matching a glob, sorted; ** matches any depth of directories, `{a,b}` matches either alternative (`**/*.{rs,py}`; nested groups work, and a path matched twice appears once), and a directory in the pattern that does not exist is E_NOT_FOUND. At most 1,000,000 entries; more is E_BUDGET_EXCEEDED.",
+        doc: "Paths matching a glob, sorted; ** matches any depth of directories, `{a,b}` matches either alternative (`**/*.{rs,py}`; nested groups work, and a path matched twice appears once; a group with one alternative, `{rs}`, is that alternative; a brace that is never closed, or a } with no {, is E_BAD_ARG), and a directory in the pattern that does not exist is E_NOT_FOUND. At most 1,000,000 entries; more is E_BUDGET_EXCEEDED.",
         examples: &[
             (r#"(glob("src/*.rs") | len) > 10"#, r#"true"#),
             (r#"(glob("src/**/*.rs") | len) > (glob("src/*.rs") | len)"#, r#"true"#),
             (r#"glob("Cargo.tom?")"#, r#"["Cargo.toml"]"#),
             (r#"glob("Cargo.{toml,lock}")"#, r#"["Cargo.toml", "Cargo.lock"]"#),
+            (r#"glob("Cargo.{toml}")"#, r#"["Cargo.toml"]"#),
+            (r#"(try { glob("**/{*.rs,*.py") } catch e { e.error.code })"#, "E_BAD_ARG"),
         ],
     },
     Signature {
@@ -11305,9 +11307,11 @@ pub static SIGNATURES: &[Signature] = &[
         subject: None,
         params: &[req("path", Ty::Str, "a .zip file")],
         returns: "Array",
-        doc: "Entries of a zip archive as {name, size, compressed_size, dir}. A file that is not a zip is refused.",
+        doc: "Entries of a zip archive as {name, path, kind, size, compressed_size, dir}. path is the same String as name and kind is \"file\", \"dir\" or \"link\", the keys tar_list's rows carry, so one loop reads either listing; name and dir stay for older scripts. A file that is not a zip is refused.",
         examples: &[
             (r#"zip_list("tests/fixtures/archives/sample.zip") | map(fn(e) => e.name)"#, r#"["README.txt", "src/files.rs"]"#),
+            (r#"zip_list("tests/fixtures/archives/sample.zip") | map(fn(e) => e.path)"#, r#"["README.txt", "src/files.rs"]"#),
+            (r#"zip_list("tests/fixtures/archives/sample.zip") | map(fn(e) => e.kind)"#, r#"["file", "file"]"#),
         ],
     },
     Signature {
@@ -14431,7 +14435,7 @@ pub static SIGNATURES: &[Signature] = &[
         subject: None,
         params: &[],
         returns: "Record",
-        doc: "The recorded steps of this session and how many can be reversed. Each row's id is the value undo({id: N}) takes to undo that one step; seq is the same number.",
+        doc: "The recorded steps of this session and how many can be reversed. Rows are per file: a call that changed several paths (a move, an extraction) has one row for each. Each row's id is the value undo({id: N}) takes to undo that one row's call; seq is the same number. step is the call the row belongs to: rows with the same step are one call, undone together, and undo(n) counts these steps (calls), not rows, so undo(1) reverts every row of the newest step.",
         examples: &[
             (r#"typeof(journal())"#, r#"Record"#),
         ],
@@ -14460,7 +14464,7 @@ pub static SIGNATURES: &[Signature] = &[
         subject: None,
         params: &[opt("steps_or_options", Ty::Any, "a bare Int n undoes the last n steps (default 1, not the step with id n); or a Record {id: Int} or {force: Bool}"), opt("options", Ty::Record, "{id: Int} undoes the one journal step with that id (a journal row's id) and leaves the others in place; {force: Bool}: put a file back even though it changed after its step (default false)")],
         returns: "Record",
-        doc: "undo(n) undoes the last n steps; to undo the step with id n, write undo({id: n}). Put back what the last steps overwrote, reporting each step (with its id, seq) and whether all of them were restored. Steps that cannot be reversed are listed, not hidden. A step whose restore fails stays in the journal and stops the undo, so it can be retried. A file changed after its step (by a hand edit, say) is not overwritten: the undo is E_BAD_STATE and names the file, unless force is set, which restores it and discards those changes. undo({id: N}) undoes the one step with journal id N and leaves the later steps in place. It is E_BAD_STATE, naming the later step, when a later step changed the same file, unless force is set; undo the later step first. Writes are recorded only in agent mode (--agent, or IRONSHELL_MODE=agent) or with IRONSHELL_JOURNAL=on; in a human session undo is refused with E_BAD_STATE, because nothing was recorded to put back.",
+        doc: "undo(n) undoes the last n steps, and n counts calls, not journal rows: a call that changed several paths is one step, and the journal rows that share a step value (journal()'s step field) go together. To undo the step with id n, write undo({id: n}). Put back what the last steps overwrote, reporting each step (with its id, seq) and whether all of them were restored. Steps that cannot be reversed are listed, not hidden. A step whose restore fails stays in the journal and stops the undo, so it can be retried. A file changed after its step (by a hand edit, say) is not overwritten: the undo is E_BAD_STATE and names the file, unless force is set, which restores it and discards those changes. undo({id: N}) undoes the one step with journal id N and leaves the later steps in place. It is E_BAD_STATE, naming the later step, when a later step changed the same file, unless force is set; undo the later step first. Writes are recorded only in agent mode (--agent, or IRONSHELL_MODE=agent) or with IRONSHELL_JOURNAL=on; in a human session undo is refused with E_BAD_STATE, because nothing was recorded to put back.",
         examples: &[
             (r#"(try { undo("x") } catch e { e.error.code })"#, "E_BAD_ARG"),
             (r#"(try { undo(-1) } catch e { e.error.code })"#, "E_BAD_ARG"),
