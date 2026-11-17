@@ -297,7 +297,7 @@ fn to_json_and_json_stringify_indent_by_the_given_spaces() {
 
 #[test]
 fn an_indent_outside_zero_to_eight_is_refused() {
-    for src in [r#"to_json([1], 9)"#, r#"json_stringify([1], -1)"#] {
+    for src in [r#"to_json([1], 17)"#, r#"json_stringify([1], -1)"#] {
         let e = eval(src).expect_err(src);
         assert!(e.to_string().contains("E_BAD_ARG"), "{src}: {e}");
     }

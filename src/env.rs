@@ -28,6 +28,9 @@ pub struct Env {
     /// look reassignable — which mattered once closures needed to know whether
     /// capturing a name by value could go stale.
     declared_mutable: std::collections::BTreeSet<String>,
+    /// The type a binding was annotated with (`let mut m: Int = 1`). A later
+    /// assignment to the name has to keep it.
+    declared_types: FxHashMap<String, String>,
 
     /// Track which variables are public (can be imported by other modules)
     public_vars: HashSet<String>,
@@ -44,6 +47,7 @@ impl Env {
             vars: FxHashMap::default(),
             mutable_vars: FxHashMap::default(),
             declared_mutable: std::collections::BTreeSet::new(),
+            declared_types: FxHashMap::default(),
             public_vars: HashSet::new(),
             exported_names: HashSet::new(),
             cwd: None,
@@ -286,6 +290,19 @@ impl Env {
     /// Delete a variable if present.
     pub fn del_var(&mut self, name: &str) {
         self.vars.remove(name);
+        if !self.declared_types.is_empty() {
+            self.declared_types.remove(name);
+        }
+    }
+
+    /// The type `name` was annotated with, when it was.
+    pub fn declared_type(&self, name: &str) -> Option<&str> {
+        self.declared_types.get(name).map(|s| s.as_str())
+    }
+
+    /// Records the annotation of `name`, which a later assignment must keep.
+    pub fn set_declared_type(&mut self, name: &str, ty: &str) {
+        self.declared_types.insert(name.to_string(), ty.to_string());
     }
 
     /// Mutable lookup (if you ever need to mutate a stored value in place).
@@ -295,6 +312,9 @@ impl Env {
 
     /// Take (remove and return) a variable. Handy for temporary slots.
     pub fn take_var(&mut self, name: &str) -> Option<Value> {
+        if !self.declared_types.is_empty() {
+            self.declared_types.remove(name);
+        }
         self.vars.remove(name)
     }
 

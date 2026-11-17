@@ -2251,7 +2251,7 @@ pub static SIGNATURES: &[Signature] = &[
         // a Haiku run returned the whole `{Count, Group, Name}` record: the
         // right fact in a form nobody asked for. The idiom that answers it is
         // named here rather than left to be discovered.
-        doc: r#"Group records by a field name or by a lambda key (`group_by(.region)`, `group_by(fn(r) => r.region)`), returning {Name, Count, Group} records. The subject is piped or the first argument: `rows | group_by("a")` and `group_by(rows, "a")` are the same. Name is always a String, the key's text (the Int key 1 is Name "1", and Int 1 and String "1" stay separate groups with the same Name), and the groups are sorted by Name as text, not by first appearance or by number: "10" comes before "9". A row without the field groups under Name "". For "which, and how many": | sort_by("Count", "desc") | first | fn(g) => "${g.Name} ${g.Count}"."#,
+        doc: r#"Group records by a field name or by a lambda key (`group_by(.region)`, `group_by(fn(r) => r.region)`), returning {Name, Count, Group} records. The subject is piped or the first argument: `rows | group_by("a")` and `group_by(rows, "a")` are the same. Name is always a String, the key's text (the Int key 1 is Name "1", and Int 1 and String "1" stay separate groups with the same Name), and the groups are sorted by Name as text, not by first appearance or by number: "10" comes before "9". A row without the field groups under Name "". `Key` is the key itself, with its type (Int 1 stays Int 1 and null stays null, where Name is the text "1" or "<null>"); Name is kept as it is for compatibility. For "which, and how many": | sort_by("Count", "desc") | first | fn(g) => "${g.Name} ${g.Count}"."#,
         examples: &[
             (
                 r#"[{user: "a"}, {user: "a"}, {user: "b"}] | group_by("user") | len"#,
@@ -2273,6 +2273,14 @@ pub static SIGNATURES: &[Signature] = &[
                 r#"[{n: 10}, {n: 9}] | group_by("n") | map(fn(g) => g.Name)"#,
                 r#"["10", "9"]"#,
             ),
+            (
+                r#"[{n: 1}, {n: 2}, {n: 1}] | group_by("n") | map(fn(g) => g.Key)"#,
+                "[1, 2]",
+            ),
+            (
+                r#"[1, 2] | group_by(fn(x) => null) | map(fn(g) => g.Key == null)"#,
+                "[true]",
+            ),
         ],
     },
     Signature {
@@ -2283,7 +2291,7 @@ pub static SIGNATURES: &[Signature] = &[
         subject: Some(Ty::Array),
         params: &[req("key", Ty::Any, "field name String to count on, or a lambda (or .field) called per row whose result is the key")],
         returns: "Array",
-        doc: r#"Count rows by a key, as {key, count} records sorted by count descending, then by the key's text: `rows | count_by(.state)`, `rows | count_by("state")`, `rows | count_by(fn(r) => r.user)`. The subject is piped or the first argument. The key keeps its type (Int 1 and String "1" are counted apart), and a row without the field counts under the key "". It is the short form of `group_by(key) | map(...) | sort_by("count", "desc")`."#,
+        doc: r#"Count rows by a key, as {key, count} records sorted by count descending, then by the key's text: `rows | count_by(.state)`, `rows | count_by("state")`, `rows | count_by(fn(r) => r.user)`. The subject is piped or the first argument. The key keeps its type (Int 1 and String "1" are counted apart), except that an Int and a Float that are equal (1 and 1.0) are one key, as `unique` treats them, and the first one seen is the key shown. A builtin name works as the key (`count_by(len)`, `count_by(path_extension)`). A row without the field counts under the key null. It is the short form of `group_by(key) | map(...) | sort_by("count", "desc")`."#,
         examples: &[
             (
                 r#"[{u: "a"}, {u: "b"}, {u: "b"}] | count_by("u")"#,
@@ -2296,6 +2304,18 @@ pub static SIGNATURES: &[Signature] = &[
             (
                 r#"count_by([1, 2, 1, 1], fn(x) => x) | first | fn(r) => r.count"#,
                 "3",
+            ),
+            (
+                r#"["a", "bb", "cc"] | count_by(len) | map(fn(r) => r.key)"#,
+                "[2, 1]",
+            ),
+            (
+                r#"[1, 1.0, 2] | count_by(fn(x) => x) | first | fn(r) => r.count"#,
+                "2",
+            ),
+            (
+                r#"[{a: 1}, {b: 2}] | count_by(.a) | map(fn(r) => r.key == null)"#,
+                "[false, true]",
             ),
             (
                 r#"(try { [1] | count_by() } catch e { e.error.code })"#,
@@ -3054,10 +3074,10 @@ pub static SIGNATURES: &[Signature] = &[
         subject_required: false,
         aliases: &["to-json"],
         subject: Some(Ty::Any),
-        params: &[opt("indent", Ty::Any, "an Int, spaces per nesting level, 0 to 8 (0 is compact); or a Bool: true indents by 2, false is compact")],
+        params: &[opt("indent", Ty::Any, "an Int, spaces per nesting level, 0 to 16 (0 is compact); or a Bool: true indents by 2, false is compact; anything else is E_BAD_ARG")],
         returns: "String",
-        doc: "Render a value as JSON text, compact, or indented by 1 to 8 spaces per level with an indent argument (0 is compact; true is 2 spaces and false is compact; an Int outside 0 to 8 is E_BAD_ARG). The value is piped in or passed as the argument: to_json(v) or to_json(v, indent). A NaN or an infinity has no JSON form, so it is E_BAD_VALUE and the refusal names its path, such as value[0].v; it is not written as 0 or null.",
-        examples: &[(r#"[1, 2] | to_json"#, r#""[1,2]""#), (r#"to_json([1, 2])"#, r#""[1,2]""#), (r#"to_json([1, 2], 2) | lines | len"#, "4"), (r#"to_json([1, 2], 0)"#, r#""[1,2]""#), (r#"to_json([1, 2], true) | lines | len"#, "4"), (r#"to_json([1, 2], false)"#, r#""[1,2]""#), (r#"(try { to_json([1], 9) } catch e { e.error.code })"#, "E_BAD_ARG"), (r#"(try { to_json(from_toml("a = nan")) } catch e { e.error.code })"#, "E_BAD_VALUE")],
+        doc: "Render a value as JSON text, compact, or indented by 1 to 16 spaces per level with an indent argument (0 is compact; true is 2 spaces and false is compact; the indent is a Bool or an Int from 0 to 16, and anything else, such as a String, a negative Int or 17, is E_BAD_ARG). The value is piped in or passed as the argument: to_json(v) or to_json(v, indent). A NaN or an infinity has no JSON form, so it is E_BAD_VALUE and the refusal names its path, such as value[0].v; it is not written as 0 or null.",
+        examples: &[(r#"[1, 2] | to_json"#, r#""[1,2]""#), (r#"to_json([1, 2])"#, r#""[1,2]""#), (r#"to_json([1, 2], 2) | lines | len"#, "4"), (r#"to_json([1, 2], 0)"#, r#""[1,2]""#), (r#"to_json([1, 2], true) | lines | len"#, "4"), (r#"to_json([1, 2], false)"#, r#""[1,2]""#), (r#"(try { to_json([1], 17) } catch e { e.error.code })"#, "E_BAD_ARG"), (r#"(try { to_json([1], "pretty") } catch e { e.error.code })"#, "E_BAD_ARG"), (r#"(try { to_json([1], -1) } catch e { e.error.code })"#, "E_BAD_ARG"), (r#"(try { to_json(from_toml("a = nan")) } catch e { e.error.code })"#, "E_BAD_VALUE")],
     },
     Signature {
         name: "ls",
@@ -15834,6 +15854,23 @@ pub fn validate(name: &str, args: &[Value], input: Option<&Value>) -> anyhow::Re
     });
     for (param, arg) in rest.filter_map(|(p, a)| p.map(|p| (p, a))) {
         if !param.ty.accepts(arg) {
+            // `map(str)`: a module is a Record of builtins, not a function.
+            if let (Ty::Lambda, Some(module)) = (param.ty, crate::modules::module_name_of(arg)) {
+                let member = match arg {
+                    Value::Record(m) => m.keys().next().map_or("member", |k| k.as_str()),
+                    _ => "member",
+                };
+                return Err(crate::safety::bad_arg_with_hint(
+                    name,
+                    &format!("{}: {} ({})", param.name, param.ty.as_str(), param.doc),
+                    arg.type_name(),
+                    &format!(
+                        "`{module}` is a module, not a function: name one of its members \
+                         (such as {module}.{member}) or use a lambda: \
+                         {name}(fn(x) => {module}.{member}(x))"
+                    ),
+                ));
+            }
             return Err(crate::safety::bad_arg(
                 name,
                 &format!("{}: {} ({})", param.name, param.ty.as_str(), param.doc),

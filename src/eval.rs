@@ -703,13 +703,23 @@ fn eval_let(
         // refuses, `name` is left as it was.
         let lhs = env.get_var(name).cloned().unwrap_or(Value::Null);
         let v = binop(&BinOp::Add, lhs, operand)?;
+        if let Some(declared) = env.declared_type(name).map(str::to_string) {
+            check_declared_type(name, &declared, &v, true)?;
+        }
         return bind_value(name, v, is_mut, visibility, bare, env, keep);
     }
     let v = eval_expr(value, env)?;
     if let Some(declared) = ty {
-        check_declared_type(name, declared, &v)?;
+        check_declared_type(name, declared, &v, false)?;
+    } else if let Some(declared) = env.declared_type(name).map(str::to_string) {
+        // An annotated binding keeps its type when it is assigned again.
+        check_declared_type(name, &declared, &v, true)?;
     }
-    bind_value(name, v, is_mut, visibility, bare, env, keep)
+    let kept = bind_value(name, v, is_mut, visibility, bare, env, keep)?;
+    if let Some(declared) = ty {
+        env.set_declared_type(name, declared);
+    }
+    Ok(kept)
 }
 
 /// Stores `v` as `name`, marks it public when asked, and returns it when `keep`.
@@ -1906,10 +1916,36 @@ pub(crate) fn call_value_named(
 ) -> Result<Value> {
     let is_lambda = matches!(f, Value::Lambda(_));
     let result = call_value_named_inner(name, f, pin, args, env);
+    // `__cb_f` is the builtin a callback wrapper calls (`map(split)`).
+    let result = if name == Some("__cb_f") {
+        result.map_err(callback_missing_arg_hint)
+    } else {
+        result
+    };
     if let (true, Err(_), Some(name)) = (is_lambda, &result, name) {
         note_failed_lambda_call(name);
     }
     result
+}
+
+/// A builtin used as a callback (`map(split)`) is called with the element alone.
+/// When it lacks a required argument, say how to pass the others.
+fn callback_missing_arg_hint(e: anyhow::Error) -> anyhow::Error {
+    match e.downcast::<crate::safety::SafetyError>() {
+        Ok(mut se) => {
+            if matches!(se.code, crate::safety::ErrorCode::BadArg)
+                && (se.got.ends_with(" required")
+                    || se.got == "nothing"
+                    || se.message.contains("missing required argument"))
+            {
+                se.hint = "a builtin callback receives only the element; pass the other \
+                           arguments with a lambda, e.g. map(fn(x) => split(x, \",\"))"
+                    .to_string();
+            }
+            anyhow::Error::new(se)
+        }
+        Err(other) => other,
+    }
 }
 
 fn call_value_named_inner(
@@ -2911,7 +2947,13 @@ pub(crate) fn caught_error_record(wire: &serde_json::Value) -> serde_json::Value
     serde_json::Value::Object(top)
 }
 
+/// The type names a `let` annotation takes, as a hint lists them. `Lambda` is
+/// accepted and not checked.
+const LET_TYPE_LIST: &str = "Int, Float, String, Bool, Array, Record, Lambda, Null";
+
 /// The check an annotated `let` makes: the value must have the declared type.
+/// `reassign` is true when the value is assigned to a binding that was
+/// annotated earlier (`let mut m: Int = 1; m = "x"`).
 ///
 /// Only the type names the language has a value for are checked (`Int`,
 /// `Float`, `String`, `Bool`, `Array`, `Record`, `Null`). The names of the other
@@ -2919,7 +2961,7 @@ pub(crate) fn caught_error_record(wire: &serde_json::Value) -> serde_json::Value
 /// that is no type at all is refused, with the closest type named. An Int is not
 /// accepted where a Float is declared: the language does not widen at a binding,
 /// so the hint says to write the decimal point.
-fn check_declared_type(name: &str, declared: &str, value: &Value) -> Result<()> {
+fn check_declared_type(name: &str, declared: &str, value: &Value, reassign: bool) -> Result<()> {
     const CHECKED: [&str; 7] = ["Int", "Float", "String", "Bool", "Array", "Record", "Null"];
     const UNCHECKED: [&str; 7] = [
         "Uri",
@@ -2941,7 +2983,7 @@ fn check_declared_type(name: &str, declared: &str, value: &Value) -> Result<()> 
             let mut hint = format!(
                 "`{name}: {declared}` is not a type; annotate with one of {} \
                  (a bare name: no `Array<Int>` and no `?`), or remove the annotation",
-                CHECKED.join(", ")
+                LET_TYPE_LIST
             );
             if let Some(first) = near.first() {
                 hint = format!("did you mean {first}? {hint}");
@@ -2960,11 +3002,14 @@ fn check_declared_type(name: &str, declared: &str, value: &Value) -> Result<()> 
     }
     let hint = if expected == "Float" && actual == "Int" {
         format!("`{name}` is declared Float: write the literal with a decimal point, such as 1.0")
+    } else if reassign {
+        format!("`{name}` is declared {expected}: assign a {expected} value, or declare it without the `: {expected}` annotation")
     } else {
         format!("`{name}` is declared {expected}: bind a {expected} value, or remove the `: {expected}` annotation")
     };
+    let what = if reassign { "assign" } else { "let" };
     Err(crate::safety::bad_arg_with_hint(
-        &format!("let {name}"),
+        &format!("{what} {name}"),
         expected,
         actual,
         &hint,

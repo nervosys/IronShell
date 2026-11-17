@@ -35,12 +35,10 @@ fn a_lambda_key_and_the_first_argument_subject() {
 }
 
 #[test]
-fn a_missing_field_counts_under_the_empty_key() {
+fn a_missing_field_counts_under_null() {
     let v = run(r#"[{a: 1}, {b: 2}] | count_by("a") | map(fn(r) => r.key)"#);
-    assert_eq!(
-        v,
-        Value::Array(vec![Value::Str(String::new()), Value::Int(1)])
-    );
+    // Ties are ordered by the key's text: "1" before "<null>".
+    assert_eq!(v, Value::Array(vec![Value::Int(1), Value::Null]));
 }
 
 #[test]

@@ -37,7 +37,7 @@ fn piped_value_takes_the_bool_too() {
 fn an_int_indent_still_works_and_is_range_checked() {
     assert_eq!(run(r#"to_json([1], 0)"#), Value::Str("[1]".to_string()));
     assert_eq!(
-        run(r#"(try { to_json([1], 9) } catch e { e.error.code })"#),
+        run(r#"(try { to_json([1], 17) } catch e { e.error.code })"#),
         Value::Str("E_BAD_ARG".to_string())
     );
 }

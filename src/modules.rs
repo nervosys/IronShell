@@ -1474,6 +1474,19 @@ pub fn is_module_name(name: &str) -> bool {
     MODULE_NAMES.contains(name)
 }
 
+/// The name of the module that `v` is (`str` for the Record `str` is bound to),
+/// when it is one. For the message of an error that got a module where it
+/// wanted a function.
+pub fn module_name_of(v: &Value) -> Option<&'static str> {
+    if !matches!(v, Value::Record(_)) {
+        return None;
+    }
+    module_table()
+        .iter()
+        .find(|(_, m)| m == v)
+        .map(|(name, _)| *name)
+}
+
 /// Whether `module` is a registered namespace with a member named `func`, so
 /// `module.func` is a real call. Used to suggest the module spelling of a name
 /// an agent wrote with underscores (`file_read` for `file.read`).

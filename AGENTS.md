@@ -173,7 +173,7 @@ grep("TODO\\|FIXME", "src/*.rs")       # grep is BRE (as grep without -E): a bar
 # SQL over values or files (read-only, in-process)
 open("issues.json") | sql("select user, count(*) as n from t group by user")
 sql_value("issues.json", "select count(*) from issues where state = 'open'")
-open("issues.json") | count_by(.user)  # [{key, count}] sorted by count descending; the short form of group_by + sort_by("Count", "desc")
+open("issues.json") | count_by(.user)  # [{key, count}] sorted by count descending; the short form of group_by + sort_by("Count", "desc"). The key may be a field name, `.field`, a lambda or a builtin (`count_by(len)`); 1 and 1.0 are one key; a row without the field counts under the key null. group_by rows carry `Name` (the key's text, "<null>" for null) and `Key` (the key with its type)
 # SQL stores a Bool as 1/0, so Bool values come back from sql as 1 and 0; every sql row (not only select *) has its columns in sorted key order, because a Record sorts its keys: to control the order prefix the aliases (a_region, b_rev) or write the table with to_csv(rows, [cols])
 
 # Check effects before running
@@ -203,7 +203,7 @@ merge({a: 1, b: 2}, {b: 3}).b         # merge(a, b): shallow Record merge, b's f
 -7.5 % 2       # -1.5: % takes the sign of the dividend, unlike Python; Int and Float mix as Float
 6 / 2          # 3.0: / is true division, so two Ints give a Float; use math.floor(6 / 2) or int(6 / 2) for integer division
 !0             # true: `!` follows truthiness (0, 0.0, "", null, [] and {} are falsy; everything else is truthy), but `if` takes only a Bool (or null, which is false) and `&&` / `||` take only Bool operands: `if 0 {...}` and `1 && 2` are errors, so write `x != 0`
-let x: Int = 1                         # an annotation is one bare type name (Int, Float, String, Bool, Array, Record, Null); an unknown name is E_BAD_ARG, and Array<Int> or String? is E_PARSE
+let x: Int = 1                         # an annotation is one bare type name (Int, Float, String, Bool, Array, Record, Lambda, Null); an unknown name is E_BAD_ARG, and Array<Int> or String? is E_PARSE; `mut m: Int = 1` is `let mut m: Int = 1`, and an annotated binding keeps its type when assigned again (`m = "x"` is E_BAD_ARG)
 ["bb", "a"] | sort_by(len)             # a builtin name works where a lambda is expected (map, where, each, any, all, sort_by, group_by): it is called with the element
 mut r = {a: 1}
 r.a = 2                                # set a field of a `mut` record; r.a.b = v needs r.a to exist already; other copies keep theirs

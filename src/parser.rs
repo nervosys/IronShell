@@ -1784,6 +1784,38 @@ impl Parser {
         // Check for `mut name = value` (mutable without let)
         if self.check(Tok::Mut) && self.peek_ahead(1) == Some(Tok::Ident) {
             let peek2 = self.peek_ahead(2);
+            // `mut m: Int = 1` is `let mut m: Int = 1`.
+            if peek2 == Some(Tok::Colon) && self.peek_ahead(3) == Some(Tok::Ident) {
+                self.match_tok(Tok::Mut); // consume 'mut'
+                let name = self.need_ident("expected identifier after mut")?;
+                self.match_tok(Tok::Colon);
+                let ty = self.need_ident("expected type after ':'")?;
+                if !self.check(Tok::Equal) && !self.check(Tok::ColonEqual) {
+                    let at = self.peek();
+                    return Err(anyhow::Error::new(HintedSyntax {
+                        msg: format!(
+                            "unsupported type annotation after `{ty}` at line {}, column {}",
+                            at.line, at.col
+                        ),
+                        hint: "an annotation is one bare type name, as in `mut m: Int = 1` \
+                               or `let mut m: Int = 1`: Int, Float, String, Bool, Array, \
+                               Record, Lambda or Null"
+                            .to_string(),
+                    }));
+                }
+                if !self.match_tok(Tok::Equal) {
+                    self.need(Tok::ColonEqual, "expected '=' or ':='")?;
+                }
+                let value = self.parse_expr()?;
+                return Ok(Stmt::Let {
+                    name,
+                    value,
+                    is_mut: true,
+                    visibility,
+                    ty: Some(ty),
+                    bare: false,
+                });
+            }
             if peek2 == Some(Tok::Equal) || peek2 == Some(Tok::ColonEqual) {
                 self.match_tok(Tok::Mut); // consume 'mut'
                 let name = self.need_ident("expected identifier after mut")?;
@@ -1865,7 +1897,7 @@ impl Parser {
                             at.line, at.col
                         ),
                         hint: "a let annotation is one bare type name: Int, Float, String, \
-                               Bool, Array, Record or Null, as in `let x: Int = 1`. Generic \
+                               Bool, Array, Record, Lambda or Null, as in `let x: Int = 1`. Generic \
                                forms (Array<Int>) and optional forms (String?) are not \
                                supported; write `let a: Array = [...]`"
                             .to_string(),

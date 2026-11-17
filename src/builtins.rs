@@ -4883,6 +4883,18 @@ fn callable(v: &Value) -> std::borrow::Cow<'_, Value> {
 fn need_lambda<'a>(v: &'a Value, name: &str) -> Result<&'a Lambda> {
     if let Value::Lambda(l) = v {
         Ok(l)
+    } else if let (Value::Record(members), Some(module)) = (v, crate::modules::module_name_of(v)) {
+        // `map(str)`: a module is a Record of builtins, not a function.
+        let member = members.keys().next().map_or("member", |k| k.as_str());
+        Err(crate::safety::bad_arg_with_hint(
+            name,
+            "a lambda",
+            "Record",
+            &format!(
+                "`{module}` is a module, not a function: name one of its members \
+                 (such as {module}.{member}) or use a lambda: {name}(fn(x) => {module}.{member}(x))"
+            ),
+        ))
     } else {
         Err(crate::safety::bad_arg(name, "a lambda", v.type_name()))
     }
@@ -5710,7 +5722,19 @@ fn bi_reduce(args: Vec<Value>, input: Option<Value>, env: &mut Env) -> Result<Va
         (1usize, 2usize)
     };
 
-    let lam = need_lambda(arg("reduce", &args, lam_idx, "a lambda")?, "reduce")?;
+    let lam_arg = arg("reduce", &args, lam_idx, "a lambda")?;
+    if let Value::Builtin(b) = lam_arg {
+        return Err(crate::safety::bad_arg_with_hint(
+            "reduce",
+            "a lambda taking two arguments",
+            "Builtin",
+            &format!(
+                "reduce takes a two-argument lambda, e.g. reduce(fn(a, b) => {}(a, b), 0)",
+                b.name
+            ),
+        ));
+    }
+    let lam = need_lambda(lam_arg, "reduce")?;
     let init = match args.get(init_idx) {
         Some(v) => v.clone(),
         None => {
@@ -11066,12 +11090,13 @@ fn bi_group_object(args: Vec<Value>, input: Option<Value>, env: &mut Env) -> Res
             // Each row with its key's text and type name. Rows share a group
             // only when both match, so Int 1 and String "1" stay apart, while
             // the group is still named by the text, as it always was.
-            let mut keyed: Vec<((String, &'static str), Value)> = Vec::with_capacity(arr.len());
+            let mut keyed: Vec<((String, &'static str), Value, Value)> =
+                Vec::with_capacity(arr.len());
             match property {
                 Some(property) => {
                     for item in arr {
                         let key = get_property_value(&item, property);
-                        keyed.push(((value_to_string(&key), key.type_name()), item));
+                        keyed.push(((value_to_string(&key), key.type_name()), key, item));
                     }
                 }
                 None => {
@@ -11080,7 +11105,7 @@ fn bi_group_object(args: Vec<Value>, input: Option<Value>, env: &mut Env) -> Res
                     with_param_slots(lam, env, |env| {
                         for item in arr {
                             let key = call_lambda_one(lam, item.clone(), env, false)?.0;
-                            keyed.push(((value_to_string(&key), key.type_name()), item));
+                            keyed.push(((value_to_string(&key), key.type_name()), key, item));
                         }
                         Ok(())
                     })?;
@@ -11088,16 +11113,22 @@ fn bi_group_object(args: Vec<Value>, input: Option<Value>, env: &mut Env) -> Res
             }
 
             // Ordered by the key's text, then its type, so the groups come out
-            // in the same order as before.
-            let mut groups: BTreeMap<(String, &'static str), Vec<Value>> = BTreeMap::new();
-            for (key, item) in keyed {
-                groups.entry(key).or_default().push(item);
+            // in the same order as before. `Key` is the first key seen, with
+            // its type.
+            let mut groups: BTreeMap<(String, &'static str), (Value, Vec<Value>)> = BTreeMap::new();
+            for (slot, key, item) in keyed {
+                groups
+                    .entry(slot)
+                    .or_insert_with(|| (key, Vec::new()))
+                    .1
+                    .push(item);
             }
 
             let mut result = Vec::new();
-            for ((key, _type), items) in groups {
+            for ((key, _type), (key_value, items)) in groups {
                 let mut group = BTreeMap::new();
                 group.insert("Name".to_string(), Value::Str(key));
+                group.insert("Key".to_string(), key_value);
                 group.insert("Count".to_string(), Value::Int(items.len() as i64));
                 group.insert("Group".to_string(), Value::Array(items));
                 result.push(Value::Record(group));
@@ -11111,11 +11142,50 @@ fn bi_group_object(args: Vec<Value>, input: Option<Value>, env: &mut Env) -> Res
     }
 }
 
+/// The fields a count_by key lambda reads when its whole body is a field path
+/// of its one parameter (`.a.b`, `fn(r) => r.a`): the path, outermost first.
+fn row_field_path(lam: &Lambda) -> Option<Vec<String>> {
+    if lam.params.len() != 1 {
+        return None;
+    }
+    let mut path = Vec::new();
+    let mut e: &crate::ast::Expr = &lam.body;
+    loop {
+        match e {
+            crate::ast::Expr::MemberAccess { object, field } => {
+                path.push(field.clone());
+                e = &**object;
+            }
+            crate::ast::Expr::Ident(name) if name == &lam.params[0] && !path.is_empty() => {
+                path.reverse();
+                return Some(path);
+            }
+            _ => return None,
+        }
+    }
+}
+
+/// The value at `path` in a row, or null when a field on the way is missing.
+fn count_by_field<S: AsRef<str>>(row: &Value, path: &[S]) -> Value {
+    let mut cur = row;
+    for field in path {
+        match cur {
+            Value::Record(r) => match r.get(field.as_ref()) {
+                Some(v) => cur = v,
+                None => return Value::Null,
+            },
+            _ => return Value::Null,
+        }
+    }
+    cur.clone()
+}
+
 /// count_by(key): how many rows have each key, as {key, count} records sorted by
-/// count descending, then by the key's text. The key is a field name String or a
-/// lambda (`.field` arrives as one), read as `group_by` reads it; the subject is
-/// piped or the first argument. Rows share a count only when the key's text and
-/// type both match; a row without the field counts under the key "".
+/// count descending, then by the key's text. The key is a field name String, a
+/// lambda (`.field` arrives as one) or a builtin name (`count_by(len)`); the
+/// subject is piped or the first argument. Rows share a count only when the
+/// key's text and type both match, except that an Int and a Float that are
+/// equal (1 and 1.0) are one key; a row without the field counts under null.
 fn bi_count_by(args: Vec<Value>, input: Option<Value>, env: &mut Env) -> Result<Value> {
     let (input, args) = match input {
         Some(v) => (v, args),
@@ -11143,7 +11213,7 @@ fn bi_count_by(args: Vec<Value>, input: Option<Value>, env: &mut Env) -> Result<
     }
     let property = match &args[0] {
         Value::Str(s) => Some(s),
-        Value::Lambda(_) => None,
+        Value::Lambda(_) | Value::Builtin(_) => None,
         other => {
             return Err(crate::safety::bad_arg_with_hint(
                 "count_by",
@@ -11168,24 +11238,40 @@ fn bi_count_by(args: Vec<Value>, input: Option<Value>, env: &mut Env) -> Result<
     match property {
         Some(property) => {
             for item in &rows {
-                keys.push(get_property_value(item, property));
+                keys.push(count_by_field(item, std::slice::from_ref(property)));
             }
         }
         None => {
-            let lam = need_lambda(&args[0], "count_by")?;
-            with_param_slots(lam, env, |env| {
-                for item in rows {
-                    keys.push(call_lambda_one(lam, item, env, false)?.0);
+            let lam_val = callable(&args[0]);
+            let lam = need_lambda(&lam_val, "count_by")?;
+            // `.field` and `fn(r) => r.field` read a field: a row without it
+            // has the key null, where calling the lambda would be an error.
+            if let Some(path) = row_field_path(lam) {
+                for item in &rows {
+                    keys.push(count_by_field(item, &path));
                 }
-                Ok(())
-            })?;
+            } else {
+                with_param_slots(lam, env, |env| {
+                    for item in rows {
+                        keys.push(call_lambda_one(lam, item, env, false)?.0);
+                    }
+                    Ok(())
+                })?;
+            }
         }
     }
 
-    // One entry per (text, type) key: the first key seen, and its count.
+    // One entry per (text, type) key: the first key seen, and its count. An
+    // Int and a Float that are equal (1 and 1.0) are one key, as `unique`
+    // treats them.
     let mut counts: BTreeMap<(String, &'static str), (Value, i64)> = BTreeMap::new();
     for key in keys {
-        let slot = (value_to_string(&key), key.type_name());
+        let slot = match &key {
+            Value::Float(f) if f.is_finite() && f.fract() == 0.0 && f.abs() < 9.0e15 => {
+                ((*f as i64).to_string(), "Int")
+            }
+            _ => (value_to_string(&key), key.type_name()),
+        };
         counts.entry(slot).or_insert((key, 0)).1 += 1;
     }
     let mut ordered: Vec<((String, &'static str), (Value, i64))> = counts.into_iter().collect();
@@ -11409,19 +11495,25 @@ fn bi_to_json(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
     };
 
     let json_val = value_to_json_strict("to_json", &value, "value")?;
-    // An Int is the indent in spaces, 0 to 8; 0 is compact.
-    if let Some(Value::Int(indent)) = flags.first() {
-        return Ok(Value::Str(json_indented("to_json", &json_val, *indent)?));
-    }
-
-    let pretty = flags
-        .first()
-        .and_then(|arg| match arg {
-            Value::Bool(b) => Some(*b),
-            Value::Str(s) => Some(s == "pretty" || s == "true"),
-            _ => None,
-        })
-        .unwrap_or(false);
+    // An Int is the indent in spaces, 0 to 16; 0 is compact. A Bool is
+    // true for two spaces, false for compact. Nothing else is an indent.
+    let pretty = match flags.first() {
+        None => false,
+        Some(Value::Int(indent)) => {
+            return Ok(Value::Str(json_indented(
+                "to_json", &json_val, *indent, 16,
+            )?));
+        }
+        Some(Value::Bool(b)) => *b,
+        Some(other) => {
+            return Err(crate::safety::bad_arg_with_hint(
+                "to_json",
+                "an indent: a Bool or an Int from 0 to 16",
+                other.type_name(),
+                "pass true (two spaces), false (compact) or a number of spaces: to_json(x, 4)",
+            ));
+        }
+    };
 
     let json_str = if pretty {
         serde_json::to_string_pretty(&json_val)?
@@ -19147,7 +19239,7 @@ fn bi_json_stringify(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
 
     let json_val = value_to_json_strict("json_stringify", &val, "value")?;
     let json_str = match rest.first() {
-        Some(Value::Int(indent)) => json_indented("json_stringify", &json_val, *indent)?,
+        Some(Value::Int(indent)) => json_indented("json_stringify", &json_val, *indent, 8)?,
         _ => serde_json::to_string(&json_val).context("Failed to stringify to JSON")?,
     };
 
@@ -19155,13 +19247,13 @@ fn bi_json_stringify(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
 }
 
 /// `json` as text with each nesting level indented by `indent` spaces. An indent
-/// of 0 is compact JSON. An indent outside 0 to 8 is a bad argument.
-fn json_indented(builtin: &str, json: &serde_json::Value, indent: i64) -> Result<String> {
-    if !(0..=8).contains(&indent) {
+/// of 0 is compact JSON. An indent outside 0 to `max` is a bad argument.
+fn json_indented(builtin: &str, json: &serde_json::Value, indent: i64, max: i64) -> Result<String> {
+    if !(0..=max).contains(&indent) {
         return Err(crate::safety::bad_arg_in(
             builtin,
-            format!("{builtin}: indent must be 0 to 8 spaces, got {indent}"),
-            "pass an indent from 0 to 8, or leave it out for compact JSON",
+            format!("{builtin}: indent must be 0 to {max} spaces, got {indent}"),
+            &format!("pass an indent from 0 to {max}, or leave it out for compact JSON"),
         ));
     }
     if indent == 0 {
@@ -24888,6 +24980,22 @@ fn aecon_str_is_ambiguous(s: &str) -> bool {
         || s == "false"
         || s.parse::<i64>().is_ok()
         || s.parse::<f64>().is_ok()
+        || aecon_str_is_radix_number(s)
+}
+
+/// `0x1F`, `0o7`, `0b101` (with an optional sign): a number to a reader that
+/// takes the radix prefixes, though Rust's parsers do not.
+fn aecon_str_is_radix_number(s: &str) -> bool {
+    let body = s.strip_prefix(['+', '-']).unwrap_or(s);
+    let mut chars = body.chars();
+    if chars.next() != Some('0') {
+        return false;
+    }
+    let digits = match chars.next() {
+        Some('x' | 'X' | 'o' | 'O' | 'b' | 'B') => chars.as_str(),
+        _ => return false,
+    };
+    !digits.is_empty() && digits.chars().all(|c| c.is_ascii_hexdigit())
 }
 
 /// The type tag a column needs for lossless decode, or `None` if inference is
