@@ -189,3 +189,37 @@ fn b7_journal_rows_carry_the_step_of_their_call() {
         assert_eq!(moves[0], moves[1], "{text}");
     }
 }
+
+#[test]
+fn b8_unmatched_glob_operand_reads_as_gnu_does() {
+    let dir = scratch("b8a");
+    let o = ish_b(&dir, "wc -l *.nomatch_b8");
+    let text = out(&o);
+    assert!(
+        text.contains("wc: '*.nomatch_b8': No such file or directory"),
+        "{text}"
+    );
+    assert_eq!(o.status.code(), Some(1), "{text}");
+    let o = ish_b(&dir, "cat nosuch_b8.txt");
+    assert!(
+        out(&o).contains("cat: nosuch_b8.txt: No such file or directory"),
+        "{}",
+        out(&o)
+    );
+}
+
+#[test]
+fn b8_missing_cp_names_the_subset() {
+    let dir = scratch("b8b");
+    for cmd in ["cp a b", "mv a b", "rm a", "xargs echo", "unzip a.zip"] {
+        let o = ish_b(&dir, cmd);
+        let text = out(&o);
+        let name = cmd.split(' ').next().unwrap();
+        assert!(
+            text.contains(&format!("{name}: command not found")),
+            "{text}"
+        );
+        assert!(text.contains("in-process subset"), "{text}");
+        assert_eq!(o.status.code(), Some(127), "{text}");
+    }
+}

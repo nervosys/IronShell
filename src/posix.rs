@@ -3330,6 +3330,11 @@ impl Shell {
             Ok(c) => c,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
                 sink.eline(&format!("{SHELL_NAME}: {name}: command not found"));
+                if matches!(&*name, "cp" | "mv" | "rm" | "xargs" | "unzip") {
+                    sink.eline(&format!(
+                        "{SHELL_NAME}: {name} is not part of ish -b's in-process subset, so it runs only as a program of that name on PATH, and none was found"
+                    ));
+                }
                 if let Some(hint) = windows_tools_hint() {
                     sink.eline(&hint);
                 }
@@ -3661,6 +3666,21 @@ fn write_file_unrecorded(path: &str, data: &[u8], append: bool) -> Result<(), St
 }
 
 /// The message GNU tools print for an I/O error.
+/// A file name as GNU tools print it in a diagnostic: bare, unless it holds a
+/// character the shell would treat specially (a glob that matched nothing, a
+/// space), when it is in single quotes (`wc: '*.rs': No such file ...`).
+fn gnu_quote(name: &str) -> String {
+    const SPECIAL: &str = "*?[]{}$&;|<>()\"\\!#~^`";
+    let special = name
+        .chars()
+        .any(|c| c.is_whitespace() || SPECIAL.contains(c));
+    if special && !name.contains('\'') {
+        format!("'{name}'")
+    } else {
+        name.to_string()
+    }
+}
+
 fn io_reason(e: &std::io::Error) -> String {
     use std::io::ErrorKind::*;
     match e.kind() {
@@ -3672,6 +3692,12 @@ fn io_reason(e: &std::io::Error) -> String {
         _ => {
             if e.raw_os_error() == Some(21) {
                 return "Is a directory".into();
+            }
+            // Windows refuses a name such as an unmatched `*.rs` as malformed
+            // (ERROR_INVALID_NAME, ERROR_BAD_PATHNAME). No such file can exist,
+            // and GNU says so in these words.
+            if cfg!(windows) && matches!(e.raw_os_error(), Some(123) | Some(161)) {
+                return "No such file or directory".into();
             }
             let s = e.to_string();
             s.split(" (os error").next().unwrap_or(&s).to_string()
@@ -4208,7 +4234,7 @@ fn read_inputs(
         match read_file(f) {
             Ok(d) => out.push((f.clone(), d)),
             Err(e) => {
-                sink.eline(&format!("{tool}: {f}: {}", io_reason(&e)));
+                sink.eline(&format!("{tool}: {}: {}", gnu_quote(f), io_reason(&e)));
                 *status = 1;
             }
         }
@@ -5863,7 +5889,10 @@ fn grep(args: &[String], stdin: &mut Input, sink: &mut Sink) -> Util {
                 targets.push((op.clone(), Some(op.clone())));
             } else {
                 if !f('s') {
-                    sink.eline(&format!("grep: {op}: No such file or directory"));
+                    sink.eline(&format!(
+                        "grep: {}: No such file or directory",
+                        gnu_quote(op)
+                    ));
                 }
                 status_err = true;
             }
