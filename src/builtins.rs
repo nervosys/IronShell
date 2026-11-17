@@ -25724,7 +25724,10 @@ fn bi_handle(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
         None => {
             let live: Vec<String> = crate::handles::list().into_iter().map(|h| h.id).collect();
             let got = if live.is_empty() {
-                format!("'{id}' (no handles live — they do not survive the process)")
+                let dir = crate::handles::session_dir()
+                    .map(|d| d.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| "none".to_string());
+                format!("'{id}' (no handles live in this session (IRONSHELL_SESSION_DIR={dir}); a handle is readable only from the session that made it)")
             } else {
                 format!("'{id}' (live: {})", live.join(", "))
             };

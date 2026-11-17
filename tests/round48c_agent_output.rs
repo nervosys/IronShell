@@ -44,3 +44,17 @@ fn a_zero_pid_error_says_it_needs_an_id_above_zero() {
         assert!(!all.contains("addresses groups"), "{code}: {all}");
     }
 }
+
+#[test]
+fn a_handle_missing_from_this_session_says_so() {
+    let dir = session("nohandle");
+    let (out, err) = agent(&dir, r#"handle("h1")"#);
+    let all = format!("{out}{err}");
+    assert!(all.contains("no handles live in this session"), "{all}");
+    assert!(all.contains("IRONSHELL_SESSION_DIR="), "{all}");
+    assert!(
+        all.contains("readable only from the session that made it"),
+        "{all}"
+    );
+    assert!(!all.contains("do not survive the process"), "{all}");
+}
