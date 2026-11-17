@@ -10005,7 +10005,7 @@ fn bi_grep(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
         .any(|arg| matches!(arg, Value::Str(s) if s == "-v" || s == "--invert-match"));
 
     // The options Record, when there is one, is read before the source is.
-    let line_numbers = grep_line_numbers(&args)?;
+    let (line_numbers, extended) = grep_options(&args)?;
 
     // Each source is its file's name (None for piped text) and its text. A
     // glob searches each file on its own, so a match can name the file.
@@ -10061,13 +10061,19 @@ fn bi_grep(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
     // now what grep takes: a POSIX basic regular expression.
     // A back-reference (\1 to \9) is the one BRE form the translation refuses.
     // Any other failure is the regex compiler's, and its reason is what to fix.
-    let translated = crate::posix::bre_to_regex(pattern).ok_or_else(|| {
-        crate::safety::bad_arg_in(
-            "grep",
-            format!("grep: {pattern:?} has a back-reference, which grep does not support"),
-            "remove the \\1 to \\9 back-reference; to match an extended regex, use regex_match",
-        )
-    })?;
+    // With {extended: true} the pattern is an extended regular expression
+    // (grep -E): it is handed to the regex engine as written.
+    let translated = if extended {
+        pattern.clone()
+    } else {
+        crate::posix::bre_to_regex(pattern).ok_or_else(|| {
+            crate::safety::bad_arg_in(
+                "grep",
+                format!("grep: {pattern:?} has a back-reference, which grep does not support"),
+                "remove the \\1 to \\9 back-reference; to match an extended regex, pass {extended: true}",
+            )
+        })?
+    };
     let re = regex::RegexBuilder::new(&translated)
         .case_insensitive(case_insensitive)
         .build()
@@ -10084,7 +10090,7 @@ fn bi_grep(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
             crate::safety::bad_arg_in(
                 "grep",
                 format!("grep: {pattern:?} is not a valid regular expression: {reason}"),
-                "grep takes a basic regular expression: + ? | ( ) { } are literal unless backslashed, so write \\( and \\| for groups and alternatives; for an extended regex, use regex_match",
+                "grep takes a basic regular expression: + ? | ( ) { } are literal unless backslashed, so write \\( and \\| for groups and alternatives, or pass {extended: true} to write them bare (TODO|FIXME)",
             )
         })?;
     let mut matching: Vec<Value> = Vec::new();
@@ -10111,37 +10117,47 @@ fn bi_grep(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
     Ok(Value::Array(matching))
 }
 
-/// The options Record of `grep`, when one is given after the pattern. Its only
-/// key is `line_numbers`, a Bool; any other key or value is a bad argument.
-fn grep_line_numbers(args: &[Value]) -> Result<bool> {
+/// The options Record of `grep`, when one is given after the pattern: its keys
+/// are `line_numbers` and `extended`, both Bools (`extended` reads the pattern
+/// as an extended regular expression, as `grep -E` does). Any other key or
+/// value is a bad argument. Returns `(line_numbers, extended)`.
+fn grep_options(args: &[Value]) -> Result<(bool, bool)> {
     let mut line_numbers = false;
+    let mut extended = false;
     for arg in args.iter().skip(1) {
         if let Value::Record(options) = arg {
             for (key, value) in options {
                 match (key.as_str(), value) {
                     ("line_numbers", Value::Bool(on)) => line_numbers = *on,
-                    ("line_numbers", other) => {
+                    ("extended", Value::Bool(on)) => extended = *on,
+                    ("line_numbers" | "extended", other) => {
                         return Err(crate::safety::bad_arg_in(
                             "grep",
-                            format!(
-                                "grep: line_numbers must be a Bool, got {}",
-                                other.type_name()
-                            ),
-                            "pass {line_numbers: true} or {line_numbers: false}",
+                            format!("grep: {key} must be a Bool, got {}", other.type_name()),
+                            &format!("pass {{{key}: true}} or {{{key}: false}}"),
+                        ))
+                    }
+                    ("recursive" | "r" | "R", _) => {
+                        return Err(crate::safety::bad_arg_in(
+                            "grep",
+                            format!("grep: unknown option {key}; grep searches one file or glob"),
+                            "for a recursive search use a glob, grep(\"TODO\", \"src/**/*.rs\"), or search.grep(pattern) (search_grep), which walks the project",
                         ))
                     }
                     _ => {
                         return Err(crate::safety::bad_arg_in(
                             "grep",
-                            format!("grep: unknown option {key}; grep takes line_numbers"),
-                            "the options Record takes one key: {line_numbers: true}",
+                            format!(
+                                "grep: unknown option {key}; grep takes line_numbers and extended"
+                            ),
+                            "the options Record takes line_numbers and extended: {line_numbers: true, extended: true}",
                         ))
                     }
                 }
             }
         }
     }
-    Ok(line_numbers)
+    Ok((line_numbers, extended))
 }
 
 /// The files `grep(pattern, path)` searches, each with its text. The path is
