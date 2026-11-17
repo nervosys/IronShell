@@ -39622,6 +39622,16 @@ fn zip_file_args(builtin: &str, args: &[Value]) -> Result<Vec<String>> {
     Ok(files)
 }
 
+/// The name of IronShell's own state folder (journal, audit log, sessions).
+const STATE_DIR_NAME: &str = ".ironshell";
+
+/// True for a folder entry named `.ironshell`. An archive walk skips it, so
+/// `tar_create("all.tar.gz", ".")` does not carry the journal and audit log
+/// (absolute paths, the principal). Naming it as a member archives it.
+fn is_state_dir(k: &std::fs::DirEntry) -> bool {
+    k.file_name() == STATE_DIR_NAME && k.path().is_dir()
+}
+
 /// What a zip write has taken in so far: the entry names (a name may be stored
 /// once), the source bytes read, and the entry count.
 struct ZipBuild {
@@ -39681,6 +39691,9 @@ fn zip_add_tree(
         }
         kids.sort_by_key(|k| k.file_name());
         for k in kids {
+            if is_state_dir(&k) {
+                continue;
+            }
             let p = k.path();
             let is_link = std::fs::symlink_metadata(&p)
                 .map(|m| m.file_type().is_symlink())
@@ -39730,8 +39743,33 @@ fn zip_write_archive(
         bytes: 0,
         entries: 0,
     };
+    let cwd = crate::journal::normalized_path(&crate::safety::resolve_path_str("."));
     for m in members {
         let p = std::path::Path::new(m);
+        // The current folder itself: its contents are stored directly, as
+        // `zip -r x .` does, not under the folder's own name.
+        if crate::journal::normalized_path(m) == cwd {
+            let mut kids = Vec::new();
+            for k in std::fs::read_dir(p).map_err(|e| crate::safety::fs_error(builtin, m, &e))? {
+                kids.push(k.map_err(|e| crate::safety::fs_error(builtin, m, &e))?);
+            }
+            kids.sort_by_key(|k| k.file_name());
+            for k in kids {
+                if is_state_dir(&k) {
+                    continue;
+                }
+                let kp = k.path();
+                let is_link = std::fs::symlink_metadata(&kp)
+                    .map(|md| md.file_type().is_symlink())
+                    .unwrap_or(false);
+                if is_link && kp.is_dir() {
+                    continue;
+                }
+                let leaf = k.file_name().to_string_lossy().into_owned();
+                zip_add_tree(builtin, &mut w, &kp, &leaf, &mut st)?;
+            }
+            continue;
+        }
         let leaf = p
             .file_name()
             .map(|n| n.to_string_lossy().into_owned())
@@ -40805,6 +40843,9 @@ fn tar_add_tree<W: std::io::Write>(
         }
         kids.sort_by_key(|k| k.file_name());
         for k in kids {
+            if is_state_dir(&k) {
+                continue;
+            }
             let leaf = k.file_name().to_string_lossy().into_owned();
             let child = if name.is_empty() {
                 leaf
@@ -40872,8 +40913,9 @@ fn tar_write_members<W: std::io::Write>(
 /// How `tar_create` stores one member: the directory tar is run from, and the
 /// name it stores. A member inside the current directory is stored as its path
 /// from it (normalised, so `./a/../b` is `b`, and never with `..`); one outside
-/// it, or the current directory itself, under its last component, with its tree
-/// below that for a folder. The name never starts with `-`, so tar reads it as a
+/// it, under its last component, with its tree below that for a folder; the
+/// current directory itself (`.`) has its contents stored directly, with no
+/// folder name above them. The name never starts with `-`, so tar reads it as a
 /// name, and always uses `/`.
 fn tar_member_name(member: &str) -> (String, String) {
     let base = crate::journal::normalized_path(&crate::safety::resolve_path_str("."));
@@ -40885,6 +40927,11 @@ fn tar_member_name(member: &str) -> (String, String) {
         .filter(|rel| rel.components().next().is_some())
     {
         Some(rel) => (base.clone(), rel.to_path_buf()),
+        // The current folder itself: its contents are stored directly, as
+        // `tar -cf x .` does, not under the folder's own name.
+        None if abs_path == std::path::Path::new(&base) => {
+            (base.clone(), std::path::PathBuf::from("."))
+        }
         None => match (abs_path.parent(), abs_path.file_name()) {
             (Some(parent), Some(last)) => (
                 parent.to_string_lossy().into_owned(),
