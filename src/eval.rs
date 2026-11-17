@@ -1585,7 +1585,21 @@ fn non_record_field_error(object: &Expr, field: &str, ty: &str) -> anyhow::Error
             &format!("a {ty} has no `.{field}` field; use len({recv}) or {recv} | len"),
         );
     }
-    crate::safety::bad_arg(&written, "a Record (or a module)", ty)
+    let article = if matches!(ty.chars().next(), Some('A' | 'E' | 'I' | 'O' | 'U')) {
+        "an"
+    } else {
+        "a"
+    };
+    let subject = match object {
+        Expr::Ident(name) if name != "__" => format!("`{name}`"),
+        _ => "the value".to_string(),
+    };
+    crate::safety::bad_arg_with_hint(
+        &written,
+        "a Record (or a module)",
+        ty,
+        &format!("{subject} is {article} {ty}; .{field} reads a field of a Record"),
+    )
 }
 
 /// Refuse a pipeline whose stage names a plain builtin that nothing serves,

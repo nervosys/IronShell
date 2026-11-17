@@ -3493,7 +3493,15 @@ pub fn ensure_structured(builtin: &str, e: anyhow::Error) -> anyhow::Error {
                     filled.message = format!("{builtin}: {rest}");
                 }
             }
-            if generic {
+            if generic && se.message.starts_with("lambda expected") && se.message.ends_with("got 1")
+            {
+                // A callback called with the element: the lambda's arity is the
+                // fault, not the builtin's own signature.
+                filled.hint = format!(
+                    "the lambda passed to {builtin} takes one argument (the element): \
+                     fn(x) => ..."
+                );
+            } else if generic {
                 if let Some(sig) = crate::signature::signature_of(builtin) {
                     filled.hint = signature_arg_hint(builtin, sig);
                 }
