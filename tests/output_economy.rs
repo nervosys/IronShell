@@ -399,8 +399,8 @@ fn agent_mode_renders_results_as_aecon_by_default() {
         render_agent(&Value::Str("hello".into()), None).as_deref(),
         Some("hello")
     );
-    // Null prints nothing.
-    assert!(render_agent(&Value::Null, None).is_none());
+    // Null prints `null`, so it cannot be mistaken for no output.
+    assert_eq!(render_agent(&Value::Null, None).as_deref(), Some("null"));
 
     // Under a tight token budget, a large array pages and carries one compact
     // `@page …` metadata line (the page itself is raw AECON, not a re-quoted blob).
@@ -452,11 +452,12 @@ fn aecon_typed_round_trip_is_lossless_for_ambiguous_values() {
         Value::Str(s) => s,
         other => panic!("{other:?}"),
     };
-    // A type line is present, tagging exactly the ambiguous columns.
+    // A type line is present, tagging the float column; a numeric-looking string
+    // is JSON-quoted in its cell instead of tagged.
     assert!(encoded.contains("@type "), "type header present: {encoded}");
     assert!(
-        encoded.contains("code:s"),
-        "numeric-looking string tagged string: {encoded}"
+        encoded.contains("\"200\"") && !encoded.contains("code:s"),
+        "numeric-looking string quoted, not tagged: {encoded}"
     );
     assert!(
         encoded.contains("ratio:f"),

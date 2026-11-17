@@ -70,11 +70,7 @@ fn deterministic_output_keeps_the_float_point() {
     let o = ish(&["--deterministic", "-c", "-0.0"]);
     assert_eq!(o.stdout, "-0.0\n", "stderr: {}", o.stderr);
     let o = ish(&["--deterministic", "-c", "1e21"]);
-    assert!(
-        o.stdout.trim().starts_with("1e") && !o.stdout.contains("0000"),
-        "stdout: {}",
-        o.stdout
-    );
+    assert_eq!(o.stdout.trim(), "1.0e21", "stderr: {}", o.stderr);
 }
 
 #[test]

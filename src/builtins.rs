@@ -5570,6 +5570,12 @@ fn bi_map(args: Vec<Value>, input: Option<Value>, env: &mut Env) -> Result<Value
     // own `v.clone()`) to keep the retry path alive. The lambda knows its own
     // arity, so ask it once.
     let two_arg = lam.params.len() == 2;
+    // The output is as long as the input: refuse before allocating it when the
+    // memory budget cannot hold it.
+    crate::memory::reserve(
+        "map",
+        items.len().saturating_mul(std::mem::size_of::<Value>()),
+    )?;
     let mut out = Vec::with_capacity(items.len());
     if items.is_empty() {
         return Ok(Value::Array(out));
@@ -16064,6 +16070,10 @@ fn bi_range(args: Vec<Value>, _input: Option<Value>) -> Result<Value> {
         ));
     }
 
+    crate::memory::reserve(
+        "range",
+        (count as usize).saturating_mul(std::mem::size_of::<Value>()),
+    )?;
     let mut result = Vec::with_capacity(count as usize);
     for i in 0..count {
         // Each element lies between start and end, so it fits in i64.
@@ -23946,12 +23956,12 @@ fn aecon_atom(v: &Value) -> String {
             // (record/array), which renders as JSON below. A *string* that happens to
             // start that way is JSON-quoted so the two can never be confused — the
             // same reservation `""` already provides for the empty string.
-            if s.is_empty()
-                || s.contains('\t')
-                || s.contains('\n')
-                || s.starts_with('{')
-                || s.starts_with('[')
-            {
+            // A bare cell opening with `{` or `[` is reserved for a composite value
+            // (record/array), which renders as JSON below. A *string* that happens to
+            // start that way is JSON-quoted so the two can never be confused — the
+            // same reservation `""` already provides for the empty string. The same
+            // goes for any string that would read back as another type.
+            if aecon_str_needs_quote(s) {
                 serde_json::to_string(s).unwrap_or_else(|_| format!("{:?}", s))
             } else {
                 s.clone()
@@ -23964,6 +23974,60 @@ fn aecon_atom(v: &Value) -> String {
         Value::Null => "null".to_string(),
         other => serde_json::to_string(&other.to_json()).unwrap_or_else(|_| "null".to_string()),
     }
+}
+
+/// A column or record key as AECON writes it: bare when it is plain, JSON-quoted
+/// when it is empty or holds a tab, newline, space, `=` or `"`, or opens with a
+/// character that has a meaning of its own, since the header line splits on tabs
+/// and a record entry reads `key=value` split on spaces.
+fn aecon_key(k: &str) -> String {
+    let plain = !k.is_empty()
+        && !k.contains(['\t', '\n', '\r', ' ', '=', '"'])
+        && !k.starts_with(['@', '[', '{']);
+    if plain {
+        k.to_string()
+    } else {
+        serde_json::to_string(k).unwrap_or_else(|_| format!("{k:?}"))
+    }
+}
+
+/// Reverse [`aecon_key`] for one name: a JSON-quoted name is parsed, any other
+/// is taken as written.
+fn aecon_unquote_key(s: &str) -> String {
+    if s.starts_with('"') {
+        if let Ok(k) = serde_json::from_str::<String>(s) {
+            return k;
+        }
+    }
+    s.to_string()
+}
+
+/// Split `s` at the first `sep` that follows a leading name, which may be a
+/// JSON-quoted string holding the separator itself. `None` when `sep` is absent.
+fn aecon_split_key<'a>(s: &'a str, sep: &str) -> Option<(String, &'a str)> {
+    if s.starts_with('"') {
+        let mut stream = serde_json::Deserializer::from_str(s).into_iter::<String>();
+        if let Some(Ok(k)) = stream.next() {
+            if let Some(rest) = s[stream.byte_offset()..].strip_prefix(sep) {
+                return Some((k, rest));
+            }
+        }
+    }
+    s.split_once(sep).map(|(k, rest)| (k.to_string(), rest))
+}
+
+/// Whether a string cell must be JSON-quoted to read back as that string: it is
+/// empty, would read as `null`/`true`/`false` or a number, opens with a character
+/// that has a meaning of its own (`@` directive, `"` quote, `[` `{` composite),
+/// has leading or trailing whitespace, or holds a tab, newline or carriage
+/// return. Ordinary strings stay bare.
+fn aecon_str_needs_quote(s: &str) -> bool {
+    s.is_empty()
+        || s.contains(['\t', '\n', '\r'])
+        || s.starts_with(['@', '"', '[', '{'])
+        || s.starts_with(char::is_whitespace)
+        || s.ends_with(char::is_whitespace)
+        || aecon_str_is_ambiguous(s)
 }
 
 /// Longest common character prefix shared by every string in `vals` (empty if
@@ -24142,9 +24206,12 @@ fn aecon_render(v: &Value) -> String {
 
     if !rows.is_empty() {
         let keys: Vec<String> = header.unwrap_or_else(|| rows[0].keys().cloned().collect());
-        let homogeneous = rows
-            .iter()
-            .all(|r| r.len() == keys.len() && keys.iter().all(|k| r.contains_key(k)));
+        // Rows with no fields have no columns to put in a table: `[{}]` would print
+        // as one blank line, so it prints as the array it is.
+        let homogeneous = !keys.is_empty()
+            && rows
+                .iter()
+                .all(|r| r.len() == keys.len() && keys.iter().all(|k| r.contains_key(k)));
         if homogeneous {
             // Constant-column factoring: columns whose value is identical across
             // ALL rows are emitted once in a `@const` line rather than repeated
@@ -24287,7 +24354,13 @@ fn aecon_render(v: &Value) -> String {
                 } else {
                     String::new()
                 };
-                let ps_cost = if lcp.is_empty() && lcs.is_empty() {
+                // A residue opening with `@` or `"` would read as a directive or a
+                // quoted cell on its own line, so such a column stays unfactored.
+                let ps_cost = if (lcp.is_empty() && lcs.is_empty())
+                    || residue
+                        .iter()
+                        .any(|r| r.starts_with('@') || r.starts_with('"'))
+                {
                     usize::MAX
                 } else {
                     residue.iter().map(|s| s.len() - lcs.len()).sum::<usize>()
@@ -24442,7 +24515,10 @@ fn aecon_render(v: &Value) -> String {
                         continue;
                     }
                     let saved: usize = (1..matrix.len())
-                        .filter(|&ri| matrix[ri][ci] == matrix[ri - 1][ci])
+                        .filter(|&ri| {
+                            matrix[ri][ci] == matrix[ri - 1][ci]
+                                && rows[ri].get(k) == rows[ri - 1].get(k)
+                        })
                         .map(|ri| matrix[ri][ci].len())
                         .sum();
                     // Naming a column costs a tab plus its name; the `\n@same `
@@ -24457,7 +24533,11 @@ fn aecon_render(v: &Value) -> String {
                     .filter_map(|k| var_keys.iter().position(|v| v == k))
                     .map(|ci| {
                         (1..matrix.len())
-                            .filter(|&ri| matrix[ri][ci] == matrix[ri - 1][ci])
+                            .filter(|&ri| {
+                                matrix[ri][ci] == matrix[ri - 1][ci]
+                                    && rows[ri].get(&var_keys[ci])
+                                        == rows[ri - 1].get(&var_keys[ci])
+                            })
                             .map(|ri| matrix[ri][ci].len())
                             .sum::<usize>()
                     })
@@ -24475,7 +24555,9 @@ fn aecon_render(v: &Value) -> String {
                     .collect::<Vec<_>>()
                 {
                     for ri in (1..matrix.len()).rev() {
-                        if matrix[ri][ci] == matrix[ri - 1][ci] {
+                        if matrix[ri][ci] == matrix[ri - 1][ci]
+                            && rows[ri].get(&var_keys[ci]) == rows[ri - 1].get(&var_keys[ci])
+                        {
                             matrix[ri][ci].clear();
                         }
                     }
@@ -24489,10 +24571,16 @@ fn aecon_render(v: &Value) -> String {
             // `@type` (lossless type tags) metadata lines, then positional
             // tab-separated rows. No `@aecon rows=N cols=` prefix — the header is
             // self-describing and ~7 tokens cheaper per result than the verbose form.
-            let mut out = var_keys.join("\t");
+            let named = |ks: &[String]| -> String {
+                ks.iter()
+                    .map(|k| aecon_key(k))
+                    .collect::<Vec<_>>()
+                    .join("\t")
+            };
+            let mut out = named(&var_keys);
             if !nest_keys.is_empty() {
                 out.push_str("\n@nest ");
-                out.push_str(&nest_keys.join("\t"));
+                out.push_str(&named(&nest_keys));
             }
             if !const_keys.is_empty() {
                 let consts: Vec<String> = const_keys
@@ -24500,7 +24588,7 @@ fn aecon_render(v: &Value) -> String {
                     .map(|k| {
                         format!(
                             "{}={}",
-                            k,
+                            aecon_key(k),
                             aecon_atom(rows[0].get(k).unwrap_or(&Value::Null))
                         )
                     })
@@ -24509,29 +24597,29 @@ fn aecon_render(v: &Value) -> String {
                 out.push_str(&consts.join("\t"));
             }
             for (col, distinct) in &dict_cols {
-                out.push_str(&format!("\n@dict {}: ", col));
+                out.push_str(&format!("\n@dict {}: ", aecon_key(col)));
                 out.push_str(&distinct.join("\t"));
             }
             for (col, prefix) in &prefix_cols {
-                out.push_str(&format!("\n@prefix {}: {}", col, prefix));
+                out.push_str(&format!("\n@prefix {}: {}", aecon_key(col), prefix));
             }
             for (col, suffix) in &suffix_cols {
-                out.push_str(&format!("\n@suffix {}: {}", col, suffix));
+                out.push_str(&format!("\n@suffix {}: {}", aecon_key(col), suffix));
             }
             if !same_cols.is_empty() {
                 out.push_str("\n@same ");
-                out.push_str(&same_cols.join("\t"));
+                out.push_str(&named(&same_cols));
             }
             if !delta_cols.is_empty() {
                 out.push_str("\n@delta: ");
-                let names: Vec<&str> = delta_cols.keys().map(|s| s.as_str()).collect();
-                out.push_str(&names.join("\t"));
+                let names: Vec<String> = delta_cols.keys().cloned().collect();
+                out.push_str(&named(&names));
             }
             if !type_tags.is_empty() {
                 out.push_str("\n@type ");
                 let tags: Vec<String> = type_tags
                     .iter()
-                    .map(|(k, t)| format!("{}:{}", k, t))
+                    .map(|(k, t)| format!("{}:{}", aecon_key(k), t))
                     .collect();
                 out.push_str(&tags.join("\t"));
             }
@@ -24547,7 +24635,7 @@ fn aecon_render(v: &Value) -> String {
         Value::Record(m) => {
             let pairs: Vec<String> = m
                 .iter()
-                .map(|(k, val)| format!("{}={}", k, aecon_item(val)))
+                .map(|(k, val)| format!("{}={}", aecon_key(k), aecon_item(val)))
                 .collect();
             format!("{{{}}}", pairs.join(" "))
         }
@@ -24591,16 +24679,10 @@ fn aecon_type_tag(vals: &[&Value]) -> Option<char> {
     if vals.is_empty() {
         return None;
     }
+    // A string that would read as another type is JSON-quoted in the cell
+    // (`aecon_str_needs_quote`), so a string column needs no tag.
     if vals.iter().all(|v| matches!(v, Value::Str(_))) {
-        let ambiguous = vals.iter().any(|v| match v {
-            // Empty / tab / newline strings render JSON-quoted and decode exactly,
-            // so only *bare* ambiguous strings need the tag.
-            Value::Str(s) => {
-                !s.is_empty() && !s.contains('\t') && !s.contains('\n') && aecon_str_is_ambiguous(s)
-            }
-            _ => false,
-        });
-        return ambiguous.then_some('s');
+        return None;
     }
     if vals.iter().all(|v| matches!(v, Value::Float(_))) {
         let ambiguous = vals.iter().any(|v| match v {
@@ -24723,7 +24805,7 @@ fn aecon_decode(s: &str) -> Result<Value> {
     if !header.contains('\t') && (header.starts_with('{') || header.starts_with('[')) {
         return Ok(aecon_decode_atom(header));
     }
-    let var_keys: Vec<String> = header.split('\t').map(|s| s.to_string()).collect();
+    let var_keys: Vec<String> = header.split('\t').map(aecon_unquote_key).collect();
 
     // `@const` is decoded *after* the metadata loop because `@type` (which can
     // correct a const's inferred type) is emitted after it; collect the raw
@@ -24741,42 +24823,44 @@ fn aecon_decode(s: &str) -> Result<Value> {
     for (i, line) in lines.iter().enumerate().skip(1) {
         if let Some(rest) = line.strip_prefix("@const ") {
             for kv in rest.split('\t') {
-                if let Some((k, v)) = kv.split_once('=') {
-                    const_raw.push((k.to_string(), v.to_string()));
+                if let Some((k, v)) = aecon_split_key(kv, "=") {
+                    const_raw.push((k, v.to_string()));
                 }
             }
         } else if let Some(rest) = line.strip_prefix("@dict ") {
-            if let Some((col, vals)) = rest.split_once(": ") {
-                dicts.insert(
-                    col.to_string(),
-                    vals.split('\t').map(|s| s.to_string()).collect(),
-                );
+            if let Some((col, vals)) = aecon_split_key(rest, ": ") {
+                dicts.insert(col, vals.split('\t').map(|s| s.to_string()).collect());
             }
         } else if let Some(rest) = line.strip_prefix("@prefix ") {
-            if let Some((col, p)) = rest.split_once(": ") {
-                prefixes.insert(col.to_string(), p.to_string());
+            if let Some((col, p)) = aecon_split_key(rest, ": ") {
+                prefixes.insert(col, p.to_string());
             }
         } else if let Some(rest) = line.strip_prefix("@suffix ") {
-            if let Some((col, p)) = rest.split_once(": ") {
-                suffixes.insert(col.to_string(), p.to_string());
+            if let Some((col, p)) = aecon_split_key(rest, ": ") {
+                suffixes.insert(col, p.to_string());
             }
         } else if let Some(rest) = line.strip_prefix("@same ") {
             for c in rest.split('\t') {
-                same_set.insert(c.to_string());
+                same_set.insert(aecon_unquote_key(c));
             }
         } else if let Some(rest) = line.strip_prefix("@nest ") {
             for c in rest.split('\t') {
-                nest_set.insert(c.to_string());
+                nest_set.insert(aecon_unquote_key(c));
             }
         } else if let Some(rest) = line.strip_prefix("@delta: ") {
             for c in rest.split('\t') {
-                delta_set.insert(c.to_string());
+                delta_set.insert(aecon_unquote_key(c));
             }
         } else if let Some(rest) = line.strip_prefix("@type ") {
             for spec in rest.split('\t') {
-                if let Some((col, tag)) = spec.rsplit_once(':') {
+                let split = if spec.starts_with('"') {
+                    aecon_split_key(spec, ":")
+                } else {
+                    spec.rsplit_once(':').map(|(c, t)| (c.to_string(), t))
+                };
+                if let Some((col, tag)) = split {
                     if let Some(c) = tag.chars().next() {
-                        type_tags.insert(col.to_string(), c);
+                        type_tags.insert(col, c);
                     }
                 }
             }
@@ -25118,6 +25202,22 @@ fn json_quote(s: &str) -> String {
     serde_json::to_string(s).unwrap_or_else(|_| format!("{:?}", s))
 }
 
+/// A Float's JSON text with the point kept in exponent form too: `1e+16`
+/// becomes `1.0e16`, `5e-324` becomes `5.0e-324`. A mantissa that already has a
+/// point is left alone, and the exponent loses its `+`. Still valid JSON.
+fn canonical_float_point(text: &str) -> String {
+    let Some(at) = text.find(['e', 'E']) else {
+        return text.to_string();
+    };
+    let (mantissa, exponent) = (&text[..at], &text[at + 1..]);
+    let exponent = exponent.strip_prefix('+').unwrap_or(exponent);
+    if mantissa.contains('.') {
+        format!("{mantissa}e{exponent}")
+    } else {
+        format!("{mantissa}.0e{exponent}")
+    }
+}
+
 /// Write a Value as canonical JSON: deterministic and byte-stable across
 /// platforms/locale. Record keys are emitted in sorted order (Records are
 /// BTreeMaps); floats use Rust's shortest round-trip, locale-independent
@@ -25133,7 +25233,7 @@ fn canonical_write(v: &Value, out: &mut String) {
                 // The text to_json writes: 1.0 stays 1.0, -0.0 stays -0.0, so a
                 // Float is never mistaken for an Int.
                 match serde_json::Number::from_f64(*f) {
-                    Some(n) => out.push_str(&n.to_string()),
+                    Some(n) => out.push_str(&canonical_float_point(&n.to_string())),
                     None => out.push_str(&format!("{:?}", f)),
                 }
             } else {
@@ -25349,6 +25449,15 @@ pub fn budget_value(value: &Value, max: usize, cursor: usize) -> Value {
     Value::Record(r)
 }
 
+/// Whether a bare top-level string must be JSON-quoted so it is not read as
+/// something else: empty, `null`/`true`/`false` or a number, or opening with `@`
+/// (a handle or directive line) or `"` (a quoted string). Text that merely
+/// starts with `[`, `{` or whitespace, or spans lines, stays raw: a file's
+/// contents are the common case, and the agent asked for them as written.
+fn aecon_top_str_needs_quote(s: &str) -> bool {
+    s.is_empty() || s.starts_with(['@', '"']) || aecon_str_is_ambiguous(s)
+}
+
 /// Render a result for **agent mode** (`IRONSHELL_MODE=agent`): compact, deterministic
 /// AECON instead of the human pretty-printer (no ANSI, keys emitted once, the
 /// four structural levers applied). `Null` prints nothing and a bare `Str` is
@@ -25368,9 +25477,28 @@ pub fn render_agent(v: &Value, budget: Option<usize>) -> Option<String> {
     } else {
         std::borrow::Cow::Borrowed(v)
     };
+    // Handing a large result back as a handle, or saying why it was not shown.
+    let handled = |value: Value, bytes: usize| -> String {
+        match render_handle(value, bytes) {
+            Ok(handle) => handle,
+            // At the handle cap the result is not sent: it is over the budget,
+            // which is why it was being handled. The refusal says so and how
+            // large it was, rather than flooding the output.
+            Err(e) => format!(
+                "@handle refused: {e}\nthe result ({bytes} bytes) is over the output budget and was not shown; release a handle with handle_drop(id) and run it again"
+            ),
+        }
+    };
     match v.as_ref() {
-        Value::Null => None,
-        Value::Str(s) => Some(s.clone()),
+        // A bare `null` prints as `null`, so it is not mistaken for no output.
+        Value::Null => Some("null".to_string()),
+        Value::Str(s) => {
+            if aecon_top_str_needs_quote(s) {
+                Some(json_quote(s))
+            } else {
+                Some(s.clone())
+            }
+        }
         _ => {
             let full = match budget {
                 Some(max) if max > 0 => render_budget_envelope(&budget_value(v.as_ref(), max, 0)),
@@ -25382,16 +25510,7 @@ pub fn render_agent(v: &Value, budget: Option<usize>) -> Option<String> {
             // reach, because it is the bytes never sent.
             let whole = crate::handles::take_show_whole();
             if !whole && crate::handles::worth_handling(v.as_ref(), full.len()) {
-                match render_handle(v.into_owned(), full.len()) {
-                    Ok(handle) => Some(handle),
-                    // At the handle cap the result is not sent: it is over the
-                    // budget, which is why it was being handled. The refusal says
-                    // so and how large it was, rather than flooding the output.
-                    Err(e) => Some(format!(
-                        "@handle refused: {e}\nthe result ({} bytes) is over the output budget and was not shown; release a handle with handle_drop(id) and run it again",
-                        full.len()
-                    )),
-                }
+                Some(handled(v.into_owned(), full.len()))
             } else {
                 Some(full)
             }
@@ -25746,7 +25865,10 @@ fn bi_handle(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
         None => {
             let live: Vec<String> = crate::handles::list().into_iter().map(|h| h.id).collect();
             let got = if live.is_empty() {
-                format!("'{id}' (no handles live — they do not survive the process)")
+                let dir = crate::handles::session_dir()
+                    .map(|d| d.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| "none".to_string());
+                format!("'{id}' (no handles live in this session (IRONSHELL_SESSION_DIR={dir}); a handle is readable only from the session that made it)")
             } else {
                 format!("'{id}' (live: {})", live.join(", "))
             };
@@ -30553,7 +30675,7 @@ fn pid_arg(builtin: &str, v: Option<&Value>) -> Result<i64> {
         Some(p) if p > 0 && p <= i64::from(u32::MAX) => Ok(p),
         _ => Err(crate::safety::bad_arg(
             builtin,
-            "a process id: a positive integer (0 and negatives address groups of processes)",
+            "a process id greater than 0 (0 and negative ids name process groups on Unix and are not single processes)",
             &v.map(|v| v.to_display_string())
                 .unwrap_or_else(|| "nothing".into()),
         )),
