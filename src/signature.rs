@@ -7700,7 +7700,7 @@ pub static SIGNATURES: &[Signature] = &[
         aliases: &[],
         subject: None,
         params: &[
-            req("message", Ty::Str, "the message the caught error carries, as given; omitted, it is the pipeline input"),
+            req("message", Ty::Str, "the message the caught error carries, as given; required unless a value is piped in, which then becomes the message"),
             opt("extra", Ty::Record, "fields added to the caught error record, such as {field: \"age\"}; code, message, retryable, builtin, error, did_you_mean and approval cannot be set; hint replaces the default hint, and expected and got are shown"),
         ],
         returns: "Null",
