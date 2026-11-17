@@ -25096,6 +25096,22 @@ fn json_quote(s: &str) -> String {
     serde_json::to_string(s).unwrap_or_else(|_| format!("{:?}", s))
 }
 
+/// A Float's JSON text with the point kept in exponent form too: `1e+16`
+/// becomes `1.0e16`, `5e-324` becomes `5.0e-324`. A mantissa that already has a
+/// point is left alone, and the exponent loses its `+`. Still valid JSON.
+fn canonical_float_point(text: &str) -> String {
+    let Some(at) = text.find(['e', 'E']) else {
+        return text.to_string();
+    };
+    let (mantissa, exponent) = (&text[..at], &text[at + 1..]);
+    let exponent = exponent.strip_prefix('+').unwrap_or(exponent);
+    if mantissa.contains('.') {
+        format!("{mantissa}e{exponent}")
+    } else {
+        format!("{mantissa}.0e{exponent}")
+    }
+}
+
 /// Write a Value as canonical JSON: deterministic and byte-stable across
 /// platforms/locale. Record keys are emitted in sorted order (Records are
 /// BTreeMaps); floats use Rust's shortest round-trip, locale-independent
@@ -25111,7 +25127,7 @@ fn canonical_write(v: &Value, out: &mut String) {
                 // The text to_json writes: 1.0 stays 1.0, -0.0 stays -0.0, so a
                 // Float is never mistaken for an Int.
                 match serde_json::Number::from_f64(*f) {
-                    Some(n) => out.push_str(&n.to_string()),
+                    Some(n) => out.push_str(&canonical_float_point(&n.to_string())),
                     None => out.push_str(&format!("{:?}", f)),
                 }
             } else {

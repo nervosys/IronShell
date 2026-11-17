@@ -58,3 +58,21 @@ fn a_handle_missing_from_this_session_says_so() {
     );
     assert!(!all.contains("do not survive the process"), "{all}");
 }
+
+#[test]
+fn deterministic_floats_keep_their_point_in_exponent_form() {
+    let dir = session("detfloat");
+    for (code, want) in [
+        ("1e16", "1.0e16"),
+        ("1e21", "1.0e21"),
+        ("1e-7", "1.0e-7"),
+        ("1.5e300", "1.5e300"),
+        ("5e-324", "5.0e-324"),
+        ("-2e-9", "-2.0e-9"),
+        ("1.5", "1.5"),
+        ("2.0", "2.0"),
+    ] {
+        let (out, err) = ish(&dir, &["--deterministic", "-c", code]);
+        assert_eq!(out.trim(), want, "{code}: {err}");
+    }
+}
