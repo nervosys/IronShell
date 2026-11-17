@@ -15748,6 +15748,13 @@ pub fn validate(name: &str, args: &[Value], input: Option<&Value>) -> anyhow::Re
     if sig.name == "crypto_hash" && input.is_none() && args.len() == 2 {
         return Ok(());
     }
+    // An Array of member names: the archive builtin's body says to pass them
+    // as separate arguments, which a bare type mismatch would not.
+    if matches!(sig.name, "zip_create" | "zip_add" | "tar_create")
+        && args.iter().any(|a| matches!(a, Value::Array(_)))
+    {
+        return Ok(());
+    }
     // `rm(path, {recursive: true})`: the body says rm has no recursive option
     // and names rmdir(path, true), which a bare type mismatch would not.
     if sig.name == "rm" && matches!(args.get(1), Some(Value::Record(_))) {

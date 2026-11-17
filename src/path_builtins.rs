@@ -332,12 +332,12 @@ mod tests {
     // String inputs only: a UNC path is never handed to a filesystem call.
     #[test]
     fn a_unc_path_keeps_its_leading_double_slash() {
-        assert_eq!(dirname_of(r"\srv\sh\f.txt"), "//srv/sh");
+        assert_eq!(dirname_of(r"\\srv\sh\f.txt"), "//srv/sh");
         assert_eq!(dirname_of("//srv/sh/f.txt"), "//srv/sh");
-        assert_eq!(normalize_text(r"\srv\sh\f.txt"), "//srv/sh/f.txt");
-        assert_eq!(normalize_text(r"\srv\sh\.\a\..\f.txt"), "//srv/sh/f.txt");
-        assert_eq!(normalize_text(r"\srv\.."), "//");
-        assert_eq!(split_text(r"\srv\sh"), vec!["//", "srv", "sh"]);
+        assert_eq!(normalize_text(r"\\srv\sh\f.txt"), "//srv/sh/f.txt");
+        assert_eq!(normalize_text(r"\\srv\sh\.\a\..\f.txt"), "//srv/sh/f.txt");
+        assert_eq!(normalize_text(r"\\srv\.."), "//");
+        assert_eq!(split_text(r"\\srv\sh"), vec!["//", "srv", "sh"]);
     }
 
     #[test]
