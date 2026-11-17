@@ -80,7 +80,10 @@ fn an_unknown_annotation_is_refused_naming_the_closest_type() {
     let (_, err, code) = run_script("unknown", "let z: Widget = 1\nz\n");
     assert_ne!(code, 0);
     assert!(err.contains("E_BAD_ARG"), "{err}");
-    assert!(err.contains("Int, Float, String"), "no list of types: {err}");
+    assert!(
+        err.contains("Int, Float, String"),
+        "no list of types: {err}"
+    );
 
     let (_, err, code) = run_script("typo", "let x: Strng = 1\nx\n");
     assert_ne!(code, 0);
@@ -100,7 +103,10 @@ fn generic_and_optional_annotations_get_a_hint_listing_the_forms() {
         let (_, err, code) = run_script(tag, src);
         assert_ne!(code, 0);
         assert!(err.contains("E_PARSE"), "{err}");
-        assert!(err.contains("Int, Float, String"), "no list of forms: {err}");
+        assert!(
+            err.contains("Int, Float, String"),
+            "no list of forms: {err}"
+        );
     }
 }
 
