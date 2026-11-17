@@ -121,3 +121,15 @@ fn a5_a_non_record_row_with_a_field_key_is_bad_arg_naming_the_index() {
     // An empty array and a row that merely lacks the field are fine.
     assert_eq!(run(r#"[] | count_by("a")"#), Value::Array(vec![]));
 }
+
+// A6
+#[test]
+fn a6_a_let_over_an_annotated_mut_says_let_not_assign() {
+    let se = refusal(r#"mut m: Int = 1; let m = "s""#);
+    assert_eq!(se.code.as_str(), "E_BAD_ARG");
+    assert!(se.message.starts_with("let m"), "{}", se.message);
+    assert!(se.hint.contains("let"), "{}", se.hint);
+    // A plain assignment still says assign.
+    let se = refusal(r#"mut m: Int = 1; m = "s""#);
+    assert!(se.message.starts_with("assign m"), "{}", se.message);
+}

@@ -704,16 +704,17 @@ fn eval_let(
         let lhs = env.get_var(name).cloned().unwrap_or(Value::Null);
         let v = binop(&BinOp::Add, lhs, operand)?;
         if let Some(declared) = env.declared_type(name).map(str::to_string) {
-            check_declared_type(name, &declared, &v, true)?;
+            check_declared_type(name, &declared, &v, true, false)?;
         }
         return bind_value(name, v, is_mut, visibility, bare, env, keep);
     }
     let v = eval_expr(value, env)?;
     if let Some(declared) = ty {
-        check_declared_type(name, declared, &v, false)?;
+        check_declared_type(name, declared, &v, false, false)?;
     } else if let Some(declared) = env.declared_type(name).map(str::to_string) {
-        // An annotated binding keeps its type when it is assigned again.
-        check_declared_type(name, &declared, &v, true)?;
+        // An annotated binding keeps its type when it is assigned again, or
+        // bound again by a `let` (`bare` is false for a `let`).
+        check_declared_type(name, &declared, &v, true, !bare)?;
     }
     let kept = bind_value(name, v, is_mut, visibility, bare, env, keep)?;
     if let Some(declared) = ty {
@@ -2961,7 +2962,13 @@ const LET_TYPE_LIST: &str = "Int, Float, String, Bool, Array, Record, Lambda, Nu
 /// that is no type at all is refused, with the closest type named. An Int is not
 /// accepted where a Float is declared: the language does not widen at a binding,
 /// so the hint says to write the decimal point.
-fn check_declared_type(name: &str, declared: &str, value: &Value, reassign: bool) -> Result<()> {
+fn check_declared_type(
+    name: &str,
+    declared: &str,
+    value: &Value,
+    reassign: bool,
+    redeclare: bool,
+) -> Result<()> {
     const CHECKED: [&str; 7] = ["Int", "Float", "String", "Bool", "Array", "Record", "Null"];
     const UNCHECKED: [&str; 7] = [
         "Uri",
@@ -3002,12 +3009,18 @@ fn check_declared_type(name: &str, declared: &str, value: &Value, reassign: bool
     }
     let hint = if expected == "Float" && actual == "Int" {
         format!("`{name}` is declared Float: write the literal with a decimal point, such as 1.0")
+    } else if redeclare {
+        format!("`{name}` was declared {expected} by an earlier `let`: a `let` that binds it again must give a {expected} value, or re-declare it with an annotation, such as `let {name}: {actual} = ...`")
     } else if reassign {
         format!("`{name}` is declared {expected}: assign a {expected} value, or declare it without the `: {expected}` annotation")
     } else {
         format!("`{name}` is declared {expected}: bind a {expected} value, or remove the `: {expected}` annotation")
     };
-    let what = if reassign { "assign" } else { "let" };
+    let what = if reassign && !redeclare {
+        "assign"
+    } else {
+        "let"
+    };
     Err(crate::safety::bad_arg_with_hint(
         &format!("{what} {name}"),
         expected,
