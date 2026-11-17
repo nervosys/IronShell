@@ -713,6 +713,7 @@ pub fn read_jail_dispatch(builtin: &str, args: &[crate::value::Value], piped: bo
         // workspace's when the jail is on, as `resolve_path_str` places it.
         check_read_jail(builtin, &resolved)
             .map_err(|e| crate::safety::with_link_hint(builtin, &resolved, e))
+            .map_err(|e| as_given_if_extraction(builtin, s, e))
     };
     let Some(sig) = crate::signature::signature_of(builtin) else {
         for s in args.iter().filter_map(|a| match a {
@@ -957,6 +958,24 @@ fn is_the_audit_log(resolved: &str) -> bool {
     };
     let canon = |p: &Path| std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
     canon(Path::new(resolved)) == canon(&log)
+}
+
+/// For an archive extraction, the refusal of a relative path names it as the
+/// caller wrote it (`jx/sub`), not as the redacted tail of the resolved path
+/// (`[...]/sub`), so a link or junction on the way can be found. Any other
+/// builtin, error or absolute path is returned unchanged.
+fn as_given_if_extraction(builtin: &str, given: &str, e: anyhow::Error) -> anyhow::Error {
+    let outside = matches!(
+        e.downcast_ref::<crate::safety::SafetyError>(),
+        Some(s) if s.code == crate::safety::ErrorCode::OutsideWorkspace
+    );
+    if outside
+        && matches!(builtin, "tar_extract" | "zip_extract" | "unzip")
+        && !Path::new(given).is_absolute()
+    {
+        return crate::safety::outside_workspace_shown(builtin, given, given);
+    }
+    e
 }
 
 /// The read jail as a builtin's error: `E_OUTSIDE_WORKSPACE` when `path` is

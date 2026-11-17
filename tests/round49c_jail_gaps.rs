@@ -235,3 +235,71 @@ fn rm_of_a_file_through_a_link_out_of_the_workspace_is_still_refused() {
     assert!(shown.contains("E_OUTSIDE_WORKSPACE"), "{shown}");
     assert!(s.outside.join("keep.txt").is_file(), "{shown}");
 }
+
+// ── Items 1 to 3: archive extraction ──
+
+fn tar_with(path: &Path, entries: &[(&str, &str)]) {
+    let mut b = tar::Builder::new(std::fs::File::create(path).unwrap());
+    for (name, content) in entries {
+        let mut h = tar::Header::new_gnu();
+        h.set_size(content.len() as u64);
+        h.set_mode(0o644);
+        h.set_entry_type(tar::EntryType::Regular);
+        h.set_cksum();
+        b.append_data(&mut h, name, content.as_bytes()).unwrap();
+    }
+    b.finish().unwrap();
+}
+
+#[test]
+fn an_overlong_entry_name_is_refused_before_anything_is_written() {
+    let s = Scratch::new("longname");
+    let long = "n".repeat(300);
+    tar_with(&s.ws.join("long.tar"), &[(&format!("d/{long}"), "x")]);
+    let out = s.agent("tar_extract('long.tar', 'out')");
+    let shown = text(&out);
+    assert!(!out.status.success(), "{shown}");
+    assert!(shown.contains("E_BAD_ARG"), "{shown}");
+    assert!(!s.ws.join("out").exists(), "debris: {shown}");
+    assert!(!s.ws.join("d").exists(), "debris: {shown}");
+}
+
+#[test]
+fn a_failed_extraction_leaves_no_partial_tree_and_says_write() {
+    let s = Scratch::new("debris");
+    tar_with(
+        &s.ws.join("bad.tar"),
+        &[("d/a.txt", "x"), ("d/a.txt/b.txt", "y")],
+    );
+    let out = s.agent("tar_extract('bad.tar', 'out')");
+    let shown = text(&out);
+    assert!(!out.status.success(), "{shown}");
+    assert!(!shown.contains("to be readable"), "{shown}");
+    assert!(!s.ws.join("out").exists(), "debris left: {shown}");
+}
+
+#[test]
+fn a_destination_through_a_link_is_named_as_given() {
+    let s = Scratch::new("jxsub");
+    tar_with(&s.ws.join("t.tar"), &[("a.txt", "x")]);
+    if !link_dir(&s.outside, &s.ws.join("jx")) {
+        return;
+    }
+    let out = s.agent("tar_extract('t.tar', 'jx/sub')");
+    let shown = text(&out);
+    assert!(!out.status.success(), "{shown}");
+    assert!(shown.contains("E_OUTSIDE_WORKSPACE"), "{shown}");
+    assert!(shown.contains("jx/sub"), "{shown}");
+    assert!(!shown.contains("[...]/sub"), "{shown}");
+    assert!(!s.outside.join("sub").exists(), "{shown}");
+}
+
+#[test]
+fn explain_agrees_about_an_overlong_entry_name() {
+    let s = Scratch::new("explainlong");
+    let long = "n".repeat(300);
+    let archive = s.ws.join("long.tar");
+    tar_with(&archive, &[(&format!("d/{long}"), "x")]);
+    let lit = archive.to_string_lossy().replace('\\', "/");
+    assert_eq!(decision(&format!("tar_extract('{lit}', 'out')")), "deny");
+}
