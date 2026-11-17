@@ -107,3 +107,19 @@ fn item2_values_names_the_array_of_min_and_max() {
     let v = execute(r#"{"action":"call","builtin":"max","args":{"values":[3,1,2]}}"#);
     assert_eq!(v["result"], json!(3), "{v}");
 }
+
+// ---- item 3: x.y with an undefined x ----
+
+#[test]
+fn item3_an_undefined_receiver_is_an_unknown_name() {
+    assert_eq!(
+        text(r#"try { zzzz_r48.parse("x") } catch e { e.code }"#),
+        "E_UNKNOWN_NAME"
+    );
+    assert_eq!(
+        text(r#"try { zzzz_r48.field } catch e { e.code }"#),
+        "E_UNKNOWN_NAME"
+    );
+    assert!(text(r#"try { zzzz_r48.parse(1) } catch e { e.hint }"#)
+        .contains("`zzzz_r48` is not a variable, builtin or module"));
+}

@@ -3,8 +3,8 @@
 //!
 //! Reproduced on 14.0.0: `zzzz.parse("x")` gave E_BAD_ARG "zzzz.parse: expected
 //! a Record (or a module), got Null", which reads as a type error on a value the
-//! reader never made. It is now E_UNKNOWN_BUILTIN "unknown module: zzzz", the
-//! code `nope()` gets, with a did-you-mean over the module names. A bound
+//! reader never made. It is now E_UNKNOWN_NAME, the error a bare `zzzz` gets,
+//! with a did-you-mean over the module names. A bound
 //! variable that is not a record keeps its record error, and so does a known
 //! module's real member. A script echoes its last value, so each one ends in a
 //! bare expression.
@@ -42,8 +42,8 @@ fn run_script(tag: &str, source: &str) -> (String, String, i32) {
 fn an_unknown_module_is_the_unknown_name_error() {
     let (out, err, code) = run_script("zzzz", "zzzz.parse(\"x\")\n");
     assert_ne!(code, 0, "ran; stdout {out:?}");
-    assert!(err.contains("E_UNKNOWN_BUILTIN"), "{err}");
-    assert!(err.contains("unknown module: zzzz"), "{err}");
+    assert!(err.contains("E_UNKNOWN_NAME"), "{err}");
+    assert!(err.contains("`zzzz` is not a variable, builtin or module"), "{err}");
     assert!(
         !err.contains("expected a Record"),
         "still reported as a record error: {err}"
