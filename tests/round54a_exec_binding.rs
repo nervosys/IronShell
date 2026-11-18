@@ -39,9 +39,12 @@ fn text(out: &Output) -> String {
 /// The first `apv_` token in the output of a run, panicking without it.
 fn token_of(out: &Output) -> String {
     let t = text(out);
-    let i = t
-        .find("apv_")
-        .unwrap_or_else(|| panic!("no approval token in {} bytes of output", t.len()));
+    let i = t.find("apv_").unwrap_or_else(|| {
+        panic!(
+            "no approval token in: {}",
+            t.chars().take(600).collect::<String>()
+        )
+    });
     t[i..i + 20].to_string()
 }
 
@@ -56,19 +59,21 @@ fn posix_token(dir: &Path, script: &str) -> String {
 #[test]
 fn a_posix_child_env_is_part_of_its_token() {
     let dir = scratch("posix_env");
-    let plain = posix_token(&dir, "someprog arg");
-    let prefixed = posix_token(&dir, "FOO=1 someprog arg");
-    let exported = posix_token(&dir, "export FOO=1; someprog arg");
-    let hooked = posix_token(&dir, "DOTNET_STARTUP_HOOKS=zz someprog arg");
+    let plain = posix_token(&dir, "git --version");
+    let prefixed = posix_token(&dir, "FOO=1 git --version");
+    let exported = posix_token(&dir, "export FOO=1; git --version");
+    // DOTNET_STARTUP_HOOKS is refused outright now, so a harmless second name
+    // stands in for "a different variable".
+    let hooked = posix_token(&dir, "BAR=1 git --version");
     assert_ne!(plain, prefixed, "a prefix assignment is not bound");
     assert_ne!(plain, exported, "an exported variable is not bound");
     assert_ne!(plain, hooked);
     assert_ne!(prefixed, hooked, "a different name gives the same token");
     // The same environment, however it is written, is the same approval.
     assert_eq!(prefixed, exported);
-    assert_ne!(prefixed, posix_token(&dir, "FOO=2 someprog arg"));
-    assert_eq!(prefixed, posix_token(&dir, "FOO=1 someprog arg"));
-    assert_eq!(plain, posix_token(&dir, "someprog arg"));
+    assert_ne!(prefixed, posix_token(&dir, "FOO=2 git --version"));
+    assert_eq!(prefixed, posix_token(&dir, "FOO=1 git --version"));
+    assert_eq!(plain, posix_token(&dir, "git --version"));
 }
 
 #[test]
