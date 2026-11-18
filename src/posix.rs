@@ -4074,8 +4074,10 @@ fn expand_pattern(
             // Zero or more directories: each base, and everything below it.
             for base in &bases {
                 // A base outside the workspace jail is never walked (`/**` would
-                // list the whole disk).
-                if crate::security::outside_read_jail(base) {
+                // list the whole disk). Only the starting base is judged: every
+                // later base came out of a stage that judged it, or is a
+                // directory (never a link) listed inside one that was judged.
+                if i == 0 && crate::security::outside_read_jail(base) {
                     continue;
                 }
                 next.push(base.clone());
@@ -4096,11 +4098,15 @@ fn expand_pattern(
                     if let Ok(rd) = std::fs::read_dir(&dir) {
                         for e in rd.filter_map(|e| e.ok()) {
                             let n = e.file_name().to_string_lossy().into_owned();
+                            let kind = e.file_type();
                             if !n.starts_with('.')
-                                && e.file_type().map(|t| !t.is_dir()).unwrap_or(false)
+                                && kind.as_ref().map(|t| !t.is_dir()).unwrap_or(false)
                             {
                                 let p = if d.is_empty() { n } else { format!("{d}/{n}") };
-                                if !crate::security::outside_read_jail(&p) {
+                                // A file listed inside a judged directory is inside
+                                // it; only a link can lead out.
+                                let is_link = kind.as_ref().map(|t| t.is_symlink()).unwrap_or(true);
+                                if !is_link || !crate::security::outside_read_jail(&p) {
                                     next.push(p);
                                 }
                             }
@@ -4146,26 +4152,42 @@ fn expand_pattern(
                 continue;
             }
             let dir = if base.is_empty() { "." } else { base.as_str() };
-            if crate::security::outside_read_jail(dir) {
+            // Only the starting base is judged here: a later base came out of a
+            // stage that judged it, or is a directory (never a link) listed
+            // inside one that was. Judging every name was a link-walk per entry.
+            if i == 0 && crate::security::outside_read_jail(dir) {
                 continue;
             }
             let Ok(rd) = std::fs::read_dir(dir) else {
                 continue;
             };
-            let mut names: Vec<String> = rd
+            // Each name with its kind, as the listing gave it (no further call):
+            // (name, is a link, is a directory that is not a link).
+            let mut names: Vec<(String, bool, bool)> = rd
                 .filter_map(|e| e.ok())
-                .map(|e| e.file_name().to_string_lossy().into_owned())
-                .filter(|n| !n.starts_with('.') || comp.starts_with('.'))
-                .filter(|n| glob_match(comp, n))
+                .map(|e| {
+                    let kind = e.file_type();
+                    (
+                        e.file_name().to_string_lossy().into_owned(),
+                        kind.as_ref().map(|t| t.is_symlink()).unwrap_or(true),
+                        kind.as_ref()
+                            .map(|t| t.is_dir() && !t.is_symlink())
+                            .unwrap_or(false),
+                    )
+                })
+                .filter(|(n, _, _)| !n.starts_with('.') || comp.starts_with('.'))
+                .filter(|(n, _, _)| glob_match(comp, n))
                 .collect();
-            names.sort_by(&order);
-            for n in names {
+            names.sort_by(|a, b| order(&a.0, &b.0));
+            for (n, is_link, is_real_dir) in names {
                 let p = join(&n);
-                // A link inside the workspace can name a target outside it.
-                if crate::security::outside_read_jail(&p) {
+                // A link inside the workspace can name a target outside it; a
+                // name that is not a link sits inside the directory it was
+                // listed in.
+                if is_link && crate::security::outside_read_jail(&p) {
                     continue;
                 }
-                if last || Path::new(&p).is_dir() {
+                if last || is_real_dir || (is_link && Path::new(&p).is_dir()) {
                     next.push(p);
                 }
             }
