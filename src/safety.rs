@@ -4929,10 +4929,10 @@ fn approve_env_is_set() -> bool {
 pub fn approval_instruction(token: &str) -> String {
     if current_mode() == Mode::Agent {
         format!(
-            "a human approves this token out of band: re-run with IRONSHELL_APPROVE={token} set by the operator (a comma-separated list, IRONSHELL_APPROVE=tok1,tok2, approves several calls at once)"
+            "a human approves this token out of band: re-run with IRONSHELL_APPROVE={token} set by the operator (a comma-separated list, IRONSHELL_APPROVE=tok1,tok2, approves several calls at once); a token approves that exact action on that exact target every time it is presented, in any later run, until it is removed from IRONSHELL_APPROVE"
         )
     } else {
-        format!("re-run with IRONSHELL_APPROVE={token} (or call approve(\"{token}\")); a comma-separated list, IRONSHELL_APPROVE=tok1,tok2, approves several calls at once")
+        format!("re-run with IRONSHELL_APPROVE={token} (or call approve(\"{token}\")); a comma-separated list, IRONSHELL_APPROVE=tok1,tok2, approves several calls at once; a token approves that exact action on that exact target every time it is presented, in any later run, until it is removed from IRONSHELL_APPROVE")
     }
 }
 
