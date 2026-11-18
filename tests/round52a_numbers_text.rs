@@ -186,3 +186,26 @@ fn a8_regex_split_takes_a_limit_as_split_does() {
     assert!(se.message.contains("not at least 1"), "{}", se.message);
     assert!(try_run(r#"regex_split("a1b2", "[0-9]", "2")"#).is_err());
 }
+
+// A9
+#[test]
+fn a9_string_builders_honour_the_8mb_cap() {
+    for src in [
+        r#"str.repeat("x", 100000000)"#,
+        r#"repeat("x", 8388609)"#,
+        r#"pad_left("x", 900000, "é") + pad_left("x", 900000, "é") | len"#,
+        r#"pad_left(repeat("x", 8000000), 900000, "é")"#,
+        r#"join(arr.range(2000000), "0123456789")"#,
+    ] {
+        let se = refusal(src);
+        assert_eq!(se.code.as_str(), "E_BUDGET_EXCEEDED", "{src}");
+        assert!(
+            se.message.contains("over the 8388608 byte limit"),
+            "{src}: {}",
+            se.message
+        );
+    }
+    assert_eq!(run(r#"len(repeat("ab", 1000))"#), Value::Int(2000));
+    assert_eq!(run(r#"len(pad_left("x", 1000, "é"))"#), Value::Int(1000));
+    assert_eq!(run(r#"join(["a", "b"], "-")"#), s("a-b"));
+}

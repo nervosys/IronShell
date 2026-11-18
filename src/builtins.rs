@@ -15898,7 +15898,18 @@ fn bi_join(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
         })
         .collect();
 
-    Ok(Value::Str(strings?.join(delimiter)))
+    let strings = strings?;
+    let total = strings
+        .iter()
+        .map(String::len)
+        .sum::<usize>()
+        .saturating_add(
+            delimiter
+                .len()
+                .saturating_mul(strings.len().saturating_sub(1)),
+        );
+    crate::eval::check_string_len(total)?;
+    Ok(Value::Str(strings.join(delimiter)))
 }
 
 /// trim(text, chars?) - Remove leading and trailing characters from a string.
@@ -16079,7 +16090,11 @@ fn bi_repeat(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
         .ok()
         .and_then(|n| n.checked_mul(text.len()));
     match bytes {
-        Some(total) if total <= REPEAT_BYTES_MAX => Ok(Value::Str(text.repeat(count as usize))),
+        Some(total) if total <= REPEAT_BYTES_MAX => {
+            // The same cap `+` enforces, checked before the text is built.
+            crate::eval::check_string_len(total)?;
+            Ok(Value::Str(text.repeat(count as usize)))
+        }
         _ => Err(crate::safety::value_not_representable(
             "repeat",
             format!(
@@ -17766,6 +17781,7 @@ fn pad_text(builtin: &str, args: Vec<Value>, input: Option<Value>, left: bool) -
     if len >= wanted {
         return Ok(Value::Str(text));
     }
+    crate::eval::check_string_len(text.len() + (wanted - len) * fill_char.len_utf8())?;
     let pad = fill_char.to_string().repeat(wanted - len);
     Ok(Value::Str(if left { pad + &text } else { text + &pad }))
 }

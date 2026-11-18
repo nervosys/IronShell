@@ -2110,19 +2110,25 @@ pub(crate) fn check_array_len(len: usize) -> Result<()> {
     Ok(())
 }
 
-/// Build a string value, refusing one that exceeds [`MAX_STRING_BYTES`].
-fn checked_string(s: String) -> Result<Value> {
-    if s.len() > MAX_STRING_BYTES {
+/// Refuse a String of `len` bytes that is over [`MAX_STRING_BYTES`], before it
+/// is allocated: the check `+` makes, for builtins that build text.
+pub(crate) fn check_string_len(len: usize) -> Result<()> {
+    if len > MAX_STRING_BYTES {
         return Err(crate::safety::budget_exceeded(
             "string",
             format!(
                 "string operation would produce {} bytes, over the {} byte limit",
-                s.len(),
-                MAX_STRING_BYTES
+                len, MAX_STRING_BYTES
             ),
             "build the text in smaller pieces, or write it to a file",
         ));
     }
+    Ok(())
+}
+
+/// Build a string value, refusing one that exceeds [`MAX_STRING_BYTES`].
+fn checked_string(s: String) -> Result<Value> {
+    check_string_len(s.len())?;
     Ok(Value::Str(s))
 }
 
