@@ -18097,16 +18097,38 @@ fn index_of_impl(
 
 /// index_of(text, sub) - The character offset of the first occurrence of sub.
 /// Args:
-///   - text: String (or the piped text)
-///   - sub: String - the text to look for
-/// Returns: Int - the offset in characters (not bytes), or -1 when absent
+///   - text: String (or the piped text), or an Array
+///   - sub: String - the text to look for; for an Array, the value to look for
+/// Returns: Int - the offset in characters (not bytes), or -1 when absent; for
+/// an Array, the index of the first equal element
 ///
 /// Example:
 ///   index_of("hello", "l")    # 2
 ///   index_of("héllo", "l")    # 2
 ///   index_of("hello", "z")    # -1
 fn bi_index_of(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
+    // An Array subject: the index of the first element equal to the value.
+    match (&input, args.first()) {
+        (Some(Value::Array(items)), _) => return array_index_of(items, &args),
+        (None, Some(Value::Array(items))) => return array_index_of(items, &args[1..]),
+        _ => {}
+    }
     index_of_impl("index_of", args, input, false)
+}
+
+/// index_of over an Array: the position of the first element equal to the
+/// single value in `rest`, or -1, as it answers for text that lacks the
+/// substring.
+fn array_index_of(items: &[Value], rest: &[Value]) -> Result<Value> {
+    let [needle] = rest else {
+        return Err(arity_error("index_of", "a value to look for", rest.len()));
+    };
+    Ok(Value::Int(
+        items
+            .iter()
+            .position(|v| values_equal(v, needle))
+            .map_or(-1, |i| i as i64),
+    ))
 }
 
 /// last_index_of(text, sub) - The character offset of the last occurrence of sub.
