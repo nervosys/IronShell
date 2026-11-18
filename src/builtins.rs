@@ -4067,6 +4067,11 @@ fn mapped_spelling(name: &str) -> Vec<String> {
             vec!["read_text".to_string(), "file.read".to_string()]
         }
         "exists_file" => vec!["exists".to_string()],
+        // Whether a path is a file or a directory: file_exists says both, and
+        // fs_stat gives the full record.
+        "is_file" | "isfile" | "is_dir" | "isdir" | "is_directory" => {
+            vec!["file_exists".to_string(), "fs_stat".to_string()]
+        }
         // Deleting a file is rm, which takes the path. No builtin is named delete.
         "delete" | "remove" | "unlink" | "file_delete" | "file_remove" | "remove_file"
         | "delete_file" => vec!["rm".to_string()],
@@ -4103,7 +4108,7 @@ fn mapped_spelling(name: &str) -> Vec<String> {
         "join_path" | "joinpath" | "path_combine" => vec!["path_join".to_string()],
         // A file's digest is crypto_hash_file(path[, algorithm]); a keyed one is
         // crypto_hmac(data, key[, algorithm]).
-        "file_hash" | "hash_file" | "sha256sum" | "checksum" | "file_checksum" => {
+        "file_hash" | "hash_file" | "sha256_file" | "sha256sum" | "checksum" | "file_checksum" => {
             vec!["crypto_hash_file".to_string()]
         }
         "hmac" => vec!["crypto_hmac".to_string()],
@@ -4156,6 +4161,12 @@ pub fn mapped_module_spelling(module: &str, member: &str) -> Vec<String> {
         ("regex" | "re", "findall" | "find_all") => &["regex_find_all"],
         ("regex" | "re", "sub") => &["regex_replace"],
         ("path", "exists" | "isfile" | "isdir") => &["path_exists"],
+        ("file" | "fs", "is_file" | "isfile" | "is_dir" | "isdir" | "is_directory") => {
+            &["file.exists", "fs_stat"]
+        }
+        ("file" | "fs", "hash" | "sha256" | "hash_file" | "file_hash" | "checksum") => {
+            &["crypto_hash_file"]
+        }
         ("path", "realpath" | "abspath" | "resolve" | "canonicalize") => &["fs_realpath"],
         ("path", "normpath" | "normalize") => &["path_normalize"],
         // `path` is not a module, so a script may bind a variable named `path`;
