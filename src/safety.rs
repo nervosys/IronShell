@@ -3738,6 +3738,99 @@ impl ApprovalDescriptor {
     }
 }
 
+/// The environment changes this process made with `set_env`, `env_set` and
+/// `env_unset`, by name: `Some(value)` for a set, `None` for an unset.
+static ENV_CHANGES: Mutex<std::collections::BTreeMap<String, Option<String>>> =
+    Mutex::new(std::collections::BTreeMap::new());
+
+/// Record an environment change made by a builtin, so the approval of a command
+/// run afterwards is bound to it (see [`bind_exec_context`]).
+pub fn note_env_change(name: &str, value: Option<&str>) {
+    let mut changes = ENV_CHANGES.lock().unwrap_or_else(|e| e.into_inner());
+    changes.insert(name.to_string(), value.map(str::to_string));
+}
+
+/// Hex of the first 8 bytes of the SHA-256 of a file's bytes, read in chunks.
+fn file_hash16(path: &str) -> Option<String> {
+    use std::io::Read as _;
+    let mut file = std::fs::File::open(path).ok()?;
+    let mut hasher = Sha256::new();
+    let mut buf = vec![0u8; 64 * 1024];
+    loop {
+        let n = file.read(&mut buf).ok()?;
+        if n == 0 {
+            break;
+        }
+        hasher.update(&buf[..n]);
+    }
+    let digest = hasher.finalize().ok()?;
+    Some(hex(&digest)[..16].to_string())
+}
+
+/// Add to an exec approval's blast radius what the command will run on: a
+/// content hash of each operand that names an existing regular file inside the
+/// workspace (`operand_hashes`), and the environment changes this process made
+/// (`env_changes`, sorted). Nothing is added when there is neither, so the
+/// token of a command that names no file and follows no `set_env` is as it was.
+fn bind_exec_context(radius: &mut Json) {
+    let mut operands: Vec<String> = Vec::new();
+    let mut take = |v: &Json| {
+        if let Some(s) = v.as_str() {
+            operands.push(s.to_string());
+        }
+    };
+    if let Some(p) = radius.get("program") {
+        take(p);
+    }
+    if let Some(args) = radius.get("args").and_then(Json::as_array) {
+        args.iter().for_each(&mut take);
+    }
+    if let Some(command) = radius.get("command").and_then(Json::as_str) {
+        for word in command.split_whitespace() {
+            operands.push(word.trim_matches(['\x27', '"']).to_string());
+        }
+    }
+    let mut hashes = serde_json::Map::new();
+    for operand in operands.into_iter().take(64) {
+        if operand.is_empty() || operand.starts_with('-') || hashes.contains_key(&operand) {
+            continue;
+        }
+        if names_a_remote_share(&operand) || !std::path::Path::new(&operand).is_file() {
+            continue;
+        }
+        if !within_workspace(&operand) {
+            continue;
+        }
+        let hash = file_hash16(&operand).unwrap_or_else(|| "unreadable".to_string());
+        hashes.insert(operand, Json::String(hash));
+    }
+    let env: Vec<Json> = ENV_CHANGES
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .iter()
+        .map(|(k, v)| json!([k, v]))
+        .collect();
+    if hashes.is_empty() && env.is_empty() {
+        return;
+    }
+    if !radius.is_object() {
+        let old = std::mem::take(radius);
+        *radius = if old.is_null() {
+            json!({})
+        } else {
+            json!({ "detail": old })
+        };
+    }
+    if let Some(map) = radius.as_object_mut() {
+        if !hashes.is_empty() {
+            map.insert("operand_hashes".to_string(), Json::Object(hashes));
+        }
+        if !env.is_empty() {
+            map.insert("env_changes".to_string(), Json::Array(env));
+        }
+    }
+}
+
 /// A safety refusal/failure carrying a stable code and an actionable hint.
 /// Implements [`std::error::Error`] so it threads through `anyhow`/`?`.
 #[derive(Debug, Clone)]
@@ -8676,11 +8769,19 @@ pub fn guard(ctx: GuardCtx) -> Result<(), SafetyError> {
             })
         }
         Decision::Approve => {
+            // A command's approval also binds what it will run on: the bytes of
+            // each workspace file it names, and the environment this process
+            // changed, so rewriting a script or a `set_env` after the approval
+            // needs a new one.
+            let mut blast_radius = ctx.blast_radius.clone();
+            if ctx.effect == Effect::Exec {
+                bind_exec_context(&mut blast_radius);
+            }
             let descriptor = ApprovalDescriptor::new(
                 ctx.what,
                 ctx.builtin,
                 ctx.targets.clone(),
-                ctx.blast_radius.clone(),
+                blast_radius,
                 ctx.reversible,
             )
             .map_err(|e| ic_refusal(ctx.builtin, e))?;
@@ -8702,7 +8803,12 @@ pub fn guard(ctx: GuardCtx) -> Result<(), SafetyError> {
                     json!({ "token": descriptor.token }),
                 );
                 let token = descriptor.token.clone();
-                let hint = approval_refusal_hint(&token, ctx.effect == Effect::Network);
+                let mut hint = approval_refusal_hint(&token, ctx.effect == Effect::Network);
+                if ctx.effect == Effect::Exec {
+                    hint.push_str(
+                        "; the token also binds the contents of workspace files the command names and the environment set_env changed, so editing a script or changing the environment needs a new approval",
+                    );
+                }
                 Err(SafetyError {
                     code: ErrorCode::NeedsApproval,
                     message: format!("{}: requires approval ({})", ctx.builtin, ctx.what),
@@ -9350,6 +9456,28 @@ pub(crate) fn env_name_steers_children(name: &str) -> bool {
         "GNUPGHOME",
         "MANPAGER",
         "GIT",
+        // Names an approved program reads to load code or change what it does:
+        // PowerShell's module path made an approved `pwsh -Command Get-Evil`
+        // load a module the agent had written.
+        "PSMODULEPATH",
+        "PSEXECUTIONPOLICYPREFERENCE",
+        "PERLLIB",
+        "GEM_HOME",
+        "GEM_PATH",
+        "JAVA_TOOL_OPTIONS",
+        "_JAVA_OPTIONS",
+        "JDK_JAVA_OPTIONS",
+        "CLASSPATH",
+        "PROMPT_COMMAND",
+        "CC",
+        "CXX",
+        "MAKEFLAGS",
+        "RUSTFLAGS",
+        "CURL_CA_BUNDLE",
+        "TEMP",
+        "TMP",
+        "TMPDIR",
+        "AETHER_SESSION_DIR",
     ];
     const PREFIXES: &[&str] = &[
         "IRONSHELL_",
@@ -9362,6 +9490,10 @@ pub(crate) fn env_name_steers_children(name: &str) -> bool {
         "RUSTC_",
         "NPM_CONFIG_",
         "PIP_",
+        "POWERSHELL_",
+        "BUNDLE_",
+        "PYTHON",
+        "UV_",
     ];
     const SUFFIXES: &[&str] = &[
         "_PROXY",
@@ -9686,6 +9818,14 @@ pub fn check_deadline() -> anyhow::Result<()> {
     if !n.is_multiple_of(DEADLINE_CHECK_INTERVAL) {
         return Ok(());
     }
+    check_deadline_now()
+}
+
+/// [`check_deadline`] without the amortisation: the clock is read on every call.
+/// For the per-entry loops of a builtin that can run long on its own (archive
+/// extraction and creation, glob and directory walks), where one evaluator step
+/// covers the whole loop and the sampled check would never fire.
+pub fn check_deadline_now() -> anyhow::Result<()> {
     DEADLINE.with(|d| match d.get() {
         Some(at) if std::time::Instant::now() >= at => Err(budget_exceeded(
             "eval",
@@ -9697,6 +9837,11 @@ pub fn check_deadline() -> anyhow::Result<()> {
         )),
         _ => Ok(()),
     })
+}
+
+/// Whether this thread's evaluation deadline has passed (false when none is set).
+pub fn deadline_passed() -> bool {
+    DEADLINE.with(|d| d.get().is_some_and(|at| std::time::Instant::now() >= at))
 }
 
 // ============================================================================

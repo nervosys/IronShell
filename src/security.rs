@@ -515,10 +515,15 @@ pub fn validate_safe_path(path: &str) -> Result<PathBuf> {
                 .context("Failed to compute relative path")?;
             let depth = relative.components().count();
             if depth > config.max_depth {
-                return Err(anyhow!(
-                    "Path exceeds maximum depth of {} (current: {})",
-                    config.max_depth,
-                    depth
+                // A limit on how deep a read may reach under the workspace, as
+                // the budgets are: coded, with the way out.
+                return Err(crate::safety::budget_exceeded(
+                    "",
+                    format!(
+                        "path exceeds the maximum depth of {} directories below the workspace root (it is {} deep)",
+                        config.max_depth, depth
+                    ),
+                    "read a file nearer the workspace root, or narrow the glob so it does not match files that deep",
                 ));
             }
 
