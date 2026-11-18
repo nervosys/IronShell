@@ -9478,6 +9478,7 @@ fn bi_read_text(args: Vec<Value>, _input: Option<Value>) -> Result<Value> {
     let metadata = fs::metadata(&validated_path)
         .map_err(|e| crate::safety::fs_error("read_text", &validated_path, &e))?;
     check_file_size_limit(metadata.len()).context("read_text: file too large")?;
+    crate::memory::reserve_parse("read_text", metadata.len() as usize, 2)?;
 
     let bytes = fs::read(&validated_path)
         .map_err(|e| crate::safety::fs_error("read_text", &validated_path, &e))?;
@@ -11475,6 +11476,7 @@ fn bi_from_json(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
         return Err(crate::safety::arg_err("from_json: no JSON input provided"));
     };
     let json_str = without_bom(json_str);
+    crate::memory::reserve_parse("from_json", json_str.len(), 8)?;
 
     // A bare `?` here surfaced serde's message as E_UNKNOWN with exit 1, the
     // one uncoded failure left in benches/agentic/errors.mjs (malformed-json).
@@ -11892,8 +11894,22 @@ fn parse_delimited(builtin: &str, text: &str, builder: &mut csv::ReaderBuilder) 
         .collect();
 
     check_csv_headers(builtin, &headers)?;
+    // Each row is a Record: one map node and one key String per cell, besides
+    // the row's own StringRecord. Refuse before building them when the line
+    // count says the rows would pass the memory budget, and look again while
+    // collecting, so a file of a million rows ends in E_BUDGET_EXCEEDED and
+    // never in a failed allocation.
+    let line_count = text.bytes().filter(|&b| b == b'\n').count();
+    let per_row = headers
+        .len()
+        .saturating_mul(std::mem::size_of::<Value>() + 2 * std::mem::size_of::<String>() + 64)
+        .saturating_add(256);
+    crate::memory::reserve(builtin, line_count.saturating_mul(per_row))?;
     let mut records = Vec::new();
     for record in reader.records() {
+        if records.len() % 4096 == 0 {
+            crate::memory::check()?;
+        }
         // A malformed row (unequal field counts, bad quoting) is the caller's
         // text, so E_BAD_ARG; it was an uncoded csv::Error, E_UNKNOWN.
         records.push(record.map_err(|e| csv_row_error(builtin, text, &e))?);
@@ -12514,6 +12530,7 @@ fn bi_from_yaml(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
             None => return Err(crate::safety::arg_err("from_yaml: requires YAML input")),
         },
     };
+    crate::memory::reserve_parse("from_yaml", yaml_str.len(), 8)?;
     crate::yaml::parse(&yaml_str).map_err(|e| {
         // A refusal the parser coded (an integer past 64 bits) keeps its code.
         if e.downcast_ref::<crate::safety::SafetyError>().is_some() {
@@ -18931,6 +18948,7 @@ fn bi_from_toml(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
     if !rest.is_empty() {
         return Err(arity_error(B, "the TOML text alone", rest.len()));
     }
+    crate::memory::reserve_parse(B, text.len(), 8)?;
     let parsed: toml::Value = toml::from_str(&text).map_err(|e| {
         // An integer past 64 bits is valid TOML that this reader cannot hold, so
         // the refusal says so instead of calling the text not TOML.
@@ -18965,6 +18983,7 @@ fn bi_from_jsonl(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
         return Err(arity_error(B, "the JSON lines text alone", rest.len()));
     }
     let text = without_bom(text);
+    crate::memory::reserve_parse(B, text.len(), 8)?;
     let mut rows = Vec::new();
     for (index, line) in text.lines().enumerate() {
         if line.trim().is_empty() {
@@ -34525,6 +34544,14 @@ fn bi_lines(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
         }
         (None, None) => return Err(crate::safety::bad_arg("lines", "String", "nothing")),
     };
+    crate::memory::reserve_parse("lines", text.len(), 2)?;
+    crate::memory::reserve(
+        "lines",
+        text.bytes()
+            .filter(|&b| b == 10)
+            .count()
+            .saturating_mul(std::mem::size_of::<Value>() + 24),
+    )?;
     let cr = char::from(13);
     let nl = char::from(10);
     let mut out: Vec<Value> = Vec::new();
@@ -34778,6 +34805,7 @@ fn bi_open(args: Vec<Value>, _input: Option<Value>) -> Result<Value> {
     let md =
         fs::metadata(&validated).map_err(|e| crate::safety::fs_error("open", &validated, &e))?;
     check_file_size_limit(md.len()).context("open: file too large")?;
+    crate::memory::reserve_parse("open", md.len() as usize, 2)?;
     let bytes =
         fs::read(&validated).map_err(|e| crate::safety::fs_error("open", &validated, &e))?;
     let text = decode_text("open", &validated, bytes).map(without_bom)?;
@@ -34785,6 +34813,12 @@ fn bi_open(args: Vec<Value>, _input: Option<Value>) -> Result<Value> {
         .extension()
         .map(|e| e.to_string_lossy().to_ascii_lowercase())
         .unwrap_or_default();
+    if matches!(
+        ext.as_str(),
+        "json" | "jsonl" | "ndjson" | "toml" | "yaml" | "yml"
+    ) {
+        crate::memory::reserve_parse("open", text.len(), 8)?;
+    }
     match ext.as_str() {
         "json" => {
             let j: serde_json::Value = serde_json::from_str(&text).map_err(|e| {
