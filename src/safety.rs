@@ -2317,6 +2317,26 @@ pub fn not_found(builtin: &str, kind: &str, name: &str) -> anyhow::Error {
     })
 }
 
+/// [`not_found`] for a script named on the command line (`ish x.ish`). A script
+/// argument is resolved against the directory `ish` was started in, and is made
+/// absolute before `--workspace` moves the working directory, so the hint must
+/// not say the path was resolved against the workspace.
+pub fn script_not_found(builtin: &str, path: &str) -> anyhow::Error {
+    let err = not_found(builtin, "file", path);
+    if path.is_empty() || control_char_path_hint(path).is_some() {
+        return err;
+    }
+    match err.downcast::<SafetyError>() {
+        Ok(mut se) => {
+            se.hint = format!(
+                "no script at this path; a script argument is resolved against the directory ish was started in (not against --workspace), so look for it at {path} and check the spelling and that directory"
+            );
+            anyhow::Error::new(se)
+        }
+        Err(other) => other,
+    }
+}
+
 /// `E_NOT_FOUND` for a journal step id that no step has. The journal's own
 /// word is "step": an id names a step, and "entry" is the file-edit term.
 pub fn journal_step_not_found(builtin: &str, id: usize, by_step: bool) -> anyhow::Error {
