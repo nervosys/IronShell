@@ -815,7 +815,7 @@ lazy_static::lazy_static! {
         map.insert("to_base", 1216);
         // 500-519: Database
         map.insert("db_sqlite_open", 500);
-        map.insert("db_sqlite_query", 501);
+        map.insert("db_sqlite_query", 1217);
         map.insert("db_sqlite_exec", 502);
         map.insert("db_sqlite_tables", 503);
         map.insert("db_sqlite_schema", 504);
@@ -834,7 +834,7 @@ lazy_static::lazy_static! {
         map.insert("db_json_to_sqlite", 517);
         map.insert("db_sqlite_to_json", 518);
         map.insert("db_kv_store", 519);
-        map.insert("sqlite_query", 501);
+        map.insert("sqlite_query", 1217);
         map.insert("sqlite_exec", 502);
         map.insert("sql", 501);
 
@@ -3008,7 +3008,7 @@ static BUILTIN_DISPATCH: &[fn(Vec<Value>, Option<Value>, &mut Env) -> Result<Val
     |args, input, _| bi_crypto_jwt_decode(args, input),
     // 500-519: Database
     |args, input, _| bi_db_sqlite_open(args, input),
-    |args, input, _| bi_db_sqlite_query(args, input),
+    |args, input, _| bi_sql(args, input),
     |args, input, _| bi_db_sqlite_exec(args, input),
     |args, input, _| bi_db_sqlite_tables(args, input),
     |args, input, _| bi_db_sqlite_schema(args, input),
@@ -3912,7 +3912,8 @@ static BUILTIN_DISPATCH: &[fn(Vec<Value>, Option<Value>, &mut Env) -> Result<Val
     // Counting rows by a key
     |args, input, env| bi_count_by(args, input, env), // 1215
     // Radix text (1216)
-    |args, input, _| bi_to_base(args, input), // 1216
+    |args, input, _| bi_to_base(args, input),         // 1216
+    |args, input, _| bi_db_sqlite_query(args, input), // 1217
 ];
 
 /// The dispatch row that serves `name`, if the fast table has one.
@@ -9449,6 +9450,7 @@ fn read_named_file(builtin: &str, path_str: &str) -> Result<String> {
     let metadata = fs::metadata(&validated_path)
         .map_err(|e| crate::safety::fs_error(builtin, &validated_path, &e))?;
     check_file_size_limit(metadata.len()).context(format!("{builtin}: file too large"))?;
+    crate::memory::reserve_parse(builtin, metadata.len() as usize, 2)?;
 
     let bytes = fs::read(&validated_path)
         .map_err(|e| crate::safety::fs_error(builtin, &validated_path, &e))?;
@@ -9478,6 +9480,7 @@ fn bi_read_text(args: Vec<Value>, _input: Option<Value>) -> Result<Value> {
     let metadata = fs::metadata(&validated_path)
         .map_err(|e| crate::safety::fs_error("read_text", &validated_path, &e))?;
     check_file_size_limit(metadata.len()).context("read_text: file too large")?;
+    crate::memory::reserve_parse("read_text", metadata.len() as usize, 2)?;
 
     let bytes = fs::read(&validated_path)
         .map_err(|e| crate::safety::fs_error("read_text", &validated_path, &e))?;
@@ -11475,6 +11478,7 @@ fn bi_from_json(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
         return Err(crate::safety::arg_err("from_json: no JSON input provided"));
     };
     let json_str = without_bom(json_str);
+    crate::memory::reserve_parse("from_json", json_str.len(), 8)?;
 
     // A bare `?` here surfaced serde's message as E_UNKNOWN with exit 1, the
     // one uncoded failure left in benches/agentic/errors.mjs (malformed-json).
@@ -11892,8 +11896,22 @@ fn parse_delimited(builtin: &str, text: &str, builder: &mut csv::ReaderBuilder) 
         .collect();
 
     check_csv_headers(builtin, &headers)?;
+    // Each row is a Record: one map node and one key String per cell, besides
+    // the row's own StringRecord. Refuse before building them when the line
+    // count says the rows would pass the memory budget, and look again while
+    // collecting, so a file of a million rows ends in E_BUDGET_EXCEEDED and
+    // never in a failed allocation.
+    let line_count = text.bytes().filter(|&b| b == b'\n').count();
+    let per_row = headers
+        .len()
+        .saturating_mul(std::mem::size_of::<Value>() + 2 * std::mem::size_of::<String>() + 64)
+        .saturating_add(256);
+    crate::memory::reserve(builtin, line_count.saturating_mul(per_row))?;
     let mut records = Vec::new();
     for record in reader.records() {
+        if records.len() % 4096 == 0 {
+            crate::memory::check()?;
+        }
         // A malformed row (unequal field counts, bad quoting) is the caller's
         // text, so E_BAD_ARG; it was an uncoded csv::Error, E_UNKNOWN.
         records.push(record.map_err(|e| csv_row_error(builtin, text, &e))?);
@@ -12194,8 +12212,8 @@ pub(crate) fn sqlite_column_type<'a>(values: impl Iterator<Item = &'a Value>) ->
 
 /// Line endings of CSV text from the sqlite3 CLI as one RFC 4180 CRLF per row.
 /// The CLI writes CRLF itself and its stdout in text mode (Windows) turns the
-/// LF into CRLF again, giving CR CR LF. A newline inside a quoted cell is left
-/// as it came.
+/// LF into CRLF again, giving CR CR LF. A newline inside a quoted cell is the
+/// cell's own: where the text-mode stdout added a CR to it, that CR is removed.
 fn normalize_csv_line_ends(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
     let mut in_quotes = false;
@@ -12216,6 +12234,12 @@ fn normalize_csv_line_ends(text: &str) -> String {
                     }
                 }
                 out.push_str("\r\n");
+            }
+            // Inside a quoted cell the Windows text-mode stdout turned each LF of
+            // the cell into CR LF; undo that, so the cell keeps its own bytes.
+            '\r' if in_quotes && cfg!(windows) && chars.peek() == Some(&'\n') => {
+                chars.next();
+                out.push('\n');
             }
             _ => out.push(c),
         }
@@ -12514,6 +12538,7 @@ fn bi_from_yaml(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
             None => return Err(crate::safety::arg_err("from_yaml: requires YAML input")),
         },
     };
+    crate::memory::reserve_parse("from_yaml", yaml_str.len(), 8)?;
     crate::yaml::parse(&yaml_str).map_err(|e| {
         // A refusal the parser coded (an integer past 64 bits) keeps its code.
         if e.downcast_ref::<crate::safety::SafetyError>().is_some() {
@@ -12521,7 +12546,7 @@ fn bi_from_yaml(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
         } else {
             let message = format!("from_yaml: {e}");
             match yaml_unsupported_construct(&message) {
-                Some(construct) => crate::safety::bad_arg_in(
+                Some(construct) => crate::safety::value_not_representable(
                     "from_yaml",
                     message,
                     &format!(
@@ -12539,7 +12564,7 @@ fn bi_from_yaml(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
                          line it could not read"
                             .to_string()
                     };
-                    crate::safety::bad_arg_in("from_yaml", message, &hint)
+                    crate::safety::value_not_representable("from_yaml", message, &hint)
                 }
             }
         }
@@ -18931,6 +18956,7 @@ fn bi_from_toml(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
     if !rest.is_empty() {
         return Err(arity_error(B, "the TOML text alone", rest.len()));
     }
+    crate::memory::reserve_parse(B, text.len(), 8)?;
     let parsed: toml::Value = toml::from_str(&text).map_err(|e| {
         // An integer past 64 bits is valid TOML that this reader cannot hold, so
         // the refusal says so instead of calling the text not TOML.
@@ -18965,6 +18991,7 @@ fn bi_from_jsonl(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
         return Err(arity_error(B, "the JSON lines text alone", rest.len()));
     }
     let text = without_bom(text);
+    crate::memory::reserve_parse(B, text.len(), 8)?;
     let mut rows = Vec::new();
     for (index, line) in text.lines().enumerate() {
         if line.trim().is_empty() {
@@ -18972,9 +18999,13 @@ fn bi_from_jsonl(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
         }
         let j: serde_json::Value = serde_json::from_str(line).map_err(|e| {
             let (number, column) = (index + 1, e.column());
+            let shown: String = line.chars().take(40).collect();
             crate::safety::value_not_representable(
                 B,
-                format!("{B}: line {number}, column {column}: {}", json_message(&e)),
+                format!(
+                    "{B}: line {number} is not JSON: {shown}: {}",
+                    json_message(&e)
+                ),
                 &format!(
                     "fix the JSON at line {number}, column {column}: {}",
                     json_message(&e)
@@ -34525,6 +34556,14 @@ fn bi_lines(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
         }
         (None, None) => return Err(crate::safety::bad_arg("lines", "String", "nothing")),
     };
+    crate::memory::reserve_parse("lines", text.len(), 2)?;
+    crate::memory::reserve(
+        "lines",
+        text.bytes()
+            .filter(|&b| b == 10)
+            .count()
+            .saturating_mul(std::mem::size_of::<Value>() + 24),
+    )?;
     let cr = char::from(13);
     let nl = char::from(10);
     let mut out: Vec<Value> = Vec::new();
@@ -34778,6 +34817,7 @@ fn bi_open(args: Vec<Value>, _input: Option<Value>) -> Result<Value> {
     let md =
         fs::metadata(&validated).map_err(|e| crate::safety::fs_error("open", &validated, &e))?;
     check_file_size_limit(md.len()).context("open: file too large")?;
+    crate::memory::reserve_parse("open", md.len() as usize, 2)?;
     let bytes =
         fs::read(&validated).map_err(|e| crate::safety::fs_error("open", &validated, &e))?;
     let text = decode_text("open", &validated, bytes).map(without_bom)?;
@@ -34785,6 +34825,12 @@ fn bi_open(args: Vec<Value>, _input: Option<Value>) -> Result<Value> {
         .extension()
         .map(|e| e.to_string_lossy().to_ascii_lowercase())
         .unwrap_or_default();
+    if matches!(
+        ext.as_str(),
+        "json" | "jsonl" | "ndjson" | "toml" | "yaml" | "yml"
+    ) {
+        crate::memory::reserve_parse("open", text.len(), 8)?;
+    }
     match ext.as_str() {
         "json" => {
             let j: serde_json::Value = serde_json::from_str(&text).map_err(|e| {
@@ -53028,11 +53074,16 @@ fn sqlite_db_file(builtin: &str, path: &str) -> Result<()> {
     ))
 }
 
+/// sql(source_or_query, query?, params?) - the in-process, read-only SQL builtin.
+fn bi_sql(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
+    crate::sql::sql("sql", args, input)
+}
+
 fn bi_db_sqlite_query(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
     // In-process and read-only since this commit; see src/sql.rs. It spawned
     // the sqlite3 CLI, so it was classed Exec, gated in agent mode, and absent
     // on any host without sqlite3.
-    crate::sql::sql("sql", args, input)
+    crate::sql::sql("db_sqlite_query", args, input)
 }
 
 /// explain_effects(code): every call in `code`, its effect class and the
@@ -55976,6 +56027,15 @@ fn bi_db_json_to_sqlite(args: Vec<Value>, _input: Option<Value>) -> Result<Value
         Some(Value::Str(s)) => s.clone(),
         _ => "imported".to_string(),
     };
+    // The second argument is the path of a JSON file. JSON text was read as a
+    // path, failed as E_IO and echoed the whole payload back in the message.
+    if matches!(json_path.trim_start().chars().next(), Some('[' | '{')) {
+        return Err(crate::safety::bad_arg_in(
+            "db_json_to_sqlite",
+            "db_json_to_sqlite: takes a file path, not JSON text",
+            "write the JSON to a file (file.write) and pass its path, as db_json_to_sqlite(db, \"rows.json\", table)",
+        ));
+    }
 
     // Read JSON
     let content = read_text_capped("db_json_to_sqlite", &json_path)?;
@@ -56821,6 +56881,7 @@ fn bi_file_replace(args: Vec<Value>, _input: Option<Value>) -> Result<Value> {
     // A missing file is named as missing, not as a pattern that is not in it.
     require_edit_target("file_replace", &crate::safety::resolve_path_str(&path))?;
 
+    let find_text = old_text.clone();
     let mut patch = BTreeMap::new();
     patch.insert("find".to_string(), Value::Str(old_text));
     patch.insert("replace".to_string(), Value::Str(new_text));
@@ -56847,6 +56908,7 @@ fn bi_file_replace(args: Vec<Value>, _input: Option<Value>) -> Result<Value> {
                 .downcast_ref::<crate::safety::SafetyError>()
                 .map(|se| se.hint.clone())
                 .unwrap_or_default();
+            let hint = line_ending_hint(&path, &find_text, hint);
             Err(crate::safety::edit_not_found(
                 "file_replace",
                 format!("file_replace: pattern not found in {path}"),
@@ -56854,6 +56916,38 @@ fn bi_file_replace(args: Vec<Value>, _input: Option<Value>) -> Result<Value> {
             ))
         }
         other => other,
+    }
+}
+
+/// The hint for a file_replace miss, with a note added when `find` would have
+/// matched had the file's line endings been the ones it names: an LF in `find`
+/// does not match a CR LF in the file, and a file that mixes both has no one
+/// spelling to guess.
+fn line_ending_hint(path: &str, find: &str, hint: String) -> String {
+    if !find.contains('\n') {
+        return hint;
+    }
+    let resolved = crate::safety::resolve_path_str(path);
+    if std::fs::metadata(&resolved).map_or(true, |m| m.len() > 64 * 1024 * 1024) {
+        return hint;
+    }
+    let Ok(text) = std::fs::read_to_string(&resolved) else {
+        return hint;
+    };
+    let squash = |s: &str| s.replace("\r\n", "\n");
+    if !text.contains("\r\n") || !squash(&text).contains(&squash(find)) {
+        return hint;
+    }
+    let bare_lf = text.replace("\r\n", "").contains('\n');
+    let note = if bare_lf {
+        "the file mixes CRLF and LF line endings, and old_text must use the file's exact endings: write the line break each line really ends with, or replace one line at a time"
+    } else {
+        "the file uses CRLF line endings, and old_text must use them too: write \\r\\n where the file has a line break, or replace one line at a time"
+    };
+    if hint.is_empty() {
+        note.to_string()
+    } else {
+        format!("{hint}; {note}")
     }
 }
 

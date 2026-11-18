@@ -197,7 +197,7 @@ fn parse_sequence(lines: &[Line], pos: &mut usize, indent: usize) -> Result<Valu
         let rest = line.content[1..].trim().to_string();
         *pos += 1;
 
-        if rest.is_empty() {
+        if rest.is_empty() || rest.starts_with('#') {
             // `-` alone: the item is the nested block beneath it.
             items.push(parse_nested(lines, pos, indent)?);
         } else if let Some((key, value)) = split_key(&rest) {
@@ -252,7 +252,7 @@ fn insert_entry(
     number: usize,
 ) -> Result<()> {
     let key = key_name(&key, number)?;
-    let parsed = if value.trim().is_empty() {
+    let parsed = if value.trim().is_empty() || value.trim().starts_with('#') {
         // A block sequence may sit at the key's own indentation (`a:\n- 1`),
         // as PyYAML writes it.
         if *pos < lines.len()
@@ -374,6 +374,10 @@ fn quoted_before_comment(s: &str) -> Option<&str> {
 
 fn parse_scalar(raw: &str, number: usize) -> Result<Value> {
     let s = raw.trim();
+    // A value that starts with `#` is a comment: the scalar is empty.
+    if s.starts_with('#') {
+        return Ok(Value::Null);
+    }
     // A quoted scalar followed by a comment, `"x" # note`: the comment goes,
     // and the quoted scalar is read as one, quotes and all.
     let s = quoted_before_comment(s).unwrap_or(s);

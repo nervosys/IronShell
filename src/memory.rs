@@ -148,3 +148,11 @@ fn over(limit: usize) -> anyhow::Error {
         "work on the data in smaller pieces, or raise the budget with --memory-limit MB or IRONSHELL_MEMORY_LIMIT_MB",
     )
 }
+
+/// Refuse, before a text of `text_bytes` bytes is parsed or split into values,
+/// when the values built from it (taken as `factor` times the text) would pass
+/// the memory budget. A file's rows and fields cost several times its bytes, and
+/// a failed allocation aborts the process, so the refusal has to come first.
+pub fn reserve_parse(builtin: &str, text_bytes: usize, factor: usize) -> anyhow::Result<()> {
+    reserve(builtin, text_bytes.saturating_mul(factor))
+}

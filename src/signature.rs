@@ -2082,11 +2082,11 @@ pub static SIGNATURES: &[Signature] = &[
                 Ty::Str,
                 "database to write — NOTE: the database comes first",
             ),
-            req("json", Ty::Str, "JSON file to import"),
+            req("json", Ty::Str, "path of the JSON file to import (not JSON text)"),
             opt("table", Ty::Str, "table name; defaults to \"imported\" (sql() names a file's table after the file stem instead)"),
         ],
         returns: "Bool",
-        doc: "Import a JSON array of objects into a SQLite table named by the table argument (default \"imported\"; unlike sql(), which names a file's table after the file stem). The columns are the union of the rows' keys in first-seen order, and a row without a key stores NULL. Each column is typed as sql() reads the same file: INTEGER for integers and Booleans (1 and 0), REAL when a number has a fraction, TEXT otherwise, so ORDER BY id sorts numbers as numbers. An empty array imports nothing and returns false. Refused before anything is written: invalid JSON, and anything but an array of objects. A nested array or object is stored as JSON text. Any non-empty key is accepted and quoted for you; a control character in a name is refused. Rows go in one at a time, so a failure partway keeps the earlier rows.",
+        doc: "Import the JSON array of objects held in a file (give its path, not JSON text) into a SQLite table named by the table argument (default \"imported\"; unlike sql(), which names a file's table after the file stem). The columns are the union of the rows' keys in first-seen order, and a row without a key stores NULL. Each column is typed as sql() reads the same file: INTEGER for integers and Booleans (1 and 0), REAL when a number has a fraction, TEXT otherwise, so ORDER BY id sorts numbers as numbers. An empty array imports nothing and returns false. Refused before anything is written: invalid JSON, and anything but an array of objects. A nested array or object is stored as JSON text. Any non-empty key is accepted and quoted for you; a control character in a name is refused. Rows go in one at a time, so a failure partway keeps the earlier rows.",
         examples: &[(
             r#"db_json_to_sqlite("issues.db", "issues.json", "issues")"#,
             "true",
@@ -3406,7 +3406,7 @@ pub static SIGNATURES: &[Signature] = &[
         name: "sql",
         category: Some("Database"),
         subject_required: false,
-        aliases: &["sqlite_query", "db_sqlite_query"],
+        aliases: &[],
         subject: Some(Ty::Any),
         // A trailing `params` Array is matched by its own type: the validator
         // lets the last argument skip `query` when it is not a String.
@@ -3466,6 +3466,48 @@ pub static SIGNATURES: &[Signature] = &[
             (
                 r#"{a: [{id: 1, n: "x"}], b: [{id: 1, m: 5}]} | sql("select b.m from a join b on a.id = b.id") | first | fn(r) => r.m"#,
                 "5",
+            ),
+        ],
+    },
+    Signature {
+        // `sqlite_query` and `db_sqlite_query` used to be aliases of `sql`, so
+        // help("db_sqlite_query") described sql() and its errors said `sql:`.
+        name: "db_sqlite_query",
+        category: Some("Database"),
+        subject_required: false,
+        aliases: &["sqlite_query"],
+        subject: Some(Ty::Any),
+        params: &[
+            req(
+                "path",
+                Ty::Str,
+                "a SQLite file, \":memory:\", or a .json/.jsonl/.csv/.tsv file (a table named after the file, also `t`); with rows piped in, the query instead (the rows are table `t`)",
+            ),
+            opt(
+                "query",
+                Ty::Str,
+                "the read-only SQL to run against the database; each ? in it takes the next value of params",
+            ),
+            opt(
+                "params",
+                Ty::Array,
+                "bind values for the placeholders, in order: Int, Float, String, Bool or null; a String binds as text, so pass 1, not \"1\", to compare with a number",
+            ),
+        ],
+        returns: "Array",
+        doc: "Run a read-only SQL query over a SQLite database (or a data file, or piped rows), in process, returning rows as records. db.sqlite_query(path, query, params) is this builtin: a query that SQLite cannot parse is E_BAD_ARG naming db_sqlite_query, and a database that does not exist is E_NOT_FOUND (none is created). A trailing params Array binds its values to the query's ? placeholders in order. To change a database use db_sqlite_exec; sql() is the same engine over rows and files.",
+        examples: &[
+            (
+                r#"db_sqlite_query(":memory:", "SELECT 1 AS n") | first | fn(r) => r.n"#,
+                "1",
+            ),
+            (
+                r#"sqlite_query(":memory:", "SELECT ? AS n", [7]) | first | fn(r) => r.n"#,
+                "7",
+            ),
+            (
+                r#"[{n: 1}, {n: 2}] | db_sqlite_query("select sum(n) as total from t") | first | fn(r) => r.total"#,
+                "3",
             ),
         ],
     },
@@ -11536,7 +11578,7 @@ pub static SIGNATURES: &[Signature] = &[
     Signature {
         name: "db_csv_to_sqlite", category: None, subject_required: false, aliases: &[],
         subject: None, params: &[req("db", Ty::Str, "SQLite destination path"), req("csv", Ty::Str, "UTF-8 CSV with a header of unique column names (compared without regard to case)"), opt("table", Ty::Str, "table name; default imported")], returns: "Bool",
-        doc: "Import CSV in process in one transaction. Always consume the header; create absent columns typed as sql() reads the same file (INTEGER, REAL, or TEXT; a column of true and false is INTEGER 1 and 0) and bind each cell with that type, so ORDER BY id sorts numbers as numbers. An empty cell is NULL. Any non-empty column or table name is accepted and quoted for you (spaces, quotes and reserved words included); a control character is refused. Existing column affinities apply. Parse failures create no database; row failures roll back all imported rows. Limited to one million rows and the configured file-size budget.",
+        doc: "Import CSV in process in one transaction. Always consume the header; create absent columns typed as sql() reads the same file (INTEGER, REAL, or TEXT; a column of true and false is INTEGER 1 and 0) and bind each cell with that type, so ORDER BY id sorts numbers as numbers. An empty cell is NULL in a numeric column and an empty string in a text column, as sql() reads the same file. Any non-empty column or table name is accepted and quoted for you (spaces, quotes and reserved words included); a control character is refused. Existing column affinities apply. Parse failures create no database; row failures roll back all imported rows. Limited to one million rows and the configured file-size budget.",
         examples: &[(r#"let d = fs_tempdir("ae_csv_import"); let f = d + "/rows.csv"; file_write(f, "name,age\nAda,42\n"); let result = db_csv_to_sqlite(d + "/db", f); rmdir(d, true); result"#, "true"), (r#"let d = fs_tempdir("ae_csv_import"); let f = d + "/rows.csv"; file_write(f, "name,age\nAda,42\n"); let result = db_csv_to_sqlite(d + "/db", f, "people"); rmdir(d, true); result"#, "true")],
     },
     Signature {

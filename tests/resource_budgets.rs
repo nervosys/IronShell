@@ -71,7 +71,7 @@ fn nesting_that_doubles_memory_hits_the_memory_budget() {
         &[],
     );
     assert_budget(&t, c, "nesting");
-    assert!(t.contains("memory budget of 64 MB exceeded"), "{t}");
+    assert!(t.contains("memory budget of 64 MB"), "{t}");
 }
 
 #[test]
