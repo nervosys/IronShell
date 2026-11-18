@@ -9840,7 +9840,7 @@ pub static SIGNATURES: &[Signature] = &[
         subject: None,
         params: &[req("pattern", Ty::Str, "a glob such as src/*.rs or src/**/*.rs")],
         returns: "Array",
-        doc: "Paths matching a glob, sorted; ** matches any depth of directories, `{a,b}` matches either alternative (`**/*.{rs,py}`; nested groups work, and a path matched twice appears once; a group with one alternative, `{rs}`, is that alternative; a brace that is never closed, or a } with no {, is E_BAD_ARG), and a directory in the pattern that does not exist is E_NOT_FOUND. At most 1,000,000 entries; more is E_BUDGET_EXCEEDED.",
+        doc: "Paths matching a glob, sorted; ** matches any depth of directories, `{a,b}` matches either alternative (`**/*.{rs,py}`; nested groups work, and a path matched twice appears once; a group with one alternative, `{rs}`, is that alternative; a brace that is never closed, or a } with no {, is E_BAD_ARG), and a directory in the pattern that does not exist is E_NOT_FOUND. `**` does not enter dot-directories, as in a shell: name them (`.github/**/*.yml`). At most 1,000,000 entries; more is E_BUDGET_EXCEEDED.",
         examples: &[
             (r#"(glob("src/*.rs") | len) > 10"#, r#"true"#),
             (r#"(glob("src/**/*.rs") | len) > (glob("src/*.rs") | len)"#, r#"true"#),

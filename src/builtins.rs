@@ -9420,7 +9420,7 @@ fn read_named_file_list(builtin: &str, path_str: &str) -> Result<Vec<(String, St
             .filter(|p| std::path::Path::new(p).is_file())
             .collect();
         if files.is_empty() {
-            return Err(crate::safety::not_found(builtin, "file matching", path_str));
+            return Err(glob_no_match(builtin, path_str));
         }
         let mut out = Vec::with_capacity(files.len());
         for p in files {
@@ -9432,6 +9432,43 @@ fn read_named_file_list(builtin: &str, path_str: &str) -> Result<Vec<(String, St
         path_str.to_string(),
         read_named_file(builtin, path_str)?,
     )])
+}
+
+/// The error for a glob that matched no file. The hint also says when links out
+/// of the workspace were skipped, and, for a pattern with `**`, which file a
+/// dot-directory would have matched (`**` does not enter them). The extra walk
+/// runs only here, on the error path, under the usual walk cap.
+fn glob_no_match(builtin: &str, pattern: &str) -> anyhow::Error {
+    let skipped = crate::posix::take_glob_jail_skipped();
+    let mut notes = String::new();
+    if skipped > 0 {
+        notes.push_str(&format!(
+            "; {skipped} match{} {} links leading outside the workspace and {} skipped",
+            if skipped == 1 { "" } else { "es" },
+            if skipped == 1 { "was" } else { "were" },
+            if skipped == 1 { "was" } else { "were" },
+        ));
+    }
+    if pattern.contains("**") {
+        let slashed = pattern.replace(char::from(92), "/");
+        'alts: for alt in brace_alternatives(&slashed) {
+            let (found, over) = crate::posix::glob_paths_with_hidden_dirs(&alt, WALK_MAX_ENTRIES);
+            if over {
+                break;
+            }
+            for p in found {
+                if std::path::Path::new(&p).is_file() && !crate::security::outside_read_jail(&p) {
+                    notes.push_str(&format!(
+                        "; `{p}` would match if dot-directories were entered, so name the dot-directory in the pattern"
+                    ));
+                    break 'alts;
+                }
+            }
+        }
+        // The retry may have counted links of its own; they are not the user's.
+        crate::posix::take_glob_jail_skipped();
+    }
+    crate::safety::no_file_matches(builtin, pattern, &notes)
 }
 
 fn read_named_file(builtin: &str, path_str: &str) -> Result<String> {
@@ -34453,6 +34490,8 @@ fn has_glob_syntax(s: &str) -> bool {
 /// matches either alternative (`*.{rs,py}`); a path matched twice appears once,
 /// and the combined result is sorted by bytes, not grouped by alternative.
 fn expand_glob_for(builtin: &str, pattern: &str) -> Result<Vec<String>> {
+    // Start the count of links skipped for this expansion (see `glob_no_match`).
+    crate::posix::take_glob_jail_skipped();
     // `glob` reads braces strictly: an unbalanced one is a mistyped pattern,
     // not a name to look for, and a one-alternative group is the alternative.
     let unbraced;
@@ -34515,12 +34554,21 @@ fn expand_glob_one(builtin: &str, pattern: &str) -> Result<Vec<String>> {
     // the match keeps its trailing slash.
     let dirs_only = pattern.ends_with('/');
     // A match that resolves outside the workspace (through a link, say) is not
-    // returned.
-    Ok(paths
+    // returned; it is counted, so a "no match" can say why.
+    let mut kept = Vec::with_capacity(paths.len());
+    let mut skipped = 0usize;
+    for p in paths
         .into_iter()
         .filter(|p| !dirs_only || std::path::Path::new(p.trim_end_matches('/')).is_dir())
-        .filter(|p| !crate::security::outside_read_jail(p))
-        .collect())
+    {
+        if crate::security::outside_read_jail(&p) {
+            skipped += 1;
+        } else {
+            kept.push(p);
+        }
+    }
+    crate::posix::note_glob_jail_skipped(skipped);
+    Ok(kept)
 }
 
 fn bi_fs_glob(args: Vec<Value>, _input: Option<Value>) -> Result<Value> {

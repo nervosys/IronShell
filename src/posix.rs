@@ -4099,6 +4099,34 @@ pub fn glob_paths_capped(pattern: &str, max: usize) -> (Vec<String>, bool) {
 /// builtins' walks.
 const WALK_MAX: usize = crate::builtins::WALK_MAX_ENTRIES;
 
+thread_local! {
+    /// Set while `glob_paths_with_hidden_dirs` runs: `**` then enters dot-directories.
+    static GLOB_HIDDEN_DIRS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// Matches a glob dropped because a link led outside the workspace.
+    static GLOB_JAIL_SKIPPED: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// `glob_paths_capped`, but `**` also enters dot-directories. Only for the error
+/// path of a glob that matched nothing, to tell the caller that naming the
+/// dot-directory would have matched.
+pub fn glob_paths_with_hidden_dirs(pattern: &str, max: usize) -> (Vec<String>, bool) {
+    GLOB_HIDDEN_DIRS.with(|h| h.set(true));
+    let r = glob_paths_capped(pattern, max);
+    GLOB_HIDDEN_DIRS.with(|h| h.set(false));
+    r
+}
+
+/// Count `n` glob matches that were dropped for leading outside the workspace.
+pub fn note_glob_jail_skipped(n: usize) {
+    GLOB_JAIL_SKIPPED.with(|c| c.set(c.get().saturating_add(n)));
+}
+
+/// The number of glob matches dropped for leading outside the workspace since
+/// the last call, and reset it.
+pub fn take_glob_jail_skipped() -> usize {
+    GLOB_JAIL_SKIPPED.with(|c| c.replace(0))
+}
+
 /// The names one expansion stage has gathered. A stage that gathers more
 /// than `max` distinct names is over, and stops as soon as it knows that.
 /// Under `dedup` (for `**`, whose stages can repeat a name), duplicates are
@@ -4169,7 +4197,7 @@ fn descendant_dirs(dir: &str, out: &mut Gather) {
         .filter_map(|e| e.ok())
         .filter(|e| e.file_type().map(|t| t.is_dir()).unwrap_or(false))
         .map(|e| e.file_name().to_string_lossy().into_owned())
-        .filter(|n| !n.starts_with('.'))
+        .filter(|n| !n.starts_with('.') || GLOB_HIDDEN_DIRS.with(|h| h.get()))
         .collect();
     names.sort();
     for n in names {
@@ -4246,6 +4274,8 @@ fn expand_pattern(
                                 let is_link = kind.as_ref().map(|t| t.is_symlink()).unwrap_or(true);
                                 if !is_link || !crate::security::outside_read_jail(&p) {
                                     next.push(p);
+                                } else {
+                                    note_glob_jail_skipped(1);
                                 }
                             }
                         }
@@ -4326,6 +4356,7 @@ fn expand_pattern(
                 // name that is not a link sits inside the directory it was
                 // listed in.
                 if is_link && crate::security::outside_read_jail(&p) {
+                    note_glob_jail_skipped(1);
                     continue;
                 }
                 if last || is_real_dir || (is_link && Path::new(&p).is_dir()) {

@@ -2317,6 +2317,24 @@ pub fn not_found(builtin: &str, kind: &str, name: &str) -> anyhow::Error {
     })
 }
 
+/// `E_NOT_FOUND` for a glob pattern that matched no file. `notes` is appended to
+/// the hint (why a match may have been missed). Retryable, as `not_found` is.
+pub fn no_file_matches(builtin: &str, pattern: &str, notes: &str) -> anyhow::Error {
+    anyhow::Error::new(SafetyError {
+        code: ErrorCode::NotFound,
+        message: format!("{builtin}: no file matches '{pattern}'"),
+        builtin: builtin.to_string(),
+        hint: format!(
+            "check the pattern with glob(...); `**` does not enter dot-directories (name them, e.g. `.github/**/*.yml`){notes}"
+        ),
+        approval: None,
+        did_you_mean: Vec::new(),
+        expected: "a file matching the pattern".to_string(),
+        got: pattern.to_string(),
+        extra: serde_json::Map::new(),
+    })
+}
+
 /// `E_NOT_FOUND` for a journal step id that no step has. The journal's own
 /// word is "step": an id names a step, and "entry" is the file-edit term.
 pub fn journal_step_not_found(builtin: &str, id: usize, by_step: bool) -> anyhow::Error {
