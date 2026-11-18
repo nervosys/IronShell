@@ -4106,7 +4106,35 @@ fn mapped_spelling(name: &str) -> Vec<String> {
             vec!["crypto_hash_file".to_string()]
         }
         "hmac" => vec!["crypto_hmac".to_string()],
+        // Epoch seconds to a date is from_epoch; a date to seconds is to_epoch.
+        "from_timestamp" | "epoch" | "from_unix" | "fromtimestamp" | "from_unixtime" => {
+            vec!["from_epoch".to_string()]
+        }
+        // Trimming and case: trim, upper, lower.
+        "strip" | "lstrip" | "rstrip" => vec!["trim".to_string()],
+        "upcase" | "uppercase" | "to_upper" | "toupper" => vec!["upper".to_string()],
+        "downcase" | "lowercase" | "to_lower" | "tolower" => vec!["lower".to_string()],
+        // A number in hex is to_base(n, 16); the hex of text's bytes is hex_encode.
+        "hex" | "to_hex" => vec!["to_base".to_string(), "hex_encode".to_string()],
+        // Formatting text: interpolation "${x}", format_number for digits, and
+        // pad_left / pad_right for width.
+        "sprintf" | "printf" | "format" => {
+            vec!["format_number".to_string(), "pad_left".to_string()]
+        }
+        // The bytes of a text are read through their hex: hex_encode.
+        "bytes" | "to_bytes" | "utf8_bytes" => vec!["hex_encode".to_string()],
         _ => Vec::new(),
+    }
+}
+
+/// What to say for a name from another language that IronShell has no builtin
+/// for, when there is nothing near enough to suggest.
+pub fn no_builtin_note(name: &str) -> Option<&'static str> {
+    match name {
+        "ord" | "chr" | "codepoint" | "char_code" => Some(
+            "IronShell has no ord or chr (no code point to character conversion); hex_encode(text) gives the bytes of a text as hex, and int(\"41\", 16) reads hex back as a number",
+        ),
+        _ => None,
     }
 }
 

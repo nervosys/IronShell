@@ -116,3 +116,38 @@ fn a5_ties_round_away_from_zero_and_the_docs_say_so() {
     let sig = include_str!("../src/signature.rs");
     assert!(sig.matches("unlike Python").count() >= 2);
 }
+
+// A6
+#[test]
+fn a6_other_languages_names_point_at_the_real_builtin() {
+    for (name, want) in [
+        ("from_timestamp", "from_epoch"),
+        ("epoch", "from_epoch"),
+        ("strip", "trim"),
+        ("substr", "slice"),
+        ("upcase", "upper"),
+        ("downcase", "lower"),
+        ("hex", "to_base"),
+        ("to_hex", "hex_encode"),
+        ("sprintf", "format_number"),
+        ("sprintf", "pad_left"),
+    ] {
+        let se = refusal(&format!("{name}(1)"));
+        assert!(
+            se.did_you_mean.iter().any(|n| n == want),
+            "{name}: {:?}",
+            se.did_you_mean
+        );
+    }
+    for name in ["ord", "chr"] {
+        let se = refusal(&format!("{name}(\"a\")"));
+        assert!(se.hint.contains("no ord or chr"), "{name}: {}", se.hint);
+    }
+    let se = refusal(r#"str.bytes("a")"#);
+    assert!(
+        se.did_you_mean.iter().any(|n| n == "hex_encode"),
+        "{:?}",
+        se.did_you_mean
+    );
+    assert!(!se.did_you_mean.iter().any(|n| n.contains("random")));
+}

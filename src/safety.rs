@@ -3213,6 +3213,8 @@ pub fn unknown_builtin_hinted(
 ) -> anyhow::Error {
     let hint = if let Some(specific) = specific {
         specific
+    } else if let Some(note) = crate::builtins::no_builtin_note(name) {
+        note.to_string()
     } else if candidates.is_empty() {
         "no builtin has a similar name; call ontology_manifest() to list the \
          available categories"
