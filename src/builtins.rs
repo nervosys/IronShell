@@ -26583,6 +26583,9 @@ fn rewind_record(
         let mut m = std::collections::BTreeMap::new();
         // The step's id, as journal() and session_history() name it.
         if let Some(seq) = r.seq {
+            // `id` is the name journal() gives the same number, and the one
+            // undo({id: N}) takes; `seq` stays for callers that read it.
+            m.insert("id".to_string(), Value::Int(seq as i64));
             m.insert("seq".to_string(), Value::Int(seq as i64));
         }
         let (action, what, why) = match &r.outcome {
@@ -26649,7 +26652,7 @@ fn journal_rows(entries: &[crate::journal::Entry]) -> Vec<Value> {
             m.insert("builtin".to_string(), Value::Str(e.builtin.clone()));
             m.insert("effect".to_string(), Value::Str(e.effect.clone()));
             if !e.path.is_empty() {
-                m.insert("path".to_string(), Value::Str(e.path.clone()));
+                m.insert("path".to_string(), Value::Str(e.path.replace('\\', "/")));
             }
             m.insert("reversible".to_string(), Value::Bool(e.reversible()));
             if let crate::journal::Before::Irreversible(why) = &e.before {
@@ -26783,6 +26786,26 @@ fn bi_handle_drop(args: Vec<Value>) -> Result<Value> {
     Ok(Value::Bool(crate::handles::drop_handle(&id)))
 }
 
+/// The call that narrows a handle to `v`, with `{id}` where the id goes. An
+/// Array is narrowed with `where`; a Record cannot be, so the hint names its
+/// largest Array field (`journal()` holds its rows in `entries`).
+fn handle_narrow_text(v: &Value) -> String {
+    if let Value::Record(m) = v {
+        let field = m
+            .iter()
+            .filter_map(|(k, val)| match val {
+                Value::Array(a) => Some((a.len(), k)),
+                _ => None,
+            })
+            .max_by_key(|(n, _)| *n);
+        if let Some((_, k)) = field {
+            return format!("handle(\"{{id}}\").{k} | where(...) | take(5)");
+        }
+        return "handle(\"{id}\").field reads one field of the Record".to_string();
+    }
+    "handle(\"{id}\") | where(...) | take(5)".to_string()
+}
+
 /// Render a large result as a handle: what it is, how big, a short preview, and
 /// the exact call that narrows it down.
 ///
@@ -26791,6 +26814,7 @@ fn bi_handle_drop(args: Vec<Value>) -> Result<Value> {
 /// site teaches itself at the moment it is needed, which beats requiring a
 /// discovery round-trip to learn how to avoid a discovery round-trip.
 fn render_handle(v: Value, full_bytes: usize) -> anyhow::Result<String> {
+    let narrow = handle_narrow_text(&v);
     let preview = crate::handles::preview_of(&v);
     let omitted = crate::handles::omitted(&v);
     let h = crate::handles::put(v, full_bytes)?;
@@ -26806,8 +26830,8 @@ fn render_handle(v: Value, full_bytes: usize) -> anyhow::Result<String> {
         out.push_str(&format!("\n@omitted {omitted}"));
     }
     out.push_str(&format!(
-        "\n@hint handle(\"{}\") | where(...) | take(5)  — full value kept, nothing lost",
-        h.id
+        "\n@hint {}  — full value kept, nothing lost",
+        narrow.replace("{id}", &h.id)
     ));
     Ok(out)
 }
@@ -26825,6 +26849,7 @@ pub fn handle_summary_for_agent(v: &Value) -> Option<Value> {
     if !crate::handles::worth_handling(v, full_bytes) {
         return None;
     }
+    let narrow = handle_narrow_text(v);
     let mut out = BTreeMap::new();
     match crate::handles::put(v.clone(), full_bytes) {
         Ok(h) => {
@@ -26838,8 +26863,8 @@ pub fn handle_summary_for_agent(v: &Value) -> Option<Value> {
             out.insert(
                 "hint".to_string(),
                 Value::Str(format!(
-                    "handle(\"{}\") | where(...) | take(5): the full value is kept, nothing is lost",
-                    h.id
+                    "{}: the full value is kept, nothing is lost",
+                    narrow.replace("{id}", &h.id)
                 )),
             );
         }
@@ -61648,7 +61673,7 @@ fn bi_session_history(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
             m.insert("builtin".to_string(), Value::Str(r.builtin.clone()));
             m.insert("effect".to_string(), Value::Str(r.effect.clone()));
             if !r.path.is_empty() {
-                m.insert("path".to_string(), Value::Str(r.path.clone()));
+                m.insert("path".to_string(), Value::Str(r.path.replace('\\', "/")));
             }
             Value::Record(m)
         })
@@ -86691,5 +86716,29 @@ mod ai_local_generate_chat_tests {
         extra.insert("content".to_string(), Value::Str("hi".to_string()));
         extra.insert("name".to_string(), Value::Str("x".to_string()));
         assert_eq!(refused(vec![Value::Record(extra)]), BadArg);
+    }
+}
+
+#[cfg(test)]
+mod handle_hint_tests {
+    use super::*;
+
+    #[test]
+    fn a_record_handle_is_narrowed_through_its_array_field() {
+        let mut m = BTreeMap::new();
+        m.insert("enabled".to_string(), Value::Bool(true));
+        m.insert("steps".to_string(), Value::Int(2));
+        m.insert(
+            "entries".to_string(),
+            Value::Array(vec![Value::Int(1), Value::Int(2)]),
+        );
+        assert_eq!(
+            handle_narrow_text(&Value::Record(m)),
+            "handle(\"{id}\").entries | where(...) | take(5)"
+        );
+        assert_eq!(
+            handle_narrow_text(&Value::Array(vec![])),
+            "handle(\"{id}\") | where(...) | take(5)"
+        );
     }
 }
