@@ -9594,6 +9594,10 @@ fn redact_str_counted(s: &str) -> (String, usize) {
             .replace_all(&cur, |caps: &regex::Captures| {
                 let value = &caps[2];
                 let word = value.trim_end_matches(')');
+                // A value an earlier pass already replaced is one secret, not two.
+                if word == REDACTION_MARKER {
+                    return caps[0].to_string();
+                }
                 // `token: String) -> Record` is a signature, which describes a
                 // secret without holding one. The shape cannot tell the two
                 // apart, so a value that is a signature type name is left.
