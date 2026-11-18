@@ -97,3 +97,12 @@ fn a3_date_parse_trims_and_reads_week_and_ordinal_dates() {
         assert!(try_run(src).is_err(), "{src}");
     }
 }
+
+// A4
+#[test]
+fn a4_index_of_doc_does_not_call_regex_find_a_byte_offset() {
+    let text = include_str!("../src/signature.rs");
+    assert!(!text.contains("as regex_find's start"));
+    assert_eq!(run(r#"index_of("héllo", "l")"#), Value::Int(2));
+    assert_eq!(run(r#"regex_find("héllo", "l").start"#), Value::Int(2));
+}

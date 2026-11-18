@@ -7940,7 +7940,7 @@ pub static SIGNATURES: &[Signature] = &[
         subject: Some(Ty::Str),
         params: &[req("sub", Ty::Str, "the text to look for")],
         returns: "Int",
-        doc: "The character offset (not the byte offset, as regex_find's start) of the first occurrence of sub in a String, or -1 when absent. An empty sub is found at 0. Direct index_of(text, sub) or text | index_of(sub).",
+        doc: "The character offset (not the byte offset; regex_find's start and end are character offsets too) of the first occurrence of sub in a String, or -1 when absent. An empty sub is found at 0. Direct index_of(text, sub) or text | index_of(sub).",
         examples: &[
             (r#"index_of("hello", "l")"#, "2"),
             (r#"index_of("héllo", "l")"#, "2"),
