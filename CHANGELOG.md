@@ -17,6 +17,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - A zip holding a symlink entry is refused (E_POLICY_DENY) and `archive_test` is false for it; `tar_create` and `zip_create` skip a link that leads out of the archived folder and name it on stderr.
 - `--explain` judges every `tar_create`/`zip_create` member as a path the run reads, and reports `rm` of a name ending in a separator, `.` or `..` as refused.
 - `--explain -b` judges `rm` and `rmdir` as the run does: each operand is a delete judged by the workspace jail (deny outside, approval inside), not an exec that is approved.
+- Agent-mode redaction recognises a bare `sk-` key (also `sk-proj-`, `sk-ant-`) and a PEM private key with no END line, and redacts error messages, hints and fields too; the stderr note counts each secret and is printed under `--deterministic`, for errors and for `ish -b` output. AGENTS.md says redaction is a best-effort text filter, not a security boundary.
+- A recursive delete's approval request counts the files and folders under the tree (without following links, capped at 10000) instead of reporting one file; the hint and AGENTS.md say a token approves that exact action on that exact target in every later run until removed.
+- `str.repeat`, `repeat`, `pad_left`, `pad_right` and `join` refuse a result over the 8 MB string cap before building it, as `+` does.
 
 ### Changed
 
@@ -45,6 +48,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - A brace glob (`**/*.{rs,py}`) returns one sorted list without repeats, not each alternative's matches in turn.
 - to_csv refuses a row that is not a Record anywhere in the list (it dropped later ones silently).
 - `ish -b`: rm and rmdir needing approval in agent mode exit 75, as cp does, and name rm.
+- Undoing a step that was already undone is E_BAD_STATE (not retryable), and `undo({step: n})` messages say step.
+- A command-line argument error is JSON E_BAD_ARG (exit 64) in agent or deterministic mode.
 
 ### Added
 
@@ -62,6 +67,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `journal()` rows carry `step`, the call they belong to; `undo(n)` counts calls.
 - `undo({step: n})` undoes every row of a journal step; an unknown undo option names the valid keys.
 - Agent mode says on stderr when it redacted a secret from the output; AGENTS.md documents redaction.
+- `int(text, base)` parses bases 2 to 36 (with a 0x/0b/0o prefix for 16/2/8), and `to_base(n, base)` writes them; `regex_split` takes an optional limit, as `split` does.
+- Date builtins read ISO week dates (`2024-W09-4`) and ordinal dates (`2024-060`), and trim surrounding whitespace.
 
 ### Fixed
 
@@ -90,6 +97,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Hints for `reduce(max, 0)`, `map(str)` and `map(split)` say what to write instead; the annotation type lists name Lambda.
 - `ish -b`: rm, rmdir, mkdir, touch, tee and sed -i refusals are GNU text (`rmdir: failed to remove 'src': Directory not empty`, `rm: cannot remove '../x': outside the workspace`), not JSON; an unsupported rm flag is named exactly (`--no-preserve-root`, `-I`); command not found for cp, mv and find names the ish builtin to use.
 - Hints for sum, avg, to_csv, from_yaml and sql say what is wrong; a `let` over an annotated name says let, not assign; round/floor/ceil/int errors print a large Float as 1e300; the word-call hint writes `**` whole; ls given options hints at glob.
+- `0xff` says radix literals are unsupported and names `int("ff", 16)`; `int("0x1F")` hints at the base form; `from_epoch` of milliseconds says so; an index into an empty Array says it is empty; the indexed-assignment hint covers Records with a computed key.
+- Unknown-name hints cover from_timestamp, strip, upcase, downcase, hex, sprintf and bytes; ord and chr say there is no such builtin.
+- Docs: journal()'s rows are journal().entries; `--timeout 0` means no deadline; `--explain`'s "approve" means the call needs approval; index_of no longer calls regex_find's offsets byte offsets; format_number and round state that an exact tie rounds away from zero.
 
 ## [14.0.5] - 2026-11-16
 
