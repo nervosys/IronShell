@@ -45,3 +45,13 @@ fn from_jsonl_names_the_line_and_its_start() {
         "{text}"
     );
 }
+
+#[test]
+fn a_hash_that_starts_a_yaml_value_is_a_comment() {
+    assert_eq!(
+        run("from_yaml(\"c: #only\nd: x #y\n\")"),
+        run("{c: null, d: \"x\"}")
+    );
+    assert_eq!(run("from_yaml(\"- #c\n- 1\n\")"), run("[null, 1]"));
+    assert_eq!(run("from_yaml(\"a: #note\n  b: 1\n\")"), run("{a: {b: 1}}"));
+}
