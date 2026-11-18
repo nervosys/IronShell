@@ -18991,9 +18991,13 @@ fn bi_from_jsonl(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
         }
         let j: serde_json::Value = serde_json::from_str(line).map_err(|e| {
             let (number, column) = (index + 1, e.column());
+            let shown: String = line.chars().take(40).collect();
             crate::safety::value_not_representable(
                 B,
-                format!("{B}: line {number}, column {column}: {}", json_message(&e)),
+                format!(
+                    "{B}: line {number} is not JSON: {shown}: {}",
+                    json_message(&e)
+                ),
                 &format!(
                     "fix the JSON at line {number}, column {column}: {}",
                     json_message(&e)

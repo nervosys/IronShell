@@ -33,3 +33,15 @@ fn from_yaml_and_open_report_a_parse_failure_with_one_code() {
     std::fs::remove_dir_all(&dir).ok();
     assert_eq!(got, Value::Array(vec![s("E_BAD_VALUE"), s("E_BAD_VALUE")]));
 }
+
+#[test]
+fn from_jsonl_names_the_line_and_its_start() {
+    let got = run("try { from_jsonl(\"{\\\"a\\\": 1}\n\n{nope}\n\") } catch e { e.message }");
+    let Value::Str(text) = got else {
+        panic!("not a String")
+    };
+    assert!(
+        text.starts_with("from_jsonl: line 3 is not JSON: {nope}: "),
+        "{text}"
+    );
+}
