@@ -16,6 +16,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `ish -b` runs `rm` (`-r`, `-R`, `-f`) and `rmdir` in process under the workspace jail: a link is removed, never followed, and `rm -rf jx/` can no longer delete through a junction what lies outside the workspace (a GNU `rm` on PATH did, outside agent mode). Under the jail an `rm` flag the subset lacks is refused (status 2), not handed to a PATH program; AGENTS.md says that other external programs are not confined outside agent mode.
 - A zip holding a symlink entry is refused (E_POLICY_DENY) and `archive_test` is false for it; `tar_create` and `zip_create` skip a link that leads out of the archived folder and name it on stderr.
 - `--explain` judges every `tar_create`/`zip_create` member as a path the run reads, and reports `rm` of a name ending in a separator, `.` or `..` as refused.
+- `--explain -b` judges `rm` and `rmdir` as the run does: each operand is a delete judged by the workspace jail (deny outside, approval inside), not an exec that is approved.
 
 ### Changed
 
@@ -39,6 +40,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `to_json(x, indent)` takes a Bool or an Int from 0 to 16 and refuses anything else.
 - file.replace and file.patch report `path` as written in agent mode too.
 - `glob` with an unbalanced brace is E_BAD_ARG, and a one-alternative group (`*.{rs}`) means its alternative.
+- sum, avg, math.sum and product raise E_BAD_VALUE on a Float or Int overflow, as `+` does, instead of returning inf (Float) or E_BAD_ARG (Int).
+- group_by treats a row without the field as null in every key form (name, `.field`, lambda) and merges 1 and 1.0, as count_by does; count_by and group_by raise E_UNKNOWN_FIELD when no row has the field, and E_BAD_ARG for a row that is not a Record.
+- A brace glob (`**/*.{rs,py}`) returns one sorted list without repeats, not each alternative's matches in turn.
+- to_csv refuses a row that is not a Record anywhere in the list (it dropped later ones silently).
+- `ish -b`: rm and rmdir needing approval in agent mode exit 75, as cp does, and name rm.
 
 ### Added
 
@@ -54,6 +60,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `group_by` rows carry `Key`, the key with its type, beside the text `Name`.
 - `zip_list` rows carry `path` and `kind` as `tar_list`'s do.
 - `journal()` rows carry `step`, the call they belong to; `undo(n)` counts calls.
+- `undo({step: n})` undoes every row of a journal step; an unknown undo option names the valid keys.
+- Agent mode says on stderr when it redacted a secret from the output; AGENTS.md documents redaction.
 
 ### Fixed
 
@@ -80,6 +88,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - AECON quotes a string cell that reads as a radix number (`"0x1"`).
 - `ish -b`: find names the operand it does not support (`-o`, `-exec`); an unmatched glob operand is reported in GNU words; command not found for cp, mv, xargs and unzip says they are outside the in-process subset.
 - Hints for `reduce(max, 0)`, `map(str)` and `map(split)` say what to write instead; the annotation type lists name Lambda.
+- `ish -b`: rm, rmdir, mkdir, touch, tee and sed -i refusals are GNU text (`rmdir: failed to remove 'src': Directory not empty`, `rm: cannot remove '../x': outside the workspace`), not JSON; an unsupported rm flag is named exactly (`--no-preserve-root`, `-I`); command not found for cp, mv and find names the ish builtin to use.
+- Hints for sum, avg, to_csv, from_yaml and sql say what is wrong; a `let` over an annotated name says let, not assign; round/floor/ceil/int errors print a large Float as 1e300; the word-call hint writes `**` whole; ls given options hints at glob.
 
 ## [14.0.5] - 2026-11-16
 
