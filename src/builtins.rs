@@ -25802,7 +25802,18 @@ pub fn render_agent(v: &Value, budget: Option<usize>) -> Option<String> {
     // Owned when redacted, so a handle can take it without a copy. With
     // redaction off the caller's value is borrowed and a handle copies it once.
     let v = if crate::safety::redaction_enabled() {
-        std::borrow::Cow::Owned(redact_value(v))
+        let _ = take_redacted_count();
+        let redacted = redact_value(v);
+        // Say so on stderr, so a `[REDACTED]` in the output is not mistaken for
+        // the file's own text. The output itself is unchanged.
+        let n = take_redacted_count();
+        if n > 0 {
+            eprintln!(
+                "ish: {n} secret{} redacted from the output as [REDACTED]; IRONSHELL_REDACT=off shows raw values",
+                if n == 1 { "" } else { "s" }
+            );
+        }
+        std::borrow::Cow::Owned(redacted)
     } else {
         std::borrow::Cow::Borrowed(v)
     };
@@ -25918,11 +25929,19 @@ fn undo_force(builtin: &str, args: &[Value]) -> Result<bool> {
                         ))
                     }
                     // Read by undo_id, which takes the id of one step.
-                    ("id", _) if builtin == "undo" => {}
+                    ("id" | "step", _) if builtin == "undo" => {}
                     _ => {
-                        return Err(crate::safety::arg_err(format!(
-                            "{builtin} unknown option {key}"
-                        )))
+                        let valid = if builtin == "undo" {
+                            "id, step and force"
+                        } else {
+                            "force"
+                        };
+                        return Err(crate::safety::bad_arg_with_hint(
+                            builtin,
+                            &format!("an option among {valid}"),
+                            key,
+                            &format!("{builtin} takes the options {valid}"),
+                        ));
                     }
                 }
             }
@@ -25948,6 +25967,47 @@ fn undo_id(builtin: &str, args: &[Value]) -> Result<Option<usize>> {
         let Value::Record(options) = arg else {
             continue;
         };
+        // `{step: N}` names a step as journal()'s `step` field shows it: the
+        // rows of one call share it. Any row of the step undoes the whole
+        // step, so it is turned into the id of the step's first row.
+        if builtin == "undo" {
+            if let Some(value) = options.get("step") {
+                if options.contains_key("id") {
+                    return Err(crate::safety::arg_err(
+                        "undo takes {id: n} or {step: n}, not both",
+                    ));
+                }
+                let step = match value {
+                    Value::Int(n) if *n >= 1 => *n as usize,
+                    Value::Str(s) => s
+                        .trim()
+                        .parse::<usize>()
+                        .ok()
+                        .filter(|n| *n >= 1)
+                        .ok_or_else(|| {
+                            crate::safety::bad_arg(
+                                builtin,
+                                "step: the Int step a journal row shows, from 1",
+                                &value.to_display_string(),
+                            )
+                        })?,
+                    _ => {
+                        return Err(crate::safety::bad_arg(
+                            builtin,
+                            "step: the Int step a journal row shows, from 1",
+                            &value.to_display_string(),
+                        ))
+                    }
+                };
+                let seq = crate::journal::entries()
+                    .iter()
+                    .find(|e| e.group.unwrap_or(e.seq) == step)
+                    .map(|e| e.seq)
+                    .ok_or_else(|| crate::safety::journal_step_not_found(builtin, step))?;
+                id = Some(seq);
+                continue;
+            }
+        }
         let Some(value) = options.get("id") else {
             continue;
         };
@@ -26319,6 +26379,24 @@ pub fn handle_summary_for_agent(v: &Value) -> Option<Value> {
     Some(Value::Record(out))
 }
 
+thread_local! {
+    /// How many values `redact_value` replaced on this thread since the count
+    /// was last taken, so the agent can be told that its output was scrubbed.
+    static REDACTED_COUNT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// Count one redaction when `changed`.
+fn note_redacted(changed: bool) {
+    if changed {
+        REDACTED_COUNT.with(|c| c.set(c.get() + 1));
+    }
+}
+
+/// The redactions counted since the last call, and reset the count.
+fn take_redacted_count() -> usize {
+    REDACTED_COUNT.with(|c| c.replace(0))
+}
+
 /// Recursively redact known secret shapes from a value before it is rendered to
 /// an agent. Scalar strings are shape-scrubbed (API-key prefixes, JWTs, PEM
 /// blocks, URL credentials, `key=secret` assignments) via `safety::redact_str`;
@@ -26328,11 +26406,13 @@ pub fn handle_summary_for_agent(v: &Value) -> Option<Value> {
 pub fn redact_value(v: &Value) -> Value {
     match v {
         Value::Str(s) => {
-            let (r, _) = crate::safety::redact_str(s);
+            let (r, changed) = crate::safety::redact_str(s);
+            note_redacted(changed);
             Value::Str(r)
         }
         Value::Uri(s) => {
-            let (r, _) = crate::safety::redact_str(s);
+            let (r, changed) = crate::safety::redact_str(s);
+            note_redacted(changed);
             Value::Uri(r)
         }
         Value::Array(items) => Value::Array(items.iter().map(redact_value).collect()),
@@ -26353,6 +26433,7 @@ fn redact_field_map(
     let mut out = std::collections::BTreeMap::new();
     for (k, val) in m {
         if crate::safety::is_secret_name(k) && redactable_by_name(val) {
+            note_redacted(true);
             out.insert(
                 k.clone(),
                 Value::Str(crate::safety::REDACTION_MARKER.to_string()),
@@ -33910,7 +33991,8 @@ fn has_glob_syntax(s: &str) -> bool {
 /// Expand a glob for a typed builtin: `**` is recursive, results sort by
 /// bytes, and a literal directory prefix that does not exist is E_NOT_FOUND
 /// rather than an empty answer that reads like "no files". A `{a,b}` group
-/// matches either alternative (`*.{rs,py}`); a path matched twice appears once.
+/// matches either alternative (`*.{rs,py}`); a path matched twice appears once,
+/// and the combined result is sorted by bytes, not grouped by alternative.
 fn expand_glob_for(builtin: &str, pattern: &str) -> Result<Vec<String>> {
     // `glob` reads braces strictly: an unbalanced one is a mistyped pattern,
     // not a name to look for, and a one-alternative group is the alternative.
@@ -33942,6 +34024,9 @@ fn expand_glob_for(builtin: &str, pattern: &str) -> Result<Vec<String>> {
             }
         }
     }
+    // Each alternative came back sorted on its own; sort the whole answer by
+    // bytes, as a single non-brace glob returns it, not grouped by alternative.
+    out.sort();
     Ok(out)
 }
 

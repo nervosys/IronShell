@@ -9761,7 +9761,7 @@ pub static SIGNATURES: &[Signature] = &[
             (r#"(glob("src/*.rs") | len) > 10"#, r#"true"#),
             (r#"(glob("src/**/*.rs") | len) > (glob("src/*.rs") | len)"#, r#"true"#),
             (r#"glob("Cargo.tom?")"#, r#"["Cargo.toml"]"#),
-            (r#"glob("Cargo.{toml,lock}")"#, r#"["Cargo.toml", "Cargo.lock"]"#),
+            (r#"glob("Cargo.{toml,lock}")"#, r#"["Cargo.lock", "Cargo.toml"]"#),
             (r#"glob("Cargo.{toml}")"#, r#"["Cargo.toml"]"#),
             (r#"(try { glob("**/{*.rs,*.py") } catch e { e.error.code })"#, "E_BAD_ARG"),
         ],
@@ -14462,13 +14462,15 @@ pub static SIGNATURES: &[Signature] = &[
         subject_required: false,
         aliases: &["rewind"],
         subject: None,
-        params: &[opt("steps_or_options", Ty::Any, "a bare Int n undoes the last n steps (default 1, not the step with id n); or a Record {id: Int} or {force: Bool}"), opt("options", Ty::Record, "{id: Int} undoes the one journal step with that id (a journal row's id) and leaves the others in place; {force: Bool}: put a file back even though it changed after its step (default false)")],
+        params: &[opt("steps_or_options", Ty::Any, "a bare Int n undoes the last n steps (default 1, not the step with id n); or a Record {id: Int}, {step: Int} or {force: Bool}"), opt("options", Ty::Record, "{id: Int} undoes the one journal step with that id (a journal row's id) and leaves the others in place; {step: Int} undoes every row of the step that journal()'s step field shows (the rows one call changed); {force: Bool}: put a file back even though it changed after its step (default false)")],
         returns: "Record",
-        doc: "undo(n) undoes the last n steps, and n counts calls, not journal rows: a call that changed several paths is one step, and the journal rows that share a step value (journal()'s step field) go together. To undo the step with id n, write undo({id: n}). Put back what the last steps overwrote, reporting each step (with its id, seq) and whether all of them were restored. Steps that cannot be reversed are listed, not hidden. A step whose restore fails stays in the journal and stops the undo, so it can be retried. A file changed after its step (by a hand edit, say) is not overwritten: the undo is E_BAD_STATE and names the file, unless force is set, which restores it and discards those changes. undo({id: N}) undoes the one step with journal id N and leaves the later steps in place. It is E_BAD_STATE, naming the later step, when a later step changed the same file, unless force is set; undo the later step first. Writes are recorded only in agent mode (--agent, or IRONSHELL_MODE=agent) or with IRONSHELL_JOURNAL=on; in a human session undo is refused with E_BAD_STATE, because nothing was recorded to put back.",
+        doc: "undo(n) undoes the last n steps, and n counts calls, not journal rows: a call that changed several paths is one step, and the journal rows that share a step value (journal()'s step field) go together. To undo the step with id n, write undo({id: n}); to undo every row of step n as journal() shows it in its step field, write undo({step: n}). An unknown option is E_BAD_ARG and the message lists the valid ones (id, step, force). Put back what the last steps overwrote, reporting each step (with its id, seq) and whether all of them were restored. Steps that cannot be reversed are listed, not hidden. A step whose restore fails stays in the journal and stops the undo, so it can be retried. A file changed after its step (by a hand edit, say) is not overwritten: the undo is E_BAD_STATE and names the file, unless force is set, which restores it and discards those changes. undo({id: N}) undoes the one step with journal id N and leaves the later steps in place. It is E_BAD_STATE, naming the later step, when a later step changed the same file, unless force is set; undo the later step first. Writes are recorded only in agent mode (--agent, or IRONSHELL_MODE=agent) or with IRONSHELL_JOURNAL=on; in a human session undo is refused with E_BAD_STATE, because nothing was recorded to put back.",
         examples: &[
             (r#"(try { undo("x") } catch e { e.error.code })"#, "E_BAD_ARG"),
             (r#"(try { undo(-1) } catch e { e.error.code })"#, "E_BAD_ARG"),
             (r#"(try { undo({id: 0}) } catch e { e.error.code })"#, "E_BAD_ARG"),
+            (r#"(try { undo({step: 0}) } catch e { e.error.code })"#, "E_BAD_ARG"),
+            (r#"(try { undo({bogus: 1}) } catch e { e.error.code })"#, "E_BAD_ARG"),
             (r#"typeof(undo(0))"#, "Record"),
             (r#"typeof(undo(0, {force: true}))"#, "Record"),
         ],
@@ -15796,6 +15798,19 @@ pub fn validate(name: &str, args: &[Value], input: Option<&Value>) -> anyhow::Re
         // argument is one of those arguments, so `sqrt(1, 2, 3)` may take one
         // argument, not zero: the parameter list is empty and the subject is the
         // one argument it takes.
+        // `ls('src', {recursive: true})`: ls has no options and is not recursive.
+        if name == "ls" {
+            return Err(crate::safety::bad_arg_with_hint(
+                name,
+                &format!(
+                    "at most {} argument(s): {}",
+                    sig.params.len() + params_start,
+                    sig.render()
+                ),
+                &format!("{}", args.len()),
+                "ls takes one path and is not recursive; list a tree with glob(\"src/**/*\") (add a `/` to match directories only)",
+            ));
+        }
         return Err(crate::safety::bad_arg(
             name,
             &format!(

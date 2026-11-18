@@ -37,15 +37,15 @@ fn brace_alternation_matches_either_extension() {
     let dir = scratch("ext");
     assert_eq!(
         run(&dir, r#"glob("**/*.{rs,py}")"#),
-        // Each alternative's matches in turn, as bash's brace expansion orders them.
-        r#"["a.rs","src/d.rs","b.py"]"#
+        // One sorted list across the alternatives, as a plain glob returns.
+        r#"["a.rs","b.py","src/d.rs"]"#
     );
 }
 
 #[test]
-fn brace_alternatives_come_in_order_and_are_not_repeated() {
+fn brace_alternatives_are_sorted_and_not_repeated() {
     let dir = scratch("dedup");
-    assert_eq!(run(&dir, r#"glob("{b,a}.{py,rs}")"#), r#"["b.py","a.rs"]"#);
+    assert_eq!(run(&dir, r#"glob("{b,a}.{py,rs}")"#), r#"["a.rs","b.py"]"#);
     assert_eq!(run(&dir, r#"glob("{*.rs,a.*}")"#), r#"["a.rs"]"#);
 }
 
