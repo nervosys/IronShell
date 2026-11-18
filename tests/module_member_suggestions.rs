@@ -2,11 +2,11 @@
 //! job: `file.is_file` -> `file.exists` / `fs_stat`, `hash_file` and
 //! `sha256_file` -> `crypto_hash_file`.
 
-use iron_shell::{env::Env, eval::eval_program, parser::parse_program};
+use iron_shell::{eval::eval_program, parser::parse_program};
 
 fn refusal(src: &str) -> String {
     let stmts = parse_program(src).expect("parse");
-    match eval_program(&stmts, &mut Env::new()) {
+    match eval_program(&stmts, &mut iron_shell::modules::env_with_modules()) {
         Ok(_) => panic!("expected an error for {src:?}"),
         Err(e) => format!("{e}"),
     }
