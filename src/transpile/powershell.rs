@@ -278,6 +278,23 @@ fn emit_ps_statement(
     out: &mut String,
     fb: &mut Vec<Fallback>,
 ) -> Result<()> {
+    // A binary operator with nothing after it (`$x = 1 +`) is a syntax error in
+    // PowerShell, not a construct the transpiler lacks.
+    if line.starts_with('$') && !line.ends_with("++") && !line.ends_with("--") {
+        if let Some(op) = line
+            .chars()
+            .last()
+            .filter(|c| matches!(c, '+' | '-' | '*' | '/' | '%'))
+        {
+            return Err(anyhow::Error::new(crate::parser::ParseError::with_hint(
+                format!(
+                    "powershell syntax error: missing an expression after `{op}` at line {line_no}, column {}",
+                    line.chars().count() + 1
+                ),
+                format!("write the operand that follows `{op}`"),
+            )));
+        }
+    }
     // Skip if contains complex constructs that need fallback
     if contains_complex_construct(line) || script_block_cmdlet(line).is_some() {
         out.push_str(&render_fallback_pwsh(line));
