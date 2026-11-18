@@ -9082,10 +9082,12 @@ lazy_static! {
     /// replaced wholesale. Ordered alternation; each branch is anchored on a
     /// distinctive prefix/structure so it can't fire on ordinary prose.
     static ref SECRET_TOKEN_RE: regex::Regex = regex::Regex::new(concat!(
-        r"-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----",
+        // A block with no END line (a slice that cut it off) is redacted to the
+        // end of the text.
+        r"-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?(?:-----END [A-Z ]*PRIVATE KEY-----|\z)",
         r"|eyJ[A-Za-z0-9_-]{10,}\.eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}", // JWT
         r"|AKIA[0-9A-Z]{16}",                                                 // AWS access key id
-        r"|sk-(?:ant-)?[A-Za-z0-9_-]{16,}",                                   // OpenAI / Anthropic
+        r"|\bsk-[A-Za-z0-9_-]{12,}",                  // OpenAI / Anthropic (sk-, sk-proj-, sk-ant-)
         r"|gh[pousr]_[A-Za-z0-9]{20,}",                                       // GitHub PAT/OAuth
         r"|xox[baprs]-[A-Za-z0-9-]{10,}",                                     // Slack
         r"|AIza[0-9A-Za-z_-]{20,}",                                           // Google API key
@@ -9286,22 +9288,60 @@ pub fn clipboard_read_gate(builtin: &str) -> anyhow::Result<()> {
 /// whether anything changed. Deterministic; each pass only ever *replaces* a
 /// secret with [`REDACTION_MARKER`], never inflates non-secret text.
 pub fn redact_str(s: &str) -> (String, bool) {
+    let (cur, n) = redact_str_counted(s);
+    add_redactions(n);
+    (cur, n > 0)
+}
+
+thread_local! {
+    /// Secrets replaced on this thread since the count was last taken.
+    static REDACTION_TOTAL: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// Add `n` replaced secrets to this thread's count.
+pub fn add_redactions(n: usize) {
+    if n > 0 {
+        REDACTION_TOTAL.with(|c| c.set(c.get() + n));
+    }
+}
+
+/// The secrets replaced on this thread since the last call, and reset the count.
+pub fn take_redaction_count() -> usize {
+    REDACTION_TOTAL.with(|c| c.replace(0))
+}
+
+/// Say on stderr how many secrets were replaced since the count was last taken
+/// (nothing when none), so a `[REDACTED]` is not mistaken for the text's own.
+pub fn note_redactions_on_stderr() {
+    let n = take_redaction_count();
+    if n > 0 {
+        eprintln!(
+            "ish: {n} secret{} redacted from the output as [REDACTED]; IRONSHELL_REDACT=off shows raw values",
+            if n == 1 { "" } else { "s" }
+        );
+    }
+}
+
+/// [`redact_str`] that reports how many secrets it replaced, not whether any.
+fn redact_str_counted(s: &str) -> (String, usize) {
     let mut cur = s.to_string();
-    let mut changed = false;
-    if SECRET_TOKEN_RE.is_match(&cur) {
+    let mut count = 0usize;
+    let hits = SECRET_TOKEN_RE.find_iter(&cur).count();
+    if hits > 0 {
         cur = SECRET_TOKEN_RE
             .replace_all(&cur, REDACTION_MARKER)
             .into_owned();
-        changed = true;
+        count += hits;
     }
-    if URL_CRED_RE.is_match(&cur) {
+    let hits = URL_CRED_RE.find_iter(&cur).count();
+    if hits > 0 {
         cur = URL_CRED_RE
             .replace_all(&cur, concat!("${1}", "[REDACTED]", "${3}"))
             .into_owned();
-        changed = true;
+        count += hits;
     }
     if SECRET_ASSIGN_RE.is_match(&cur) {
-        let mut replaced = false;
+        let mut replaced = 0usize;
         cur = SECRET_ASSIGN_RE
             .replace_all(&cur, |caps: &regex::Captures| {
                 let value = &caps[2];
@@ -9323,20 +9363,21 @@ pub fn redact_str(s: &str) -> (String, bool) {
                 if names_secret_variable(word) {
                     return caps[0].to_string();
                 }
-                replaced = true;
+                replaced += 1;
                 // The pattern swallows a closing paren after the value; put it back.
                 format!("{}[REDACTED]{}", &caps[1], &value[word.len()..])
             })
             .into_owned();
-        changed |= replaced;
+        count += replaced;
     }
-    if URL_QUERY_SECRET_RE.is_match(&cur) {
+    let hits = URL_QUERY_SECRET_RE.find_iter(&cur).count();
+    if hits > 0 {
         cur = URL_QUERY_SECRET_RE
             .replace_all(&cur, concat!("${1}", "[REDACTED]"))
             .into_owned();
-        changed = true;
+        count += hits;
     }
-    (cur, changed)
+    (cur, count)
 }
 
 /// Whether `word` is the name of a variable that holds a secret (`GITHUB_TOKEN`,

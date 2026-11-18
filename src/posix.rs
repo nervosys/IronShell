@@ -4200,7 +4200,10 @@ fn redacted(bytes: &[u8]) -> std::borrow::Cow<'_, [u8]> {
     let Ok(text) = std::str::from_utf8(bytes) else {
         return std::borrow::Cow::Borrowed(bytes);
     };
+    let _ = crate::safety::take_redaction_count();
     let (out, _) = crate::safety::redact_str(text);
+    // The utility's output is printed as it runs, so the note is too.
+    crate::safety::note_redactions_on_stderr();
     if out == text {
         std::borrow::Cow::Borrowed(bytes)
     } else {

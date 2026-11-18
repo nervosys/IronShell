@@ -285,7 +285,10 @@ pub fn run_one_as(env: &mut Env, code: &str, surface: crate::record::Surface) ->
                 let v = if crate::safety::current_mode() == crate::safety::Mode::Agent
                     && crate::safety::redaction_enabled()
                 {
-                    crate::builtins::redact_value(&v)
+                    let _ = crate::safety::take_redaction_count();
+                    let redacted = crate::builtins::redact_value(&v);
+                    crate::safety::note_redactions_on_stderr();
+                    redacted
                 } else {
                     v
                 };
@@ -373,6 +376,16 @@ fn print_eval_error(e: &anyhow::Error, color: bool, line: Option<usize>, note: O
     if current_mode() == Mode::Agent || crate::agent_api::deterministic_mode() {
         // Structured form is what an agent reads — emit it verbatim, with the
         // line of the failing statement in the error object.
+        // A message, hint or `got` echoes the values of the failed call, so the
+        // text is scrubbed as the output of a successful call is, and counted.
+        let _ = crate::safety::take_redaction_count();
+        let scrub = |s: String| {
+            if crate::safety::redaction_enabled() {
+                crate::safety::redact_str(&s).0
+            } else {
+                s
+            }
+        };
         match (e.downcast_ref::<SafetyError>(), line) {
             (Some(se), Some(n)) => {
                 let mut json = se.to_json();
@@ -382,10 +395,14 @@ fn print_eval_error(e: &anyhow::Error, color: bool, line: Option<usize>, note: O
                 eprintln!("{json}");
             }
             (_, Some(n)) => match &note {
-                Some(t) => eprintln!("{e} (at line {n} {t})"),
-                None => eprintln!("{e} (at line {n})"),
+                Some(t) => eprintln!("{}", scrub(format!("{e} (at line {n} {t})"))),
+                None => eprintln!("{}", scrub(format!("{e} (at line {n})"))),
             },
-            (_, None) => eprintln!("{e}"),
+            (Some(se), None) => eprintln!("{}", se.to_json()),
+            (None, None) => eprintln!("{}", scrub(format!("{e}"))),
+        }
+        if crate::safety::redaction_enabled() {
+            crate::safety::note_redactions_on_stderr();
         }
         return;
     }
