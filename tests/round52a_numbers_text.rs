@@ -151,3 +151,17 @@ fn a6_other_languages_names_point_at_the_real_builtin() {
     );
     assert!(!se.did_you_mean.iter().any(|n| n.contains("random")));
 }
+
+// A7
+#[test]
+fn a7_from_epoch_in_milliseconds_says_so() {
+    let se = refusal("from_epoch(1709164800000)");
+    assert!(se.hint.contains("milliseconds"), "{}", se.hint);
+    assert!(se.hint.contains("from_epoch(n / 1000)"), "{}", se.hint);
+    assert_eq!(
+        run("from_epoch(1709164800000 / 1000)"),
+        s("2024-02-29T00:00:00Z")
+    );
+    let se = refusal("from_epoch(99999999999999999)");
+    assert!(!se.hint.contains("milliseconds"), "{}", se.hint);
+}

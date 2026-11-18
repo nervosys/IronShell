@@ -33064,8 +33064,23 @@ fn epoch_range(builtin: &str, shown: &str) -> anyhow::Error {
     crate::safety::value_not_representable(
         builtin,
         format!("{builtin}: {shown} is outside the years 0001 to 9999"),
-        "epoch seconds run from -62135596800 (0001-01-01T00:00:00Z) to 253402300799 (9999-12-31T23:59:59Z)",
+        &epoch_range_hint(builtin, shown),
     )
+}
+
+/// The hint for an epoch second out of range: a value that is in range once
+/// divided by 1000 is milliseconds, which is what most clocks give.
+fn epoch_range_hint(builtin: &str, shown: &str) -> String {
+    let base = "epoch seconds run from -62135596800 (0001-01-01T00:00:00Z) to 253402300799 (9999-12-31T23:59:59Z)";
+    let looks_like_millis = builtin == "from_epoch"
+        && shown.parse::<f64>().is_ok_and(|n| {
+            n.is_finite() && n / 1000.0 >= EPOCH_MIN as f64 && n / 1000.0 < (EPOCH_MAX + 1) as f64
+        });
+    if looks_like_millis {
+        format!("this looks like milliseconds; use from_epoch(n / 1000); {base}")
+    } else {
+        base.to_string()
+    }
 }
 
 /// from_epoch(seconds) - The UTC ISO 8601 text of an instant, given as seconds
