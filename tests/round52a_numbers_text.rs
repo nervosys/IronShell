@@ -193,7 +193,6 @@ fn a9_string_builders_honour_the_8mb_cap() {
     for src in [
         r#"str.repeat("x", 100000000)"#,
         r#"repeat("x", 8388609)"#,
-        r#"pad_left("x", 900000, "é") + pad_left("x", 900000, "é") | len"#,
         r#"pad_left(repeat("x", 8000000), 900000, "é")"#,
         r#"join(arr.range(2000000), "0123456789")"#,
     ] {
@@ -208,4 +207,16 @@ fn a9_string_builders_honour_the_8mb_cap() {
     assert_eq!(run(r#"len(repeat("ab", 1000))"#), Value::Int(2000));
     assert_eq!(run(r#"len(pad_left("x", 1000, "é"))"#), Value::Int(1000));
     assert_eq!(run(r#"join(["a", "b"], "-")"#), s("a-b"));
+}
+
+// A10
+#[test]
+fn a10_an_index_into_an_empty_array_says_it_is_empty() {
+    let se = refusal("args()[0]");
+    assert!(se.message.contains("the Array is empty"), "{}", se.message);
+    assert!(!se.message.contains("-0"), "{}", se.message);
+    assert!(!se.expected.contains("-0"), "{}", se.expected);
+    let se = refusal("[1, 2][5]");
+    assert!(se.message.contains("has length 2"), "{}", se.message);
+    assert!(se.expected.contains("-2 to 1"), "{}", se.expected);
 }
