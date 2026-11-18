@@ -3737,6 +3737,46 @@ impl ApprovalDescriptor {
     }
 }
 
+/// The environment changes this process made with `set_env`, `env_set` and
+/// `env_unset`, by name: `Some(value)` for a set, `None` for an unset.
+static ENV_CHANGES: Mutex<std::collections::BTreeMap<String, Option<String>>> =
+    Mutex::new(std::collections::BTreeMap::new());
+
+/// Record an environment change made by a builtin, so the approval of a command
+/// run afterwards is bound to it (see [`bind_exec_context`]).
+pub fn note_env_change(name: &str, value: Option<&str>) {
+    let mut changes = ENV_CHANGES.lock().unwrap_or_else(|e| e.into_inner());
+    changes.insert(name.to_string(), value.map(str::to_string));
+}
+
+/// Add to an exec approval's blast radius the environment changes this process
+/// made with `set_env` (`env_changes`, sorted by name), so an approval given
+/// before the change does not approve the command after it. Nothing is added
+/// when there is no change, so the token of a command that follows no
+/// `set_env` is as it was.
+fn bind_exec_context(radius: &mut Json) {
+    let env: Vec<Json> = ENV_CHANGES
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .iter()
+        .map(|(k, v)| json!([k, v]))
+        .collect();
+    if env.is_empty() {
+        return;
+    }
+    if !radius.is_object() {
+        let old = std::mem::take(radius);
+        *radius = if old.is_null() {
+            json!({})
+        } else {
+            json!({ "detail": old })
+        };
+    }
+    if let Some(map) = radius.as_object_mut() {
+        map.insert("env_changes".to_string(), Json::Array(env));
+    }
+}
+
 /// A safety refusal/failure carrying a stable code and an actionable hint.
 /// Implements [`std::error::Error`] so it threads through `anyhow`/`?`.
 #[derive(Debug, Clone)]
@@ -8675,11 +8715,19 @@ pub fn guard(ctx: GuardCtx) -> Result<(), SafetyError> {
             })
         }
         Decision::Approve => {
+            // A command's approval also binds what it will run on: the bytes of
+            // each workspace file it names, and the environment this process
+            // changed, so rewriting a script or a `set_env` after the approval
+            // needs a new one.
+            let mut blast_radius = ctx.blast_radius.clone();
+            if ctx.effect == Effect::Exec {
+                bind_exec_context(&mut blast_radius);
+            }
             let descriptor = ApprovalDescriptor::new(
                 ctx.what,
                 ctx.builtin,
                 ctx.targets.clone(),
-                ctx.blast_radius.clone(),
+                blast_radius,
                 ctx.reversible,
             )
             .map_err(|e| ic_refusal(ctx.builtin, e))?;
@@ -8701,7 +8749,12 @@ pub fn guard(ctx: GuardCtx) -> Result<(), SafetyError> {
                     json!({ "token": descriptor.token }),
                 );
                 let token = descriptor.token.clone();
-                let hint = approval_refusal_hint(&token, ctx.effect == Effect::Network);
+                let mut hint = approval_refusal_hint(&token, ctx.effect == Effect::Network);
+                if ctx.effect == Effect::Exec {
+                    hint.push_str(
+                        "; the token also binds the environment set_env changed, so changing the environment after an approval needs a new one",
+                    );
+                }
                 Err(SafetyError {
                     code: ErrorCode::NeedsApproval,
                     message: format!("{}: requires approval ({})", ctx.builtin, ctx.what),
@@ -9349,6 +9402,28 @@ pub(crate) fn env_name_steers_children(name: &str) -> bool {
         "GNUPGHOME",
         "MANPAGER",
         "GIT",
+        // Names an approved program reads to load code or change what it does:
+        // PowerShell's module path made an approved `pwsh -Command Get-Evil`
+        // load a module the agent had written.
+        "PSMODULEPATH",
+        "PSEXECUTIONPOLICYPREFERENCE",
+        "PERLLIB",
+        "GEM_HOME",
+        "GEM_PATH",
+        "JAVA_TOOL_OPTIONS",
+        "_JAVA_OPTIONS",
+        "JDK_JAVA_OPTIONS",
+        "CLASSPATH",
+        "PROMPT_COMMAND",
+        "CC",
+        "CXX",
+        "MAKEFLAGS",
+        "RUSTFLAGS",
+        "CURL_CA_BUNDLE",
+        "TEMP",
+        "TMP",
+        "TMPDIR",
+        "AETHER_SESSION_DIR",
     ];
     const PREFIXES: &[&str] = &[
         "IRONSHELL_",
@@ -9361,6 +9436,10 @@ pub(crate) fn env_name_steers_children(name: &str) -> bool {
         "RUSTC_",
         "NPM_CONFIG_",
         "PIP_",
+        "POWERSHELL_",
+        "BUNDLE_",
+        "PYTHON",
+        "UV_",
     ];
     const SUFFIXES: &[&str] = &[
         "_PROXY",

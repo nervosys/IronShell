@@ -19465,6 +19465,7 @@ fn bi_set_env(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
     let key = env_name(B, &args[0])?;
     refuse_gate_env(B, &key)?;
     let value = env_value(B, &args[1])?;
+    crate::safety::note_env_change(&key, Some(&value));
     std::env::set_var(key, value);
     Ok(Value::Null)
 }
@@ -62172,6 +62173,7 @@ fn bi_env_set(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
     let name = env_name(B, &args[0])?;
     refuse_gate_env(B, &name)?;
     let value = env_value(B, &args[1])?;
+    crate::safety::note_env_change(&name, Some(&value));
     std::env::set_var(&name, &value);
     Ok(Value::Bool(true))
 }
@@ -62183,6 +62185,7 @@ fn bi_env_unset(args: Vec<Value>, _input: Option<Value>) -> Result<Value> {
         .ok_or_else(|| crate::safety::arg_err("variable name required"))?;
     let name = env_name(B, raw)?;
     refuse_gate_env(B, &name)?;
+    crate::safety::note_env_change(&name, None);
     std::env::remove_var(&name);
     Ok(Value::Bool(true))
 }
