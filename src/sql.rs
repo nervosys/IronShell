@@ -581,6 +581,14 @@ fn run(
                 },
             )
         } else if text.contains("interrupted") {
+            // The run's own deadline stopped it before the query's budget did.
+            if started.elapsed() <= QUERY_BUDGET && crate::safety::deadline_passed() {
+                return crate::safety::budget_exceeded(
+                    builtin,
+                    "the query was stopped because the run's --timeout expired".to_string(),
+                    "narrow the query, or give the run a longer --timeout SECONDS",
+                );
+            }
             return crate::safety::budget_exceeded(
                 builtin,
                 format!("the query ran past its {}s budget", QUERY_BUDGET.as_secs()),
