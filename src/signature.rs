@@ -9787,7 +9787,7 @@ pub static SIGNATURES: &[Signature] = &[
         subject: Some(Ty::Str),
         params: &[],
         returns: "Record",
-        doc: "Whether a path exists, and whether it is a file or a directory. A path that cannot be checked is an error, not absent.",
+        doc: "A Record {exists, is_dir, is_file, path}, not a Bool (write file_exists(p).exists in a condition): whether a path exists, and whether it is a file or a directory. A path that cannot be checked is an error, not absent.",
         examples: &[
             (r#"file_exists("Cargo.toml").exists"#, r#"true"#),
             (r#"(file_exists("Cargo.toml")).is_file"#, r#"true"#),
