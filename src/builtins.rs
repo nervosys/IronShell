@@ -18405,6 +18405,34 @@ fn expand_week_or_ordinal(builtin: &str, text: &str) -> Result<Option<String>> {
     use chrono::Datelike as _;
     let b = text.as_bytes();
     let digits = |s: &[u8]| s.iter().all(u8::is_ascii_digit);
+    // A week without its weekday (`2024-W09`) and the basic week form
+    // (`2024W093`) are named for what they are, not blamed on zero padding.
+    if text.is_ascii() && b.len() >= 7 && digits(&b[0..4]) {
+        let end_or_time = |at: usize| text.len() == at || matches!(b[at], b'T' | b't' | b' ');
+        let week_only =
+            b.len() >= 8 && b[4] == b'-' && b[5] == b'W' && digits(&b[6..8]) && end_or_time(8);
+        let basic_week = b[4] == b'W' && digits(&b[5..7]);
+        if week_only {
+            return Err(crate::safety::bad_arg_in(
+                builtin,
+                format!(
+                    "{builtin}: {text:?} is an ISO week without a weekday: write {}-W{}-1 (Monday) .. {}-W{}-7 (Sunday)",
+                    &text[0..4],
+                    &text[6..8],
+                    &text[0..4],
+                    &text[6..8]
+                ),
+                "accepted forms: 2024-02-29, 20240229, 2024-W09-4 (week date, weekday 1-7), 2024-060 (ordinal), each optionally followed by T13:05[:09][Z|+05:30]",
+            ));
+        }
+        if basic_week {
+            return Err(crate::safety::bad_arg_in(
+                builtin,
+                format!("{builtin}: {text:?} is the basic ISO week form, which is not read"),
+                "accepted forms: 2024-02-29, 20240229, 2024-W09-4 (week date, weekday 1-7), 2024-060 (ordinal), each optionally followed by T13:05[:09][Z|+05:30]",
+            ));
+        }
+    }
     if !text.is_ascii() || b.len() < 8 || !digits(&b[0..4]) || b[4] != b'-' {
         return Ok(None);
     }
