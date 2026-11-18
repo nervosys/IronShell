@@ -56020,6 +56020,15 @@ fn bi_db_json_to_sqlite(args: Vec<Value>, _input: Option<Value>) -> Result<Value
         Some(Value::Str(s)) => s.clone(),
         _ => "imported".to_string(),
     };
+    // The second argument is the path of a JSON file. JSON text was read as a
+    // path, failed as E_IO and echoed the whole payload back in the message.
+    if matches!(json_path.trim_start().chars().next(), Some('[' | '{')) {
+        return Err(crate::safety::bad_arg_in(
+            "db_json_to_sqlite",
+            "db_json_to_sqlite: takes a file path, not JSON text",
+            "write the JSON to a file (file.write) and pass its path, as db_json_to_sqlite(db, \"rows.json\", table)",
+        ));
+    }
 
     // Read JSON
     let content = read_text_capped("db_json_to_sqlite", &json_path)?;

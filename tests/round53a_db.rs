@@ -50,3 +50,29 @@ fn the_csv_import_doc_says_what_an_empty_cell_becomes() {
     assert!(sig.doc.contains("text column"), "{}", sig.doc);
     assert!(!sig.doc.contains("An empty cell is NULL."), "{}", sig.doc);
 }
+
+#[test]
+fn db_json_to_sqlite_refuses_json_text_without_echoing_it() {
+    let payload = "x".repeat(500);
+    let src = format!(
+        "try {{ db_json_to_sqlite(\"unused.db\", \"[{{\\\"a\\\": \\\"{payload}\\\"}}]\") }} catch e {{ [e.code, e.message] }}"
+    );
+    let Value::Array(parts) = run(&src) else {
+        panic!("not an Array")
+    };
+    assert_eq!(parts[0], Value::Str("E_BAD_ARG".into()));
+    let Value::Str(message) = &parts[1] else {
+        panic!("not a String")
+    };
+    assert!(
+        message.contains("takes a file path, not JSON text"),
+        "{message}"
+    );
+    assert!(message.len() < 200, "{}", message.len());
+}
+
+#[test]
+fn the_json_import_doc_says_it_takes_a_path() {
+    let sig = iron_shell::signature::signature_of("db_json_to_sqlite").expect("declared");
+    assert!(sig.doc.contains("not JSON text"), "{}", sig.doc);
+}

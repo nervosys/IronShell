@@ -2082,11 +2082,11 @@ pub static SIGNATURES: &[Signature] = &[
                 Ty::Str,
                 "database to write — NOTE: the database comes first",
             ),
-            req("json", Ty::Str, "JSON file to import"),
+            req("json", Ty::Str, "path of the JSON file to import (not JSON text)"),
             opt("table", Ty::Str, "table name; defaults to \"imported\" (sql() names a file's table after the file stem instead)"),
         ],
         returns: "Bool",
-        doc: "Import a JSON array of objects into a SQLite table named by the table argument (default \"imported\"; unlike sql(), which names a file's table after the file stem). The columns are the union of the rows' keys in first-seen order, and a row without a key stores NULL. Each column is typed as sql() reads the same file: INTEGER for integers and Booleans (1 and 0), REAL when a number has a fraction, TEXT otherwise, so ORDER BY id sorts numbers as numbers. An empty array imports nothing and returns false. Refused before anything is written: invalid JSON, and anything but an array of objects. A nested array or object is stored as JSON text. Any non-empty key is accepted and quoted for you; a control character in a name is refused. Rows go in one at a time, so a failure partway keeps the earlier rows.",
+        doc: "Import the JSON array of objects held in a file (give its path, not JSON text) into a SQLite table named by the table argument (default \"imported\"; unlike sql(), which names a file's table after the file stem). The columns are the union of the rows' keys in first-seen order, and a row without a key stores NULL. Each column is typed as sql() reads the same file: INTEGER for integers and Booleans (1 and 0), REAL when a number has a fraction, TEXT otherwise, so ORDER BY id sorts numbers as numbers. An empty array imports nothing and returns false. Refused before anything is written: invalid JSON, and anything but an array of objects. A nested array or object is stored as JSON text. Any non-empty key is accepted and quoted for you; a control character in a name is refused. Rows go in one at a time, so a failure partway keeps the earlier rows.",
         examples: &[(
             r#"db_json_to_sqlite("issues.db", "issues.json", "issues")"#,
             "true",
