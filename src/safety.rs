@@ -3749,19 +3749,67 @@ pub fn note_env_change(name: &str, value: Option<&str>) {
     changes.insert(name.to_string(), value.map(str::to_string));
 }
 
-/// Add to an exec approval's blast radius the environment changes this process
-/// made with `set_env` (`env_changes`, sorted by name), so an approval given
-/// before the change does not approve the command after it. Nothing is added
-/// when there is no change, so the token of a command that follows no
-/// `set_env` is as it was.
+/// Hex of the first 8 bytes of the SHA-256 of a file's bytes, read in chunks.
+fn file_hash16(path: &str) -> Option<String> {
+    use std::io::Read as _;
+    let mut file = std::fs::File::open(path).ok()?;
+    let mut hasher = Sha256::new();
+    let mut buf = vec![0u8; 64 * 1024];
+    loop {
+        let n = file.read(&mut buf).ok()?;
+        if n == 0 {
+            break;
+        }
+        hasher.update(&buf[..n]);
+    }
+    let digest = hasher.finalize().ok()?;
+    Some(hex(&digest)[..16].to_string())
+}
+
+/// Add to an exec approval's blast radius what the command will run on: a
+/// content hash of each operand that names an existing regular file inside the
+/// workspace (`operand_hashes`), and the environment changes this process made
+/// (`env_changes`, sorted). Nothing is added when there is neither, so the
+/// token of a command that names no file and follows no `set_env` is as it was.
 fn bind_exec_context(radius: &mut Json) {
+    let mut operands: Vec<String> = Vec::new();
+    let mut take = |v: &Json| {
+        if let Some(s) = v.as_str() {
+            operands.push(s.to_string());
+        }
+    };
+    if let Some(p) = radius.get("program") {
+        take(p);
+    }
+    if let Some(args) = radius.get("args").and_then(Json::as_array) {
+        args.iter().for_each(&mut take);
+    }
+    if let Some(command) = radius.get("command").and_then(Json::as_str) {
+        for word in command.split_whitespace() {
+            operands.push(word.trim_matches(['\x27', '"']).to_string());
+        }
+    }
+    let mut hashes = serde_json::Map::new();
+    for operand in operands.into_iter().take(64) {
+        if operand.is_empty() || operand.starts_with('-') || hashes.contains_key(&operand) {
+            continue;
+        }
+        if names_a_remote_share(&operand) || !std::path::Path::new(&operand).is_file() {
+            continue;
+        }
+        if !within_workspace(&operand) {
+            continue;
+        }
+        let hash = file_hash16(&operand).unwrap_or_else(|| "unreadable".to_string());
+        hashes.insert(operand, Json::String(hash));
+    }
     let env: Vec<Json> = ENV_CHANGES
         .lock()
         .unwrap_or_else(|e| e.into_inner())
         .iter()
         .map(|(k, v)| json!([k, v]))
         .collect();
-    if env.is_empty() {
+    if hashes.is_empty() && env.is_empty() {
         return;
     }
     if !radius.is_object() {
@@ -3773,7 +3821,12 @@ fn bind_exec_context(radius: &mut Json) {
         };
     }
     if let Some(map) = radius.as_object_mut() {
-        map.insert("env_changes".to_string(), Json::Array(env));
+        if !hashes.is_empty() {
+            map.insert("operand_hashes".to_string(), Json::Object(hashes));
+        }
+        if !env.is_empty() {
+            map.insert("env_changes".to_string(), Json::Array(env));
+        }
     }
 }
 
@@ -8752,7 +8805,7 @@ pub fn guard(ctx: GuardCtx) -> Result<(), SafetyError> {
                 let mut hint = approval_refusal_hint(&token, ctx.effect == Effect::Network);
                 if ctx.effect == Effect::Exec {
                     hint.push_str(
-                        "; the token also binds the environment set_env changed, so changing the environment after an approval needs a new one",
+                        "; the token also binds the contents of workspace files the command names and the environment set_env changed, so editing a script or changing the environment needs a new approval",
                     );
                 }
                 Err(SafetyError {
