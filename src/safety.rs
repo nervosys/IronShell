@@ -9685,6 +9685,14 @@ pub fn check_deadline() -> anyhow::Result<()> {
     if !n.is_multiple_of(DEADLINE_CHECK_INTERVAL) {
         return Ok(());
     }
+    check_deadline_now()
+}
+
+/// [`check_deadline`] without the amortisation: the clock is read on every call.
+/// For the per-entry loops of a builtin that can run long on its own (archive
+/// extraction and creation, glob and directory walks), where one evaluator step
+/// covers the whole loop and the sampled check would never fire.
+pub fn check_deadline_now() -> anyhow::Result<()> {
     DEADLINE.with(|d| match d.get() {
         Some(at) if std::time::Instant::now() >= at => Err(budget_exceeded(
             "eval",
@@ -9696,6 +9704,11 @@ pub fn check_deadline() -> anyhow::Result<()> {
         )),
         _ => Ok(()),
     })
+}
+
+/// Whether this thread's evaluation deadline has passed (false when none is set).
+pub fn deadline_passed() -> bool {
+    DEADLINE.with(|d| d.get().is_some_and(|at| std::time::Instant::now() >= at))
 }
 
 // ============================================================================

@@ -9728,6 +9728,8 @@ fn check_walk_room(builtin: &str, len: usize, max: usize) -> Result<()> {
 
 /// Adds `v` to a walk's output, or refuses once the output is at the cap.
 fn push_capped(builtin: &str, out: &mut Vec<Value>, v: Value, max: usize) -> Result<()> {
+    // Every walk adds its entries here, so this is where `--timeout` reaches it.
+    crate::safety::check_deadline_now()?;
     check_walk_room(builtin, out.len(), max)?;
     out.push(v);
     Ok(())
@@ -34473,6 +34475,8 @@ fn expand_glob_one(builtin: &str, pattern: &str) -> Result<Vec<String>> {
     // and is refused, not built in full and counted afterwards.
     let (paths, over) = crate::posix::glob_paths_capped(&pattern, WALK_MAX_ENTRIES);
     if over {
+        // A walk the deadline cut short is the deadline's error, not a count.
+        crate::safety::check_deadline_now()?;
         return Err(walk_over(builtin, WALK_MAX_ENTRIES));
     }
     // A pattern ending in `/` matches directories only, as Python's glob does;
@@ -40633,6 +40637,7 @@ fn zip_add_tree(
     entry_name: &str,
     st: &mut ZipBuild,
 ) -> Result<()> {
+    crate::safety::check_deadline_now()?;
     let shown = fs_path.to_string_lossy().into_owned();
     let meta =
         std::fs::metadata(fs_path).map_err(|e| crate::safety::fs_error(builtin, &shown, &e))?;
@@ -41372,6 +41377,7 @@ fn zip_archive_entries(
     let mut out = Vec::with_capacity(zip.len());
     let mut declared: u64 = 0;
     for i in 0..zip.len() {
+        crate::safety::check_deadline_now()?;
         let mut entry = zip
             .by_index(i)
             .map_err(|e| archive_read_error(builtin, "zip", &format!("unreadable entry: {e}")))?;
@@ -41650,6 +41656,7 @@ fn read_tar_entries<R: std::io::Read>(
     let mut out = Vec::new();
     let mut declared: u64 = 0;
     for entry in entries {
+        crate::safety::check_deadline_now()?;
         if out.len() >= WALK_MAX_ENTRIES {
             return Err(walk_over(builtin, WALK_MAX_ENTRIES));
         }
@@ -41773,6 +41780,7 @@ fn zip_extract_in_process(archive: &str, dest: &str) -> Result<()> {
     let mut links: usize = 0;
     let mut total: u64 = 0;
     for i in 0..zip.len() {
+        crate::safety::check_deadline_now()?;
         let mut entry = zip
             .by_index(i)
             .map_err(|e| zip_not_an_archive(B, archive, e))?;
@@ -42378,6 +42386,7 @@ fn tar_extract_in_process(archive: &str, root: &str) -> Result<bool> {
     let mut extracted: usize = 0;
     let mut skipped_links: usize = 0;
     for entry in entries {
+        crate::safety::check_deadline_now()?;
         let mut entry =
             entry.map_err(|e| archive_read_error(B, "tar", &format!("unreadable entry: {e}")))?;
         count += 1;

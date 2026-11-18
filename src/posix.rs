@@ -4043,6 +4043,11 @@ fn descendant_dirs(dir: &str, out: &mut Gather) {
         if out.over {
             return;
         }
+        // A walk over a large tree answers to the evaluation deadline.
+        if crate::safety::deadline_passed() {
+            out.over = true;
+            return;
+        }
         let p = if dir.is_empty() {
             n
         } else if dir.ends_with('/') {
@@ -4128,6 +4133,9 @@ fn expand_pattern(
         for base in &bases {
             if next.over {
                 break;
+            }
+            if crate::safety::deadline_passed() {
+                return (Vec::new(), true);
             }
             let join = |name: &str| {
                 if base.is_empty() {
