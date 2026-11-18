@@ -67,7 +67,10 @@ fn a2_radix_literals_say_so() {
         let err = iron_shell::parser::parse_program(src).expect_err(src);
         let msg = err.to_string();
         assert!(msg.contains(word), "{src}: {msg}");
-        assert!(msg.contains(&format!("int(\"ff\", {base})")), "{src}: {msg}");
+        assert!(
+            msg.contains(&format!("int(\"ff\", {base})")),
+            "{src}: {msg}"
+        );
     }
     let err = iron_shell::parser::parse_program("1x").expect_err("1x");
     assert!(err.to_string().contains("valid exponent"));
@@ -85,7 +88,10 @@ fn a3_date_parse_trims_and_reads_week_and_ordinal_dates() {
     ] {
         assert_eq!(run(src), s("2024-02-29"), "{src}");
     }
-    assert_eq!(run(r#"date_parse("2024-060T10:00:00Z")"#), s("2024-02-29T10:00:00Z"));
+    assert_eq!(
+        run(r#"date_parse("2024-060T10:00:00Z")"#),
+        s("2024-02-29T10:00:00Z")
+    );
     assert_eq!(run(r#"date_parse("2024-W01-1")"#), s("2024-01-01"));
     assert_eq!(run(r#"date_parse("2020-W53-7")"#), s("2021-01-03"));
     for src in [
