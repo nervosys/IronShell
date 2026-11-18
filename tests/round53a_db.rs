@@ -42,3 +42,11 @@ fn db_sqlite_query_has_its_own_signature_and_names_itself_in_errors() {
     assert!(message.contains("db_sqlite_query"), "{message}");
     assert!(!message.starts_with("sql:"), "{message}");
 }
+
+#[test]
+fn the_csv_import_doc_says_what_an_empty_cell_becomes() {
+    let sig = iron_shell::signature::signature_of("db_csv_to_sqlite").expect("declared");
+    assert!(sig.doc.contains("NULL in a numeric column"), "{}", sig.doc);
+    assert!(sig.doc.contains("text column"), "{}", sig.doc);
+    assert!(!sig.doc.contains("An empty cell is NULL."), "{}", sig.doc);
+}
