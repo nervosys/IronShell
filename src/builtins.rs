@@ -40948,24 +40948,81 @@ fn archive_entry_refusal(builtin: &str, name: &str, target: Option<&str>) -> Opt
     None
 }
 
-/// The most an archive may declare as uncompressed content before
-/// `zip_extract` or `tar_extract` refuses it: the sum of its members' sizes.
-const ARCHIVE_EXTRACT_MAX_BYTES: u64 = 4 * 1024 * 1024 * 1024;
+/// The default for the most uncompressed content one `zip_extract` or
+/// `tar_extract` may write: 1 GiB. `IRONSHELL_EXTRACT_MAX_BYTES` overrides it.
+const ARCHIVE_EXTRACT_MAX_BYTES: u64 = 1024 * 1024 * 1024;
 
-/// Refuse an archive whose members declare more than `ARCHIVE_EXTRACT_MAX_BYTES`
-/// in total, before anything is written. Declared sizes can lie: a zip's
-/// uncompressed size and a tar header's size are written by whoever made the
-/// archive, so a small archive can claim little and inflate to far more. This
-/// bounds what the archive claims, not what the extracting tool writes. The
-/// tool's deadline (`TOOL_LONG_DEADLINE_SECS`) is what bounds the work done.
+/// The default for the most entries one extraction may hold: 100000.
+/// `IRONSHELL_EXTRACT_MAX_ENTRIES` overrides it.
+const ARCHIVE_EXTRACT_MAX_ENTRIES: usize = 100_000;
+
+/// A zip entry that declares more than this many bytes uncompressed, at more
+/// than `ARCHIVE_RATIO_MAX` times its compressed size, is a bomb.
+const ARCHIVE_RATIO_MIN_BYTES: u64 = 100 * 1024 * 1024;
+
+/// The compression ratio, declared size to compressed size, past which a large
+/// zip entry is refused (see `ARCHIVE_RATIO_MIN_BYTES`).
+const ARCHIVE_RATIO_MAX: u64 = 1000;
+
+/// A limit from the environment (a plain decimal count), else `default`. The
+/// variable is the operator's: an agent cannot set `IRONSHELL_*` variables.
+fn archive_limit_env(name: &str) -> Option<u64> {
+    std::env::var(name).ok()?.trim().parse::<u64>().ok()
+}
+
+/// The byte limit in force: `IRONSHELL_EXTRACT_MAX_BYTES`, else 1 GiB.
+fn archive_max_bytes() -> u64 {
+    archive_limit_env("IRONSHELL_EXTRACT_MAX_BYTES").unwrap_or(ARCHIVE_EXTRACT_MAX_BYTES)
+}
+
+/// The entry limit in force: `IRONSHELL_EXTRACT_MAX_ENTRIES`, else 100000.
+fn archive_max_entries() -> usize {
+    archive_limit_env("IRONSHELL_EXTRACT_MAX_ENTRIES")
+        .map(|n| usize::try_from(n).unwrap_or(usize::MAX))
+        .unwrap_or(ARCHIVE_EXTRACT_MAX_ENTRIES)
+}
+
+/// Refuse an archive that holds more than the entry limit, naming it.
+fn check_archive_entry_count(builtin: &str, count: usize) -> Result<()> {
+    let max = archive_max_entries();
+    if count > max {
+        return Err(crate::safety::budget_exceeded(
+            builtin,
+            format!("the archive holds more than {max} entries, the extraction entry limit"),
+            "anything partly extracted was removed; extract the parts you need, or set IRONSHELL_EXTRACT_MAX_ENTRIES to a higher limit",
+        ));
+    }
+    Ok(())
+}
+
+/// Refuse a total of uncompressed bytes over the byte limit. Called with the
+/// total the archive declares, before anything is written, and again with the
+/// total actually written as an extraction runs: a header can understate what
+/// a stream inflates to. Declared sizes are written by whoever made the
+/// archive, so only the written count is trusted.
 fn check_archive_budget(builtin: &str, declared: u64) -> Result<()> {
-    if declared > ARCHIVE_EXTRACT_MAX_BYTES {
+    let max = archive_max_bytes();
+    if declared > max {
+        return Err(crate::safety::budget_exceeded(
+            builtin,
+            format!("the archive expands to more than {max} bytes uncompressed, the extraction byte limit"),
+            "anything partly extracted was removed; extract the parts you need, or set IRONSHELL_EXTRACT_MAX_BYTES to a higher limit",
+        ));
+    }
+    Ok(())
+}
+
+/// Refuse a zip entry that declares more than `ARCHIVE_RATIO_MIN_BYTES`
+/// uncompressed at over `ARCHIVE_RATIO_MAX` times its compressed size.
+fn check_archive_ratio(builtin: &str, name: &str, size: u64, compressed: u64) -> Result<()> {
+    if size > ARCHIVE_RATIO_MIN_BYTES && size / compressed.max(1) > ARCHIVE_RATIO_MAX {
+        let shown: String = name.chars().take(60).collect();
         return Err(crate::safety::budget_exceeded(
             builtin,
             format!(
-                "the archive declares {declared} bytes uncompressed, over the {ARCHIVE_EXTRACT_MAX_BYTES}-byte limit"
+                "entry `{shown}` declares {size} bytes from {compressed} compressed, over the {ARCHIVE_RATIO_MAX}:1 ratio limit"
             ),
-            "nothing was extracted; extract the parts you need, or split the archive",
+            "nothing was extracted; the archive looks like a decompression bomb",
         ));
     }
     Ok(())
@@ -41386,6 +41443,7 @@ fn zip_archive_entries(
             .name()
             .map(|n| n.into_owned())
             .unwrap_or_else(|_| String::from_utf8_lossy(entry.name_raw()).into_owned());
+        check_archive_ratio(builtin, &name, entry.size(), entry.compressed_size())?;
         let is_link = matches!(entry.unix_mode(), Some(m) if m & 0o170000 == 0o120000);
         let target = if is_link {
             let mut buf = Vec::new();
@@ -41710,6 +41768,7 @@ fn bi_zip_extract(args: Vec<Value>, _input: Option<Value>) -> Result<Value> {
         return Err(refusal);
     }
     check_archive_entries("zip_extract", members.iter().cloned())?;
+    check_archive_entry_count("zip_extract", members.len())?;
     check_archive_budget("zip_extract", declared)?;
     crate::safety::reject_option_like("zip_extract", std::slice::from_ref(&archive))?;
     crate::safety::reject_option_like("zip_extract", std::slice::from_ref(&dest))?;
@@ -41826,7 +41885,8 @@ fn zip_extract_in_process(archive: &str, dest: &str) -> Result<()> {
             .truncate(true)
             .open(&target)
             .map_err(|e| crate::safety::fs_write_error(B, &shown, &e))?;
-        let room = ARCHIVE_EXTRACT_MAX_BYTES.saturating_sub(total);
+        // What is written is counted, whatever the header said.
+        let room = archive_max_bytes().saturating_sub(total);
         let n = std::io::copy(&mut (&mut entry).take(room.saturating_add(1)), &mut out)
             .map_err(|e| zip_not_an_archive(B, archive, e))?;
         total = total.saturating_add(n);
@@ -42252,6 +42312,7 @@ fn bi_tar_extract(args: Vec<Value>, _input: Option<Value>) -> Result<Value> {
     // tar writes anything.
     let (members, declared) = tar_archive_listing("tar_extract", &archive)?;
     check_archive_entries("tar_extract", members.iter().cloned())?;
+    check_archive_entry_count("tar_extract", members.len())?;
     check_archive_budget("tar_extract", declared)?;
     let mut cmd = crate::safety::child_command("tar");
     cmd.args(["-xvf", &archive]);
@@ -42390,9 +42451,7 @@ fn tar_extract_in_process(archive: &str, root: &str) -> Result<bool> {
         let mut entry =
             entry.map_err(|e| archive_read_error(B, "tar", &format!("unreadable entry: {e}")))?;
         count += 1;
-        if count > WALK_MAX_ENTRIES {
-            return Err(walk_over(B, WALK_MAX_ENTRIES));
-        }
+        check_archive_entry_count(B, count)?;
         total = total.saturating_add(entry.size());
         check_archive_budget(B, total)?;
         let name = entry
@@ -85520,6 +85579,19 @@ mod archive_prescan_tests {
         assert!(check_archive_budget("tar_extract", ARCHIVE_EXTRACT_MAX_BYTES).is_ok());
         let err = check_archive_budget("tar_extract", ARCHIVE_EXTRACT_MAX_BYTES + 1)
             .expect_err("one byte over must be refused");
+        assert!(format!("{err}").contains("E_BUDGET_EXCEEDED"), "{err}");
+    }
+
+    #[test]
+    fn a_large_zip_entry_with_a_bomb_ratio_is_refused() {
+        let big = ARCHIVE_RATIO_MIN_BYTES + 1;
+        // 300 MB from 305 KB: refused. The same size at 10:1: fine.
+        assert!(check_archive_ratio("zip_extract", "big.bin", 300_000_000, 305_000).is_err());
+        assert!(check_archive_ratio("zip_extract", "big.bin", big, big / 10).is_ok());
+        // A small entry at a huge ratio is not a bomb (a page of zeros).
+        assert!(check_archive_ratio("zip_extract", "z.bin", 1_000_000, 10).is_ok());
+        let err = check_archive_ratio("zip_extract", "big.bin", 300_000_000, 0)
+            .expect_err("a zero compressed size is the largest ratio");
         assert!(format!("{err}").contains("E_BUDGET_EXCEEDED"), "{err}");
     }
 
