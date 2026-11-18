@@ -1353,6 +1353,7 @@ tmux_send	Exec
 to-csv	Pure
 to-json	Pure
 to-yaml	Pure
+to_base	Pure
 to_csv	Pure
 to_entries	Pure
 to_epoch	Pure

@@ -811,6 +811,8 @@ lazy_static::lazy_static! {
         map.insert("to_jsonl", 1214);
         // Counting rows by a key (1215)
         map.insert("count_by", 1215);
+        // Radix text (1216)
+        map.insert("to_base", 1216);
         // 500-519: Database
         map.insert("db_sqlite_open", 500);
         map.insert("db_sqlite_query", 501);
@@ -3909,6 +3911,8 @@ static BUILTIN_DISPATCH: &[fn(Vec<Value>, Option<Value>, &mut Env) -> Result<Val
     |args, input, _| bi_to_jsonl(args, input),   // 1214
     // Counting rows by a key
     |args, input, env| bi_count_by(args, input, env), // 1215
+    // Radix text (1216)
+    |args, input, _| bi_to_base(args, input), // 1216
 ];
 
 /// The dispatch row that serves `name`, if the fast table has one.
@@ -17314,6 +17318,17 @@ const NUMBER_TEXT_HINT: &str = "float(\"1.5\") parses decimals; int(\"42\") pars
 ///   int("42")      # 42
 ///   int(3.9)       # 3
 fn bi_int(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
+    // The radix form: int(text, base), or text | int(base).
+    let radix = match (args.len(), &input) {
+        (2, _) => Some((&args[0], &args[1])),
+        (1, Some(text @ Value::Str(_))) if matches!(args[0], Value::Int(_)) => {
+            Some((text, &args[0]))
+        }
+        _ => None,
+    };
+    if let Some((text, base)) = radix {
+        return int_with_base(text, base);
+    }
     let value = conversion_operand("int", &args, &input)?;
     match value {
         Value::Int(n) => Ok(Value::Int(*n)),
@@ -17354,11 +17369,27 @@ fn bi_int(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
                     ),
                 ))
             }
-            Err(_) => Err(crate::safety::value_not_representable(
-                "int",
-                format!("int: {text:?} is not a decimal integer (digits with an optional sign)"),
-                NUMBER_TEXT_HINT,
-            )),
+            Err(_) => {
+                let t = text.trim().trim_start_matches(['+', '-']).to_ascii_lowercase();
+                let radix_hint = if t.starts_with("0x") {
+                    Some(16)
+                } else if t.starts_with("0b") {
+                    Some(2)
+                } else if t.starts_with("0o") {
+                    Some(8)
+                } else {
+                    None
+                };
+                let hint = match radix_hint {
+                    Some(base) => format!("{NUMBER_TEXT_HINT}; for this radix write int({text:?}, {base})"),
+                    None => format!("{NUMBER_TEXT_HINT}; int(\"ff\", 16) parses another base (2 to 36)"),
+                };
+                Err(crate::safety::value_not_representable(
+                    "int",
+                    format!("int: {text:?} is not a decimal integer (digits with an optional sign)"),
+                    &hint,
+                ))
+            }
         },
         other => Err(crate::safety::bad_arg(
             "int",
@@ -17366,6 +17397,129 @@ fn bi_int(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
             other.type_name(),
         )),
     }
+}
+
+/// The base of `int(text, base)` and `to_base(n, base)`: an Int from 2 to 36.
+fn radix_base(builtin: &str, base: &Value) -> Result<u32> {
+    match base {
+        Value::Int(b) if (2..=36).contains(b) => Ok(*b as u32),
+        Value::Int(b) => Err(crate::safety::bad_arg_in(
+            builtin,
+            format!("{builtin}: the base must be from 2 to 36, got {b}"),
+            "digits are 0-9 then a-z, so a base is 2 to 36",
+        )),
+        other => Err(crate::safety::bad_arg(
+            builtin,
+            "an Int base from 2 to 36",
+            other.type_name(),
+        )),
+    }
+}
+
+/// int(text, base) - parse whole-number text in a base from 2 to 36.
+fn int_with_base(text: &Value, base: &Value) -> Result<Value> {
+    let base = radix_base("int", base)?;
+    let Value::Str(text) = text else {
+        return Err(crate::safety::bad_arg(
+            "int",
+            "a String to parse when a base is given",
+            text.type_name(),
+        ));
+    };
+    let trimmed = text.trim();
+    let (negative, rest) = match trimmed.as_bytes().first() {
+        Some(b'-') => (true, &trimmed[1..]),
+        Some(b'+') => (false, &trimmed[1..]),
+        _ => (false, trimmed),
+    };
+    let lower = rest.to_ascii_lowercase();
+    let prefix = match base {
+        16 => "0x",
+        2 => "0b",
+        8 => "0o",
+        _ => "",
+    };
+    let digits = if !prefix.is_empty() && lower.starts_with(prefix) {
+        &rest[2..]
+    } else {
+        rest
+    };
+    let bad = || {
+        crate::safety::value_not_representable(
+            "int",
+            format!("int: {text:?} is not a base-{base} integer (digits with an optional sign)"),
+            "digits are 0-9 then a-z; no underscores or spaces inside; 0x, 0b and 0o prefixes are accepted for bases 16, 2 and 8",
+        )
+    };
+    if digits.is_empty() || digits.starts_with(['+', '-']) {
+        return Err(bad());
+    }
+    let signed = if negative {
+        format!("-{digits}")
+    } else {
+        digits.to_string()
+    };
+    match i64::from_str_radix(&signed, base) {
+        Ok(n) => Ok(Value::Int(n)),
+        Err(e)
+            if matches!(
+                e.kind(),
+                std::num::IntErrorKind::PosOverflow | std::num::IntErrorKind::NegOverflow
+            ) =>
+        {
+            Err(crate::safety::value_not_representable(
+                "int",
+                format!(
+                    "int: {text:?} does not fit in a 64-bit Int (-9223372036854775808 to 9223372036854775807)"
+                ),
+                "an Int holds whole numbers from -9223372036854775808 to 9223372036854775807",
+            ))
+        }
+        Err(_) => Err(bad()),
+    }
+}
+
+/// to_base(n, base) - An Int as lowercase digits in a base from 2 to 36.
+/// Args:
+///   - n: Int (or the piped Int)
+///   - base: Int - 2 to 36
+/// Returns: String
+///
+/// A negative number starts with '-'; there is no 0x prefix.
+///
+/// Example:
+///   to_base(255, 16)   # "ff"
+fn bi_to_base(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
+    let (n, base) = match (args.as_slice(), &input) {
+        ([n, base], _) => (n, base),
+        ([base], Some(n)) => (n, base),
+        _ => {
+            return Err(arity_error(
+                "to_base",
+                "an Int and a base from 2 to 36",
+                args.len(),
+            ))
+        }
+    };
+    let base = radix_base("to_base", base)?;
+    let Value::Int(n) = n else {
+        return Err(crate::safety::bad_arg("to_base", "an Int", n.type_name()));
+    };
+    let mut magnitude = n.unsigned_abs();
+    let mut digits: Vec<u8> = Vec::new();
+    loop {
+        let d = (magnitude % u64::from(base)) as u8;
+        digits.push(if d < 10 { b'0' + d } else { b'a' + d - 10 });
+        magnitude /= u64::from(base);
+        if magnitude == 0 {
+            break;
+        }
+    }
+    if *n < 0 {
+        digits.push(b'-');
+    }
+    digits.reverse();
+    Ok(Value::Str(String::from_utf8(digits).unwrap_or_default()))
 }
 
 /// float(x) - Convert a value to a Float.
