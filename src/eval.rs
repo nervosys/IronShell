@@ -832,6 +832,38 @@ pub(crate) fn eval_body_consuming_params(
     eval_expr(body, env)
 }
 
+/// A rough count of the heap bytes a value holds.
+fn deep_bytes(v: &Value) -> usize {
+    let base = std::mem::size_of::<Value>();
+    match v {
+        Value::Str(s) | Value::Uri(s) | Value::Error(s) => base.saturating_add(s.len()),
+        Value::Array(items) => items
+            .iter()
+            .fold(base, |sum, x| sum.saturating_add(deep_bytes(x))),
+        Value::Record(map) => map.iter().fold(base, |sum, (k, x)| {
+            sum.saturating_add(k.len() + 48)
+                .saturating_add(deep_bytes(x))
+        }),
+        _ => base,
+    }
+}
+
+/// Refuse, before a variable's collection is copied into a new Array, Record or
+/// sum, when the copy would pass the memory budget. The copy is made all at
+/// once, so the budget check that runs between evaluator steps comes too late
+/// for `a = [a, a]` repeated: the process died on a failed allocation.
+fn reserve_for_ident_clone(expr: &Expr, env: &Env) -> Result<()> {
+    if crate::memory::limit_mb().is_none() {
+        return Ok(());
+    }
+    if let Expr::Ident(name) = expr {
+        if let Some(v @ (Value::Array(_) | Value::Record(_))) = env.get_var(name) {
+            crate::memory::reserve("eval", deep_bytes(v))?;
+        }
+    }
+    Ok(())
+}
+
 fn append_in_place(env: &mut Env, name: &str, operand: Value) -> std::result::Result<(), Value> {
     match (env.get_var_mut(name), operand) {
         (Some(Value::Str(a)), Value::Str(b)) if a.len() + b.len() <= MAX_STRING_BYTES => {
@@ -885,6 +917,7 @@ pub fn eval_expr(expr: &Expr, env: &mut Env) -> Result<Value> {
         Expr::Array(items) => {
             let mut out = Vec::with_capacity(items.len());
             for it in items {
+                reserve_for_ident_clone(it, env)?;
                 out.push(eval_expr(it, env)?);
             }
             Ok(Value::Array(out))
@@ -903,6 +936,7 @@ pub fn eval_expr(expr: &Expr, env: &mut Env) -> Result<Value> {
                 } else {
                     k.replace(crate::parser::ESCAPED_DOLLAR, "$")
                 };
+                reserve_for_ident_clone(v, env)?;
                 m.insert(key, eval_expr(v, env)?);
             }
             Ok(Value::Record(m))
@@ -1190,6 +1224,9 @@ pub fn eval_expr(expr: &Expr, env: &mut Env) -> Result<Value> {
 
         // ---------- binary ----------
         Expr::Binary { left, op, right } => {
+            if matches!(op, BinOp::Add) {
+                reserve_for_ident_clone(left, env)?;
+            }
             let a = eval_expr(left, env)?;
             // `&&` and `||` short-circuit, as in every shell and C-family
             // language: `x != "" && x >= 1` must not compare "" with 1.
@@ -1210,6 +1247,9 @@ pub fn eval_expr(expr: &Expr, env: &mut Env) -> Result<Value> {
                     Value::Bool(y) => Ok(Value::Bool(y)),
                     other => Err(logic_operand_error(op, &other)),
                 };
+            }
+            if matches!(op, BinOp::Add) {
+                reserve_for_ident_clone(right, env)?;
             }
             let b = eval_expr(right, env)?;
             binop(op, a, b)
