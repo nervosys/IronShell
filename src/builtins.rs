@@ -815,7 +815,7 @@ lazy_static::lazy_static! {
         map.insert("to_base", 1216);
         // 500-519: Database
         map.insert("db_sqlite_open", 500);
-        map.insert("db_sqlite_query", 501);
+        map.insert("db_sqlite_query", 1217);
         map.insert("db_sqlite_exec", 502);
         map.insert("db_sqlite_tables", 503);
         map.insert("db_sqlite_schema", 504);
@@ -834,7 +834,7 @@ lazy_static::lazy_static! {
         map.insert("db_json_to_sqlite", 517);
         map.insert("db_sqlite_to_json", 518);
         map.insert("db_kv_store", 519);
-        map.insert("sqlite_query", 501);
+        map.insert("sqlite_query", 1217);
         map.insert("sqlite_exec", 502);
         map.insert("sql", 501);
 
@@ -3008,7 +3008,7 @@ static BUILTIN_DISPATCH: &[fn(Vec<Value>, Option<Value>, &mut Env) -> Result<Val
     |args, input, _| bi_crypto_jwt_decode(args, input),
     // 500-519: Database
     |args, input, _| bi_db_sqlite_open(args, input),
-    |args, input, _| bi_db_sqlite_query(args, input),
+    |args, input, _| bi_sql(args, input),
     |args, input, _| bi_db_sqlite_exec(args, input),
     |args, input, _| bi_db_sqlite_tables(args, input),
     |args, input, _| bi_db_sqlite_schema(args, input),
@@ -3912,7 +3912,8 @@ static BUILTIN_DISPATCH: &[fn(Vec<Value>, Option<Value>, &mut Env) -> Result<Val
     // Counting rows by a key
     |args, input, env| bi_count_by(args, input, env), // 1215
     // Radix text (1216)
-    |args, input, _| bi_to_base(args, input), // 1216
+    |args, input, _| bi_to_base(args, input),         // 1216
+    |args, input, _| bi_db_sqlite_query(args, input), // 1217
 ];
 
 /// The dispatch row that serves `name`, if the fast table has one.
@@ -9449,6 +9450,7 @@ fn read_named_file(builtin: &str, path_str: &str) -> Result<String> {
     let metadata = fs::metadata(&validated_path)
         .map_err(|e| crate::safety::fs_error(builtin, &validated_path, &e))?;
     check_file_size_limit(metadata.len()).context(format!("{builtin}: file too large"))?;
+    crate::memory::reserve_parse(builtin, metadata.len() as usize, 2)?;
 
     let bytes = fs::read(&validated_path)
         .map_err(|e| crate::safety::fs_error(builtin, &validated_path, &e))?;
@@ -53070,6 +53072,11 @@ fn sqlite_db_file(builtin: &str, path: &str) -> Result<()> {
         "an SQLite database file, or a path that does not exist yet",
         &format!("{path}, which is not an SQLite database"),
     ))
+}
+
+/// sql(source_or_query, query?, params?) - the in-process, read-only SQL builtin.
+fn bi_sql(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
+    crate::sql::sql("sql", args, input)
 }
 
 fn bi_db_sqlite_query(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
