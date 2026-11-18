@@ -2577,6 +2577,13 @@ pub fn output_with_timeout(
     })?;
     let status = match run.status {
         Some(status) if !run.timed_out => status,
+        _ if run.timed_out && deadline_passed() => {
+            return Err(std::io::Error::other(budget_error(
+                &program,
+                "was killed: the run's --timeout expired".to_string(),
+                "the child and its process tree were stopped and its result discarded; give the run a longer --timeout SECONDS",
+            )))
+        }
         _ => {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::TimedOut,
@@ -9931,6 +9938,20 @@ pub fn check_deadline_now() -> anyhow::Result<()> {
         )),
         _ => Ok(()),
     })
+}
+
+/// The coded budget error for a child process the run's own deadline killed:
+/// it names `--timeout` (and its length when the command line set one).
+pub(crate) fn run_deadline_error(builtin: &str, command: &str) -> anyhow::Error {
+    let limit = match CLI_TIMEOUT_SECS.load(std::sync::atomic::Ordering::Relaxed) {
+        0 => String::new(),
+        n => format!(" of {n} s"),
+    };
+    budget_exceeded(
+        builtin,
+        format!("`{command}` was killed: the run's --timeout{limit} expired"),
+        "the child and its process tree were stopped and its result discarded; it can have left work half done, so check the state before retrying, or give the run a longer --timeout SECONDS",
+    )
 }
 
 /// Whether this thread's evaluation deadline has passed (false when none is set).
