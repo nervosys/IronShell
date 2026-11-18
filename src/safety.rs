@@ -1003,6 +1003,7 @@ fn classified_effect(name: &str) -> Option<Effect> {
         | "search_todos"
         | "session_diff_since"
         | "shellcheck_check"
+        | "sql"
         | "sql_value"
         | "startup_list"
         | "strings_extract"
