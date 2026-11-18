@@ -26198,13 +26198,7 @@ pub fn render_agent(v: &Value, budget: Option<usize>) -> Option<String> {
         let redacted = redact_value(v);
         // Say so on stderr, so a `[REDACTED]` in the output is not mistaken for
         // the file's own text. The output itself is unchanged.
-        let n = take_redacted_count();
-        if n > 0 {
-            eprintln!(
-                "ish: {n} secret{} redacted from the output as [REDACTED]; IRONSHELL_REDACT=off shows raw values",
-                if n == 1 { "" } else { "s" }
-            );
-        }
+        crate::safety::note_redactions_on_stderr();
         std::borrow::Cow::Owned(redacted)
     } else {
         std::borrow::Cow::Borrowed(v)
@@ -26802,22 +26796,17 @@ pub fn handle_summary_for_agent(v: &Value) -> Option<Value> {
     Some(Value::Record(out))
 }
 
-thread_local! {
-    /// How many values `redact_value` replaced on this thread since the count
-    /// was last taken, so the agent can be told that its output was scrubbed.
-    static REDACTED_COUNT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
-}
-
-/// Count one redaction when `changed`.
+/// Count one redaction (a secret-named field replaced whole). The strings
+/// `redact_str` scrubs are counted by `redact_str` itself, one per secret.
 fn note_redacted(changed: bool) {
     if changed {
-        REDACTED_COUNT.with(|c| c.set(c.get() + 1));
+        crate::safety::add_redactions(1);
     }
 }
 
 /// The redactions counted since the last call, and reset the count.
 fn take_redacted_count() -> usize {
-    REDACTED_COUNT.with(|c| c.replace(0))
+    crate::safety::take_redaction_count()
 }
 
 /// Recursively redact known secret shapes from a value before it is rendered to
@@ -26829,13 +26818,11 @@ fn take_redacted_count() -> usize {
 pub fn redact_value(v: &Value) -> Value {
     match v {
         Value::Str(s) => {
-            let (r, changed) = crate::safety::redact_str(s);
-            note_redacted(changed);
+            let (r, _) = crate::safety::redact_str(s);
             Value::Str(r)
         }
         Value::Uri(s) => {
-            let (r, changed) = crate::safety::redact_str(s);
-            note_redacted(changed);
+            let (r, _) = crate::safety::redact_str(s);
             Value::Uri(r)
         }
         Value::Array(items) => Value::Array(items.iter().map(redact_value).collect()),
