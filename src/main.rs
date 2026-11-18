@@ -397,13 +397,63 @@ const SUBCOMMANDS: &[&str] = &[
 /// are split off and parsed beside the subcommand, and applied to it.
 fn parse_cli() -> Cli {
     let argv: Vec<std::ffi::OsString> = env::args_os().collect();
-    match split_leading_globals(&argv) {
-        None => Cli::parse(),
-        Some((leading, rest)) => {
-            let leading = Cli::parse_from(leading);
-            Cli::parse_from(rest).with_leading_globals(leading)
-        }
+    let parsed = match split_leading_globals(&argv) {
+        None => Cli::try_parse_from(argv.iter().cloned()),
+        Some((leading, rest)) => Cli::try_parse_from(leading)
+            .and_then(|leading| Cli::try_parse_from(rest).map(|c| c.with_leading_globals(leading))),
+    };
+    parsed.unwrap_or_else(|e| exit_on_cli_error(e, &argv))
+}
+
+/// Whether the command line or the environment asks for the machine-readable
+/// form: `--agent` or `--deterministic`, or IRONSHELL_MODE=agent or
+/// IRONSHELL_DETERMINISTIC set. Read from the raw words, because clap has not
+/// produced a `Cli` when it fails.
+fn machine_output_requested(argv: &[std::ffi::OsString]) -> bool {
+    let flagged = argv
+        .iter()
+        .skip(1)
+        .any(|a| a == "--agent" || a == "--deterministic");
+    let mode_agent =
+        env::var("IRONSHELL_MODE").is_ok_and(|v| v.trim().eq_ignore_ascii_case("agent"));
+    let deterministic = env::var("IRONSHELL_DETERMINISTIC").is_ok_and(|v| {
+        matches!(
+            v.trim().to_ascii_lowercase().as_str(),
+            "1" | "true" | "on" | "yes"
+        )
+    });
+    flagged || mode_agent || deterministic
+}
+
+/// End the process for a command line clap refused. A person gets clap's text
+/// and status 2, unchanged. When agent mode or deterministic output is asked
+/// for, an argument error is the JSON `E_BAD_ARG` an agent parses everywhere
+/// else, on stderr, with that code's exit status (64). `--help` and `--version`
+/// are not errors and keep clap's output.
+fn exit_on_cli_error(e: clap::Error, argv: &[std::ffi::OsString]) -> ! {
+    if !e.use_stderr() || !machine_output_requested(argv) {
+        e.exit();
     }
+    let text = e.render().to_string();
+    let message = text
+        .lines()
+        .take_while(|l| !l.trim().is_empty())
+        .map(|l| l.trim().trim_start_matches("error: "))
+        .collect::<Vec<_>>()
+        .join(" ");
+    let error = iron_shell::safety::SafetyError {
+        code: iron_shell::safety::ErrorCode::BadArg,
+        message,
+        builtin: String::new(),
+        hint: "run `ish --help` for the options and the values they take".to_string(),
+        approval: None,
+        did_you_mean: Vec::new(),
+        expected: String::new(),
+        got: String::new(),
+        extra: serde_json::Map::new(),
+    };
+    eprintln!("{}", error.to_json());
+    std::process::exit(error.code.exit_code());
 }
 
 /// Split `argv` into the global flags before its first subcommand, and the

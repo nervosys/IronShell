@@ -126,3 +126,55 @@ fn undo_of_a_step_that_never_was_is_still_not_found() {
     let message = json["error"]["message"].as_str().unwrap_or("");
     assert!(message.contains("no journal step 7"), "{message}");
 }
+
+// ── B5: CLI argument errors are JSON in agent and deterministic mode ──
+
+fn ish_raw(args: &[&str], mode_env: bool) -> Output {
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_ish"));
+    cmd.args(args)
+        .env("NO_COLOR", "1")
+        .env_remove("IRONSHELL_MODE")
+        .env_remove("IRONSHELL_DETERMINISTIC");
+    if mode_env {
+        cmd.env("IRONSHELL_MODE", "agent");
+    }
+    cmd.output().expect("run ish")
+}
+
+#[test]
+fn a_bad_flag_value_is_json_under_agent() {
+    for (args, env) in [
+        (vec!["--agent", "--memory-limit", "abc", "-c", "1"], false),
+        (
+            vec!["--deterministic", "--timeout", "abc", "-c", "1"],
+            false,
+        ),
+        (vec!["--memory-limit", "abc", "-c", "1"], true),
+    ] {
+        let out = ish_raw(&args, env);
+        assert_eq!(out.status.code(), Some(64), "{args:?} {out:?}");
+        let err = String::from_utf8_lossy(&out.stderr);
+        let json: serde_json::Value = serde_json::from_str(err.lines().next().unwrap_or(""))
+            .unwrap_or_else(|e| panic!("not JSON ({e}): {err:?}"));
+        assert_eq!(json["error"]["code"], "E_BAD_ARG", "{json}");
+        assert!(
+            json["error"]["message"]
+                .as_str()
+                .unwrap_or("")
+                .contains("--memory-limit")
+                || json["error"]["message"]
+                    .as_str()
+                    .unwrap_or("")
+                    .contains("--timeout"),
+            "{json}"
+        );
+    }
+}
+
+#[test]
+fn a_bad_flag_value_stays_clap_text_for_a_person() {
+    let out = ish_raw(&["--memory-limit", "abc", "-c", "1"], false);
+    assert_eq!(out.status.code(), Some(2), "{out:?}");
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.starts_with("error:"), "{err:?}");
+}
