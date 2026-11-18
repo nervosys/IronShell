@@ -1497,7 +1497,7 @@ fn run_file(path: &str, explicit_mode: Option<TranspileMode>) -> Result<()> {
         // file is anywhere else in the language; under --agent it is the JSON
         // error shape.
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            let err = iron_shell::safety::not_found("run", "file", path);
+            let err = iron_shell::safety::not_found("ish", "file", path);
             iron_shell::repl::report_error(&err);
             std::process::exit(iron_shell::repl::exit_status_for(&err));
         }
