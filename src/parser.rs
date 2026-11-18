@@ -119,7 +119,7 @@ const ONE_EXPR_HINT: &str =
 /// The hint for `=` after an indexed element, `rows[0].n = 99`: elements are
 /// values, so the array is rebuilt rather than assigned in place.
 const INDEX_ASSIGN_HINT: &str =
-    "an indexed element cannot be assigned; rebuild the array, e.g. rows = rows | map(fn(r) => ...)";
+    "an indexed element cannot be assigned; for an Array rebuild it, e.g. rows = rows | map(fn(r) => ...); for a Record field with a computed key use c.app = merge(c.app, from_entries([[k, v]]))";
 
 /// The hint for `c ? a : b`, which IronShell does not have.
 const TERNARY_HINT: &str = "IronShell has no ?: operator; write if cond { a } else { b }";

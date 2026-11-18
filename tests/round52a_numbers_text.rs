@@ -220,3 +220,18 @@ fn a10_an_index_into_an_empty_array_says_it_is_empty() {
     assert!(se.message.contains("has length 2"), "{}", se.message);
     assert!(se.expected.contains("-2 to 1"), "{}", se.expected);
 }
+
+// A11
+#[test]
+fn a11_the_indexed_assignment_hint_covers_records() {
+    let err = iron_shell::parser::parse_program("mut c = {app: {a: 1}}\nk = \"b\"\nc.app[k] = 2\n")
+        .expect_err("indexed assignment");
+    let text = err.to_string();
+    assert!(text.contains("for an Array rebuild it"), "{text}");
+    assert!(text.contains("from_entries([[k, v]])"), "{text}");
+    // The spelling the hint gives works.
+    assert_eq!(
+        run("mut c = {app: {a: 1}}\nk = \"b\"\nc.app = merge(c.app, from_entries([[k, 2]]))\nc.app.b"),
+        Value::Int(2)
+    );
+}
