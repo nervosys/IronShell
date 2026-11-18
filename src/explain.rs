@@ -1114,13 +1114,28 @@ pub fn explain_posix(src: &str) -> Result<Value> {
         }
         let tee_files = crate::posix::write_operands(&head, &cmd.args);
         let tee_in_subset = tee_files.is_some();
-        let mut writes: Vec<(String, String)> = cmd.writes.clone();
+        // `rm` and `rmdir` run in process as their builtins do: each operand is
+        // a `delete` (destructive), judged by the jail as the run judges it.
+        let rm_files = crate::posix::remove_operands(&head, &cmd.args);
+        let rm_in_subset = rm_files.is_some();
+        let mut writes: Vec<(String, String, Effect)> = cmd
+            .writes
+            .iter()
+            .map(|(op, target)| (op.clone(), target.clone(), Effect::WriteLocal))
+            .collect();
         for f in tee_files.unwrap_or_default() {
             if f != "/dev/null" {
-                writes.push((head.clone(), f));
+                writes.push((head.clone(), f, Effect::WriteLocal));
             }
         }
-        for (op, target) in writes {
+        for f in rm_files.unwrap_or_default() {
+            writes.push((head.clone(), f, Effect::Destructive));
+        }
+        for (op, target, effect) in writes {
+            // `rm` removes a link itself, so a link inside the workspace is
+            // judged by where it sits, as the run judges it.
+            let _link_scope =
+                matches!(effect, Effect::Destructive).then(crate::safety::link_leaf_scope);
             let mut r = BTreeMap::new();
             r.insert("call".to_string(), Value::Str(format!("{op} {target}")));
             if target.is_empty() {
@@ -1134,7 +1149,6 @@ pub fn explain_posix(src: &str) -> Result<Value> {
                 }
                 r.insert("decision".to_string(), Value::Str("unknown".to_string()));
             } else {
-                let effect = Effect::WriteLocal;
                 // The jail judges the path the write goes to, as the run's
                 // guard does for a `>` target or a `tee`, `mkdir` or `touch` file.
                 let resolved = crate::safety::resolve_path_str(&target);
@@ -1175,6 +1189,8 @@ pub fn explain_posix(src: &str) -> Result<Value> {
         } else {
             let effect = if tee_in_subset {
                 Effect::WriteLocal
+            } else if rm_in_subset {
+                Effect::Destructive
             } else {
                 match crate::posix::in_process_reads(&head) {
                     Some(true) => Effect::ReadLocal,

@@ -219,7 +219,8 @@ fn explain_judges_write_and_read_operands_against_the_jail_as_the_run_does() {
             String::from_utf8_lossy(&run.stdout),
             String::from_utf8_lossy(&run.stderr)
         );
-        assert!(text.contains("E_OUTSIDE_WORKSPACE"), "{script}: {text}");
+        // The write utilities say it as GNU tools do, the readers as JSON.
+        assert!(text.contains("outside the workspace"), "{script}: {text}");
     }
     assert!(!sb.0.join("z").exists() && !sb.0.join("d").exists() && !sb.0.join("f").exists());
     assert!(!sb.0.join("x").exists());
