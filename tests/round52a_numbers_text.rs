@@ -72,3 +72,28 @@ fn a2_radix_literals_say_so() {
     let err = iron_shell::parser::parse_program("1x").expect_err("1x");
     assert!(err.to_string().contains("valid exponent"));
 }
+
+// A3
+#[test]
+fn a3_date_parse_trims_and_reads_week_and_ordinal_dates() {
+    for src in [
+        r#"date_parse("2024-02-29 ")"#,
+        r#"date_parse("2024-02-29\n")"#,
+        r#"date_parse("  2024-02-29")"#,
+        r#"date_parse("2024-W09-4")"#,
+        r#"date_parse("2024-060")"#,
+    ] {
+        assert_eq!(run(src), s("2024-02-29"), "{src}");
+    }
+    assert_eq!(run(r#"date_parse("2024-060T10:00:00Z")"#), s("2024-02-29T10:00:00Z"));
+    assert_eq!(run(r#"date_parse("2024-W01-1")"#), s("2024-01-01"));
+    assert_eq!(run(r#"date_parse("2020-W53-7")"#), s("2021-01-03"));
+    for src in [
+        r#"date_parse("2023-366")"#,
+        r#"date_parse("2023-W53-1")"#,
+        r#"date_parse("2024-W09-8")"#,
+        r#"date_parse("2024-2-9")"#,
+    ] {
+        assert!(try_run(src).is_err(), "{src}");
+    }
+}

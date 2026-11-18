@@ -18291,8 +18291,68 @@ fn canonical_iso(text: &str) -> String {
     format!("{date}T{clock}{frac}{zone}")
 }
 
+/// The calendar date of an ISO week date (`2024-W09-4`, Monday-based weeks) or
+/// an ordinal date (`2024-060`, the day of the year), keeping any time after it,
+/// as `YYYY-MM-DD...`. Text in neither shape is `Ok(None)`; a week or day that
+/// the year does not have is refused by name.
+fn expand_week_or_ordinal(builtin: &str, text: &str) -> Result<Option<String>> {
+    use chrono::Datelike as _;
+    let b = text.as_bytes();
+    let digits = |s: &[u8]| s.iter().all(u8::is_ascii_digit);
+    if !text.is_ascii() || b.len() < 8 || !digits(&b[0..4]) || b[4] != b'-' {
+        return Ok(None);
+    }
+    let after =
+        |at: usize| text[at..].is_empty() || matches!(text.as_bytes()[at], b'T' | b't' | b' ');
+    let year: i32 = text[0..4].parse().unwrap_or(0);
+    let refuse = |what: &str| {
+        crate::safety::value_not_representable(
+            builtin,
+            format!("{builtin}: {text:?} is not a date: {what}"),
+            "write an ISO 8601 date such as 2024-02-29, a week date such as 2024-W09-4, or an ordinal date such as 2024-060",
+        )
+    };
+    let date = if b[5] == b'W'
+        && b.len() >= 10
+        && digits(&b[6..8])
+        && b[8] == b'-'
+        && b[9].is_ascii_digit()
+        && after(10)
+    {
+        let week: u32 = text[6..8].parse().unwrap_or(0);
+        let day = match b[9] {
+            b'1' => chrono::Weekday::Mon,
+            b'2' => chrono::Weekday::Tue,
+            b'3' => chrono::Weekday::Wed,
+            b'4' => chrono::Weekday::Thu,
+            b'5' => chrono::Weekday::Fri,
+            b'6' => chrono::Weekday::Sat,
+            b'7' => chrono::Weekday::Sun,
+            _ => return Err(refuse("the weekday must be 1 (Monday) to 7 (Sunday)")),
+        };
+        chrono::NaiveDate::from_isoywd_opt(year, week, day)
+            .ok_or_else(|| refuse(&format!("the ISO year {year} has no week {week}")))?
+    } else if digits(&b[5..8]) && after(8) {
+        let ordinal: u32 = text[5..8].parse().unwrap_or(0);
+        chrono::NaiveDate::from_yo_opt(year, ordinal)
+            .ok_or_else(|| refuse(&format!("the year {year} has no day {ordinal}")))?
+    } else {
+        return Ok(None);
+    };
+    let consumed = if b[5] == b'W' { 10 } else { 8 };
+    Ok(Some(format!(
+        "{:04}-{:02}-{:02}{}",
+        date.year(),
+        chrono::Datelike::month(&date),
+        chrono::Datelike::day(&date),
+        &text[consumed..]
+    )))
+}
+
 fn parse_iso(builtin: &str, text: &str) -> Result<(chrono::DateTime<chrono::Utc>, bool)> {
-    let canon = canonical_iso(text);
+    let text = text.trim();
+    let expanded = expand_week_or_ordinal(builtin, text)?;
+    let canon = canonical_iso(expanded.as_deref().unwrap_or(text));
     check_iso_shape(builtin, text, &canon)?;
     let (instant, date_only) = iso_instant(&canon).ok_or_else(|| not_a_date(builtin, text))?;
     check_instant(builtin, text, instant)?;
