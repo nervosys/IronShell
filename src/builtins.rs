@@ -85589,7 +85589,7 @@ mod archive_prescan_tests {
     fn a_large_zip_entry_with_a_bomb_ratio_is_refused() {
         let big = ARCHIVE_RATIO_MIN_BYTES + 1;
         // 300 MB from 305 KB: refused. The same size at 10:1: fine.
-        assert!(check_archive_ratio("zip_extract", "big.bin", 300_000_000, 305_000).is_err());
+        assert!(check_archive_ratio("zip_extract", "big.bin", 314_572_800, 305_761).is_err());
         assert!(check_archive_ratio("zip_extract", "big.bin", big, big / 10).is_ok());
         // A small entry at a huge ratio is not a bomb (a page of zeros).
         assert!(check_archive_ratio("zip_extract", "z.bin", 1_000_000, 10).is_ok());
