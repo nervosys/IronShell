@@ -88,6 +88,8 @@ Also in the subset: `grep -r` takes `--include=GLOB`, `--exclude=GLOB` and `--ex
 exemptions (conditions, `&&`/`||` operands, `!` pipelines) and `+` forms to turn them off. `set -x`
 and other `set` options are refused before anything runs, naming the option.
 
+`$PWD`, `$USER`, `$SHELL`, `$PPID` and `$RANDOM` (0..32767) are always set (`$OLDPWD` after the first `cd`), and on Windows `pwd`, `$PWD`, `basename` and `dirname` use `/`; a command a policy refuses, such as a steering variable in agent mode, exits 77.
+
 In the subset, `uniq` drops only adjacent duplicates, as Unix `uniq` does
 (`sort | uniq` drops all of them); the `arr.unique` builtin drops all duplicates.
 

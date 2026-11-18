@@ -864,6 +864,11 @@ impl<'a> Lexer<'a> {
                         if op == ":"
                             && (c.is_ascii_alphanumeric()
                                 || matches!(c, '_' | ' ' | '\t' | '$' | '(')) => {}
+                    // `${x` with the text ending, or a blank, before any `}`.
+                    Some(c) if c.is_whitespace() && !self.s[self.i..].contains(&'}') => {
+                        return unterminated("unterminated ${", dollar_at, "a `}`");
+                    }
+                    None => return unterminated("unterminated ${", dollar_at, "a `}`"),
                     _ => {
                         let named = param_operator(op.starts_with(':'), &self.s[self.i..]);
                         return unsupported_at(&format!("${{...}} operator `{named}`"), dollar_at);
@@ -1117,7 +1122,11 @@ impl Parser {
             Some(&(kw, at)) => {
                 let line = self.line_of(at);
                 let close = closer_of(kw);
-                if self.peek().is_none() {
+                if kw == "if" && self.peek_keyword() == Some("fi") {
+                    format!("the `if` at line {line} needs `then` before its body")
+                } else if matches!(kw, "while" | "until") && self.peek_keyword() == Some("done") {
+                    format!("the `{kw}` at line {line} needs `do` before its body")
+                } else if self.peek().is_none() {
                     format!("the `{kw}` at line {line} needs a closing `{close}`")
                 } else {
                     format!("the `{kw}` at line {line} is closed by `{close}`")
@@ -1161,7 +1170,7 @@ impl Parser {
     }
 
     fn skip_newlines(&mut self) {
-        while matches!(self.peek(), Some(Tok::Nl) | Some(Tok::Semi)) {
+        while matches!(self.peek(), Some(Tok::Nl)) {
             self.i += 1;
         }
     }
@@ -1174,6 +1183,17 @@ impl Parser {
         } else {
             self.expected(kw)
         }
+    }
+
+    /// The list of an `if`, `elif`, `while` or `until` condition: bash needs
+    /// at least one command in it, so an empty one is a syntax error at the
+    /// token that stopped it (`do`, `then`).
+    fn condition(&mut self, stop: &[&str]) -> PResult<List> {
+        let list = self.list(stop)?;
+        if list.is_empty() {
+            return self.syntax("a condition needs at least one command".to_string());
+        }
+        Ok(list)
     }
 
     /// A list, stopping before any of `stop` (reserved words) or the end.
@@ -1192,11 +1212,20 @@ impl Parser {
                 }
                 Some(Tok::Redir(_)) => {}
                 Some(Tok::RParen) => return self.stray_paren(),
+                // A separator or operator with no command before it.
+                Some(Tok::Semi | Tok::DSemi | Tok::And | Tok::Or | Tok::Pipe) => {
+                    return self.syntax("a command is needed before this token".to_string());
+                }
                 Some(t) => return unsupported(operator_what(t)),
             }
             out.push(self.and_or()?);
             match self.peek() {
-                None | Some(Tok::Nl) | Some(Tok::Semi) => {}
+                None | Some(Tok::Nl) => {}
+                // One `;` ends a command; a second has no command before it.
+                Some(Tok::Semi) => self.i += 1,
+                Some(Tok::DSemi) => {
+                    return self.syntax("`;;` is only valid in a `case`".to_string());
+                }
                 Some(Tok::Word(w)) if plain(w).is_some_and(|k| stop.contains(&k)) => {}
                 _ => return unsupported("unexpected token after command"),
             }
@@ -1256,7 +1285,7 @@ impl Parser {
                 self.open.push(("if", at));
                 self.i += 1;
                 let mut branches = Vec::new();
-                let cond = self.list(&["then"])?;
+                let cond = self.condition(&["then"])?;
                 self.expect_keyword("then")?;
                 let body = self.list(&["elif", "else", "fi"])?;
                 branches.push((cond, body));
@@ -1266,7 +1295,7 @@ impl Parser {
                     match self.peek_keyword() {
                         Some("elif") => {
                             self.i += 1;
-                            let c = self.list(&["then"])?;
+                            let c = self.condition(&["then"])?;
                             self.expect_keyword("then")?;
                             let b = self.list(&["elif", "else", "fi"])?;
                             branches.push((c, b));
@@ -1301,9 +1330,15 @@ impl Parser {
                         {
                             n.to_string()
                         }
-                        _ => return unsupported("for variable"),
+                        _ => {
+                            return self
+                                .syntax("a `for` needs a variable name to loop with".to_string())
+                        }
                     },
-                    _ => return unsupported("for variable"),
+                    _ => {
+                        return self
+                            .syntax("a `for` needs a variable name to loop with".to_string())
+                    }
                 };
                 self.i += 1;
                 while matches!(self.peek(), Some(Tok::Nl)) {
@@ -1313,13 +1348,19 @@ impl Parser {
                     return unsupported("for without in");
                 }
                 self.i += 1;
+                // `do` is a word of the list until a `;` or newline ends it.
                 let mut items = Vec::new();
                 while let Some(Tok::Word(w)) = self.peek() {
-                    if plain(w) == Some("do") {
-                        break;
-                    }
                     items.push(w.clone());
                     self.i += 1;
+                }
+                match self.peek() {
+                    Some(Tok::Semi) => {
+                        self.i += 1;
+                        self.skip_newlines();
+                    }
+                    Some(Tok::Nl) => self.skip_newlines(),
+                    _ => {}
                 }
                 self.expect_keyword("do")?;
                 let body = self.list(&["done"])?;
@@ -1338,7 +1379,7 @@ impl Parser {
                 let at = self.offset();
                 self.open.push((kw, at));
                 self.i += 1;
-                let cond = self.list(&["do"])?;
+                let cond = self.condition(&["do"])?;
                 self.expect_keyword("do")?;
                 let body = self.list(&["done"])?;
                 self.expect_keyword("done")?;
@@ -1424,14 +1465,17 @@ impl Parser {
                     return unsupported_at("array assignment", start);
                 }
                 Some(Tok::RParen) => return self.stray_paren(),
-                Some(t @ (Tok::LParen | Tok::DSemi)) => {
+                Some(Tok::DSemi) => {
+                    return self.syntax("`;;` is only valid in a `case`".to_string());
+                }
+                Some(t @ Tok::LParen) => {
                     return unsupported(operator_what(t));
                 }
                 _ => break,
             }
         }
         if assigns.is_empty() && words.is_empty() && redirs.is_empty() {
-            return unsupported("empty command");
+            return self.syntax("a command is needed here".to_string());
         }
         // A shell builtin the subset does not run is refused here, before any
         // command runs. Left alone it would be sent to PATH as a program.
@@ -1870,6 +1914,10 @@ struct Shell {
 
 const SHELL_NAME: &str = "ish";
 
+/// The status of a command a policy refused (`E_POLICY_DENY`), as the other
+/// refusals of the shell exit.
+const POLICY_DENY_STATUS: i32 = 77;
+
 impl Shell {
     fn var(&self, name: &str) -> Option<String> {
         match name {
@@ -1892,11 +1940,24 @@ impl Shell {
         if let Some(v) = self.vars.get(name) {
             return Some(v.clone());
         }
+        // `$RANDOM` is a new number each time it is read, whatever the
+        // environment holds.
+        if name == "RANDOM" && !self.vars.contains_key(name) {
+            return Some(next_random().to_string());
+        }
         match std::env::var(name).ok() {
             Some(v) => Some(v),
             // Windows has no HOME; the platform's home directory stands in for it
             // (only here, the process environment is left alone).
             None if name == "HOME" => dirs::home_dir().map(|p| p.to_string_lossy().into_owned()),
+            // The variables a bash always has, which a Windows environment
+            // lacks or spells differently. `OLDPWD` stays unset until a `cd`.
+            None if name == "PWD" => Some(logical_pwd()),
+            None if name == "USER" => std::env::var("USERNAME").ok(),
+            None if name == "SHELL" => std::env::current_exe()
+                .ok()
+                .map(|p| posix_path(&p.to_string_lossy())),
+            None if name == "PPID" => parent_pid(),
             None => None,
         }
     }
@@ -1917,7 +1978,14 @@ impl Shell {
     /// The first one wins.
     fn note_unbound(&mut self, name: &str) {
         if self.nounset && self.unbound.is_none() {
-            self.unbound = Some(self.expansion_message(name, "unbound variable"));
+            // Bash names a positional parameter with its `$`: `$1: unbound
+            // variable`, and a variable by its bare name.
+            let named = if !name.is_empty() && name.chars().all(|c| c.is_ascii_digit()) {
+                format!("${name}")
+            } else {
+                name.to_string()
+            };
+            self.unbound = Some(self.expansion_message(&named, "unbound variable"));
         }
     }
 
@@ -2759,7 +2827,7 @@ impl Shell {
                 var, items, body, ..
             } => {
                 if refuse_steering(sink, var) {
-                    return Flow::Next(126);
+                    return Flow::Next(POLICY_DENY_STATUS);
                 }
                 let mut values = Vec::new();
                 for w in items {
@@ -2850,7 +2918,7 @@ impl Shell {
         let mut env_overrides = Vec::new();
         for (name, w) in assigns {
             if refuse_steering(sink, name) {
-                return Flow::Next(126);
+                return Flow::Next(POLICY_DENY_STATUS);
             }
             let v = self.expand_assign(w, stdin);
             if argv.is_empty() {
@@ -2920,7 +2988,7 @@ impl Shell {
                         None => (a.clone(), None),
                     };
                     if refuse_steering(sink, &n) {
-                        return Flow::Next(126);
+                        return Flow::Next(POLICY_DENY_STATUS);
                     }
                     if let Some(v) = v {
                         self.set_var(&n, v);
@@ -3018,10 +3086,10 @@ impl Shell {
                 return match std::env::set_current_dir(&target) {
                     Ok(()) => {
                         if let Some(o) = old {
-                            self.set_var("OLDPWD", o.to_string_lossy().into_owned());
+                            self.set_var("OLDPWD", posix_path(&o.to_string_lossy()));
                         }
                         if let Ok(d) = std::env::current_dir() {
-                            self.set_var("PWD", d.to_string_lossy().into_owned());
+                            self.set_var("PWD", posix_path(&d.to_string_lossy()));
                         }
                         // `cd -` says where it went, as bash does.
                         if args.first().map(|t| t == "-").unwrap_or(false) {
@@ -3072,9 +3140,24 @@ impl Shell {
     ) -> i32 {
         let mut raw = false;
         let mut names = Vec::new();
-        for a in args {
+        let mut prompt: Option<String> = None;
+        let mut it = args.iter();
+        while let Some(a) = it.next() {
             if a == "-r" {
                 raw = true;
+            } else if a == "-p" {
+                match it.next() {
+                    Some(p) => prompt = Some(p.clone()),
+                    None => {
+                        let _ = writeln!(
+                            std::io::stderr(),
+                            "{SHELL_NAME}: read: -p: option requires an argument"
+                        );
+                        return 2;
+                    }
+                }
+            } else if let Some(p) = a.strip_prefix("-p").filter(|p| !p.is_empty()) {
+                prompt = Some(p.to_string());
             } else if a.starts_with('-') {
                 // -p, -t, -n …: honoured by ignoring would be a lie; say no.
                 let _ = writeln!(
@@ -3100,7 +3183,17 @@ impl Shell {
                 "variables that steer child programs are set by whoever launches the agent",
             );
             let _ = writeln!(std::io::stderr(), "{refusal}");
-            return 126;
+            return POLICY_DENY_STATUS;
+        }
+        // As bash does, the prompt goes to stderr and only when the input is a
+        // terminal, so a script reading a pipe prints nothing extra.
+        if let Some(p) = &prompt {
+            use std::io::IsTerminal;
+            if !stdin.is_buffered() && std::io::stdin().is_terminal() {
+                let mut err = std::io::stderr();
+                let _ = err.write_all(p.as_bytes());
+                let _ = err.flush();
+            }
         }
         let (line, terminated) = match stdin.read_line() {
             Ok(Some(found)) => found,
@@ -3172,7 +3265,7 @@ impl Shell {
         }
         if let Some(refusal) = self.steering_refusal(env) {
             sink.eline(&refusal);
-            return 126;
+            return POLICY_DENY_STATUS;
         }
         let program = match resolve_program(argv, env, why) {
             Ok(p) => p,
@@ -3253,7 +3346,7 @@ impl Shell {
         }
         if let Some(refusal) = self.steering_refusal(env) {
             sink.eline(&refusal);
-            return 126;
+            return POLICY_DENY_STATUS;
         }
         // A script that runs itself would nest children until memory ran out.
         // Each child is told its depth, and a script at the limit starts none.
@@ -3739,16 +3832,56 @@ fn io_reason(e: &std::io::Error) -> String {
     }
 }
 
+/// A path as `pwd -W` of Git bash writes it on Windows: with `/`, not `\`, so
+/// `${d##*/}` and `basename` find the last component. Unchanged elsewhere.
+fn posix_path(p: &str) -> String {
+    if cfg!(windows) {
+        p.replace('\\', "/")
+    } else {
+        p.to_string()
+    }
+}
+
+/// `$RANDOM`: 0..=32767, from a generator seeded once from the clock and pid.
+fn next_random() -> u32 {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static STATE: AtomicU64 = AtomicU64::new(0);
+    let mut x = STATE.load(Ordering::Relaxed);
+    if x == 0 {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_nanos() as u64);
+        x = nanos ^ (u64::from(std::process::id()) << 32) ^ 0x9E37_79B9_7F4A_7C15;
+        if x == 0 {
+            x = 1;
+        }
+    }
+    // xorshift64: never 0 from a non-zero state.
+    x ^= x << 13;
+    x ^= x >> 7;
+    x ^= x << 17;
+    STATE.store(x, Ordering::Relaxed);
+    ((x >> 33) & 0x7FFF) as u32
+}
+
+/// `$PPID`: the parent process's id, or `None` when the system will not say.
+fn parent_pid() -> Option<String> {
+    let me = sysinfo::get_current_pid().ok()?;
+    let mut sys = sysinfo::System::new();
+    sys.refresh_processes(sysinfo::ProcessesToUpdate::Some(&[me]), true);
+    sys.process(me)?.parent().map(|p| p.as_u32().to_string())
+}
+
 fn logical_pwd() -> String {
     let phys = std::env::current_dir().ok();
     if let (Ok(pwd), Some(phys)) = (std::env::var("PWD"), phys.as_ref()) {
         if std::fs::canonicalize(&pwd).ok().as_deref()
             == std::fs::canonicalize(phys).ok().as_deref()
         {
-            return pwd;
+            return posix_path(&pwd);
         }
     }
-    phys.map(|p| p.to_string_lossy().into_owned())
+    phys.map(|p| posix_path(&p.to_string_lossy()))
         .unwrap_or_default()
 }
 
@@ -4344,6 +4477,8 @@ fn utility(name: &str, args: &[String], stdin: &mut Input, sink: &mut Sink) -> U
         "date" => date(args, sink),
         "basename" => match args {
             [p] | [p, _] => {
+                // On Windows a `\` separates too.
+                let p = &posix_path(p);
                 let trimmed = p.trim_end_matches('/');
                 let mut b = trimmed.rsplit('/').next().unwrap_or("").to_string();
                 if trimmed.is_empty() && p.starts_with('/') {
@@ -4361,6 +4496,7 @@ fn utility(name: &str, args: &[String], stdin: &mut Input, sink: &mut Sink) -> U
         },
         "dirname" => match args {
             [p] => {
+                let p = &posix_path(p);
                 let t = p.trim_end_matches('/');
                 let d = match t.rfind('/') {
                     Some(0) => "/".to_string(),
@@ -4970,6 +5106,26 @@ fn test(args: &[String], sink: &mut Sink) -> i32 {
         Some(match op {
             "=" | "==" => Ok(a == b),
             "!=" => Ok(a != b),
+            // `\<` and `\>`: byte order, as in the C locale.
+            "<" => Ok(a.as_bytes() < b.as_bytes()),
+            ">" => Ok(a.as_bytes() > b.as_bytes()),
+            // File times: a file that exists is newer than one that does not.
+            "-nt" | "-ot" => {
+                let time = |p: &str| std::fs::metadata(p).and_then(|m| m.modified()).ok();
+                let (x, y) = (time(a), time(b));
+                Ok(match (op, x, y) {
+                    ("-nt", Some(x), Some(y)) => x > y,
+                    ("-nt", Some(_), None) => true,
+                    ("-ot", Some(x), Some(y)) => x < y,
+                    ("-ot", None, Some(_)) => true,
+                    _ => false,
+                })
+            }
+            // The same file: both exist and resolve to one path.
+            "-ef" => Ok(match (std::fs::canonicalize(a), std::fs::canonicalize(b)) {
+                (Ok(x), Ok(y)) => x == y,
+                _ => false,
+            }),
             "-eq" | "-ne" | "-lt" | "-le" | "-gt" | "-ge" => num(a).and_then(|x| {
                 num(b).map(|y| match op {
                     "-eq" => x == y,
@@ -5020,19 +5176,30 @@ fn test(args: &[String], sink: &mut Sink) -> i32 {
                     }
                 }
             }
-            [x, op, y] => match binary(x, op, y) {
-                Some(Ok(v)) => Ok(v),
-                Some(Err(m)) => {
-                    sink.eline(&format!("{SHELL_NAME}: test: {m}"));
-                    Err(2)
+            [x, op, y] => {
+                // Like the unary file tests, these may not look outside the jail.
+                if matches!(op.as_str(), "-nt" | "-ot" | "-ef") {
+                    for p in [x, y] {
+                        if let Some(refusal) = jail_refusal("test", p) {
+                            sink.eline(&refusal);
+                            return Err(2);
+                        }
+                    }
                 }
-                None => {
-                    sink.eline(&format!(
-                        "{SHELL_NAME}: test: {op}: binary operator expected"
-                    ));
-                    Err(2)
+                match binary(x, op, y) {
+                    Some(Ok(v)) => Ok(v),
+                    Some(Err(m)) => {
+                        sink.eline(&format!("{SHELL_NAME}: test: {m}"));
+                        Err(2)
+                    }
+                    None => {
+                        sink.eline(&format!(
+                            "{SHELL_NAME}: test: {op}: binary operator expected"
+                        ));
+                        Err(2)
+                    }
                 }
-            },
+            }
             _ => {
                 sink.eline(&format!("{SHELL_NAME}: test: too many arguments"));
                 Err(2)
