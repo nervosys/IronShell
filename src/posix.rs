@@ -3259,7 +3259,23 @@ impl Shell {
             sink.eline(&message);
             return 2;
         }
-        if let Err(e) = crate::safety::guard_exec("posix", argv.join(" ")) {
+        // What the child gets beyond this process's environment (exports and
+        // prefix assignments) is part of what is approved.
+        let mut child_env: Vec<(String, String)> = Vec::new();
+        for n in &self.exported {
+            if let Some(v) = self.vars.get(n) {
+                child_env.push((n.clone(), v.clone()));
+            }
+        }
+        child_env.extend(env.iter().cloned());
+        // Later entries win, as they do on the command below.
+        let mut deduped: std::collections::BTreeMap<String, String> =
+            std::collections::BTreeMap::new();
+        for (n, v) in child_env {
+            deduped.insert(n, v);
+        }
+        let child_env: Vec<(String, String)> = deduped.into_iter().collect();
+        if let Err(e) = crate::safety::guard_exec_env("posix", argv.join(" "), &child_env) {
             sink.eline(&e.to_string());
             return e.code.exit_code();
         }

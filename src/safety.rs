@@ -6227,6 +6227,37 @@ pub fn guard_exec(builtin: &str, command: impl Into<String>) -> Result<(), Safet
     })
 }
 
+/// [`guard_exec`] for a command that also gets environment beyond this
+/// process's own: `env` (name, value) pairs from prefix assignments and
+/// exports. They are bound into the approval, sorted by name, so a change of
+/// name or value gives a new token. With no pairs the descriptor, and so the
+/// token, is exactly [`guard_exec`]'s.
+pub fn guard_exec_env(
+    builtin: &str,
+    command: impl Into<String>,
+    env: &[(String, String)],
+) -> Result<(), SafetyError> {
+    let command = command.into();
+    let sorted: std::collections::BTreeMap<&str, &str> =
+        env.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
+    let mut radius = serde_json::json!({ "command": command });
+    if !sorted.is_empty() {
+        let pairs: Vec<Json> = sorted.iter().map(|(k, v)| json!([k, v])).collect();
+        if let Some(map) = radius.as_object_mut() {
+            map.insert("child_env".to_string(), Json::Array(pairs));
+        }
+    }
+    guard(GuardCtx {
+        builtin,
+        effect: Effect::Exec,
+        what: "exec",
+        targets: vec![command.clone()],
+        blast_radius: radius,
+        reversible: false,
+        fs_paths: false,
+    })
+}
+
 /// Reject caller-supplied *positional* arguments that a tool would parse as
 /// options (CWE-88).
 ///
