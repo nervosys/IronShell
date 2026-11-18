@@ -3767,6 +3767,56 @@ fn file_hash16(path: &str) -> Option<String> {
     Some(hex(&digest)[..16].to_string())
 }
 
+/// The most workspace files an exec approval hashes.
+const OPERAND_HASH_LIMIT: usize = 32;
+/// The most candidate names examined for those hashes.
+const OPERAND_CANDIDATE_LIMIT: usize = 512;
+/// The longest argument that is split into words to look for file names.
+const OPERAND_SPLIT_MAX_CHARS: usize = 4096;
+
+/// Push the names in one argument that may be a file the command runs or
+/// reads: the argument itself; the part after the first `:` or `=` of a
+/// `-Flag:value` or `--flag=value` argument; and, for an argument that is a
+/// piece of script (`. ./x.ps1`, `call x.cmd`, `& 'a b.ps1'`), each word of it
+/// split on whitespace, quotes, `;`, `&`, `|`, `(`, `)` and `,`, with the part
+/// after a `:` or `=` of a word as well. A name that is no existing file is
+/// dropped later, so over-collecting here costs nothing.
+fn operand_candidates(arg: &str, out: &mut Vec<String>) {
+    out.push(arg.to_string());
+    let after_flag = |s: &str| -> Option<String> {
+        let rest = s.strip_prefix('-')?;
+        let i = rest.find([':', '='])?;
+        let v = rest[i + 1..].trim_matches(['\x27', '"']);
+        (!v.is_empty()).then(|| v.to_string())
+    };
+    if let Some(v) = after_flag(arg) {
+        out.push(v);
+    }
+    if arg.chars().count() > OPERAND_SPLIT_MAX_CHARS {
+        return;
+    }
+    let splits = |c: char| {
+        c.is_whitespace() || matches!(c, '\x27' | '"' | ';' | '&' | '|' | '(' | ')' | ',')
+    };
+    if !arg.contains(splits) {
+        return;
+    }
+    for word in arg.split(splits).filter(|w| !w.is_empty()) {
+        out.push(word.to_string());
+        if let Some(v) = after_flag(word) {
+            out.push(v);
+        }
+        if !word.starts_with('-') {
+            if let Some(i) = word.find('=') {
+                let v = &word[i + 1..];
+                if !v.is_empty() {
+                    out.push(v.to_string());
+                }
+            }
+        }
+    }
+}
+
 /// Add to an exec approval's blast radius what the command will run on: a
 /// content hash of each operand that names an existing regular file inside the
 /// workspace (`operand_hashes`), and the environment changes this process made
@@ -3776,7 +3826,7 @@ fn bind_exec_context(radius: &mut Json) {
     let mut operands: Vec<String> = Vec::new();
     let mut take = |v: &Json| {
         if let Some(s) = v.as_str() {
-            operands.push(s.to_string());
+            operand_candidates(s, &mut operands);
         }
     };
     if let Some(p) = radius.get("program") {
@@ -3787,11 +3837,14 @@ fn bind_exec_context(radius: &mut Json) {
     }
     if let Some(command) = radius.get("command").and_then(Json::as_str) {
         for word in command.split_whitespace() {
-            operands.push(word.trim_matches(['\x27', '"']).to_string());
+            operand_candidates(word.trim_matches(['\x27', '"']), &mut operands);
         }
     }
     let mut hashes = serde_json::Map::new();
-    for operand in operands.into_iter().take(64) {
+    for operand in operands.into_iter().take(OPERAND_CANDIDATE_LIMIT) {
+        if hashes.len() >= OPERAND_HASH_LIMIT {
+            break;
+        }
         if operand.is_empty() || operand.starts_with('-') || hashes.contains_key(&operand) {
             continue;
         }
@@ -11586,5 +11639,34 @@ mod mirror_and_git_install_tests {
             ("PATH", r"\\ae-no-such-host\share"),
         ]));
         assert_eq!(none, plain);
+    }
+}
+
+#[cfg(test)]
+mod operand_candidate_tests {
+    use super::operand_candidates;
+
+    fn names(arg: &str) -> Vec<String> {
+        let mut out = Vec::new();
+        operand_candidates(arg, &mut out);
+        out
+    }
+
+    #[test]
+    fn a_file_inside_an_argument_is_a_candidate() {
+        assert!(names("-File:x.ps1").contains(&"x.ps1".to_string()));
+        assert!(names("--config=a.toml").contains(&"a.toml".to_string()));
+        assert!(names(". ./x.ps1").contains(&"./x.ps1".to_string()));
+        assert!(names("call x.cmd").contains(&"x.cmd".to_string()));
+        assert!(names("& 'x y.ps1'").contains(&"x".to_string()));
+        assert!(names("a;b.ps1").contains(&"b.ps1".to_string()));
+        assert!(names("-Command:\". ./z.ps1\"").contains(&"./z.ps1".to_string()));
+    }
+
+    #[test]
+    fn a_huge_argument_is_not_split() {
+        let long = format!("a {}", "b ".repeat(5000));
+        let found = names(&long);
+        assert_eq!(found.len(), 1, "a {}-char argument was split", long.len());
     }
 }
