@@ -56874,6 +56874,7 @@ fn bi_file_replace(args: Vec<Value>, _input: Option<Value>) -> Result<Value> {
     // A missing file is named as missing, not as a pattern that is not in it.
     require_edit_target("file_replace", &crate::safety::resolve_path_str(&path))?;
 
+    let find_text = old_text.clone();
     let mut patch = BTreeMap::new();
     patch.insert("find".to_string(), Value::Str(old_text));
     patch.insert("replace".to_string(), Value::Str(new_text));
@@ -56900,6 +56901,7 @@ fn bi_file_replace(args: Vec<Value>, _input: Option<Value>) -> Result<Value> {
                 .downcast_ref::<crate::safety::SafetyError>()
                 .map(|se| se.hint.clone())
                 .unwrap_or_default();
+            let hint = line_ending_hint(&path, &find_text, hint);
             Err(crate::safety::edit_not_found(
                 "file_replace",
                 format!("file_replace: pattern not found in {path}"),
@@ -56907,6 +56909,38 @@ fn bi_file_replace(args: Vec<Value>, _input: Option<Value>) -> Result<Value> {
             ))
         }
         other => other,
+    }
+}
+
+/// The hint for a file_replace miss, with a note added when `find` would have
+/// matched had the file's line endings been the ones it names: an LF in `find`
+/// does not match a CR LF in the file, and a file that mixes both has no one
+/// spelling to guess.
+fn line_ending_hint(path: &str, find: &str, hint: String) -> String {
+    if !find.contains('\n') {
+        return hint;
+    }
+    let resolved = crate::safety::resolve_path_str(path);
+    if std::fs::metadata(&resolved).map_or(true, |m| m.len() > 64 * 1024 * 1024) {
+        return hint;
+    }
+    let Ok(text) = std::fs::read_to_string(&resolved) else {
+        return hint;
+    };
+    let squash = |s: &str| s.replace("\r\n", "\n");
+    if !text.contains("\r\n") || !squash(&text).contains(&squash(find)) {
+        return hint;
+    }
+    let bare_lf = text.replace("\r\n", "").contains('\n');
+    let note = if bare_lf {
+        "the file mixes CRLF and LF line endings, and old_text must use the file's exact endings: write the line break each line really ends with, or replace one line at a time"
+    } else {
+        "the file uses CRLF line endings, and old_text must use them too: write \\r\\n where the file has a line break, or replace one line at a time"
+    };
+    if hint.is_empty() {
+        note.to_string()
+    } else {
+        format!("{hint}; {note}")
     }
 }
 
