@@ -3167,7 +3167,16 @@ impl Parser {
             .iter()
             .map(|&(a, b)| self.render_tokens(a, b))
             .collect();
-        let mut end = self.i + 1;
+        // `**` is two adjacent `*` tokens: name it as one operator, so the hint
+        // does not read `print(2) * * 10`.
+        let doubled = op.kind == Tok::Star
+            && self
+                .toks
+                .get(self.i + 1)
+                .is_some_and(|n| n.kind == Tok::Star && n.line == op.line && n.col == op.col + 1);
+        let op_text = if doubled { "**" } else { op.text.as_str() };
+        let rest_from = if doubled { self.i + 2 } else { self.i + 1 };
+        let mut end = rest_from;
         let mut depth = 0usize;
         while let Some(t) = self.toks.get(end) {
             if t.line != op.line {
@@ -3187,7 +3196,7 @@ impl Parser {
             }
             end += 1;
         }
-        let mut rest = self.render_tokens(self.i + 1, end);
+        let mut rest = self.render_tokens(rest_from, end);
         if rest.is_empty() {
             rest = "...".to_string();
         }
@@ -3201,12 +3210,12 @@ impl Parser {
         let hint = format!(
             "write {name}({all}) {op} {rest} to use the result, or \
              {name}({head}{last} {op} {rest}) to pass the whole expression",
-            op = op.text
+            op = op_text
         );
         Err(anyhow::Error::new(HintedSyntax {
             msg: format!(
                 "ambiguous word-call: `{}` after the arguments of `{name}` at line {}, column {}",
-                op.text, op.line, op.col
+                op_text, op.line, op.col
             ),
             hint,
         }))
