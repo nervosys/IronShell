@@ -41569,7 +41569,8 @@ fn tar_tool_entry_names(
             "nothing was extracted; convert the archive to .tar.gz (the links are then checked before anything is written), or remove the link entries",
         ));
     }
-    Ok((names, 0))
+    let declared = tar_verbose_total_bytes(&String::from_utf8_lossy(&long.stdout));
+    Ok((names, declared))
 }
 
 /// Whether a `tar -tv` listing has a symbolic link (`l`) or hard link (`h`)
@@ -41578,6 +41579,52 @@ fn tar_verbose_lists_a_link(listing: &str) -> bool {
     listing
         .lines()
         .any(|l| matches!(l.as_bytes().first(), Some(b'l' | b'h')))
+}
+
+/// The sum of the size column of a `tar -tv` listing. GNU tar writes
+/// `perms owner/group SIZE date time name`; bsdtar writes
+/// `perms links owner group SIZE month day time name`. A line that does not
+/// parse counts 0, so this is a lower bound used for an early refusal; the
+/// bytes written are counted again after the extraction (`written_bytes_over`).
+fn tar_verbose_total_bytes(listing: &str) -> u64 {
+    let mut total: u64 = 0;
+    for line in listing.lines() {
+        let tok: Vec<&str> = line.split_whitespace().collect();
+        let idx = if tok.get(1).is_some_and(|t| t.contains('/')) {
+            2
+        } else {
+            4
+        };
+        if let Some(n) = tok.get(idx).and_then(|t| t.parse::<u64>().ok()) {
+            total = total.saturating_add(n);
+        }
+    }
+    total
+}
+
+/// The bytes the extraction of `members` wrote under `root`, as the files now
+/// are, or `None` when they stay within `max`. Stops counting once past `max`.
+/// This is the check on what an external tar actually wrote: a sparse entry
+/// declares a small size and expands past it.
+fn written_bytes_over(
+    root: &str,
+    members: &[(String, Option<String>)],
+    max: u64,
+) -> Result<Option<u64>> {
+    let mut total: u64 = 0;
+    for (name, _) in members {
+        crate::safety::check_deadline_now()?;
+        let path = std::path::Path::new(root).join(name.trim_end_matches(['/', '\\']));
+        if let Ok(meta) = std::fs::symlink_metadata(&path) {
+            if meta.is_file() {
+                total = total.saturating_add(meta.len());
+                if total > max {
+                    return Ok(Some(total));
+                }
+            }
+        }
+    }
+    Ok(None)
 }
 
 /// The program that decompresses a bzip2, xz or zstd stream, by its first two
@@ -42431,6 +42478,12 @@ fn bi_tar_extract(args: Vec<Value>, _input: Option<Value>) -> Result<Value> {
                 output.status.code(),
                 &String::from_utf8_lossy(&output.stderr),
             ));
+        }
+        // A sparse entry declares its stored size, not the size it expands to,
+        // and an external tar writes the expanded file. Count what was written;
+        // past the limit the caller removes it (the `trail` below).
+        if written_bytes_over(&extract_root, &members, archive_max_bytes())?.is_some() {
+            check_archive_budget("tar_extract", archive_max_bytes().saturating_add(1))?;
         }
         Ok(Value::Bool(true))
     })();
@@ -85677,6 +85730,31 @@ mod archive_prescan_tests {
         let err = check_archive_budget("tar_extract", ARCHIVE_EXTRACT_MAX_BYTES + 1)
             .expect_err("one byte over must be refused");
         assert!(format!("{err}").contains("E_BUDGET_EXCEEDED"), "{err}");
+    }
+
+    #[test]
+    fn a_verbose_tar_listing_is_totalled_in_both_layouts() {
+        let gnu = "-rw-r--r-- u/g 600 2024-01-01 00:00 a\n-rw-r--r-- u/g 400 2024-01-01 00:00 b\n";
+        assert_eq!(tar_verbose_total_bytes(gnu), 1000);
+        let bsd = "-rw-r--r--  0 u g   700 Jan  1 00:00 a\n-rw-r--r--  0 u g 300 Jan  1 00:00 b\n";
+        assert_eq!(tar_verbose_total_bytes(bsd), 1000);
+        assert_eq!(tar_verbose_total_bytes("garbage\n"), 0);
+    }
+
+    #[test]
+    fn files_written_past_the_limit_are_counted_after_an_external_tar() {
+        let dir =
+            std::env::temp_dir().join(format!("ae_written_{}", uuid::Uuid::new_v4().simple()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("a.bin"), vec![0u8; 600]).unwrap();
+        std::fs::write(dir.join("b.bin"), vec![0u8; 600]).unwrap();
+        let members = vec![("a.bin".to_string(), None), ("b.bin".to_string(), None)];
+        let root = dir.to_str().unwrap();
+        let over = written_bytes_over(root, &members, 1000).unwrap();
+        let under = written_bytes_over(root, &members, 1200).unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(over, Some(1200));
+        assert_eq!(under, None);
     }
 
     #[test]
