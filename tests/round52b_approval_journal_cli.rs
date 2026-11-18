@@ -91,3 +91,13 @@ fn the_approval_hint_says_a_token_is_good_for_every_later_run() {
         "{hint}"
     );
 }
+
+// ── B3: help("journal") names journal().entries ──
+
+#[test]
+fn journal_help_names_the_entries_field() {
+    let dir = scratch("b3_help");
+    let out = ish_agent(&dir, r#"help("journal")"#, None);
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(text.contains("journal().entries"), "{text}");
+}

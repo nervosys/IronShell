@@ -14455,7 +14455,7 @@ pub static SIGNATURES: &[Signature] = &[
         subject: None,
         params: &[],
         returns: "Record",
-        doc: "The recorded steps of this session and how many can be reversed. Rows are per file: a call that changed several paths (a move, an extraction) has one row for each. Each row's id is the value undo({id: N}) takes to undo that one row's call; seq is the same number. step is the call the row belongs to: rows with the same step are one call, undone together, and undo(n) counts these steps (calls), not rows, so undo(1) reverts every row of the newest step.",
+        doc: "The recorded steps of this session and how many can be reversed, as a Record {steps, reversible, irreversible, enabled, entries}: steps, reversible and irreversible are counts, and the rows are in the Array journal().entries (so journal().entries | map(.step), not journal() | map(.step)). Rows are per file: a call that changed several paths (a move, an extraction) has one row for each. Each row's id is the value undo({id: N}) takes to undo that one row's call; seq is the same number. step is the call the row belongs to: rows with the same step are one call, undone together, and undo(n) counts these steps (calls), not rows, so undo(1) reverts every row of the newest step.",
         examples: &[
             (r#"typeof(journal())"#, r#"Record"#),
         ],
