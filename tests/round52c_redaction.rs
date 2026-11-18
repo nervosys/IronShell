@@ -115,7 +115,7 @@ fn the_note_is_printed_under_deterministic_and_for_posix_output() {
     let o = d.run(&["--deterministic", "-c", r#"file.read("s.env")"#]);
     assert!(!out(&o).contains("123456789"), "{}", out(&o));
     assert!(err(&o).contains("1 secret redacted"), "{}", err(&o));
-    let o = d.run(&["--agent", "-b", "-c", "cat s.env | tr a-z A-Z"]);
+    let o = d.run(&["--agent", "-b", "-c", "cat s.env | tr q Q"]);
     assert!(!out(&o).contains("123456789"), "{}", out(&o));
     assert!(err(&o).contains("secret redacted"), "{}", err(&o));
 }
