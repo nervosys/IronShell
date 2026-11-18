@@ -689,6 +689,7 @@ fn run(mut cli: Cli) -> Result<()> {
     if cli.bash && file.is_none() && cli.command.is_none() {
         let mut buf = String::new();
         io::stdin().read_to_string(&mut buf)?;
+        let buf = strip_bom(buf);
         run_posix_or_fall_back(&buf, None, &[]);
         let code = transpile::bash::transpile_bash_to_ae(&buf)?;
         return run_code(&code);
@@ -697,6 +698,7 @@ fn run(mut cli: Cli) -> Result<()> {
     if cli.zsh && file.is_none() && cli.command.is_none() {
         let mut buf = String::new();
         io::stdin().read_to_string(&mut buf)?;
+        let buf = strip_bom(buf);
         run_zsh_or_fall_back(&buf, None, &[]);
         let code = transpile_zsh_checked(&buf)?;
         return run_code(&code);
@@ -705,6 +707,7 @@ fn run(mut cli: Cli) -> Result<()> {
     if cli.pwsh && file.is_none() && cli.command.is_none() {
         let mut buf = String::new();
         io::stdin().read_to_string(&mut buf)?;
+        let buf = strip_bom(buf);
         let code = transpile_pwsh_checked(&buf)?;
         return run_code(&code);
     }
@@ -1490,8 +1493,17 @@ fn detect_transpile_mode(path: &str) -> Option<TranspileMode> {
     }
 }
 
+/// `text` without a leading UTF-8 byte-order mark, which an editor on Windows
+/// may put before `#!/bin/sh` and which is no part of the script.
+fn strip_bom(text: String) -> String {
+    match text.strip_prefix('\u{feff}') {
+        Some(rest) => rest.to_string(),
+        None => text,
+    }
+}
+
 fn run_file(path: &str, explicit_mode: Option<TranspileMode>) -> Result<()> {
-    let mut code = match fs::read_to_string(path) {
+    let mut code = match fs::read_to_string(path).map(strip_bom) {
         Ok(code) => code,
         // A script that does not exist is E_NOT_FOUND (exit 66), as a missing
         // file is anywhere else in the language; under --agent it is the JSON
@@ -1640,6 +1652,23 @@ fn transpile_zsh_checked(src: &str) -> Result<String> {
     Ok(code)
 }
 
+/// A transpile-time refusal, `powershell line N: WHAT; nothing was run`, in the
+/// form every other refusal takes: `WHAT at line N, so nothing in this script
+/// was run`.
+fn pwsh_refusal_wording(message: &str) -> String {
+    let Some(rest) = message.strip_prefix("powershell line ") else {
+        return message.to_string();
+    };
+    let Some((n, what)) = rest.split_once(": ") else {
+        return message.to_string();
+    };
+    if n.is_empty() || !n.chars().all(|c| c.is_ascii_digit()) {
+        return message.to_string();
+    }
+    let what = what.strip_suffix("; nothing was run").unwrap_or(what);
+    format!("{what} at line {n}, so nothing in this script was run")
+}
+
 /// [`transpile_zsh_checked`] for PowerShell.
 fn transpile_pwsh_checked(src: &str) -> Result<String> {
     let (code, fallbacks) = match transpile::powershell::transpile_powershell_with_report(src) {
@@ -1647,9 +1676,17 @@ fn transpile_pwsh_checked(src: &str) -> Result<String> {
         // Every transpile-time refusal has one shape: E_POLICY_DENY, exit 77,
         // with a hint, as a construct handed to `sh` is refused below.
         Err(why) => {
+            // A syntax error in the PowerShell is wrong in every shell: E_PARSE.
+            if why
+                .downcast_ref::<iron_shell::parser::ParseError>()
+                .is_some()
+            {
+                iron_shell::repl::report_error(&why);
+                std::process::exit(iron_shell::repl::exit_status_for(&why));
+            }
             let e = iron_shell::safety::policy_deny(
                 "powershell",
-                why.to_string(),
+                pwsh_refusal_wording(&why.to_string()),
                 "rewrite it with commands and expressions the powershell transpiler translates, or write it in ish",
             );
             iron_shell::repl::report_error(&e);

@@ -207,10 +207,10 @@ fn a_child_process_never_inherits_a_gate_variable_in_agent_mode() {
     std::env::set_var("IRONSHELL_APPROVE_ALL", "1");
     let _approve = EnvVarGuard("IRONSHELL_APPROVE_ALL");
     let program = "ae_no_such_program_xyz";
-    // With the gate variable as a prefix: refused before any spawn (126).
+    // With the gate variable as a prefix: refused before any spawn (77, a policy refusal).
     assert_eq!(
         iron_shell::posix::run(&format!("IRONSHELL_MODE=human {program}")),
-        Some(126)
+        Some(77)
     );
     // Without it, the same command reaches the spawn and is not found (127).
     assert_eq!(iron_shell::posix::run(program), Some(127));
