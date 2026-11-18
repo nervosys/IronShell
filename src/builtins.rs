@@ -16844,6 +16844,7 @@ fn bi_ceil(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
 }
 
 /// round(number) - Round to nearest integer
+/// An exact tie rounds away from zero, unlike Python's round-half-even: round(2.5) is 3.
 /// Args:
 ///   - number: Number
 /// Returns: Int - Rounded value
@@ -19139,7 +19140,8 @@ fn bi_ps_add(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
 ///   - separator: String (optional) - groups the integer part, such as ","
 /// Returns: String
 ///
-/// A Float rounds half away from zero, and a negative value keeps its sign
+/// A Float rounds half away from zero (an exact tie rounds away from zero,
+/// unlike Python's round-half-even: 0.125 to 2 places is "0.13"), and a negative value keeps its sign
 /// unless it rounds to zero. NaN and the infinities are E_BAD_ARG.
 ///
 /// Example:

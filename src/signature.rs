@@ -1873,7 +1873,7 @@ pub static SIGNATURES: &[Signature] = &[
             "decimal places, 0 to 17 (a value outside that range is E_BAD_ARG); 0 returns an Int",
         )],
         returns: "Number",
-        doc: "Round a number, optionally to 0 to 17 decimal places (digits outside that range are refused with E_BAD_ARG, never clamped). The tie rule is half away from zero, applied to the exact binary value of a Float, as format_number does: 2.675 is stored as 2.67499999..., so round(2.675, 2) is 2.67, while an exact tie such as 0.125 or 2.5 goes up (round(0.125, 2) is 0.13, round(2.5) is 3, round(-2.5) is -3).",
+        doc: "Round a number, optionally to 0 to 17 decimal places (digits outside that range are refused with E_BAD_ARG, never clamped). The tie rule is half away from zero, applied to the exact binary value of a Float, as format_number does: 2.675 is stored as 2.67499999..., so round(2.675, 2) is 2.67, while an exact tie such as 0.125 or 2.5 goes up (round(0.125, 2) is 0.13, round(2.5) is 3, round(-2.5) is -3). An exact tie rounds away from zero, unlike Python's round, which rounds half to even (round(2.5) is 2 there).",
         examples: &[
             ("round(4.966, 2)", "4.97"),
             ("4.966 | round(2)", "4.97"),
@@ -8143,7 +8143,7 @@ pub static SIGNATURES: &[Signature] = &[
             opt("separator", Ty::Str, "groups the integer part, such as \",\""),
         ],
         returns: "String",
-        doc: "Format an Int or Float with exactly decimals digits after the point, rounded half away from zero. With a separator the integer part is grouped in threes. A negative number keeps its sign unless it rounds to zero.",
+        doc: "Format an Int or Float with exactly decimals digits after the point, rounded half away from zero: an exact tie rounds away from zero, unlike Python's round-half-even (format_number(0.125, 2) is 0.13 and format_number(2.5, 0) is 3, where Python gives 0.12 and 2). With a separator the integer part is grouped in threes. A negative number keeps its sign unless it rounds to zero.",
         examples: &[
             (r#"format_number(1234567.891, 2, ",")"#, r#""1,234,567.89""#),
             (r#"format_number(1000, 2)"#, r#""1000.00""#),

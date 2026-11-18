@@ -106,3 +106,13 @@ fn a4_index_of_doc_does_not_call_regex_find_a_byte_offset() {
     assert_eq!(run(r#"index_of("héllo", "l")"#), Value::Int(2));
     assert_eq!(run(r#"regex_find("héllo", "l").start"#), Value::Int(2));
 }
+
+// A5: behaviour is unchanged and the docs state the tie rule.
+#[test]
+fn a5_ties_round_away_from_zero_and_the_docs_say_so() {
+    assert_eq!(run("format_number(0.125, 2)"), s("0.13"));
+    assert_eq!(run("format_number(2.5, 0)"), s("3"));
+    assert_eq!(run("math.round(2.5)"), Value::Int(3));
+    let sig = include_str!("../src/signature.rs");
+    assert!(sig.matches("unlike Python").count() >= 2);
+}
