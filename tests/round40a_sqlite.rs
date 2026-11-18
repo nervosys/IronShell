@@ -300,3 +300,27 @@ fn messages_are_plain() {
     assert!(e.contains("db_sqlite_insert"), "{e}");
     assert!(!e.contains("command line argument"), "{e}");
 }
+
+#[test]
+fn a_newline_inside_a_quoted_cell_keeps_its_bytes() {
+    if !have_sqlite3() {
+        eprintln!("skipping: sqlite3 not on PATH");
+        return;
+    }
+    let _g = lock();
+    let dir = scratch("cellnl");
+    let db = dir.join("t.db");
+    let conn = rusqlite::Connection::open(&db).unwrap();
+    conn.execute_batch(
+        "CREATE TABLE t(id INTEGER, note TEXT); INSERT INTO t VALUES (1, 'a' || char(10) || 'b');",
+    )
+    .unwrap();
+    drop(conn);
+    let Value::Str(text) = call("db_sqlite_to_csv", vec![p(&db), s("t")]).unwrap() else {
+        panic!("expected text")
+    };
+    assert_eq!(text, "id,note\r\n1,\"a\nb\"\r\n");
+    let out = dir.join("out.csv");
+    call("db_sqlite_to_csv", vec![p(&db), s("t"), p(&out)]).unwrap();
+    assert_eq!(std::fs::read(&out).unwrap(), text.as_bytes());
+}

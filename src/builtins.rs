@@ -12210,8 +12210,8 @@ pub(crate) fn sqlite_column_type<'a>(values: impl Iterator<Item = &'a Value>) ->
 
 /// Line endings of CSV text from the sqlite3 CLI as one RFC 4180 CRLF per row.
 /// The CLI writes CRLF itself and its stdout in text mode (Windows) turns the
-/// LF into CRLF again, giving CR CR LF. A newline inside a quoted cell is left
-/// as it came.
+/// LF into CRLF again, giving CR CR LF. A newline inside a quoted cell is the
+/// cell's own: where the text-mode stdout added a CR to it, that CR is removed.
 fn normalize_csv_line_ends(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
     let mut in_quotes = false;
@@ -12232,6 +12232,12 @@ fn normalize_csv_line_ends(text: &str) -> String {
                     }
                 }
                 out.push_str("\r\n");
+            }
+            // Inside a quoted cell the Windows text-mode stdout turned each LF of
+            // the cell into CR LF; undo that, so the cell keeps its own bytes.
+            '\r' if in_quotes && cfg!(windows) && chars.peek() == Some(&'\n') => {
+                chars.next();
+                out.push('\n');
             }
             _ => out.push(c),
         }
