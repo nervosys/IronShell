@@ -53076,7 +53076,7 @@ fn bi_db_sqlite_query(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
     // In-process and read-only since this commit; see src/sql.rs. It spawned
     // the sqlite3 CLI, so it was classed Exec, gated in agent mode, and absent
     // on any host without sqlite3.
-    crate::sql::sql("sql", args, input)
+    crate::sql::sql("db_sqlite_query", args, input)
 }
 
 /// explain_effects(code): every call in `code`, its effect class and the

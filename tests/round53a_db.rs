@@ -21,3 +21,24 @@ fn db_exposes_the_import_and_export_builtins_as_members() {
         );
     }
 }
+
+#[test]
+fn db_sqlite_query_has_its_own_signature_and_names_itself_in_errors() {
+    let sig = iron_shell::signature::signature_of("db_sqlite_query").expect("declared");
+    assert_eq!(sig.name, "db_sqlite_query");
+    let alias = iron_shell::signature::signature_of("sqlite_query").expect("declared");
+    assert_eq!(alias.name, "db_sqlite_query");
+    assert_eq!(
+        iron_shell::signature::signature_of("sql")
+            .expect("declared")
+            .name,
+        "sql"
+    );
+    let got =
+        run("try { db_sqlite_query(\":memory:\", \"SELEC nonsense\") } catch e { e.message }");
+    let Value::Str(message) = got else {
+        panic!("not a String")
+    };
+    assert!(message.contains("db_sqlite_query"), "{message}");
+    assert!(!message.starts_with("sql:"), "{message}");
+}

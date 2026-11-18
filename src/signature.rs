@@ -3406,7 +3406,7 @@ pub static SIGNATURES: &[Signature] = &[
         name: "sql",
         category: Some("Database"),
         subject_required: false,
-        aliases: &["sqlite_query", "db_sqlite_query"],
+        aliases: &[],
         subject: Some(Ty::Any),
         // A trailing `params` Array is matched by its own type: the validator
         // lets the last argument skip `query` when it is not a String.
@@ -3466,6 +3466,48 @@ pub static SIGNATURES: &[Signature] = &[
             (
                 r#"{a: [{id: 1, n: "x"}], b: [{id: 1, m: 5}]} | sql("select b.m from a join b on a.id = b.id") | first | fn(r) => r.m"#,
                 "5",
+            ),
+        ],
+    },
+    Signature {
+        // `sqlite_query` and `db_sqlite_query` used to be aliases of `sql`, so
+        // help("db_sqlite_query") described sql() and its errors said `sql:`.
+        name: "db_sqlite_query",
+        category: Some("Database"),
+        subject_required: false,
+        aliases: &["sqlite_query"],
+        subject: Some(Ty::Any),
+        params: &[
+            req(
+                "path",
+                Ty::Str,
+                "a SQLite file, \":memory:\", or a .json/.jsonl/.csv/.tsv file (a table named after the file, also `t`); with rows piped in, the query instead (the rows are table `t`)",
+            ),
+            opt(
+                "query",
+                Ty::Str,
+                "the read-only SQL to run against the database; each ? in it takes the next value of params",
+            ),
+            opt(
+                "params",
+                Ty::Array,
+                "bind values for the placeholders, in order: Int, Float, String, Bool or null; a String binds as text, so pass 1, not \"1\", to compare with a number",
+            ),
+        ],
+        returns: "Array",
+        doc: "Run a read-only SQL query over a SQLite database (or a data file, or piped rows), in process, returning rows as records. db.sqlite_query(path, query, params) is this builtin: a query that SQLite cannot parse is E_BAD_ARG naming db_sqlite_query, and a database that does not exist is E_NOT_FOUND (none is created). A trailing params Array binds its values to the query's ? placeholders in order. To change a database use db_sqlite_exec; sql() is the same engine over rows and files.",
+        examples: &[
+            (
+                r#"db_sqlite_query(":memory:", "SELECT 1 AS n") | first | fn(r) => r.n"#,
+                "1",
+            ),
+            (
+                r#"sqlite_query(":memory:", "SELECT ? AS n", [7]) | first | fn(r) => r.n"#,
+                "7",
+            ),
+            (
+                r#"[{n: 1}, {n: 2}] | db_sqlite_query("select sum(n) as total from t") | first | fn(r) => r.total"#,
+                "3",
             ),
         ],
     },
