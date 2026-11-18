@@ -12538,7 +12538,7 @@ fn bi_from_yaml(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
         } else {
             let message = format!("from_yaml: {e}");
             match yaml_unsupported_construct(&message) {
-                Some(construct) => crate::safety::bad_arg_in(
+                Some(construct) => crate::safety::value_not_representable(
                     "from_yaml",
                     message,
                     &format!(
@@ -12556,7 +12556,7 @@ fn bi_from_yaml(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
                          line it could not read"
                             .to_string()
                     };
-                    crate::safety::bad_arg_in("from_yaml", message, &hint)
+                    crate::safety::value_not_representable("from_yaml", message, &hint)
                 }
             }
         }
