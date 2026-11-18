@@ -56766,7 +56766,9 @@ fn bi_file_patch(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
     for (index, patch) in patches.iter().enumerate() {
         let Value::Record(record) = patch else {
             return Err(crate::safety::arg_err(format!(
-                "{builtin}: patch {index} must be a record"
+                "{builtin}: patch {} of {} must be a record",
+                index + 1,
+                patches.len()
             )));
         };
         for names in [["find", "old", "search"], ["replace", "new", "with"]] {
@@ -56778,7 +56780,9 @@ fn bi_file_patch(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
                 Some(Value::Str(_))
             ) {
                 return Err(crate::safety::arg_err(format!(
-                    "{builtin}: patch {index} requires a {} string",
+                    "{builtin}: patch {} of {} requires a {} string",
+                    index + 1,
+                    patches.len(),
                     names[0]
                 )));
             }
@@ -56811,7 +56815,11 @@ fn bi_file_patch(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
             Value::Record(r) => r,
             _ => {
                 failed_at.push(i);
-                failed.push(Value::Str(format!("patch {}: not a record", i)));
+                failed.push(Value::Str(format!(
+                    "patch {} of {}: not a record",
+                    i + 1,
+                    patches.len()
+                )));
                 continue;
             }
         };
@@ -56824,7 +56832,11 @@ fn bi_file_patch(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
             Some(Value::Str(s)) => s.clone(),
             _ => {
                 failed_at.push(i);
-                failed.push(Value::Str(format!("patch {}: missing 'find' string", i)));
+                failed.push(Value::Str(format!(
+                    "patch {} of {}: missing 'find' string",
+                    i + 1,
+                    patches.len()
+                )));
                 continue;
             }
         };
@@ -56837,7 +56849,11 @@ fn bi_file_patch(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
             Some(Value::Str(s)) => s.clone(),
             _ => {
                 failed_at.push(i);
-                failed.push(Value::Str(format!("patch {}: missing 'replace' string", i)));
+                failed.push(Value::Str(format!(
+                    "patch {} of {}: missing 'replace' string",
+                    i + 1,
+                    patches.len()
+                )));
                 continue;
             }
         };
@@ -56857,8 +56873,9 @@ fn bi_file_patch(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
             failed_at.push(i);
             failed_find.push(find_str.clone());
             failed.push(Value::Str(format!(
-                "patch {}: '{}' not found",
-                i,
+                "patch {} of {}: '{}' not found",
+                i + 1,
+                patches.len(),
                 if find_str.chars().nth(40).is_some() {
                     format!("{}...", find_str.chars().take(40).collect::<String>())
                 } else {
@@ -56878,9 +56895,11 @@ fn bi_file_patch(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
             builtin,
             format!("{builtin}: pattern not found in {path}"),
             &format!(
-                "patch {first} looks for {find:?}, which is not in the file as written. \
+                "patch {} of {} looks for {find:?}, which is not in the file as written. \
                  Nothing was written. Read the file first and copy the exact text: a \
-                 match is an exact, case-sensitive substring."
+                 match is an exact, case-sensitive substring.",
+                first + 1,
+                patches.len()
             ),
         ));
     }

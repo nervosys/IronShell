@@ -102,7 +102,7 @@ fn a_batch_with_one_missing_patch_writes_nothing() {
     );
     assert_eq!(se.code, iron_shell::safety::ErrorCode::NotFound);
     assert_eq!(se.code.as_str(), "E_NOT_FOUND");
-    assert!(se.hint.contains("patch 1"), "{}", se.hint);
+    assert!(se.hint.contains("patch 2 of 2"), "{}", se.hint);
 }
 
 #[test]
@@ -134,7 +134,7 @@ fn the_first_failing_patch_is_the_one_reported() {
     );
 
     assert_eq!(std::fs::read_to_string(&p).expect("read"), "a1 b2\n");
-    assert!(se.hint.contains("patch 1"), "{}", se.hint);
+    assert!(se.hint.contains("patch 2 of 3"), "{}", se.hint);
     assert!(se.hint.contains("zz9"), "{}", se.hint);
 }
 
@@ -149,7 +149,7 @@ fn a_single_patch_that_does_not_apply_writes_nothing() {
 
     assert_eq!(std::fs::read_to_string(&p).expect("read"), "a1 b2\n");
     assert_eq!(se.code.as_str(), "E_NOT_FOUND");
-    assert!(se.hint.contains("patch 0"), "{}", se.hint);
+    assert!(se.hint.contains("patch 1 of 1"), "{}", se.hint);
 }
 
 #[test]

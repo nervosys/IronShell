@@ -140,7 +140,7 @@ fn file_patch_with_a_missing_pattern_is_refused_and_writes_nothing() {
         "{}",
         se.message
     );
-    assert!(se.hint.contains("patch 1"), "{}", se.hint);
+    assert!(se.hint.contains("patch 2 of 2"), "{}", se.hint);
     assert_eq!(std::fs::read_to_string(&path).unwrap(), "a1 b2\n");
 }
 
