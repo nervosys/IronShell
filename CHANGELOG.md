@@ -20,6 +20,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Agent-mode redaction recognises a bare `sk-` key (also `sk-proj-`, `sk-ant-`) and a PEM private key with no END line, and redacts error messages, hints and fields too; the stderr note counts each secret and is printed under `--deterministic`, for errors and for `ish -b` output. AGENTS.md says redaction is a best-effort text filter, not a security boundary.
 - A recursive delete's approval request counts the files and folders under the tree (without following links, capped at 10000) instead of reporting one file; the hint and AGENTS.md say a token approves that exact action on that exact target in every later run until removed.
 - `str.repeat`, `repeat`, `pad_left`, `pad_right` and `join` refuse a result over the 8 MB string cap before building it, as `+` does.
+- Agent mode can no longer `set_env` another group of variables that steer the programs an approved command runs (PSModulePath, Java, Ruby, Perl, compiler and temp-folder variables among them), and an `sh`/exec approval token is bound to the `set_env` changes made in that process and to the content of any workspace file the command names.
+- zip_extract and tar_extract refuse more than 1 GiB uncompressed, 100000 entries, or a zip entry over 100 MB that expands more than 1000:1 (E_BUDGET_EXCEEDED, partial output removed); IRONSHELL_EXTRACT_MAX_BYTES and IRONSHELL_EXTRACT_MAX_ENTRIES raise the first two.
+- `--timeout` stops archive listing, extraction and zip creation, glob and directory walks.
+- Text read from files (file.read, open, the from_* parsers, lines) and copies of Arrays and Records are charged to the memory budget before they are built, so a large CSV or `a = [a, a]` raises E_BUDGET_EXCEEDED instead of aborting the process.
 
 ### Changed
 
@@ -50,6 +54,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `ish -b`: rm and rmdir needing approval in agent mode exit 75, as cp does, and name rm.
 - Undoing a step that was already undone is E_BAD_STATE (not retryable), and `undo({step: n})` messages say step.
 - A command-line argument error is JSON E_BAD_ARG (exit 64) in agent or deterministic mode.
+- `ish -b`: an empty while/until/if condition, a stray `;`, `&& cmd`, `a | | b`, `;;` outside case and an unterminated `${` are syntax errors (E_PARSE, exit 2) before anything runs, not loops or E_POLICY_DENY; a policy refusal inside a script exits 77.
+- `pwd`, `$PWD`, basename and dirname use `/` on Windows in `ish -b`.
+- from_yaml parse errors are E_BAD_VALUE, as open's are.
 
 ### Added
 
@@ -69,6 +76,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Agent mode says on stderr when it redacted a secret from the output; AGENTS.md documents redaction.
 - `int(text, base)` parses bases 2 to 36 (with a 0x/0b/0o prefix for 16/2/8), and `to_base(n, base)` writes them; `regex_split` takes an optional limit, as `split` does.
 - Date builtins read ISO week dates (`2024-W09-4`) and ordinal dates (`2024-060`), and trim surrounding whitespace.
+- `ish -b` sets `$PWD`, `$USER`, `$SHELL`, `$PPID` and `$RANDOM`; `test` takes `-nt`, `-ot`, `-ef`, `\<` and `\>`, and `read` takes `-p`.
+- db.csv_to_sqlite, db.json_to_sqlite and db.sqlite_to_csv are db members; db_sqlite_query has its own help entry and name.
 
 ### Fixed
 
@@ -100,6 +109,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `0xff` says radix literals are unsupported and names `int("ff", 16)`; `int("0x1F")` hints at the base form; `from_epoch` of milliseconds says so; an index into an empty Array says it is empty; the indexed-assignment hint covers Records with a computed key.
 - Unknown-name hints cover from_timestamp, strip, upcase, downcase, hex, sprintf and bytes; ord and chr say there is no such builtin.
 - Docs: journal()'s rows are journal().entries; `--timeout 0` means no deadline; `--explain`'s "approve" means the call needs approval; index_of no longer calls regex_find's offsets byte offsets; format_number and round state that an exact tie rounds away from zero.
+- glob no longer re-runs the jail's link walk on every listed entry, so `glob("tree/**/*")` runs near fs_walk's speed.
+- db_sqlite_to_csv keeps a newline inside a cell; `c: #comment` in YAML is null; a bad JSONL line names its start; file.replace explains a miss caused only by line endings; db_json_to_sqlite says it takes a path.
+- A leading UTF-8 BOM in a script is ignored; `set -u` names `$1`; `if c; body; fi` hints at the missing `then`; a PowerShell statement missing an operand is a parse error; reading deeper than 50 directories under the jail is E_BUDGET_EXCEEDED, not E_UNKNOWN; a missing script is reported by ish, not `run`.
 
 ## [14.0.5] - 2026-11-16
 
