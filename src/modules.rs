@@ -263,6 +263,9 @@ pub fn db_module() -> Value {
         ("kv_get", "db_kv_get"),
         ("kv_set", "db_kv_set"),
         ("kv_delete", "db_kv_delete"),
+        ("csv_to_sqlite", "db_csv_to_sqlite"),
+        ("json_to_sqlite", "db_json_to_sqlite"),
+        ("sqlite_to_csv", "db_sqlite_to_csv"),
     ])
 }
 
