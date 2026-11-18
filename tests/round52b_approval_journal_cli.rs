@@ -178,3 +178,18 @@ fn a_bad_flag_value_stays_clap_text_for_a_person() {
     let err = String::from_utf8_lossy(&out.stderr);
     assert!(err.starts_with("error:"), "{err:?}");
 }
+
+// ── B6: --timeout 0 means no deadline, and --help says so ──
+
+#[test]
+fn timeout_zero_is_no_deadline_and_help_says_so() {
+    let out = ish_raw(&["--timeout", "0", "-c", "1 + 1"], false);
+    assert!(out.status.success(), "{out:?}");
+    assert!(
+        String::from_utf8_lossy(&out.stdout).contains('2'),
+        "{out:?}"
+    );
+    let help = ish_raw(&["--help"], false);
+    let text = String::from_utf8_lossy(&help.stdout);
+    assert!(text.contains("0 for none"), "{text}");
+}

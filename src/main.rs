@@ -52,7 +52,7 @@ struct Cli {
     budget: Option<usize>,
 
     /// Stop the evaluation after SECONDS (E_BUDGET_EXCEEDED); env IRONSHELL_TIMEOUT.
-    /// No limit by default.
+    /// No limit by default, and 0 for none (as with --memory-limit).
     #[arg(long, value_name = "SECONDS")]
     timeout: Option<u64>,
 
