@@ -9509,6 +9509,12 @@ pub(crate) fn env_name_steers_children(name: &str) -> bool {
         "TMP",
         "TMPDIR",
         "AETHER_SESSION_DIR",
+        // .NET and Windows names that load code into, or redirect, a program:
+        // `DOTNET_STARTUP_HOOKS` loads a DLL into an approved `pwsh`.
+        "WINDIR",
+        "__COMPAT_LAYER",
+        "NUGET_PACKAGES",
+        "PSDEFAULTPARAMETERVALUES",
     ];
     const PREFIXES: &[&str] = &[
         "IRONSHELL_",
@@ -9525,6 +9531,10 @@ pub(crate) fn env_name_steers_children(name: &str) -> bool {
         "BUNDLE_",
         "PYTHON",
         "UV_",
+        "DOTNET_",
+        "COMPLUS_",
+        "CORECLR_",
+        "COR_",
     ];
     const SUFFIXES: &[&str] = &[
         "_PROXY",
