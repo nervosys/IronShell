@@ -17926,6 +17926,7 @@ fn bi_regex_find_all(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
 /// Args:
 ///   - text: String (or the piped text)
 ///   - pattern: String - a Rust regex pattern
+///   - limit: Int (optional) - the most pieces to answer, 1 or more; the last piece keeps the rest
 /// Returns: Array of String
 ///
 /// Rust regex split semantics: a match at the start or end of the text gives an
@@ -17937,13 +17938,46 @@ fn bi_regex_find_all(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
 fn bi_regex_split(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
     const B: &str = "regex_split";
     let (text, rest) = text_subject(B, args, input)?;
-    let [pattern] = rest.as_slice() else {
-        return Err(arity_error(B, "a pattern", rest.len()));
+    let (pattern, limit_arg) = match rest.as_slice() {
+        [pattern] => (pattern, None),
+        [pattern, limit] => (pattern, Some(limit)),
+        _ => {
+            return Err(arity_error(
+                B,
+                "a pattern and an optional limit",
+                rest.len(),
+            ))
+        }
     };
     let re = text_regex(B, string_arg(B, "a String pattern", pattern)?)?;
-    Ok(Value::Array(
-        re.split(&text).map(|s| Value::Str(s.to_string())).collect(),
-    ))
+    // limit: the most pieces to answer, as split's; the last piece holds the
+    // rest of the text unsplit.
+    let limit: Option<usize> = match limit_arg {
+        None => None,
+        Some(Value::Int(n)) if *n >= 1 => Some(usize::try_from(*n).unwrap_or(usize::MAX)),
+        Some(Value::Int(n)) => {
+            return Err(crate::safety::bad_arg_in(
+                B,
+                format!("{B}: limit {n} is not at least 1: it is the most pieces to answer"),
+                "pass a limit of 1 or more, or leave it out to split at every match",
+            ))
+        }
+        Some(other) => {
+            return Err(crate::safety::bad_arg(
+                B,
+                "an Int limit, the most pieces",
+                other.type_name(),
+            ))
+        }
+    };
+    let pieces: Vec<Value> = match limit {
+        Some(n) => re
+            .splitn(&text, n)
+            .map(|s| Value::Str(s.to_string()))
+            .collect(),
+        None => re.split(&text).map(|s| Value::Str(s.to_string())).collect(),
+    };
+    Ok(Value::Array(pieces))
 }
 
 /// index_of(text, sub) / last_index_of(text, sub): the character offset of the

@@ -165,3 +165,24 @@ fn a7_from_epoch_in_milliseconds_says_so() {
     let se = refusal("from_epoch(99999999999999999)");
     assert!(!se.hint.contains("milliseconds"), "{}", se.hint);
 }
+
+// A8
+#[test]
+fn a8_regex_split_takes_a_limit_as_split_does() {
+    assert_eq!(
+        run(r#"regex_split("a1b2c", "[0-9]", 2)"#),
+        Value::Array(vec![s("a"), s("b2c")])
+    );
+    assert_eq!(
+        run(r#""a1b2c" | regex_split("[0-9]", 1)"#),
+        Value::Array(vec![s("a1b2c")])
+    );
+    assert_eq!(
+        run(r#"regex_split("a1b2c", "[0-9]", 10)"#),
+        run(r#"regex_split("a1b2c", "[0-9]")"#)
+    );
+    let se = refusal(r#"regex_split("a1b2", "[0-9]", 0)"#);
+    assert_eq!(se.code.as_str(), "E_BAD_ARG");
+    assert!(se.message.contains("not at least 1"), "{}", se.message);
+    assert!(try_run(r#"regex_split("a1b2", "[0-9]", "2")"#).is_err());
+}
