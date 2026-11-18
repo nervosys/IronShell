@@ -73,3 +73,21 @@ fn the_token_does_not_change_with_the_tree() {
         "counts describe the action; the token binds action and target"
     );
 }
+
+// ── B2: the hint says what a token approves ──
+
+#[test]
+fn the_approval_hint_says_a_token_is_good_for_every_later_run() {
+    let dir = scratch("b2_hint");
+    std::fs::write(dir.join("proj").join("f.txt"), "x").unwrap();
+    let json = first_error(&ish_agent(&dir, r#"rm("f.txt")"#, None));
+    let hint = json["error"]["hint"].as_str().unwrap_or("");
+    assert!(
+        hint.contains("exact action on that exact target every time it is presented"),
+        "{hint}"
+    );
+    assert!(
+        hint.contains("until it is removed from IRONSHELL_APPROVE"),
+        "{hint}"
+    );
+}
