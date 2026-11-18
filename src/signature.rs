@@ -3479,7 +3479,7 @@ pub static SIGNATURES: &[Signature] = &[
         subject: None,
         params: &[req("code", Ty::Str, "IronShell source to analyse; it is parsed, never run")],
         returns: "Record",
-        doc: "Every call in a program with its effect class and agent-mode decision, and the strictest decision overall, without running it.",
+        doc: "Every call in a program with its effect class and agent-mode decision, and the strictest decision overall, without running it. A decision is allow, approve or deny: approve means the call needs approval and would stop with E_NEEDS_APPROVAL (exit 75) in agent mode.",
         examples: &[
             (r#"explain_effects("[1, 2] | map(fn(x) => x + 1)") | fn(r) => r.decision"#, "allow"),
             (r#"explain_effects("rm(1)") | fn(r) => r.effects"#, r#"["destructive"]"#),

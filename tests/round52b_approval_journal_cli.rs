@@ -193,3 +193,12 @@ fn timeout_zero_is_no_deadline_and_help_says_so() {
     let text = String::from_utf8_lossy(&help.stdout);
     assert!(text.contains("0 for none"), "{text}");
 }
+
+// ── B7: the explain docs say what "approve" means ──
+
+#[test]
+fn explain_help_says_approve_means_needs_approval() {
+    let help = ish_raw(&["--help"], false);
+    let text = String::from_utf8_lossy(&help.stdout);
+    assert!(text.contains("E_NEEDS_APPROVAL (exit 75)"), "{text}");
+}

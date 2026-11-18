@@ -74,7 +74,9 @@ struct Cli {
     policy: Option<String>,
 
     /// Report what a program would do -- every call, its effect class and the
-    /// agent-mode decision -- without running it. Use with -c or a file.
+    /// agent-mode decision -- without running it. Use with -c or a file. A decision
+    /// of "approve" means the call needs approval and would stop with
+    /// E_NEEDS_APPROVAL (exit 75).
     #[arg(long)]
     explain: bool,
 

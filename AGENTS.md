@@ -179,7 +179,7 @@ open("issues.json") | count_by(.user)  # [{key, count}] sorted by count descendi
 # SQL stores a Bool as 1/0, so Bool values come back from sql as 1 and 0; every sql row (not only select *) has its columns in sorted key order, because a Record sorts its keys: to control the order prefix the aliases (a_region, b_rev) or write the table with to_csv(rows, [cols])
 
 # Check effects before running
-explain_effects("rm(\"x\")")            # or: ish --explain -c '...'
+explain_effects("rm(\"x\")")            # or: ish --explain -c '...'; a decision of "approve" means the call needs approval and would stop with E_NEEDS_APPROVAL (exit 75)
 
 # Pattern matching
 match score { s if s >= 90 => "A", s if s >= 80 => "B", _ => "F" }

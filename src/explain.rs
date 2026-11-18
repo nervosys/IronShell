@@ -13,6 +13,10 @@
 //! reports `ls` as `read_local` and `rm` as `destructive`, and that
 //! agent mode would ask for approval before the delete.
 //!
+//! The `decision` is `allow`, `approve` or `deny`. `approve` means the call needs
+//! approval: run in agent mode it would stop with `E_NEEDS_APPROVAL` (exit 75)
+//! until its token is approved. The word is kept for compatibility.
+//!
 //! It is conservative in one direction only. A call it cannot resolve to a
 //! builtin -- through a variable, or a computed callee -- is listed as
 //! unresolved and raises the verdict to `unknown`, never lowers it. What it
