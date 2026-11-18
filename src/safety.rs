@@ -2318,17 +2318,49 @@ pub fn not_found(builtin: &str, kind: &str, name: &str) -> anyhow::Error {
 
 /// `E_NOT_FOUND` for a journal step id that no step has. The journal's own
 /// word is "step": an id names a step, and "entry" is the file-edit term.
-pub fn journal_step_not_found(builtin: &str, id: usize) -> anyhow::Error {
+pub fn journal_step_not_found(builtin: &str, id: usize, by_step: bool) -> anyhow::Error {
     anyhow::Error::new(SafetyError {
         code: ErrorCode::NotFound,
-        message: format!("{builtin}: no journal step with id {id}"),
+        message: if by_step {
+            format!("{builtin}: no journal step {id}")
+        } else {
+            format!("{builtin}: no journal step with id {id}")
+        },
         builtin: builtin.to_string(),
-        hint: "list the available journal steps with journal() and use an id from them".to_string(),
+        hint: if by_step {
+            "list the available journal steps with journal().entries and use a step from them"
+                .to_string()
+        } else {
+            "list the available journal steps with journal() and use an id from them".to_string()
+        },
         approval: None,
         did_you_mean: Vec::new(),
         expected: "an existing journal step".to_string(),
         got: id.to_string(),
         extra: serde_json::Map::new(),
+    })
+}
+
+/// `E_BAD_STATE` for a journal step that is in the journal's undone list: it was
+/// there and has been undone, so the same call can never succeed again. Not
+/// retryable (see `is_retryable`); `session_redo` brings the step back.
+pub fn journal_step_already_undone(builtin: &str, id: usize, by_step: bool) -> anyhow::Error {
+    let mut extra = serde_json::Map::new();
+    extra.insert("already_undone".to_string(), Json::Bool(true));
+    anyhow::Error::new(SafetyError {
+        code: ErrorCode::BadState,
+        message: if by_step {
+            format!("{builtin}: step {id} was already undone")
+        } else {
+            format!("{builtin}: the journal step with id {id} was already undone")
+        },
+        builtin: builtin.to_string(),
+        hint: "nothing to undo; session_redo() re-applies the last undone step".to_string(),
+        approval: None,
+        did_you_mean: Vec::new(),
+        expected: "a step still in the journal".to_string(),
+        got: id.to_string(),
+        extra,
     })
 }
 
@@ -3673,11 +3705,21 @@ impl ApprovalDescriptor {
         reversible: bool,
     ) -> Result<Self, ironcrypto::core_types::Error> {
         // token = apv_<first 16 hex of sha256 over the action content>
+        // A radius marked "counted" carries counts read from the tree now; they
+        // describe the action and are not part of what the token binds.
+        let mut bound_radius = blast_radius.clone();
+        if bound_radius.get("counted").is_some() {
+            if let Some(map) = bound_radius.as_object_mut() {
+                for key in ["files", "dirs", "counted"] {
+                    map.remove(key);
+                }
+            }
+        }
         let content = json!({
             "what": what,
             "builtin": builtin,
             "targets": targets,
-            "blast_radius": blast_radius,
+            "blast_radius": bound_radius,
             "reversible": reversible,
         });
         let mut hasher = Sha256::new();
@@ -3743,6 +3785,8 @@ impl SafetyError {
     pub fn is_retryable(&self) -> bool {
         match self.code {
             ErrorCode::UnknownBuiltin => !self.did_you_mean.is_empty(),
+            // An undone step stays undone: the same call fails the same way.
+            ErrorCode::BadState if self.extra.contains_key("already_undone") => false,
             code => code.retryable(),
         }
     }
@@ -4586,6 +4630,67 @@ pub fn is_link(path: &str) -> bool {
         && std::fs::symlink_metadata(path).is_ok_and(|m| m.file_type().is_symlink())
 }
 
+/// How many entries a blast-radius count reads before it stops.
+pub const TREE_COUNT_LIMIT: usize = 10_000;
+
+/// The files and directories under `root` (not counting `root`), without
+/// following links: a link counts as one file and is not entered. Counting stops
+/// once `limit` entries have been seen; the flag is then true and the counts are
+/// lower bounds.
+pub fn count_tree(root: &str, limit: usize) -> (usize, usize, bool) {
+    let (mut files, mut dirs) = (0usize, 0usize);
+    if names_a_remote_share(root) {
+        return (files, dirs, false);
+    }
+    let mut stack = vec![std::path::PathBuf::from(root)];
+    while let Some(dir) = stack.pop() {
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            if files + dirs >= limit {
+                return (files, dirs, true);
+            }
+            match entry.file_type() {
+                Ok(t) if t.is_dir() => {
+                    dirs += 1;
+                    stack.push(entry.path());
+                }
+                _ => files += 1,
+            }
+        }
+    }
+    (files, dirs, false)
+}
+
+/// The blast radius of a delete of `path` when it is a directory tree: the
+/// counts of files and directories under it ("10000+" when the count was cut
+/// off), with `base` kept. `"counted"` marks the counts as a description only:
+/// they are left out of the approval token, which binds the action and target
+/// and does not change when the tree's contents do.
+pub fn tree_blast_radius(path: &str, base: Json) -> Json {
+    let mut radius = base;
+    let is_tree =
+        !names_a_remote_share(path) && std::fs::symlink_metadata(path).is_ok_and(|m| m.is_dir());
+    if !is_tree {
+        return radius;
+    }
+    let (files, dirs, cut) = count_tree(path, TREE_COUNT_LIMIT);
+    let at_most = format!("{TREE_COUNT_LIMIT}+");
+    if let Some(map) = radius.as_object_mut() {
+        map.insert(
+            "files".to_string(),
+            if cut { json!(at_most) } else { json!(files) },
+        );
+        map.insert(
+            "dirs".to_string(),
+            if cut { json!(at_most) } else { json!(dirs) },
+        );
+        map.insert("counted".to_string(), json!(true));
+    }
+    radius
+}
+
 /// Whether the last component of `path`, as written, is `.` or `..`.
 pub fn path_ends_in_dot_component(path: &str) -> bool {
     let last = path.rsplit(['/', '\\']).next().unwrap_or("");
@@ -4868,10 +4973,10 @@ fn approve_env_is_set() -> bool {
 pub fn approval_instruction(token: &str) -> String {
     if current_mode() == Mode::Agent {
         format!(
-            "a human approves this token out of band: re-run with IRONSHELL_APPROVE={token} set by the operator (a comma-separated list, IRONSHELL_APPROVE=tok1,tok2, approves several calls at once)"
+            "a human approves this token out of band: re-run with IRONSHELL_APPROVE={token} set by the operator (a comma-separated list, IRONSHELL_APPROVE=tok1,tok2, approves several calls at once); a token approves that exact action on that exact target every time it is presented, in any later run, until it is removed from IRONSHELL_APPROVE"
         )
     } else {
-        format!("re-run with IRONSHELL_APPROVE={token} (or call approve(\"{token}\")); a comma-separated list, IRONSHELL_APPROVE=tok1,tok2, approves several calls at once")
+        format!("re-run with IRONSHELL_APPROVE={token} (or call approve(\"{token}\")); a comma-separated list, IRONSHELL_APPROVE=tok1,tok2, approves several calls at once; a token approves that exact action on that exact target every time it is presented, in any later run, until it is removed from IRONSHELL_APPROVE")
     }
 }
 
