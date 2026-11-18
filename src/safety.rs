@@ -2318,17 +2318,49 @@ pub fn not_found(builtin: &str, kind: &str, name: &str) -> anyhow::Error {
 
 /// `E_NOT_FOUND` for a journal step id that no step has. The journal's own
 /// word is "step": an id names a step, and "entry" is the file-edit term.
-pub fn journal_step_not_found(builtin: &str, id: usize) -> anyhow::Error {
+pub fn journal_step_not_found(builtin: &str, id: usize, by_step: bool) -> anyhow::Error {
     anyhow::Error::new(SafetyError {
         code: ErrorCode::NotFound,
-        message: format!("{builtin}: no journal step with id {id}"),
+        message: if by_step {
+            format!("{builtin}: no journal step {id}")
+        } else {
+            format!("{builtin}: no journal step with id {id}")
+        },
         builtin: builtin.to_string(),
-        hint: "list the available journal steps with journal() and use an id from them".to_string(),
+        hint: if by_step {
+            "list the available journal steps with journal().entries and use a step from them"
+                .to_string()
+        } else {
+            "list the available journal steps with journal() and use an id from them".to_string()
+        },
         approval: None,
         did_you_mean: Vec::new(),
         expected: "an existing journal step".to_string(),
         got: id.to_string(),
         extra: serde_json::Map::new(),
+    })
+}
+
+/// `E_BAD_STATE` for a journal step that is in the journal's undone list: it was
+/// there and has been undone, so the same call can never succeed again. Not
+/// retryable (see `is_retryable`); `session_redo` brings the step back.
+pub fn journal_step_already_undone(builtin: &str, id: usize, by_step: bool) -> anyhow::Error {
+    let mut extra = serde_json::Map::new();
+    extra.insert("already_undone".to_string(), Json::Bool(true));
+    anyhow::Error::new(SafetyError {
+        code: ErrorCode::BadState,
+        message: if by_step {
+            format!("{builtin}: step {id} was already undone")
+        } else {
+            format!("{builtin}: the journal step with id {id} was already undone")
+        },
+        builtin: builtin.to_string(),
+        hint: "nothing to undo; session_redo() re-applies the last undone step".to_string(),
+        approval: None,
+        did_you_mean: Vec::new(),
+        expected: "a step still in the journal".to_string(),
+        got: id.to_string(),
+        extra,
     })
 }
 
@@ -3743,6 +3775,8 @@ impl SafetyError {
     pub fn is_retryable(&self) -> bool {
         match self.code {
             ErrorCode::UnknownBuiltin => !self.did_you_mean.is_empty(),
+            // An undone step stays undone: the same call fails the same way.
+            ErrorCode::BadState if self.extra.contains_key("already_undone") => false,
             code => code.retryable(),
         }
     }

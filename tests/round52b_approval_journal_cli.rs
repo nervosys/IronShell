@@ -101,3 +101,28 @@ fn journal_help_names_the_entries_field() {
     let text = String::from_utf8_lossy(&out.stdout);
     assert!(text.contains("journal().entries"), "{text}");
 }
+
+// ── B4: undoing a step twice says it was already undone ──
+
+#[test]
+fn undo_by_step_twice_says_already_undone() {
+    let dir = scratch("b4_twice");
+    let wrote = ish_agent(&dir, r#"file.write("a.txt", "x")"#, None);
+    assert!(wrote.status.success(), "{wrote:?}");
+    let first = ish_agent(&dir, "undo({step: 1})", None);
+    assert!(first.status.success(), "{first:?}");
+    let second = first_error(&ish_agent(&dir, "undo({step: 1})", None));
+    assert_eq!(second["error"]["code"], "E_BAD_STATE", "{second}");
+    assert_eq!(second["error"]["retryable"], false, "{second}");
+    let message = second["error"]["message"].as_str().unwrap_or("");
+    assert!(message.contains("step 1 was already undone"), "{message}");
+}
+
+#[test]
+fn undo_of_a_step_that_never_was_is_still_not_found() {
+    let dir = scratch("b4_never");
+    let json = first_error(&ish_agent(&dir, "undo({step: 7})", None));
+    assert_eq!(json["error"]["code"], "E_NOT_FOUND", "{json}");
+    let message = json["error"]["message"].as_str().unwrap_or("");
+    assert!(message.contains("no journal step 7"), "{message}");
+}

@@ -25971,7 +25971,7 @@ const UNDO_STEP_HINT: &str =
 // tests/fallback_dispatch.rs reads the arms as `name => bi_fn(..)` pairs.
 fn bi_undo(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
     refuse_pipeline_input("undo", &input)?;
-    if let Some(id) = undo_id("undo", &args)? {
+    if let Some((id, step)) = undo_id("undo", &args)? {
         // An id names one step, so a step count next to it would say what else to take.
         if args.iter().any(|v| !matches!(v, Value::Record(_))) {
             return Err(crate::safety::arg_err(
@@ -25980,7 +25980,7 @@ fn bi_undo(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
         }
         let force = undo_force("undo", &args)?;
         refuse_unless_recording("undo")?;
-        return undo_by_id_record("undo", id, force);
+        return undo_by_id_record("undo", id, step, force);
     }
     let n = match args.iter().find(|v| !matches!(v, Value::Record(_))) {
         None => 1,
@@ -26059,7 +26059,7 @@ fn undo_record(builtin: &str, n: usize, force: bool) -> Result<Value> {
 
 /// The `id` option of undo: `undo({id: N})` names one journal entry by the `seq`
 /// its journal row shows. `None` when no argument names an id.
-fn undo_id(builtin: &str, args: &[Value]) -> Result<Option<usize>> {
+fn undo_id(builtin: &str, args: &[Value]) -> Result<Option<(usize, Option<usize>)>> {
     let mut id = None;
     for arg in args {
         let Value::Record(options) = arg else {
@@ -26101,8 +26101,19 @@ fn undo_id(builtin: &str, args: &[Value]) -> Result<Option<usize>> {
                     .iter()
                     .find(|e| e.group.unwrap_or(e.seq) == step)
                     .map(|e| e.seq)
-                    .ok_or_else(|| crate::safety::journal_step_not_found(builtin, step))?;
-                id = Some(seq);
+                    .ok_or_else(|| {
+                        // A step that was done and then undone is not a step that
+                        // never was: the same call cannot succeed a second time.
+                        if crate::journal::undone()
+                            .iter()
+                            .any(|u| u.group.unwrap_or(u.seq) == step)
+                        {
+                            crate::safety::journal_step_already_undone(builtin, step, true)
+                        } else {
+                            crate::safety::journal_step_not_found(builtin, step, true)
+                        }
+                    })?;
+                id = Some((seq, Some(step)));
                 continue;
             }
         }
@@ -26115,7 +26126,7 @@ fn undo_id(builtin: &str, args: &[Value]) -> Result<Option<usize>> {
             _ => None,
         };
         match parsed {
-            Some(n) => id = Some(n),
+            Some(n) => id = Some((n, None)),
             None => {
                 return Err(crate::safety::bad_arg(
                     builtin,
@@ -26129,20 +26140,40 @@ fn undo_id(builtin: &str, args: &[Value]) -> Result<Option<usize>> {
 }
 
 /// Undo the one journal entry `seq`, and render the record as `undo` does.
-fn undo_by_id_record(builtin: &str, seq: usize, force: bool) -> Result<Value> {
+fn undo_by_id_record(builtin: &str, seq: usize, step: Option<usize>, force: bool) -> Result<Value> {
     use crate::journal::UndoRefusal;
-    let force_call = format!("{builtin}({{id: {seq}, force: true}})");
+    // The call was written with `step` or with `id`: its messages use the same word.
+    let force_call = match step {
+        Some(step) => format!("{builtin}({{step: {step}, force: true}})"),
+        None => format!("{builtin}({{id: {seq}, force: true}})"),
+    };
     let outcomes = crate::journal::undo_by_id(seq, force).map_err(|refusal| match refusal {
-        UndoRefusal::NotFound => crate::safety::journal_step_not_found(builtin, seq),
-        UndoRefusal::LaterStep { seq: later, path } => crate::safety::bad_state_with_hint(
-            builtin,
-            &format!(
-                "entry {seq} changed {path}, and later entry {later} changed it too; undoing {seq} would also undo that change"
-            ),
-            &format!(
-                "{builtin}({{id: {later}}}) first, or {force_call} to undo {seq} anyway"
-            ),
-        ),
+        UndoRefusal::NotFound => {
+            if crate::journal::undone().iter().any(|u| u.seq == seq) {
+                crate::safety::journal_step_already_undone(builtin, step.unwrap_or(seq), step.is_some())
+            } else {
+                crate::safety::journal_step_not_found(builtin, step.unwrap_or(seq), step.is_some())
+            }
+        }
+        UndoRefusal::LaterStep { seq: later, path } => {
+            let first = match step {
+                Some(_) => format!(
+                    "{builtin}({{step: {}}})",
+                    crate::journal::entries()
+                        .iter()
+                        .find(|e| e.seq == later)
+                        .map_or(later, |e| e.group.unwrap_or(e.seq))
+                ),
+                None => format!("{builtin}({{id: {later}}})"),
+            };
+            crate::safety::bad_state_with_hint(
+                builtin,
+                &format!(
+                    "entry {seq} changed {path}, and later entry {later} changed it too; undoing {seq} would also undo that change"
+                ),
+                &format!("{first} first, or {force_call} to undo it anyway"),
+            )
+        }
         UndoRefusal::Changed { path, removed } => {
             changed_refusal(builtin, &path, removed, &force_call)
         }
