@@ -131,7 +131,7 @@ fn a_comparison_on_a_function_says_the_pipe_binds_loosest() {
 fn an_indexed_element_cannot_be_assigned() {
     let text = parse_refusal("rows = [{n: 1}]\nrows[0].n = 99\n");
     assert!(
-        text.contains("an indexed element cannot be assigned; rebuild the array"),
+        text.contains("an indexed element cannot be assigned; for an Array rebuild it"),
         "{text}"
     );
     assert!(!text.contains("use `==`"), "{text}");

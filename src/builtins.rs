@@ -811,6 +811,8 @@ lazy_static::lazy_static! {
         map.insert("to_jsonl", 1214);
         // Counting rows by a key (1215)
         map.insert("count_by", 1215);
+        // Radix text (1216)
+        map.insert("to_base", 1216);
         // 500-519: Database
         map.insert("db_sqlite_open", 500);
         map.insert("db_sqlite_query", 501);
@@ -3909,6 +3911,8 @@ static BUILTIN_DISPATCH: &[fn(Vec<Value>, Option<Value>, &mut Env) -> Result<Val
     |args, input, _| bi_to_jsonl(args, input),   // 1214
     // Counting rows by a key
     |args, input, env| bi_count_by(args, input, env), // 1215
+    // Radix text (1216)
+    |args, input, _| bi_to_base(args, input), // 1216
 ];
 
 /// The dispatch row that serves `name`, if the fast table has one.
@@ -4102,7 +4106,35 @@ fn mapped_spelling(name: &str) -> Vec<String> {
             vec!["crypto_hash_file".to_string()]
         }
         "hmac" => vec!["crypto_hmac".to_string()],
+        // Epoch seconds to a date is from_epoch; a date to seconds is to_epoch.
+        "from_timestamp" | "epoch" | "from_unix" | "fromtimestamp" | "from_unixtime" => {
+            vec!["from_epoch".to_string()]
+        }
+        // Trimming and case: trim, upper, lower.
+        "strip" | "lstrip" | "rstrip" => vec!["trim".to_string()],
+        "upcase" | "uppercase" | "to_upper" | "toupper" => vec!["upper".to_string()],
+        "downcase" | "lowercase" | "to_lower" | "tolower" => vec!["lower".to_string()],
+        // A number in hex is to_base(n, 16); the hex of text's bytes is hex_encode.
+        "hex" | "to_hex" => vec!["to_base".to_string(), "hex_encode".to_string()],
+        // Formatting text: interpolation "${x}", format_number for digits, and
+        // pad_left / pad_right for width.
+        "sprintf" | "printf" | "format" => {
+            vec!["format_number".to_string(), "pad_left".to_string()]
+        }
+        // The bytes of a text are read through their hex: hex_encode.
+        "bytes" | "to_bytes" | "utf8_bytes" => vec!["hex_encode".to_string()],
         _ => Vec::new(),
+    }
+}
+
+/// What to say for a name from another language that IronShell has no builtin
+/// for, when there is nothing near enough to suggest.
+pub fn no_builtin_note(name: &str) -> Option<&'static str> {
+    match name {
+        "ord" | "chr" | "codepoint" | "char_code" => Some(
+            "IronShell has no ord or chr (no code point to character conversion); hex_encode(text) gives the bytes of a text as hex, and int(\"41\", 16) reads hex back as a number",
+        ),
+        _ => None,
     }
 }
 
@@ -15866,7 +15898,18 @@ fn bi_join(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
         })
         .collect();
 
-    Ok(Value::Str(strings?.join(delimiter)))
+    let strings = strings?;
+    let total = strings
+        .iter()
+        .map(String::len)
+        .sum::<usize>()
+        .saturating_add(
+            delimiter
+                .len()
+                .saturating_mul(strings.len().saturating_sub(1)),
+        );
+    crate::eval::check_string_len(total)?;
+    Ok(Value::Str(strings.join(delimiter)))
 }
 
 /// trim(text, chars?) - Remove leading and trailing characters from a string.
@@ -16047,7 +16090,11 @@ fn bi_repeat(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
         .ok()
         .and_then(|n| n.checked_mul(text.len()));
     match bytes {
-        Some(total) if total <= REPEAT_BYTES_MAX => Ok(Value::Str(text.repeat(count as usize))),
+        Some(total) if total <= REPEAT_BYTES_MAX => {
+            // The same cap `+` enforces, checked before the text is built.
+            crate::eval::check_string_len(total)?;
+            Ok(Value::Str(text.repeat(count as usize)))
+        }
         _ => Err(crate::safety::value_not_representable(
             "repeat",
             format!(
@@ -16840,6 +16887,7 @@ fn bi_ceil(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
 }
 
 /// round(number) - Round to nearest integer
+/// An exact tie rounds away from zero, unlike Python's round-half-even: round(2.5) is 3.
 /// Args:
 ///   - number: Number
 /// Returns: Int - Rounded value
@@ -17314,6 +17362,17 @@ const NUMBER_TEXT_HINT: &str = "float(\"1.5\") parses decimals; int(\"42\") pars
 ///   int("42")      # 42
 ///   int(3.9)       # 3
 fn bi_int(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
+    // The radix form: int(text, base), or text | int(base).
+    let radix = match (args.len(), &input) {
+        (2, _) => Some((&args[0], &args[1])),
+        (1, Some(text @ Value::Str(_))) if matches!(args[0], Value::Int(_)) => {
+            Some((text, &args[0]))
+        }
+        _ => None,
+    };
+    if let Some((text, base)) = radix {
+        return int_with_base(text, base);
+    }
     let value = conversion_operand("int", &args, &input)?;
     match value {
         Value::Int(n) => Ok(Value::Int(*n)),
@@ -17354,11 +17413,27 @@ fn bi_int(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
                     ),
                 ))
             }
-            Err(_) => Err(crate::safety::value_not_representable(
-                "int",
-                format!("int: {text:?} is not a decimal integer (digits with an optional sign)"),
-                NUMBER_TEXT_HINT,
-            )),
+            Err(_) => {
+                let t = text.trim().trim_start_matches(['+', '-']).to_ascii_lowercase();
+                let radix_hint = if t.starts_with("0x") {
+                    Some(16)
+                } else if t.starts_with("0b") {
+                    Some(2)
+                } else if t.starts_with("0o") {
+                    Some(8)
+                } else {
+                    None
+                };
+                let hint = match radix_hint {
+                    Some(base) => format!("{NUMBER_TEXT_HINT}; for this radix write int({text:?}, {base})"),
+                    None => format!("{NUMBER_TEXT_HINT}; int(\"ff\", 16) parses another base (2 to 36)"),
+                };
+                Err(crate::safety::value_not_representable(
+                    "int",
+                    format!("int: {text:?} is not a decimal integer (digits with an optional sign)"),
+                    &hint,
+                ))
+            }
         },
         other => Err(crate::safety::bad_arg(
             "int",
@@ -17366,6 +17441,129 @@ fn bi_int(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
             other.type_name(),
         )),
     }
+}
+
+/// The base of `int(text, base)` and `to_base(n, base)`: an Int from 2 to 36.
+fn radix_base(builtin: &str, base: &Value) -> Result<u32> {
+    match base {
+        Value::Int(b) if (2..=36).contains(b) => Ok(*b as u32),
+        Value::Int(b) => Err(crate::safety::bad_arg_in(
+            builtin,
+            format!("{builtin}: the base must be from 2 to 36, got {b}"),
+            "digits are 0-9 then a-z, so a base is 2 to 36",
+        )),
+        other => Err(crate::safety::bad_arg(
+            builtin,
+            "an Int base from 2 to 36",
+            other.type_name(),
+        )),
+    }
+}
+
+/// int(text, base) - parse whole-number text in a base from 2 to 36.
+fn int_with_base(text: &Value, base: &Value) -> Result<Value> {
+    let base = radix_base("int", base)?;
+    let Value::Str(text) = text else {
+        return Err(crate::safety::bad_arg(
+            "int",
+            "a String to parse when a base is given",
+            text.type_name(),
+        ));
+    };
+    let trimmed = text.trim();
+    let (negative, rest) = match trimmed.as_bytes().first() {
+        Some(b'-') => (true, &trimmed[1..]),
+        Some(b'+') => (false, &trimmed[1..]),
+        _ => (false, trimmed),
+    };
+    let lower = rest.to_ascii_lowercase();
+    let prefix = match base {
+        16 => "0x",
+        2 => "0b",
+        8 => "0o",
+        _ => "",
+    };
+    let digits = if !prefix.is_empty() && lower.starts_with(prefix) {
+        &rest[2..]
+    } else {
+        rest
+    };
+    let bad = || {
+        crate::safety::value_not_representable(
+            "int",
+            format!("int: {text:?} is not a base-{base} integer (digits with an optional sign)"),
+            "digits are 0-9 then a-z; no underscores or spaces inside; 0x, 0b and 0o prefixes are accepted for bases 16, 2 and 8",
+        )
+    };
+    if digits.is_empty() || digits.starts_with(['+', '-']) {
+        return Err(bad());
+    }
+    let signed = if negative {
+        format!("-{digits}")
+    } else {
+        digits.to_string()
+    };
+    match i64::from_str_radix(&signed, base) {
+        Ok(n) => Ok(Value::Int(n)),
+        Err(e)
+            if matches!(
+                e.kind(),
+                std::num::IntErrorKind::PosOverflow | std::num::IntErrorKind::NegOverflow
+            ) =>
+        {
+            Err(crate::safety::value_not_representable(
+                "int",
+                format!(
+                    "int: {text:?} does not fit in a 64-bit Int (-9223372036854775808 to 9223372036854775807)"
+                ),
+                "an Int holds whole numbers from -9223372036854775808 to 9223372036854775807",
+            ))
+        }
+        Err(_) => Err(bad()),
+    }
+}
+
+/// to_base(n, base) - An Int as lowercase digits in a base from 2 to 36.
+/// Args:
+///   - n: Int (or the piped Int)
+///   - base: Int - 2 to 36
+/// Returns: String
+///
+/// A negative number starts with '-'; there is no 0x prefix.
+///
+/// Example:
+///   to_base(255, 16)   # "ff"
+fn bi_to_base(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
+    let (n, base) = match (args.as_slice(), &input) {
+        ([n, base], _) => (n, base),
+        ([base], Some(n)) => (n, base),
+        _ => {
+            return Err(arity_error(
+                "to_base",
+                "an Int and a base from 2 to 36",
+                args.len(),
+            ))
+        }
+    };
+    let base = radix_base("to_base", base)?;
+    let Value::Int(n) = n else {
+        return Err(crate::safety::bad_arg("to_base", "an Int", n.type_name()));
+    };
+    let mut magnitude = n.unsigned_abs();
+    let mut digits: Vec<u8> = Vec::new();
+    loop {
+        let d = (magnitude % u64::from(base)) as u8;
+        digits.push(if d < 10 { b'0' + d } else { b'a' + d - 10 });
+        magnitude /= u64::from(base);
+        if magnitude == 0 {
+            break;
+        }
+    }
+    if *n < 0 {
+        digits.push(b'-');
+    }
+    digits.reverse();
+    Ok(Value::Str(String::from_utf8(digits).unwrap_or_default()))
 }
 
 /// float(x) - Convert a value to a Float.
@@ -17583,6 +17781,7 @@ fn pad_text(builtin: &str, args: Vec<Value>, input: Option<Value>, left: bool) -
     if len >= wanted {
         return Ok(Value::Str(text));
     }
+    crate::eval::check_string_len(text.len() + (wanted - len) * fill_char.len_utf8())?;
     let pad = fill_char.to_string().repeat(wanted - len);
     Ok(Value::Str(if left { pad + &text } else { text + &pad }))
 }
@@ -17743,6 +17942,7 @@ fn bi_regex_find_all(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
 /// Args:
 ///   - text: String (or the piped text)
 ///   - pattern: String - a Rust regex pattern
+///   - limit: Int (optional) - the most pieces to answer, 1 or more; the last piece keeps the rest
 /// Returns: Array of String
 ///
 /// Rust regex split semantics: a match at the start or end of the text gives an
@@ -17754,13 +17954,46 @@ fn bi_regex_find_all(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
 fn bi_regex_split(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
     const B: &str = "regex_split";
     let (text, rest) = text_subject(B, args, input)?;
-    let [pattern] = rest.as_slice() else {
-        return Err(arity_error(B, "a pattern", rest.len()));
+    let (pattern, limit_arg) = match rest.as_slice() {
+        [pattern] => (pattern, None),
+        [pattern, limit] => (pattern, Some(limit)),
+        _ => {
+            return Err(arity_error(
+                B,
+                "a pattern and an optional limit",
+                rest.len(),
+            ))
+        }
     };
     let re = text_regex(B, string_arg(B, "a String pattern", pattern)?)?;
-    Ok(Value::Array(
-        re.split(&text).map(|s| Value::Str(s.to_string())).collect(),
-    ))
+    // limit: the most pieces to answer, as split's; the last piece holds the
+    // rest of the text unsplit.
+    let limit: Option<usize> = match limit_arg {
+        None => None,
+        Some(Value::Int(n)) if *n >= 1 => Some(usize::try_from(*n).unwrap_or(usize::MAX)),
+        Some(Value::Int(n)) => {
+            return Err(crate::safety::bad_arg_in(
+                B,
+                format!("{B}: limit {n} is not at least 1: it is the most pieces to answer"),
+                "pass a limit of 1 or more, or leave it out to split at every match",
+            ))
+        }
+        Some(other) => {
+            return Err(crate::safety::bad_arg(
+                B,
+                "an Int limit, the most pieces",
+                other.type_name(),
+            ))
+        }
+    };
+    let pieces: Vec<Value> = match limit {
+        Some(n) => re
+            .splitn(&text, n)
+            .map(|s| Value::Str(s.to_string()))
+            .collect(),
+        None => re.split(&text).map(|s| Value::Str(s.to_string())).collect(),
+    };
+    Ok(Value::Array(pieces))
 }
 
 /// index_of(text, sub) / last_index_of(text, sub): the character offset of the
@@ -18137,8 +18370,68 @@ fn canonical_iso(text: &str) -> String {
     format!("{date}T{clock}{frac}{zone}")
 }
 
+/// The calendar date of an ISO week date (`2024-W09-4`, Monday-based weeks) or
+/// an ordinal date (`2024-060`, the day of the year), keeping any time after it,
+/// as `YYYY-MM-DD...`. Text in neither shape is `Ok(None)`; a week or day that
+/// the year does not have is refused by name.
+fn expand_week_or_ordinal(builtin: &str, text: &str) -> Result<Option<String>> {
+    use chrono::Datelike as _;
+    let b = text.as_bytes();
+    let digits = |s: &[u8]| s.iter().all(u8::is_ascii_digit);
+    if !text.is_ascii() || b.len() < 8 || !digits(&b[0..4]) || b[4] != b'-' {
+        return Ok(None);
+    }
+    let after =
+        |at: usize| text[at..].is_empty() || matches!(text.as_bytes()[at], b'T' | b't' | b' ');
+    let year: i32 = text[0..4].parse().unwrap_or(0);
+    let refuse = |what: &str| {
+        crate::safety::value_not_representable(
+            builtin,
+            format!("{builtin}: {text:?} is not a date: {what}"),
+            "write an ISO 8601 date such as 2024-02-29, a week date such as 2024-W09-4, or an ordinal date such as 2024-060",
+        )
+    };
+    let date = if b[5] == b'W'
+        && b.len() >= 10
+        && digits(&b[6..8])
+        && b[8] == b'-'
+        && b[9].is_ascii_digit()
+        && after(10)
+    {
+        let week: u32 = text[6..8].parse().unwrap_or(0);
+        let day = match b[9] {
+            b'1' => chrono::Weekday::Mon,
+            b'2' => chrono::Weekday::Tue,
+            b'3' => chrono::Weekday::Wed,
+            b'4' => chrono::Weekday::Thu,
+            b'5' => chrono::Weekday::Fri,
+            b'6' => chrono::Weekday::Sat,
+            b'7' => chrono::Weekday::Sun,
+            _ => return Err(refuse("the weekday must be 1 (Monday) to 7 (Sunday)")),
+        };
+        chrono::NaiveDate::from_isoywd_opt(year, week, day)
+            .ok_or_else(|| refuse(&format!("the ISO year {year} has no week {week}")))?
+    } else if digits(&b[5..8]) && after(8) {
+        let ordinal: u32 = text[5..8].parse().unwrap_or(0);
+        chrono::NaiveDate::from_yo_opt(year, ordinal)
+            .ok_or_else(|| refuse(&format!("the year {year} has no day {ordinal}")))?
+    } else {
+        return Ok(None);
+    };
+    let consumed = if b[5] == b'W' { 10 } else { 8 };
+    Ok(Some(format!(
+        "{:04}-{:02}-{:02}{}",
+        date.year(),
+        chrono::Datelike::month(&date),
+        chrono::Datelike::day(&date),
+        &text[consumed..]
+    )))
+}
+
 fn parse_iso(builtin: &str, text: &str) -> Result<(chrono::DateTime<chrono::Utc>, bool)> {
-    let canon = canonical_iso(text);
+    let text = text.trim();
+    let expanded = expand_week_or_ordinal(builtin, text)?;
+    let canon = canonical_iso(expanded.as_deref().unwrap_or(text));
     check_iso_shape(builtin, text, &canon)?;
     let (instant, date_only) = iso_instant(&canon).ok_or_else(|| not_a_date(builtin, text))?;
     check_instant(builtin, text, instant)?;
@@ -18925,7 +19218,8 @@ fn bi_ps_add(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
 ///   - separator: String (optional) - groups the integer part, such as ","
 /// Returns: String
 ///
-/// A Float rounds half away from zero, and a negative value keeps its sign
+/// A Float rounds half away from zero (an exact tie rounds away from zero,
+/// unlike Python's round-half-even: 0.125 to 2 places is "0.13"), and a negative value keeps its sign
 /// unless it rounds to zero. NaN and the infinities are E_BAD_ARG.
 ///
 /// Example:
@@ -32820,8 +33114,23 @@ fn epoch_range(builtin: &str, shown: &str) -> anyhow::Error {
     crate::safety::value_not_representable(
         builtin,
         format!("{builtin}: {shown} is outside the years 0001 to 9999"),
-        "epoch seconds run from -62135596800 (0001-01-01T00:00:00Z) to 253402300799 (9999-12-31T23:59:59Z)",
+        &epoch_range_hint(builtin, shown),
     )
+}
+
+/// The hint for an epoch second out of range: a value that is in range once
+/// divided by 1000 is milliseconds, which is what most clocks give.
+fn epoch_range_hint(builtin: &str, shown: &str) -> String {
+    let base = "epoch seconds run from -62135596800 (0001-01-01T00:00:00Z) to 253402300799 (9999-12-31T23:59:59Z)";
+    let looks_like_millis = builtin == "from_epoch"
+        && shown.parse::<f64>().is_ok_and(|n| {
+            n.is_finite() && n / 1000.0 >= EPOCH_MIN as f64 && n / 1000.0 < (EPOCH_MAX + 1) as f64
+        });
+    if looks_like_millis {
+        format!("this looks like milliseconds; use from_epoch(n / 1000); {base}")
+    } else {
+        base.to_string()
+    }
 }
 
 /// from_epoch(seconds) - The UTC ISO 8601 text of an instant, given as seconds

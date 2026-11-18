@@ -300,6 +300,7 @@ title
 to-csv
 to-json
 to-yaml
+to_base
 to_csv
 to_entries
 to_epoch

@@ -119,7 +119,7 @@ const ONE_EXPR_HINT: &str =
 /// The hint for `=` after an indexed element, `rows[0].n = 99`: elements are
 /// values, so the array is rebuilt rather than assigned in place.
 const INDEX_ASSIGN_HINT: &str =
-    "an indexed element cannot be assigned; rebuild the array, e.g. rows = rows | map(fn(r) => ...)";
+    "an indexed element cannot be assigned; for an Array rebuild it, e.g. rows = rows | map(fn(r) => ...); for a Record field with a computed key use c.app = merge(c.app, from_entries([[k, v]]))";
 
 /// The hint for `c ? a : b`, which IronShell does not have.
 const TERNARY_HINT: &str = "IronShell has no ?: operator; write if cond { a } else { b }";
@@ -886,6 +886,23 @@ fn lex_marked(src: &str) -> Result<(Vec<Spanned>, std::collections::HashSet<usiz
         }
         if let Some(next) = peek(chars, *pos) {
             if is_ident_part(next) {
+                // `0xff`, `0b101`, `0o17`: radix literals, which the language does not have.
+                if acc == "0" && matches!(next, 'x' | 'X' | 'b' | 'B' | 'o' | 'O') {
+                    let (kind_name, base) = match next {
+                        'x' | 'X' => ("hexadecimal", 16),
+                        'b' | 'B' => ("binary", 2),
+                        _ => ("octal", 8),
+                    };
+                    return Err(anyhow!(
+                        "malformed number: '0' is followed by '{}' at line {}, column {}; \
+                         {} literals are not supported; write int(\"ff\", {}) for the value",
+                        next,
+                        line,
+                        col,
+                        kind_name,
+                        base
+                    ));
+                }
                 // `1_000`: a digit separator, which the language does not have.
                 if next == '_' {
                     let mut joined = acc.clone();

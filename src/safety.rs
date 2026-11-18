@@ -3186,12 +3186,20 @@ pub fn index_out_of_range(kind: &str, index: i64, len: usize, from_args: bool) -
     };
     anyhow::Error::new(SafetyError {
         code: ErrorCode::BadValue,
-        message: format!("index {index} is out of range: the {kind} has length {len}"),
+        message: if len == 0 {
+            format!("index {index} is out of range: the {kind} is empty")
+        } else {
+            format!("index {index} is out of range: the {kind} has length {len}")
+        },
         builtin: String::new(),
         hint,
         approval: None,
         did_you_mean: Vec::new(),
-        expected: format!("an index from -{len} to {}", len.saturating_sub(1)),
+        expected: if len == 0 {
+            format!("a non-empty {kind}")
+        } else {
+            format!("an index from -{len} to {}", len - 1)
+        },
         got: index.to_string(),
         extra: serde_json::Map::new(),
     })
@@ -3213,6 +3221,8 @@ pub fn unknown_builtin_hinted(
 ) -> anyhow::Error {
     let hint = if let Some(specific) = specific {
         specific
+    } else if let Some(note) = crate::builtins::no_builtin_note(name) {
+        note.to_string()
     } else if candidates.is_empty() {
         "no builtin has a similar name; call ontology_manifest() to list the \
          available categories"

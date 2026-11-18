@@ -192,7 +192,7 @@ try { error("bad", {field: "age"}) } catch e { e.code }   # "E_USER"; error(mess
 
 # Script arguments: `ish script.ish a b` gives the script args() == ["a", "b"] (empty under -c)
 # A script file echoes the value of its last expression only; earlier values are not printed.
-int("42") + 1                  # int(x) / float(x) convert text or numbers; int("1.5") is refused, float("1.5") is 1.5
+int("42") + 1                  # int(x) / float(x) convert text or numbers; int("1.5") is refused, float("1.5") is 1.5; int("ff", 16) parses a base 2..36 (0x/0b/0o prefix allowed for 16/2/8; int("0x1F") alone is refused), to_base(255, 16) is "ff"; there are no 0xff literals
 now_iso()                      # the current time, e.g. 2026-11-08T14:03:05Z; now_iso("local") carries the offset
 
 "abc" | regex_match("b"); regex_find("a1b22", "[0-9]+").start; regex_replace("a1", "([0-9])", "<$1>")    # regex on text; a match is {match, groups, start, end}
