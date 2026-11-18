@@ -134,10 +134,26 @@ pub fn reserve(builtin: &str, bytes: usize) -> anyhow::Result<()> {
                 "allocating {bytes} bytes with {live} already live would pass the memory budget of {} MB",
                 limit / (1024 * 1024)
             ),
-            "work on the data in smaller pieces, or raise the budget with --memory-limit MB or IRONSHELL_MEMORY_LIMIT_MB",
+            &format!(
+                "work on the data in smaller pieces, or raise the budget with --memory-limit MB or IRONSHELL_MEMORY_LIMIT_MB; this needs about {} MB, so rerun with --memory-limit {}",
+                needed_mb(live, bytes),
+                suggested_limit_mb(live, bytes)
+            ),
         ));
     }
     Ok(())
+}
+
+/// Megabytes (rounded up) that `live` bytes plus a request of `bytes` need.
+fn needed_mb(live: usize, bytes: usize) -> usize {
+    live.saturating_add(bytes).div_ceil(1024 * 1024)
+}
+
+/// A budget in MB that would hold `live` plus `bytes`: the need rounded up to
+/// the next 256 MB.
+pub(crate) fn suggested_limit_mb(live: usize, bytes: usize) -> usize {
+    let need = needed_mb(live, bytes);
+    (need / 256 + 1) * 256
 }
 
 #[cold]
@@ -155,4 +171,18 @@ fn over(limit: usize) -> anyhow::Error {
 /// a failed allocation aborts the process, so the refusal has to come first.
 pub fn reserve_parse(builtin: &str, text_bytes: usize, factor: usize) -> anyhow::Result<()> {
     reserve(builtin, text_bytes.saturating_mul(factor))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_suggested_limit_holds_the_need_and_rounds_to_256_mb() {
+        // 832000832 + 25662883 bytes is 818 MB: the next 256 MB step is 1024.
+        assert_eq!(needed_mb(25_662_883, 832_000_832), 818);
+        assert_eq!(suggested_limit_mb(25_662_883, 832_000_832), 1024);
+        // Exactly 512 MB needs more than a 512 MB budget.
+        assert_eq!(suggested_limit_mb(0, 512 * 1024 * 1024), 768);
+    }
 }
