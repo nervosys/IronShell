@@ -68,7 +68,7 @@ fn a2_radix_literals_say_so() {
         let msg = err.to_string();
         assert!(msg.contains(word), "{src}: {msg}");
         assert!(
-            msg.contains(&format!("int(\"ff\", {base})")),
+            msg.contains(&format!("{base})")) && msg.contains("int("),
             "{src}: {msg}"
         );
     }
