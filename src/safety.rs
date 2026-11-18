@@ -3663,11 +3663,21 @@ impl ApprovalDescriptor {
         reversible: bool,
     ) -> Result<Self, ironcrypto::core_types::Error> {
         // token = apv_<first 16 hex of sha256 over the action content>
+        // A radius marked "counted" carries counts read from the tree now; they
+        // describe the action and are not part of what the token binds.
+        let mut bound_radius = blast_radius.clone();
+        if bound_radius.get("counted").is_some() {
+            if let Some(map) = bound_radius.as_object_mut() {
+                for key in ["files", "dirs", "counted"] {
+                    map.remove(key);
+                }
+            }
+        }
         let content = json!({
             "what": what,
             "builtin": builtin,
             "targets": targets,
-            "blast_radius": blast_radius,
+            "blast_radius": bound_radius,
             "reversible": reversible,
         });
         let mut hasher = Sha256::new();
@@ -4574,6 +4584,67 @@ impl Drop for LinkLeafScope {
 pub fn is_link(path: &str) -> bool {
     !names_a_remote_share(path)
         && std::fs::symlink_metadata(path).is_ok_and(|m| m.file_type().is_symlink())
+}
+
+/// How many entries a blast-radius count reads before it stops.
+pub const TREE_COUNT_LIMIT: usize = 10_000;
+
+/// The files and directories under `root` (not counting `root`), without
+/// following links: a link counts as one file and is not entered. Counting stops
+/// once `limit` entries have been seen; the flag is then true and the counts are
+/// lower bounds.
+pub fn count_tree(root: &str, limit: usize) -> (usize, usize, bool) {
+    let (mut files, mut dirs) = (0usize, 0usize);
+    if names_a_remote_share(root) {
+        return (files, dirs, false);
+    }
+    let mut stack = vec![std::path::PathBuf::from(root)];
+    while let Some(dir) = stack.pop() {
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            if files + dirs >= limit {
+                return (files, dirs, true);
+            }
+            match entry.file_type() {
+                Ok(t) if t.is_dir() => {
+                    dirs += 1;
+                    stack.push(entry.path());
+                }
+                _ => files += 1,
+            }
+        }
+    }
+    (files, dirs, false)
+}
+
+/// The blast radius of a delete of `path` when it is a directory tree: the
+/// counts of files and directories under it ("10000+" when the count was cut
+/// off), with `base` kept. `"counted"` marks the counts as a description only:
+/// they are left out of the approval token, which binds the action and target
+/// and does not change when the tree's contents do.
+pub fn tree_blast_radius(path: &str, base: Json) -> Json {
+    let mut radius = base;
+    let is_tree =
+        !names_a_remote_share(path) && std::fs::symlink_metadata(path).is_ok_and(|m| m.is_dir());
+    if !is_tree {
+        return radius;
+    }
+    let (files, dirs, cut) = count_tree(path, TREE_COUNT_LIMIT);
+    let at_most = format!("{TREE_COUNT_LIMIT}+");
+    if let Some(map) = radius.as_object_mut() {
+        map.insert(
+            "files".to_string(),
+            if cut { json!(at_most) } else { json!(files) },
+        );
+        map.insert(
+            "dirs".to_string(),
+            if cut { json!(at_most) } else { json!(dirs) },
+        );
+        map.insert("counted".to_string(), json!(true));
+    }
+    radius
 }
 
 /// Whether the last component of `path`, as written, is `.` or `..`.

@@ -70090,7 +70090,7 @@ pub fn bi_rm(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
         effect: crate::safety::Effect::Destructive,
         what: "delete",
         targets: vec![path.clone()],
-        blast_radius: serde_json::json!({ "files": 1 }),
+        blast_radius: crate::safety::tree_blast_radius(&path, serde_json::json!({ "files": 1 })),
         reversible: crate::journal::would_capture(&path),
         fs_paths: true,
     })?;
@@ -70163,7 +70163,11 @@ pub fn bi_rmdir(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
         effect: crate::safety::Effect::Destructive,
         what: "delete",
         targets: vec![path.clone()],
-        blast_radius: serde_json::json!({ "recursive": recursive }),
+        blast_radius: if recursive {
+            crate::safety::tree_blast_radius(&path, serde_json::json!({ "recursive": recursive }))
+        } else {
+            serde_json::json!({ "recursive": recursive })
+        },
         reversible: false,
         fs_paths: true,
     })?;
