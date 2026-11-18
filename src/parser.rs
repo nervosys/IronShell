@@ -886,6 +886,23 @@ fn lex_marked(src: &str) -> Result<(Vec<Spanned>, std::collections::HashSet<usiz
         }
         if let Some(next) = peek(chars, *pos) {
             if is_ident_part(next) {
+                // `0xff`, `0b101`, `0o17`: radix literals, which the language does not have.
+                if acc == "0" && matches!(next, 'x' | 'X' | 'b' | 'B' | 'o' | 'O') {
+                    let (kind_name, base) = match next {
+                        'x' | 'X' => ("hexadecimal", 16),
+                        'b' | 'B' => ("binary", 2),
+                        _ => ("octal", 8),
+                    };
+                    return Err(anyhow!(
+                        "malformed number: '0' is followed by '{}' at line {}, column {}; \
+                         {} literals are not supported; write int(\"ff\", {}) for the value",
+                        next,
+                        line,
+                        col,
+                        kind_name,
+                        base
+                    ));
+                }
                 // `1_000`: a digit separator, which the language does not have.
                 if next == '_' {
                     let mut joined = acc.clone();

@@ -55,3 +55,20 @@ fn a1_int_takes_a_base_and_to_base_writes_one() {
     let se = refusal(r#"int("0x1F")"#);
     assert!(se.hint.contains(r#"int("0x1F", 16)"#), "{}", se.hint);
 }
+
+// A2
+#[test]
+fn a2_radix_literals_say_so() {
+    for (src, word, base) in [
+        ("0xff", "hexadecimal", "16"),
+        ("0b101", "binary", "2"),
+        ("0o17", "octal", "8"),
+    ] {
+        let err = iron_shell::parser::parse_program(src).expect_err(src);
+        let msg = err.to_string();
+        assert!(msg.contains(word), "{src}: {msg}");
+        assert!(msg.contains(&format!("int(\"ff\", {base})")), "{src}: {msg}");
+    }
+    let err = iron_shell::parser::parse_program("1x").expect_err("1x");
+    assert!(err.to_string().contains("valid exponent"));
+}
