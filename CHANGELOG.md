@@ -29,6 +29,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - An exec approval also binds the content of workspace files named inside an argument (`-File:x.ps1`, `. ./x.ps1`, `call x.cmd`, `--config=x`), up to 32 files.
 - `--timeout` kills external programs started by sh() and `ish -b`, with their process tree, and fails with E_BUDGET_EXCEEDED naming `--timeout`.
 - tar_extract of .tar.xz/.bz2/.zst through an external tar counts the bytes it wrote, so a sparse entry cannot pass the 1 GiB extraction cap.
+- An exec approval binds a file named inside quotes in an argument (`-File 'a b.ps1'`, `& './a b.ps1'`), and a relative name that reaches outside the workspace through a link (by size and time, not content); it binds up to 256 files and refuses a command that names more.
+- On Windows, environment names that differ only in case are one variable in what an approval binds, and `unset` of an inherited variable in `ish -b` removes it from children and from the token.
+- Agents can no longer set SHELLOPTS, BASHOPTS, PS0-PS4, GLOBIGNORE, CDPATH, JAVA_HOME, the PowerShell policy and module-cache names, or `NODE_*`, `MSBUILD*`, `NUGET_*` and `PWSH_*`; a variable name with surrounding whitespace, `=` or NUL is E_BAD_ARG.
+- `ish -b` ends with status 69 when `--timeout` kills any stage of a pipeline.
 
 ### Changed
 
@@ -64,6 +68,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - from_yaml parse errors are E_BAD_VALUE, as open's are.
 - A memory-budget refusal says how many MB the call needs and which `--memory-limit` to rerun with.
 - `file.patch` errors number patches from 1 and say how many there are; `undo` rows carry the journal `id`; journal paths use `/`.
+- In agent mode, `ish -b` allows a plain assignment, `for` variable or `read` target named like a steering variable (`tmp=x`); `export` and a prefix assignment on a command, which reach a child, are still refused.
+- fs_walk results and ls paths use `/` on Windows.
 
 ### Added
 
@@ -86,6 +92,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `ish -b` sets `$PWD`, `$USER`, `$SHELL`, `$PPID` and `$RANDOM`; `test` takes `-nt`, `-ot`, `-ef`, `\<` and `\>`, and `read` takes `-p`.
 - db.csv_to_sqlite, db.json_to_sqlite and db.sqlite_to_csv are db members; db_sqlite_query has its own help entry and name.
 - index_of takes an Array and returns the index of the first equal element, or -1.
+- `ish -b` runs `$((...))` arithmetic: 64-bit integers, bash's operators including `**`, `?:`, assignments and `++`/`--`, and bash's messages for division by 0 and syntax errors.
+- The in-process grep takes `-A`, `-B`, `-C`, `-NUM` and the long context options, with GNU's `--` group separators.
+- diff_values(a, b) lists the added, removed and changed paths between two values; diff, json_diff and deep_diff suggest it.
 
 ### Fixed
 
@@ -123,6 +132,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - A glob that matches nothing in cat/grep says "no file matches" and why (a dot-directory `**` skipped, or links leading outside the workspace); help("glob") says `**` skips dot-directories.
 - Hints: `&&`/`||` on a Record with a Bool field such as `exists` names the field; is_file/is_dir suggest file.exists and fs_stat; sha256_file and file.hash suggest crypto_hash_file; a Record handle's hint names its Array field; `ish -b` suggests `for x in "$@"` and if/elif for case; sql stopped by --timeout says so; a missing script's hint names the start directory, not the workspace.
 - The redaction note counts a `key=value` secret whose value is also a bare key once; date_format names an ISO week written without a weekday.
+- help("db") describes sqlite_exec and sqlite_query, and the sqlite_exec approval hint names db.csv_to_sqlite and db.json_to_sqlite; help and unknown-name errors find a bare module member (`csv_to_sqlite`); ontology_search suggests ontology_manifest and ontology_describe.
+- Refusal hints for `find -newer`/`-o`, brace expansion, `trap`, functions and `source` say what to write instead.
 
 ## [14.0.5] - 2026-11-16
 
