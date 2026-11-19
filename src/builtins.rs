@@ -4017,6 +4017,16 @@ pub fn did_you_mean_among<'a>(name: &str, extra: impl Iterator<Item = &'a str>) 
             out.push(spelled);
         }
     }
+    // A bare member name that exactly one module has (`csv_to_sqlite` is
+    // `db.csv_to_sqlite`) names that member.
+    if !name.contains('.') {
+        if let Some(module) = crate::modules::unique_module_for_member(name) {
+            let spelled = format!("{module}.{name}");
+            if !out.contains(&spelled) {
+                out.push(spelled);
+            }
+        }
+    }
     for near in nearest_names(name, extra.chain(BUILTIN_LOOKUP.keys().copied())) {
         if out.len() == 3 {
             break;
@@ -28102,6 +28112,17 @@ fn bi_ontology_describe(args: Vec<Value>, _input: Option<Value>) -> Result<Value
                     candidates,
                     Some(specific),
                 ));
+            }
+        }
+        // A bare name that exactly one module has as a member describes that
+        // member: help("csv_to_sqlite") is help("db.csv_to_sqlite").
+        if !q.contains('.') {
+            if let Some(module) = crate::modules::unique_module_for_member(q.trim()) {
+                let qualified =
+                    crate::agent_api::ontology_describe_json(&format!("{module}.{}", q.trim()));
+                if qualified.get("error").is_none() {
+                    return Ok(Value::from_json(&qualified));
+                }
             }
         }
         let categories = crate::agent_api::ontology_category_names();
