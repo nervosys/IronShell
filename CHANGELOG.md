@@ -24,6 +24,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - zip_extract and tar_extract refuse more than 1 GiB uncompressed, 100000 entries, or a zip entry over 100 MB that expands more than 1000:1 (E_BUDGET_EXCEEDED, partial output removed); IRONSHELL_EXTRACT_MAX_BYTES and IRONSHELL_EXTRACT_MAX_ENTRIES raise the first two.
 - `--timeout` stops archive listing, extraction and zip creation, glob and directory walks.
 - Text read from files (file.read, open, the from_* parsers, lines) and copies of Arrays and Records are charged to the memory budget before they are built, so a large CSV or `a = [a, a]` raises E_BUDGET_EXCEEDED instead of aborting the process.
+- In `ish -b --agent`, variables given to an external command by a prefix assignment (`FOO=1 cmd`) or `export` are part of its approval token, so an approval no longer covers the same command with other variables.
+- Agents can no longer set `DOTNET_*`, `COMPlus_*`, `CORECLR_*`, `COR_*`, `windir`, `__COMPAT_LAYER`, `NUGET_PACKAGES` or `PSDefaultParameterValues` (set_env, export or a prefix assignment), which load code into .NET programs and pwsh.
+- An exec approval also binds the content of workspace files named inside an argument (`-File:x.ps1`, `. ./x.ps1`, `call x.cmd`, `--config=x`), up to 32 files.
+- `--timeout` kills external programs started by sh() and `ish -b`, with their process tree, and fails with E_BUDGET_EXCEEDED naming `--timeout`.
+- tar_extract of .tar.xz/.bz2/.zst through an external tar counts the bytes it wrote, so a sparse entry cannot pass the 1 GiB extraction cap.
 
 ### Changed
 
@@ -57,6 +62,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `ish -b`: an empty while/until/if condition, a stray `;`, `&& cmd`, `a | | b`, `;;` outside case and an unterminated `${` are syntax errors (E_PARSE, exit 2) before anything runs, not loops or E_POLICY_DENY; a policy refusal inside a script exits 77.
 - `pwd`, `$PWD`, basename and dirname use `/` on Windows in `ish -b`.
 - from_yaml parse errors are E_BAD_VALUE, as open's are.
+- A memory-budget refusal says how many MB the call needs and which `--memory-limit` to rerun with.
+- `file.patch` errors number patches from 1 and say how many there are; `undo` rows carry the journal `id`; journal paths use `/`.
 
 ### Added
 
@@ -78,6 +85,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Date builtins read ISO week dates (`2024-W09-4`) and ordinal dates (`2024-060`), and trim surrounding whitespace.
 - `ish -b` sets `$PWD`, `$USER`, `$SHELL`, `$PPID` and `$RANDOM`; `test` takes `-nt`, `-ot`, `-ef`, `\<` and `\>`, and `read` takes `-p`.
 - db.csv_to_sqlite, db.json_to_sqlite and db.sqlite_to_csv are db members; db_sqlite_query has its own help entry and name.
+- index_of takes an Array and returns the index of the first equal element, or -1.
 
 ### Fixed
 
@@ -112,6 +120,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - glob no longer re-runs the jail's link walk on every listed entry, so `glob("tree/**/*")` runs near fs_walk's speed.
 - db_sqlite_to_csv keeps a newline inside a cell; `c: #comment` in YAML is null; a bad JSONL line names its start; file.replace explains a miss caused only by line endings; db_json_to_sqlite says it takes a path.
 - A leading UTF-8 BOM in a script is ignored; `set -u` names `$1`; `if c; body; fi` hints at the missing `then`; a PowerShell statement missing an operand is a parse error; reading deeper than 50 directories under the jail is E_BUDGET_EXCEEDED, not E_UNKNOWN; a missing script is reported by ish, not `run`.
+- A glob that matches nothing in cat/grep says "no file matches" and why (a dot-directory `**` skipped, or links leading outside the workspace); help("glob") says `**` skips dot-directories.
+- Hints: `&&`/`||` on a Record with a Bool field such as `exists` names the field; is_file/is_dir suggest file.exists and fs_stat; sha256_file and file.hash suggest crypto_hash_file; a Record handle's hint names its Array field; `ish -b` suggests `for x in "$@"` and if/elif for case; sql stopped by --timeout says so; a missing script's hint names the start directory, not the workspace.
+- The redaction note counts a `key=value` secret whose value is also a bare key once; date_format names an ISO week written without a weekday.
 
 ## [14.0.5] - 2026-11-16
 
