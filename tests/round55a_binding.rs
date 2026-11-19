@@ -350,3 +350,37 @@ fn a_name_with_whitespace_or_equals_is_not_a_valid_name() {
         .expect("run ish");
     assert!(out.status.success(), "{}", head(&out));
 }
+
+// ---- A5: a --timeout kill ends an `ish -b` run with E_BUDGET_EXCEEDED -------
+
+#[test]
+fn a_timeout_kill_in_a_pipeline_exits_69_whichever_stage_was_killed() {
+    let dir = scratch("timeout_pipe");
+    let exe = env!("CARGO_BIN_EXE_ish").replace('\\', "/");
+    let slow = format!(r#""{exe}" -c 'sleep(20)'"#);
+    let scripts = [
+        format!("echo hi | {slow} | sort"),
+        format!("echo hi | {slow}"),
+        format!("echo hi | sort | {slow} | sort; echo SENTINEL_AFTER"),
+    ];
+    for script in scripts {
+        let started = std::time::Instant::now();
+        let out = base(&dir)
+            .args(["-b", "--timeout", "2", "-c", &script])
+            .output()
+            .expect("run ish");
+        let t = text(&out);
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(15),
+            "ran {:?}",
+            started.elapsed()
+        );
+        assert_eq!(out.status.code(), Some(69), "{script}: {}", head(&out));
+        assert!(t.contains("E_BUDGET_EXCEEDED"), "{script}: {}", head(&out));
+        assert!(
+            !t.contains("SENTINEL_AFTER"),
+            "the script went on: {}",
+            head(&out)
+        );
+    }
+}

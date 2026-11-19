@@ -2635,6 +2635,14 @@ impl Shell {
                     Flow::Next(c) | Flow::Exit(c) => c,
                     _ => 0,
                 };
+                // A `--timeout` that killed a stage stops the later ones too.
+                if RUN_TIMEOUT_STATUS.load(std::sync::atomic::Ordering::SeqCst) != 0 {
+                    sink.out.extend_from_slice(&stage.out);
+                    if stage.err_mode == ErrMode::Capture {
+                        sink.err.extend_from_slice(&stage.err);
+                    }
+                    break;
+                }
                 // Under `pipefail` the status is the last failing stage's, or 0.
                 if !self.pipefail || c != 0 {
                     status = c;
@@ -2652,6 +2660,13 @@ impl Shell {
         };
         if p.negate {
             self.errexit_off -= 1;
+        }
+        // The run's deadline passed while a program ran: the script ends with
+        // the status of that refusal (E_BUDGET_EXCEEDED, 69), whichever stage
+        // was killed and whatever the last stage's own status was.
+        let timed_out = RUN_TIMEOUT_STATUS.load(std::sync::atomic::Ordering::SeqCst);
+        if timed_out != 0 {
+            return Flow::Exit(timed_out);
         }
         match flow {
             Flow::Next(c) => {
@@ -3530,10 +3545,15 @@ impl Shell {
                 Ok(None) => {
                     let refusal = crate::safety::run_deadline_error("posix", name);
                     sink.eline(&refusal.to_string());
-                    return refusal
+                    let code = refusal
                         .downcast_ref::<crate::safety::SafetyError>()
                         .map(|e| e.code.exit_code())
                         .unwrap_or(1);
+                    // The deadline ends the whole run, not this one stage:
+                    // whichever stage it killed, the script stops with this
+                    // status (see `run_pipeline`).
+                    RUN_TIMEOUT_STATUS.store(code, std::sync::atomic::Ordering::SeqCst);
+                    return code;
                 }
                 Err(e) => {
                     sink.eline(&format!("{SHELL_NAME}: {name}: {}", io_reason(&e)));
@@ -8197,8 +8217,13 @@ pub fn run_script(src: &str, script: &str, args: &[String]) -> Option<i32> {
     run_named(src, script, args)
 }
 
+/// The exit status of a refusal that ended the run, set when `--timeout`
+/// killed a program (0 until then); read by the pipeline that ran it.
+static RUN_TIMEOUT_STATUS: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(0);
+
 fn run_named(src: &str, script_name: &str, args: &[String]) -> Option<i32> {
     let list = parse(src).ok()?;
+    RUN_TIMEOUT_STATUS.store(0, std::sync::atomic::Ordering::SeqCst);
     let mut sh = Shell {
         vars: HashMap::new(),
         exported: Vec::new(),
