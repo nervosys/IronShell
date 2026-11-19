@@ -1881,7 +1881,11 @@ enum Util {
 
 struct Shell {
     vars: HashMap<String, String>,
-    exported: HashSet<String>,
+    /// The names exported to children, in the order they were last exported.
+    exported: Vec<String>,
+    /// Inherited variables the script unset: removed from every child's
+    /// environment, and bound into the approval of a command that runs.
+    unset_env: Vec<String>,
     last: i32,
     /// A pathname expansion over the cap, set by `expand` (which cannot
     /// report errors itself) and taken by the command that contains it, which
@@ -2631,6 +2635,14 @@ impl Shell {
                     Flow::Next(c) | Flow::Exit(c) => c,
                     _ => 0,
                 };
+                // A `--timeout` that killed a stage stops the later ones too.
+                if RUN_TIMEOUT_STATUS.load(std::sync::atomic::Ordering::SeqCst) != 0 {
+                    sink.out.extend_from_slice(&stage.out);
+                    if stage.err_mode == ErrMode::Capture {
+                        sink.err.extend_from_slice(&stage.err);
+                    }
+                    break;
+                }
                 // Under `pipefail` the status is the last failing stage's, or 0.
                 if !self.pipefail || c != 0 {
                     status = c;
@@ -2648,6 +2660,13 @@ impl Shell {
         };
         if p.negate {
             self.errexit_off -= 1;
+        }
+        // The run's deadline passed while a program ran: the script ends with
+        // the status of that refusal (E_BUDGET_EXCEEDED, 69), whichever stage
+        // was killed and whatever the last stage's own status was.
+        let timed_out = RUN_TIMEOUT_STATUS.load(std::sync::atomic::Ordering::SeqCst);
+        if timed_out != 0 {
+            return Flow::Exit(timed_out);
         }
         match flow {
             Flow::Next(c) => {
@@ -2993,14 +3012,21 @@ impl Shell {
                     if let Some(v) = v {
                         self.set_var(&n, v);
                     }
-                    self.exported.insert(n);
+                    self.mark_exported(n);
                 }
                 return Flow::Next(0);
             }
             "unset" => {
                 for a in args {
                     self.vars.remove(a);
-                    self.exported.remove(a);
+                    self.exported.retain(|n| n != a);
+                    // An inherited variable is removed from what children get.
+                    if !a.is_empty() && !a.contains(['=', '\0']) && std::env::var_os(a).is_some() {
+                        let folded = crate::safety::fold_env_name(a);
+                        self.unset_env
+                            .retain(|n| crate::safety::fold_env_name(n) != folded);
+                        self.unset_env.push(a.clone());
+                    }
                 }
                 return Flow::Next(0);
             }
@@ -3244,6 +3270,59 @@ impl Shell {
         status
     }
 
+    /// Mark `name` exported, last in the order, so that where names differing
+    /// only in case are one variable (Windows) the later export wins.
+    fn mark_exported(&mut self, name: String) {
+        let folded = crate::safety::fold_env_name(&name);
+        self.unset_env
+            .retain(|n| crate::safety::fold_env_name(n) != folded);
+        self.exported.retain(|n| *n != name);
+        self.exported.push(name);
+    }
+
+    /// The variables a child gets beyond this process's own, in the order they
+    /// are applied: the exports (in export order), then the prefix assignments
+    /// of the command.
+    fn child_env_pairs(&self, env: &[(String, String)]) -> Vec<(String, String)> {
+        let mut pairs: Vec<(String, String)> = Vec::new();
+        for n in &self.exported {
+            if let Some(v) = self.vars.get(n) {
+                pairs.push((n.clone(), v.clone()));
+            }
+        }
+        pairs.extend(env.iter().cloned());
+        pairs
+    }
+
+    /// The inherited variables a child must not see: those the script unset,
+    /// less any a later export or prefix assignment sets again (`pairs`).
+    fn removed_env(&self, pairs: &[(String, String)]) -> Vec<String> {
+        let mut removed: Vec<String> = self
+            .unset_env
+            .iter()
+            .filter(|n| {
+                let folded = crate::safety::fold_env_name(n);
+                !pairs
+                    .iter()
+                    .any(|(k, _)| crate::safety::fold_env_name(k) == folded)
+            })
+            .map(|n| crate::safety::fold_env_name(n))
+            .collect();
+        removed.sort();
+        removed
+    }
+
+    /// Give `cmd` the environment of [`Shell::child_env_pairs`], without the
+    /// variables the script unset.
+    fn apply_child_env(&self, cmd: &mut std::process::Command, pairs: &[(String, String)]) {
+        for n in &self.unset_env {
+            cmd.env_remove(n);
+        }
+        for (n, v) in pairs {
+            cmd.env(n, v);
+        }
+    }
+
     /// Run a program that is not implemented here: directly, with no shell in
     /// between, and only after the effect gate has admitted it. `why` is the
     /// part of the command the subset declined, named if no GNU program runs it.
@@ -3261,21 +3340,19 @@ impl Shell {
         }
         // What the child gets beyond this process's environment (exports and
         // prefix assignments) is part of what is approved.
-        let mut child_env: Vec<(String, String)> = Vec::new();
-        for n in &self.exported {
-            if let Some(v) = self.vars.get(n) {
-                child_env.push((n.clone(), v.clone()));
-            }
-        }
-        child_env.extend(env.iter().cloned());
-        // Later entries win, as they do on the command below.
+        let pairs = self.child_env_pairs(env);
+        // Later entries win, as they do on the command below, and names that
+        // differ only in case are one variable where the system folds them.
         let mut deduped: std::collections::BTreeMap<String, String> =
             std::collections::BTreeMap::new();
-        for (n, v) in child_env {
-            deduped.insert(n, v);
+        for (n, v) in &pairs {
+            deduped.insert(crate::safety::fold_env_name(n), v.clone());
         }
         let child_env: Vec<(String, String)> = deduped.into_iter().collect();
-        if let Err(e) = crate::safety::guard_exec_env("posix", argv.join(" "), &child_env) {
+        let removed = self.removed_env(&child_env);
+        if let Err(e) =
+            crate::safety::guard_exec_env("posix", argv.join(" "), argv, &child_env, &removed)
+        {
             sink.eline(&e.to_string());
             return e.code.exit_code();
         }
@@ -3292,14 +3369,7 @@ impl Shell {
         };
         let mut cmd = crate::safety::child_command(&program);
         cmd.args(&argv[1..]);
-        for n in &self.exported {
-            if let Some(v) = self.vars.get(n) {
-                cmd.env(n, v);
-            }
-        }
-        for (n, v) in env {
-            cmd.env(n, v);
-        }
+        self.apply_child_env(&mut cmd, &pairs);
         crate::safety::strip_ironshell_env(&mut cmd);
         self.run_piped(cmd, &argv[0], stdin, sink)
     }
@@ -3400,14 +3470,7 @@ impl Shell {
         if let Some(session) = std::env::var_os("IRONSHELL_SESSION_DIR") {
             cmd.env("IRONSHELL_SESSION_DIR", session);
         }
-        for n in &self.exported {
-            if let Some(v) = self.vars.get(n) {
-                cmd.env(n, v);
-            }
-        }
-        for (n, v) in env {
-            cmd.env(n, v);
-        }
+        self.apply_child_env(&mut cmd, &self.child_env_pairs(env));
         // Set last, so no inherited or exported value can stand in for it.
         cmd.env(SCRIPT_DEPTH_ENV, (depth + 1).to_string());
         crate::safety::strip_ironshell_env(&mut cmd);
@@ -3482,10 +3545,15 @@ impl Shell {
                 Ok(None) => {
                     let refusal = crate::safety::run_deadline_error("posix", name);
                     sink.eline(&refusal.to_string());
-                    return refusal
+                    let code = refusal
                         .downcast_ref::<crate::safety::SafetyError>()
                         .map(|e| e.code.exit_code())
                         .unwrap_or(1);
+                    // The deadline ends the whole run, not this one stage:
+                    // whichever stage it killed, the script stops with this
+                    // status (see `run_pipeline`).
+                    RUN_TIMEOUT_STATUS.store(code, std::sync::atomic::Ordering::SeqCst);
+                    return code;
                 }
                 Err(e) => {
                     sink.eline(&format!("{SHELL_NAME}: {name}: {}", io_reason(&e)));
@@ -8149,11 +8217,17 @@ pub fn run_script(src: &str, script: &str, args: &[String]) -> Option<i32> {
     run_named(src, script, args)
 }
 
+/// The exit status of a refusal that ended the run, set when `--timeout`
+/// killed a program (0 until then); read by the pipeline that ran it.
+static RUN_TIMEOUT_STATUS: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(0);
+
 fn run_named(src: &str, script_name: &str, args: &[String]) -> Option<i32> {
     let list = parse(src).ok()?;
+    RUN_TIMEOUT_STATUS.store(0, std::sync::atomic::Ordering::SeqCst);
     let mut sh = Shell {
         vars: HashMap::new(),
-        exported: HashSet::new(),
+        exported: Vec::new(),
+        unset_env: Vec::new(),
         last: 0,
         glob_refused: None,
         positional: args.to_vec(),
@@ -8658,7 +8732,8 @@ mod tests {
         let list = parse(src).unwrap_or_else(|u| panic!("{src}: {}", u.what));
         let mut shell = Shell {
             vars: HashMap::new(),
-            exported: HashSet::new(),
+            exported: Vec::new(),
+            unset_env: Vec::new(),
             last: 0,
             glob_refused: None,
             positional: Vec::new(),

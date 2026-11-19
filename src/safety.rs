@@ -3784,7 +3784,8 @@ impl ApprovalDescriptor {
 }
 
 /// The environment changes this process made with `set_env`, `env_set` and
-/// `env_unset`, by name: `Some(value)` for a set, `None` for an unset.
+/// `env_unset`, by name (see [`fold_env_name`]): `Some(value)` for a set,
+/// `None` for an unset.
 static ENV_CHANGES: Mutex<std::collections::BTreeMap<String, Option<String>>> =
     Mutex::new(std::collections::BTreeMap::new());
 
@@ -3792,7 +3793,19 @@ static ENV_CHANGES: Mutex<std::collections::BTreeMap<String, Option<String>>> =
 /// run afterwards is bound to it (see [`bind_exec_context`]).
 pub fn note_env_change(name: &str, value: Option<&str>) {
     let mut changes = ENV_CHANGES.lock().unwrap_or_else(|e| e.into_inner());
-    changes.insert(name.to_string(), value.map(str::to_string));
+    changes.insert(fold_env_name(name), value.map(str::to_string));
+}
+
+/// The name under which the system keeps the environment variable `name`:
+/// upper-cased where names are matched without regard to case (Windows), as
+/// given elsewhere. An approval binds the variables a child sees, so two names
+/// that are one variable must be one entry, the later assignment winning.
+pub fn fold_env_name(name: &str) -> String {
+    if cfg!(windows) {
+        name.to_ascii_uppercase()
+    } else {
+        name.to_string()
+    }
 }
 
 /// Hex of the first 8 bytes of the SHA-256 of a file's bytes, read in chunks.
@@ -3812,12 +3825,55 @@ fn file_hash16(path: &str) -> Option<String> {
     Some(hex(&digest)[..16].to_string())
 }
 
-/// The most workspace files an exec approval hashes.
-const OPERAND_HASH_LIMIT: usize = 32;
-/// The most candidate names examined for those hashes.
-const OPERAND_CANDIDATE_LIMIT: usize = 512;
+/// The most workspace files an exec approval hashes; a command that names more
+/// is refused, not approved with the rest unbound.
+const OPERAND_HASH_LIMIT: usize = 256;
+/// The most distinct candidate names examined for those hashes; a command with
+/// more is refused likewise.
+const OPERAND_CANDIDATE_LIMIT: usize = 2048;
 /// The longest argument that is split into words to look for file names.
 const OPERAND_SPLIT_MAX_CHARS: usize = 4096;
+
+/// Push `s` as a candidate file name, and again without a leading `& ` (the
+/// PowerShell call operator) and without a leading `./` or `.\`.
+fn push_name_variants(s: &str, out: &mut Vec<String>) {
+    out.push(s.to_string());
+    let t = s.trim();
+    if t.is_empty() {
+        return;
+    }
+    let t = match t.strip_prefix('&') {
+        Some(rest) if rest.starts_with(char::is_whitespace) => {
+            let rest = rest.trim_start();
+            out.push(rest.to_string());
+            rest
+        }
+        _ => t,
+    };
+    if let Some(rest) = t.strip_prefix("./").or_else(|| t.strip_prefix(".\\")) {
+        out.push(rest.to_string());
+    }
+}
+
+/// Push each `'...'` and `"..."` piece of `s` whole, as a candidate file name
+/// (see [`push_name_variants`]), and look inside it for quoted pieces too, down
+/// to `depth` levels (`"& 'a b.ps1'"`). An unmatched quote ends the scan.
+fn quoted_substrings(s: &str, depth: u8, out: &mut Vec<String>) {
+    let mut rest = s;
+    while let Some(i) = rest.find(['\x27', '"']) {
+        let quote = rest.as_bytes()[i] as char;
+        let after = &rest[i + 1..];
+        let Some(j) = after.find(quote) else {
+            break;
+        };
+        let inner = &after[..j];
+        push_name_variants(inner, out);
+        if depth > 0 {
+            quoted_substrings(inner, depth - 1, out);
+        }
+        rest = &after[j + 1..];
+    }
+}
 
 /// Push the names in one argument that may be a file the command runs or
 /// reads: the argument itself; the part after the first `:` or `=` of a
@@ -3827,7 +3883,7 @@ const OPERAND_SPLIT_MAX_CHARS: usize = 4096;
 /// after a `:` or `=` of a word as well. A name that is no existing file is
 /// dropped later, so over-collecting here costs nothing.
 fn operand_candidates(arg: &str, out: &mut Vec<String>) {
-    out.push(arg.to_string());
+    push_name_variants(arg, out);
     let after_flag = |s: &str| -> Option<String> {
         let rest = s.strip_prefix('-')?;
         let i = rest.find([':', '='])?;
@@ -3846,6 +3902,9 @@ fn operand_candidates(arg: &str, out: &mut Vec<String>) {
     if !arg.contains(splits) {
         return;
     }
+    // A name with a space in it is one quoted piece (`& 'a b.ps1'`), which
+    // the split below would cut in two.
+    quoted_substrings(arg, 3, out);
     for word in arg.split(splits).filter(|w| !w.is_empty()) {
         out.push(word.to_string());
         if let Some(v) = after_flag(word) {
@@ -3863,11 +3922,11 @@ fn operand_candidates(arg: &str, out: &mut Vec<String>) {
 }
 
 /// Add to an exec approval's blast radius what the command will run on: a
-/// content hash of each operand that names an existing regular file inside the
-/// workspace (`operand_hashes`), and the environment changes this process made
+/// content hash of each operand that names an existing regular file, wherever it
+/// resolves (`operand_hashes`), and the environment changes this process made
 /// (`env_changes`, sorted). Nothing is added when there is neither, so the
 /// token of a command that names no file and follows no `set_env` is as it was.
-fn bind_exec_context(radius: &mut Json) {
+fn bind_exec_context(builtin: &str, radius: &mut Json) -> Result<(), SafetyError> {
     let mut operands: Vec<String> = Vec::new();
     let mut take = |v: &Json| {
         if let Some(s) = v.as_str() {
@@ -3881,25 +3940,82 @@ fn bind_exec_context(radius: &mut Json) {
         args.iter().for_each(&mut take);
     }
     if let Some(command) = radius.get("command").and_then(Json::as_str) {
+        operand_candidates(command, &mut operands);
         for word in command.split_whitespace() {
             operand_candidates(word.trim_matches(['\x27', '"']), &mut operands);
         }
     }
+    // The words of a command run by `ish -b`, whole: its `command` text joins
+    // them with spaces, so `-File 'a b.ps1'` would otherwise be two words.
+    EXEC_ARGV.with(|argv| {
+        for word in argv.borrow().iter() {
+            operand_candidates(word, &mut operands);
+        }
+    });
+    let mut seen = std::collections::HashSet::new();
+    operands.retain(|o| !o.is_empty() && !o.starts_with('-') && seen.insert(o.clone()));
+    // Past the bound, a name is not looked at, so a file named there would go
+    // unbound: refuse rather than drop it silently.
+    if operands.len() > OPERAND_CANDIDATE_LIMIT {
+        return Err(unbindable_refusal(
+            builtin,
+            &format!(
+                "this command has more than {OPERAND_CANDIDATE_LIMIT} distinct words to check for \
+                 workspace files; an approval cannot bind them all"
+            ),
+        ));
+    }
     let mut hashes = serde_json::Map::new();
-    for operand in operands.into_iter().take(OPERAND_CANDIDATE_LIMIT) {
-        if hashes.len() >= OPERAND_HASH_LIMIT {
-            break;
-        }
-        if operand.is_empty() || operand.starts_with('-') || hashes.contains_key(&operand) {
-            continue;
-        }
+    let mut files = std::collections::HashSet::new();
+    for operand in operands {
         if names_a_remote_share(&operand) || !std::path::Path::new(&operand).is_file() {
             continue;
         }
-        if !within_workspace(&operand) {
+        // A relative name resolves from the working directory, so it can reach
+        // outside the workspace through a link or `..`: it is bound wherever it
+        // resolves. An absolute path outside the workspace names a program or
+        // file of the system and is not bound, so a tool upgrade does not
+        // change every token that names it.
+        let p = std::path::Path::new(&operand);
+        let absolute = p.is_absolute() || operand.starts_with(['/', '\\']);
+        if absolute && !within_workspace(&operand) {
             continue;
         }
-        let hash = file_hash16(&operand).unwrap_or_else(|| "unreadable".to_string());
+        // One file named in two spellings (`x`, `./x`) counts once.
+        let file = std::fs::canonicalize(&operand)
+            .map(|p| p.to_string_lossy().into_owned())
+            .unwrap_or_else(|_| operand.clone());
+        if !files.insert(file) {
+            continue;
+        }
+        if hashes.len() >= OPERAND_HASH_LIMIT {
+            return Err(unbindable_refusal(
+                builtin,
+                &format!(
+                    "this command names more than {OPERAND_HASH_LIMIT} workspace files; an \
+                     approval cannot bind them all"
+                ),
+            ));
+        }
+        // A file inside the workspace is bound by its content. One outside it
+        // (reached through a link, or named by an absolute path) is bound by its
+        // size and modification time only: a content hash in a token the agent
+        // sees would let it confirm guesses about a file it may not read.
+        let hash = if within_workspace(&operand) {
+            file_hash16(&operand).unwrap_or_else(|| "unreadable".to_string())
+        } else {
+            std::fs::metadata(&operand)
+                .map(|m| {
+                    let mtime = m
+                        .modified()
+                        .ok()
+                        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                        .map(|d| d.as_nanos())
+                        .unwrap_or(0);
+                    format!("stamp:{}:{}", m.len(), mtime)
+                })
+                .unwrap_or_else(|_| "unreadable".to_string())
+        };
         hashes.insert(operand, Json::String(hash));
     }
     let env: Vec<Json> = ENV_CHANGES
@@ -3909,7 +4025,7 @@ fn bind_exec_context(radius: &mut Json) {
         .map(|(k, v)| json!([k, v]))
         .collect();
     if hashes.is_empty() && env.is_empty() {
-        return;
+        return Ok(());
     }
     if !radius.is_object() {
         let old = std::mem::take(radius);
@@ -3926,6 +4042,23 @@ fn bind_exec_context(radius: &mut Json) {
         if !env.is_empty() {
             map.insert("env_changes".to_string(), Json::Array(env));
         }
+    }
+    Ok(())
+}
+
+/// The refusal of an exec whose approval cannot bind everything the command
+/// names (see [`bind_exec_context`]).
+fn unbindable_refusal(builtin: &str, message: &str) -> SafetyError {
+    SafetyError {
+        code: ErrorCode::PolicyDeny,
+        message: format!("{builtin}: {message}"),
+        builtin: builtin.to_string(),
+        hint: "split the command so each call names fewer files; nothing was run".to_string(),
+        approval: None,
+        did_you_mean: Vec::new(),
+        expected: String::new(),
+        got: String::new(),
+        extra: serde_json::Map::new(),
     }
 }
 
@@ -6329,15 +6462,22 @@ pub fn guard_exec(builtin: &str, command: impl Into<String>) -> Result<(), Safet
 /// process's own: `env` (name, value) pairs from prefix assignments and
 /// exports. They are bound into the approval, sorted by name, so a change of
 /// name or value gives a new token. With no pairs the descriptor, and so the
-/// token, is exactly [`guard_exec`]'s.
+/// token, is exactly [`guard_exec`]'s. `removed` names inherited variables the
+/// child does not get, and is bound the same way.
 pub fn guard_exec_env(
     builtin: &str,
     command: impl Into<String>,
+    argv: &[String],
     env: &[(String, String)],
+    removed: &[String],
 ) -> Result<(), SafetyError> {
     let command = command.into();
-    let sorted: std::collections::BTreeMap<&str, &str> =
-        env.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
+    // Names that are one variable to the system are one entry, the later
+    // assignment winning, as it does on the child's environment.
+    let sorted: std::collections::BTreeMap<String, &str> = env
+        .iter()
+        .map(|(k, v)| (fold_env_name(k), v.as_str()))
+        .collect();
     let mut radius = serde_json::json!({ "command": command });
     if !sorted.is_empty() {
         let pairs: Vec<Json> = sorted.iter().map(|(k, v)| json!([k, v])).collect();
@@ -6345,7 +6485,17 @@ pub fn guard_exec_env(
             map.insert("child_env".to_string(), Json::Array(pairs));
         }
     }
-    guard(GuardCtx {
+    // Inherited variables the command's child does not get (`unset NAME`).
+    if !removed.is_empty() {
+        let names: Vec<Json> = removed.iter().map(|n| json!(fold_env_name(n))).collect();
+        if let Some(map) = radius.as_object_mut() {
+            map.insert("child_env_removed".to_string(), Json::Array(names));
+        }
+    }
+    // The words are read by the file binding of the approval (see
+    // `bind_exec_context`) and are not part of the token themselves.
+    EXEC_ARGV.with(|a| *a.borrow_mut() = argv.to_vec());
+    let result = guard(GuardCtx {
         builtin,
         effect: Effect::Exec,
         what: "exec",
@@ -6353,7 +6503,16 @@ pub fn guard_exec_env(
         blast_radius: radius,
         reversible: false,
         fs_paths: false,
-    })
+    });
+    EXEC_ARGV.with(|a| a.borrow_mut().clear());
+    result
+}
+
+thread_local! {
+    /// The words of the command [`guard_exec_env`] is judging, for the file
+    /// binding of its approval.
+    static EXEC_ARGV: std::cell::RefCell<Vec<String>> =
+        const { std::cell::RefCell::new(Vec::new()) };
 }
 
 /// Reject caller-supplied *positional* arguments that a tool would parse as
@@ -8904,7 +9063,7 @@ pub fn guard(ctx: GuardCtx) -> Result<(), SafetyError> {
             // needs a new one.
             let mut blast_radius = ctx.blast_radius.clone();
             if ctx.effect == Effect::Exec {
-                bind_exec_context(&mut blast_radius);
+                bind_exec_context(ctx.builtin, &mut blast_radius)?;
             }
             let descriptor = ApprovalDescriptor::new(
                 ctx.what,
@@ -9613,6 +9772,23 @@ pub(crate) fn env_name_steers_children(name: &str) -> bool {
         "__COMPAT_LAYER",
         "NUGET_PACKAGES",
         "PSDEFAULTPARAMETERVALUES",
+        // Names a shell or PowerShell expands or consults on its own: with
+        // `SHELLOPTS=xtrace` and a `PS4` holding `$(...)`, an approved
+        // `bash -c true` runs the agent's command.
+        "SHELLOPTS",
+        "BASHOPTS",
+        "PS0",
+        "PS1",
+        "PS2",
+        "PS4",
+        "GLOBIGNORE",
+        "CDPATH",
+        "JAVA_HOME",
+        "PSMODULEANALYSISCACHEPATH",
+        "PSMODULEAUTOLOADINGPREFERENCE",
+        "PSHOME",
+        "PSLOCKDOWNPOLICY",
+        "__PSLOCKDOWNPOLICY",
     ];
     const PREFIXES: &[&str] = &[
         "IRONSHELL_",
@@ -9633,6 +9809,10 @@ pub(crate) fn env_name_steers_children(name: &str) -> bool {
         "COMPLUS_",
         "CORECLR_",
         "COR_",
+        "NODE_",
+        "MSBUILD",
+        "NUGET_",
+        "PWSH_",
     ];
     const SUFFIXES: &[&str] = &[
         "_PROXY",
@@ -9642,7 +9822,7 @@ pub(crate) fn env_name_steers_children(name: &str) -> bool {
         "_API_BASE",
         "_ENDPOINT",
     ];
-    let upper = name.to_ascii_uppercase();
+    let upper = name.trim().to_ascii_uppercase();
     EXACT.contains(&upper.as_str())
         || PREFIXES.iter().any(|p| upper.starts_with(p))
         || SUFFIXES.iter().any(|s| upper.ends_with(s))
