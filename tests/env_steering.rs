@@ -236,12 +236,12 @@ fn a_shell_assignment_or_export_of_a_steering_name_is_refused_in_agent_mode() {
     let _gitcfg = Set::restoring("GIT_CONFIG_GLOBAL");
     let before = std::env::var_os("PATH");
     let scripts = [
+        // A plain `PATH=x`, `read PATH` or `for PATH in a` stays in the shell
+        // and is allowed (see tests/posix_round55b.rs); only a value that
+        // reaches a child is refused.
         "export PATH=/ae_steer_probe",
-        "PATH=/ae_steer_probe",
         "PATH=/ae_steer_probe ae_no_such_program_xyz",
         "export GIT_CONFIG_GLOBAL=/ae_steer_probe",
-        "read PATH",
-        "for PATH in a; do :; done",
         "GIT_CONFIG_GLOBAL=/ae_steer_probe ae_no_such_program_xyz",
     ];
     for script in scripts {

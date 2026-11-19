@@ -19,7 +19,7 @@
 //! mode gates each one. A redirection that writes a file goes through the same
 //! guard as `file.write`, jail included.
 //!
-//! What it does not parse (functions, `case`, arithmetic, here-documents,
+//! What it does not parse (functions, `case`, here-documents,
 //! subshells, background jobs) makes [`run`] return `None` before anything has
 //! executed, and the caller falls back to the transpiler exactly as before.
 
@@ -43,6 +43,9 @@ enum Part {
     Len(String),
     /// `$(…)` or backquotes, and whether quoted.
     Cmd(String, bool),
+    /// `$((…))`: the expression as a word (its `$` expansions come first), and
+    /// whether quoted.
+    Arith(Vec<Part>, bool),
 }
 
 type Word = Vec<Part>;
@@ -769,7 +772,21 @@ impl<'a> Lexer<'a> {
         match self.peek() {
             Some('(') => {
                 if self.peek_at(1) == Some('(') {
-                    return unsupported_at("arithmetic expansion $((...))", dollar_at);
+                    if let Some(end) = self.arith_end() {
+                        // The expression is read as double-quoted text, so
+                        // `$n`, `${n}` and `$(cmd)` in it expand first, as in
+                        // bash; its names and operators are read at run time.
+                        let start = self.i + 2;
+                        let inner: Vec<char> = self.s[start..end].to_vec();
+                        if inner.contains(&'"') || inner.contains(&'`') {
+                            return unsupported_at("arithmetic expansion $((...))", dollar_at);
+                        }
+                        let mut w = Vec::new();
+                        lex_quoted(&inner, &mut w).map_err(|e| relocate(e, start, dollar_at))?;
+                        self.i = end + 2;
+                        parts.push(Part::Arith(w, quoted));
+                        return Ok(());
+                    }
                 }
                 self.i += 1;
                 let start = self.i;
@@ -979,6 +996,27 @@ impl<'a> Lexer<'a> {
         Ok(())
     }
 
+    /// With `self.i` at the `(` of `$((`: the offset of the first `)` of the
+    /// closing `))`, when the text up to it holds balanced parentheses. `None`
+    /// when the first unbalanced `)` is not followed by another (`$((cmd) ...)`
+    /// is a command substitution holding a subshell) or the text ends.
+    fn arith_end(&self) -> Option<usize> {
+        let mut depth = 0usize;
+        let mut j = self.i + 2;
+        while let Some(&c) = self.s.get(j) {
+            match c {
+                '(' => depth += 1,
+                ')' if depth == 0 => {
+                    return (self.s.get(j + 1) == Some(&')')).then_some(j);
+                }
+                ')' => depth -= 1,
+                _ => {}
+            }
+            j += 1;
+        }
+        None
+    }
+
     fn name(&mut self) -> String {
         let mut n = String::new();
         while let Some(c) = self.peek() {
@@ -1028,6 +1066,7 @@ fn token_text(t: &Tok) -> String {
                 Part::Var(name, _, _) => format!("${name}"),
                 Part::Len(name) => format!("${{#{name}}}"),
                 Part::Cmd(..) => "$(...)".to_string(),
+                Part::Arith(..) => "$((...))".to_string(),
             })
             .collect(),
         Tok::Pipe => "|".into(),
@@ -1967,13 +2006,10 @@ impl Shell {
     }
 
     fn set_var(&mut self, name: &str, value: String) {
-        // A steering name is not stored at all in agent mode, so no path into
-        // here can make `$PATH` or `$HOME` something the agent chose. The callers
-        // that can report it (assignment, export, for, read) refuse first; this
-        // catches the rest, such as `${NAME:=value}`, which cannot.
-        if crate::safety::env_change_refused(name) {
-            return;
-        }
+        // A variable that is not exported never reaches a child, so a steering
+        // name may be a plain shell variable even in agent mode (`tmp=x`). The
+        // check is made where a value reaches a child: `export`, a prefix
+        // assignment on a command (see `run_simple` and `refuse_steering`).
         self.vars.insert(name.to_string(), value);
     }
 
@@ -2098,6 +2134,10 @@ impl Shell {
                 }
                 Part::Cmd(body, quoted) => {
                     let value = self.substitute(body);
+                    self.splice(&value, *quoted, &mut fields, &mut cur, &mut mask, &mut have);
+                }
+                Part::Arith(expr, quoted) => {
+                    let value = self.arith_expand(expr, stdin);
                     self.splice(&value, *quoted, &mut fields, &mut cur, &mut mask, &mut have);
                 }
             }
@@ -2434,7 +2474,9 @@ impl Shell {
                         out.push_str(s);
                     }
                 }
-                Part::Var(_, _, part_quoted) | Part::Cmd(_, part_quoted) => {
+                Part::Var(_, _, part_quoted)
+                | Part::Cmd(_, part_quoted)
+                | Part::Arith(_, part_quoted) => {
                     let text = self.expand_assign(&vec![part.clone()], stdin);
                     if *part_quoted {
                         out.push_str(&escape_glob(&text));
@@ -2554,9 +2596,30 @@ impl Shell {
                     let value = self.substitute(body);
                     out.push_str(&value);
                 }
+                Part::Arith(expr, _) => {
+                    let value = self.arith_expand(expr, stdin);
+                    out.push_str(&value);
+                }
             }
         }
         out
+    }
+
+    /// `$((expr))`: the expression's `$` expansions are made first, then the
+    /// text is evaluated as 64-bit integer arithmetic (see [`ArithEval`]). An
+    /// error ends the command and the script with status 1, as an unbound
+    /// parameter does (see [`Shell::note_unbound`]).
+    fn arith_expand(&mut self, expr: &Word, stdin: &mut Input) -> String {
+        let text = self.expand_assign(expr, stdin);
+        match arith_eval(self, &text) {
+            Ok(n) => n.to_string(),
+            Err(why) => {
+                if self.unbound.is_none() {
+                    self.unbound = Some(self.expansion_message(text.trim(), &why));
+                }
+                String::new()
+            }
+        }
     }
 
     // ── running ──
@@ -2845,9 +2908,6 @@ impl Shell {
             Cmd::For {
                 var, items, body, ..
             } => {
-                if refuse_steering(sink, var) {
-                    return Flow::Next(POLICY_DENY_STATUS);
-                }
                 let mut values = Vec::new();
                 for w in items {
                     values.extend(self.expand(w, stdin));
@@ -2936,7 +2996,9 @@ impl Shell {
         }
         let mut env_overrides = Vec::new();
         for (name, w) in assigns {
-            if refuse_steering(sink, name) {
+            // A prefix assignment on a command reaches that command's
+            // environment; a bare assignment stays in the shell.
+            if !argv.is_empty() && refuse_steering(sink, name) {
                 return Flow::Next(POLICY_DENY_STATUS);
             }
             let v = self.expand_assign(w, stdin);
@@ -3199,17 +3261,6 @@ impl Shell {
         let default_reply = names.is_empty();
         if default_reply {
             names.push("REPLY".into());
-        }
-        if let Some(name) = names.iter().find(|n| crate::safety::env_change_refused(n)) {
-            let refusal = crate::safety::policy_deny(
-                "posix",
-                format!(
-                    "{name}: an agent may not read into this variable: it steers child programs"
-                ),
-                "variables that steer child programs are set by whoever launches the agent",
-            );
-            let _ = writeln!(std::io::stderr(), "{refusal}");
-            return POLICY_DENY_STATUS;
         }
         // As bash does, the prompt goes to stderr and only when the input is a
         // terminal, so a script reading a pipe prints nothing extra.
@@ -3515,7 +3566,11 @@ impl Shell {
                         "{SHELL_NAME}: {name} is not part of ish -b's in-process subset, so it runs only as a program of that name on PATH, and none was found"
                     ));
                 }
-                if let Some(alt) = ish_alternative(name) {
+                let spawned_args: Vec<String> = cmd
+                    .get_args()
+                    .map(|a| a.to_string_lossy().into_owned())
+                    .collect();
+                if let Some(alt) = ish_alternative(name, &spawned_args) {
                     sink.eline(&alt);
                 }
                 if let Some(hint) = windows_tools_hint() {
@@ -3792,7 +3847,7 @@ fn resolve_program(
             Some(p) => Ok(p.to_string_lossy().into_owned()),
             None => {
                 let mut msg = format!("{SHELL_NAME}: {name}: command not found");
-                if let Some(alt) = ish_alternative(name) {
+                if let Some(alt) = ish_alternative(name, &argv[1..]) {
                     msg.push('\n');
                     msg.push_str(&alt);
                 }
@@ -3831,7 +3886,7 @@ fn resolve_program(
     let mut msg = format!(
         "{SHELL_NAME}: {name}: the in-process {name} does not support {what}; a GNU-compatible {name} on PATH would run it, and none was found"
     );
-    if let Some(alt) = ish_alternative(name) {
+    if let Some(alt) = ish_alternative(name, &argv[1..]) {
         msg.push('\n');
         msg.push_str(&alt);
     }
@@ -3846,11 +3901,24 @@ fn resolve_program(
 /// `name` would, for a command the subset does not run: `cp` and `mv` are
 /// builtins of that name, and `find`'s `-name` with `-o` is `glob` with a
 /// `{a,b}` alternation. `None` for any other name.
-fn ish_alternative(name: &str) -> Option<String> {
+fn ish_alternative(name: &str, args: &[String]) -> Option<String> {
     let alt = match name {
-        "cp" => r#"cp("a", "b")"#,
-        "mv" => r#"mv("a", "b")"#,
-        "find" => r#"glob("**/*.{rs,py}")"#,
+        "cp" => r#"cp("a", "b")"#.to_string(),
+        "mv" => r#"mv("a", "b")"#.to_string(),
+        // `glob` matches names, not times, so `-newer` is a filter on `ls`.
+        "find" if args.iter().any(|a| a.starts_with("-newer")) => {
+            return Some(
+                r#"  hint: in ish, ls(dir) | where(fn(f) => f.modified > fs_stat("ref").modified) (ish -c '...')"#
+                    .to_string(),
+            );
+        }
+        "find" if args.iter().any(|a| a == "-o") => {
+            return Some(
+                r#"  hint: run one find per alternative, or in ish use glob("**/*.{a,b}") (ish -c '...')"#
+                    .to_string(),
+            );
+        }
+        "find" => r#"glob("**/*.{rs,py}")"#.to_string(),
         _ => return None,
     };
     Some(format!("  hint: in ish, use {alt} (ish -c '...')"))
@@ -6295,6 +6363,103 @@ fn grep_glob_opt(a: &str) -> Option<(&'static str, Option<String>)> {
     None
 }
 
+/// The plain flags of a cluster of short grep options (`-rn`, `-nA2`, `-3`),
+/// and the context options in it: `A`, `B` or `C` with the value written in the
+/// same word (`-A2`), or `None` when it is the next word; a run of digits is
+/// `-C` of that number. `Err(c)` is the first flag the in-process grep does
+/// not run.
+type GrepCluster = (Vec<char>, Vec<(char, Option<String>)>);
+
+fn grep_cluster(a: &str) -> Result<GrepCluster, char> {
+    let mut plain = Vec::new();
+    let mut context = Vec::new();
+    let chars: Vec<char> = a[1..].chars().collect();
+    let mut k = 0;
+    while k < chars.len() {
+        let c = chars[k];
+        if matches!(c, 'A' | 'B' | 'C') {
+            let rest: String = chars[k + 1..].iter().collect();
+            context.push((c, if rest.is_empty() { None } else { Some(rest) }));
+            break;
+        } else if c.is_ascii_digit() {
+            let mut digits = String::new();
+            while k < chars.len() && chars[k].is_ascii_digit() {
+                digits.push(chars[k]);
+                k += 1;
+            }
+            context.push(('C', Some(digits)));
+            continue;
+        } else if "rRnclLivEFwoqshHx".contains(c) {
+            plain.push(c);
+        } else {
+            return Err(c);
+        }
+        k += 1;
+    }
+    Ok((plain, context))
+}
+
+/// A long context option: `--after-context`, `--before-context`, `--context`
+/// or `--group-separator`, with its value when written `--name=VALUE` (`None`
+/// when it is the next word). The name may be abbreviated, as getopt allows.
+fn grep_long_context(a: &str) -> Option<(&'static str, Option<String>)> {
+    let body = a.strip_prefix("--")?;
+    let (name, value) = match body.split_once('=') {
+        Some((n, v)) => (n, Some(v.to_string())),
+        None => (body, None),
+    };
+    if name.is_empty() {
+        return None;
+    }
+    for full in [
+        "after-context",
+        "before-context",
+        "context",
+        "group-separator",
+    ] {
+        if full.starts_with(name) && name.len() >= 3 {
+            return Some((full, value));
+        }
+    }
+    None
+}
+
+/// The lines of context `grep -A/-B/-C/-NUM` ask for.
+#[derive(Default)]
+struct GrepContext {
+    after: Option<usize>,
+    before: Option<usize>,
+    both: Option<usize>,
+    separator: Option<String>,
+    no_separator: bool,
+}
+
+impl GrepContext {
+    /// Apply one option; `Err` is the value GNU calls an invalid context length.
+    fn set(&mut self, kind: &str, value: &str) -> Result<(), String> {
+        if kind == "group-separator" {
+            self.separator = Some(value.to_string());
+            self.no_separator = false;
+            return Ok(());
+        }
+        let n: usize = value.parse().map_err(|_| value.to_string())?;
+        match kind {
+            "A" | "after-context" => self.after = Some(n),
+            "B" | "before-context" => self.before = Some(n),
+            _ => self.both = Some(n),
+        }
+        Ok(())
+    }
+
+    /// Lines before and after a match: `-A` and `-B` win over `-C`, in any order.
+    fn lines(&self) -> (usize, usize) {
+        (
+            self.before.or(self.both).unwrap_or(0),
+            self.after.or(self.both).unwrap_or(0),
+        )
+    }
+}
+
 /// What GNU getopt says about an argument that starts with `-` and is no option
 /// of the utility: `invalid option -- 'c'` for a short one, `unrecognized option
 /// '--name'` for a long one, then the usage line(s). `short` lists the short
@@ -6420,12 +6585,35 @@ fn grep(args: &[String], stdin: &mut Input, sink: &mut Sink) -> Util {
     let mut patterns: Vec<String> = Vec::new();
     let mut ops = Vec::new();
     let mut filter = GrepFilter::default();
+    let mut context = GrepContext::default();
     let mut i = 0;
     let mut done = false;
     while i < args.len() {
         let a = &args[i];
         if !done && a == "--" {
             done = true;
+        } else if !done && a == "--no-group-separator" {
+            context.no_separator = true;
+        } else if let Some((kind, inline)) = grep_long_context(a).filter(|_| !done) {
+            let value = match inline {
+                Some(v) => v,
+                None => {
+                    i += 1;
+                    match args.get(i) {
+                        Some(v) => v.clone(),
+                        None => {
+                            sink.eline(&format!(
+                                "grep: option '--{kind}' requires an argument\nUsage: grep [OPTION]... PATTERNS [FILE]...\nTry 'grep --help' for more information."
+                            ));
+                            return Util::Done(2);
+                        }
+                    }
+                }
+            };
+            if let Err(bad) = context.set(kind, &value) {
+                sink.eline(&format!("grep: {bad}: invalid context length argument"));
+                return Util::Done(2);
+            }
         } else if !done && a == "-e" {
             match args.get(i + 1) {
                 Some(p) => patterns.push(p.clone()),
@@ -6456,11 +6644,31 @@ fn grep(args: &[String], stdin: &mut Input, sink: &mut Sink) -> Util {
         } else if !done && a.starts_with("--") {
             return Util::DeclineFor(a.clone());
         } else if !done && a.len() > 1 && a.starts_with('-') {
-            for c in a[1..].chars() {
-                if !"rRnclLivEFwoqshHx".contains(c) {
-                    return Util::DeclineFor(format!("-{c}"));
+            let (plain, with_value) = match grep_cluster(a) {
+                Ok(parsed) => parsed,
+                Err(c) => return Util::DeclineFor(format!("-{c}")),
+            };
+            flags.extend(plain);
+            for (kind, inline) in with_value {
+                let value = match inline {
+                    Some(v) => v,
+                    None => {
+                        i += 1;
+                        match args.get(i) {
+                            Some(v) => v.clone(),
+                            None => {
+                                sink.eline(&format!(
+                                    "grep: option requires an argument -- '{kind}'\nUsage: grep [OPTION]... PATTERNS [FILE]...\nTry 'grep --help' for more information."
+                                ));
+                                return Util::Done(2);
+                            }
+                        }
+                    }
+                };
+                if let Err(bad) = context.set(&kind.to_string(), &value) {
+                    sink.eline(&format!("grep: {bad}: invalid context length argument"));
+                    return Util::Done(2);
                 }
-                flags.insert(c);
             }
         } else {
             ops.push(a.clone());
@@ -6562,6 +6770,9 @@ fn grep(args: &[String], stdin: &mut Input, sink: &mut Sink) -> Util {
     let walks_dir = recursive && (ops.is_empty() || ops.iter().any(|o| Path::new(o).is_dir()));
     let prefix = (targets.len() > 1 || walks_dir || ops.len() > 1) && !f('h') || f('H');
     let mut any = false;
+    // Whether an earlier file printed a group of lines with context, which a
+    // later group is then separated from by `--`.
+    let mut printed_group = false;
     for (name, path) in &targets {
         let data = match path {
             Some(p) => match read_file(p) {
@@ -6579,26 +6790,73 @@ fn grep(args: &[String], stdin: &mut Input, sink: &mut Sink) -> Util {
         let binary = data.iter().take(32 * 1024).any(|&b| b == 0);
         let mut count = 0usize;
         let mut out = Vec::new();
-        for (n, line) in lines_of(&data).into_iter().enumerate() {
+        let all_lines = lines_of(&data);
+        // The prefix of a line: the file name (when several), then the line
+        // number, each ended by `:` for a selected line and `-` for context.
+        let lead_of = |n: usize, sep: u8| {
+            let mut s = Vec::new();
+            if prefix {
+                s.extend_from_slice(name.as_bytes());
+                s.push(sep);
+            }
+            if f('n') {
+                s.extend_from_slice(format!("{}", n + 1).as_bytes());
+                s.push(sep);
+            }
+            s
+        };
+        let (before, after) = context.lines();
+        let with_context = (before > 0 || after > 0) && !f('o');
+        let mut last_printed: Option<usize> = None;
+        let mut after_left = 0usize;
+        for (n, line) in all_lines.iter().copied().enumerate() {
             let hit = re.is_match(line) != f('v');
             if !hit {
+                if with_context
+                    && after_left > 0
+                    && !f('q')
+                    && !f('l')
+                    && !f('L')
+                    && !f('c')
+                    && !binary
+                {
+                    after_left -= 1;
+                    out.extend_from_slice(&lead_of(n, b'-'));
+                    out.extend_from_slice(line);
+                    out.push(b'\n');
+                    last_printed = Some(n);
+                }
                 continue;
             }
             count += 1;
             if f('q') || f('l') || f('L') || f('c') || binary {
                 continue;
             }
-            let lead = {
-                let mut s = Vec::new();
-                if prefix {
-                    s.extend_from_slice(name.as_bytes());
-                    s.push(b':');
+            let lead = lead_of(n, b':');
+            if with_context {
+                let first = n
+                    .saturating_sub(before)
+                    .max(last_printed.map_or(0, |p| p + 1));
+                let gap = match last_printed {
+                    Some(p) => first > p + 1,
+                    None => printed_group,
+                };
+                if gap && !context.no_separator {
+                    out.extend_from_slice(context.separator.as_deref().unwrap_or("--").as_bytes());
+                    out.push(b'\n');
                 }
-                if f('n') {
-                    s.extend_from_slice(format!("{}:", n + 1).as_bytes());
+                for (k, before_line) in all_lines.iter().enumerate().take(n).skip(first) {
+                    out.extend_from_slice(&lead_of(k, b'-'));
+                    out.extend_from_slice(before_line);
+                    out.push(b'\n');
                 }
-                s
-            };
+                out.extend_from_slice(&lead);
+                out.extend_from_slice(line);
+                out.push(b'\n');
+                last_printed = Some(n);
+                after_left = after;
+                continue;
+            }
             if f('o') && !f('v') {
                 for m in re.find_iter(line) {
                     if m.as_bytes().is_empty() {
@@ -6616,6 +6874,9 @@ fn grep(args: &[String], stdin: &mut Input, sink: &mut Sink) -> Util {
         }
         if count > 0 {
             any = true;
+        }
+        if with_context && !out.is_empty() {
+            printed_group = true;
         }
         if f('q') {
             if any {
@@ -8331,7 +8592,10 @@ pub fn refusal_hint(construct: &str) -> String {
     // The operator of a `${name...}` form, named in its refusal as `op`.
     let op = construct.split('`').nth(1).unwrap_or("");
     let tip: String = match construct {
-        "function definition" => "inline the body, or write the logic in ish".into(),
+        "function definition" => "functions are outside the subset; repeat the body, or put it in a .sh script run with ish -b, or write the logic in ish".into(),
+        "`trap` builtin" => "trap is outside the subset; put cleanup after the commands and use `|| cleanup` / set -e".into(),
+        "`source` builtin" | "`.` builtin" => "source and . are outside the subset; run the script as a command (ish -b ./x.sh) or write its commands here".into(),
+        c if c.starts_with("brace expansion") => "write the words out (d/a d/b) or use a for loop".into(),
         "case ... esac" => {
             "case is outside the subset: rewrite it as if/elif with [ \"$x\" = a ] tests, one elif per pattern".into()
         }
@@ -8507,11 +8771,21 @@ fn grep_operands(args: &[String]) -> Option<Vec<String>> {
                 i += 1;
                 args.get(i)?;
             }
+        } else if !done && a == "--no-group-separator" {
+        } else if let Some((_, inline)) = grep_long_context(a).filter(|_| !done) {
+            if inline.is_none() {
+                i += 1;
+                args.get(i)?;
+            }
         } else if !done && a.starts_with("--") {
             return None;
         } else if !done && a.len() > 1 && a.starts_with('-') {
-            if !a[1..].chars().all(|c| "rRnclLivEFwoqshHx".contains(c)) {
-                return None;
+            let (_, with_value) = grep_cluster(a).ok()?;
+            for (_, inline) in with_value {
+                if inline.is_none() {
+                    i += 1;
+                    args.get(i)?;
+                }
             }
         } else {
             ops.push(a.clone());
@@ -8723,6 +8997,516 @@ fn literal_text(word: &Word) -> String {
         .unwrap_or_default()
 }
 
+// ── arithmetic expansion ─────────────────────────────────────────────────
+
+/// `text` evaluated as `$((...))` does in bash: 64-bit signed integers that
+/// wrap on overflow; decimal, `0x` hex and leading-0 octal literals; names (an
+/// unset or empty one is 0, a value is itself evaluated as an expression);
+/// `+ - * / % **`, unary `+ - ! ~`, `<< >> < <= > >= == != & ^ | && ||`, `?:`,
+/// `,`, the assignments `= += -= *= /= %= <<= >>= &= ^= |=` and `++`/`--`.
+/// `Err` holds bash's message, without the place.
+fn arith_eval(sh: &mut Shell, text: &str) -> Result<i64, String> {
+    ArithEval {
+        s: text.chars().collect(),
+        i: 0,
+        dead: 0,
+        depth: 0,
+        sh,
+    }
+    .run()
+}
+
+struct ArithEval<'a> {
+    s: Vec<char>,
+    i: usize,
+    /// Above 0 while an operand bash would not evaluate is read (`0 && x=1`,
+    /// the unchosen side of `?:`): nothing is assigned and `1/0` is no error.
+    dead: u32,
+    /// How deep a variable's value is being evaluated as an expression.
+    depth: u32,
+    sh: &'a mut Shell,
+}
+
+type ArithResult = Result<i64, String>;
+
+/// A C integer constant as the arithmetic reads it, wrapping into 64 bits.
+fn arith_number(tok: &str) -> Option<i64> {
+    let u = if let Some(h) = tok.strip_prefix("0x").or_else(|| tok.strip_prefix("0X")) {
+        u64::from_str_radix(h, 16).ok()?
+    } else if tok.len() > 1 && tok.starts_with('0') {
+        u64::from_str_radix(&tok[1..], 8).ok()?
+    } else {
+        tok.parse::<u64>().ok()?
+    };
+    Some(u as i64)
+}
+
+impl ArithEval<'_> {
+    fn ws(&mut self) {
+        while self.s.get(self.i).is_some_and(|c| c.is_whitespace()) {
+            self.i += 1;
+        }
+    }
+
+    fn rest_from(&self, at: usize) -> String {
+        self.s[at.min(self.s.len())..].iter().collect()
+    }
+
+    /// Whether the text at the cursor (no blanks skipped) starts with `op`.
+    fn starts(&self, op: &str) -> bool {
+        let o: Vec<char> = op.chars().collect();
+        self.s[self.i..].starts_with(&o)
+    }
+
+    /// Skips blanks, then whether the text starts with `op`.
+    fn at(&mut self, op: &str) -> bool {
+        self.ws();
+        self.starts(op)
+    }
+
+    fn eat(&mut self, op: &str) -> bool {
+        if self.at(op) {
+            self.i += op.chars().count();
+            true
+        } else {
+            false
+        }
+    }
+
+    fn syntax(&self) -> String {
+        format!(
+            "syntax error in expression (error token is \"{}\")",
+            self.rest_from(self.i)
+        )
+    }
+
+    fn run(&mut self) -> ArithResult {
+        self.ws();
+        if self.i >= self.s.len() {
+            return Ok(0);
+        }
+        let v = self.comma()?;
+        self.ws();
+        if self.i < self.s.len() {
+            return Err(self.syntax());
+        }
+        Ok(v)
+    }
+
+    fn comma(&mut self) -> ArithResult {
+        let mut v = self.assign()?;
+        while self.eat(",") {
+            v = self.assign()?;
+        }
+        Ok(v)
+    }
+
+    fn ident(&mut self) -> Option<String> {
+        self.ws();
+        if !self.s.get(self.i).is_some_and(|c| is_name_start(*c)) {
+            return None;
+        }
+        let start = self.i;
+        while self.s.get(self.i).is_some_and(|c| is_name_char(*c)) {
+            self.i += 1;
+        }
+        Some(self.s[start..self.i].iter().collect())
+    }
+
+    /// The value of a name: 0 when unset or empty, else its text read as a
+    /// number or, failing that, evaluated as an expression.
+    fn ident_value(&mut self, name: &str) -> ArithResult {
+        let value = self.sh.var(name);
+        if value.is_none() && self.dead == 0 {
+            self.sh.note_unbound(name);
+        }
+        let text = value.unwrap_or_default();
+        let t = text.trim();
+        if t.is_empty() {
+            return Ok(0);
+        }
+        if let Some(n) = arith_number(t) {
+            return Ok(n);
+        }
+        if self.depth >= 16 {
+            return Err(format!(
+                "{t}: expression recursion level exceeded (error token is \"{name}\")"
+            ));
+        }
+        let mut inner = ArithEval {
+            s: t.chars().collect(),
+            i: 0,
+            dead: self.dead,
+            depth: self.depth + 1,
+            sh: &mut *self.sh,
+        };
+        inner.run()
+    }
+
+    fn store(&mut self, name: &str, value: i64) {
+        if self.dead == 0 {
+            self.sh.set_var(name, value.to_string());
+        }
+    }
+
+    /// `a op b` for the arithmetic operators; `tok` is where `b` starts, for the
+    /// error token of a division by zero.
+    fn binary(&self, op: &str, a: i64, b: i64, tok: usize) -> ArithResult {
+        Ok(match op {
+            "+" => a.wrapping_add(b),
+            "-" => a.wrapping_sub(b),
+            "*" => a.wrapping_mul(b),
+            "/" | "%" => {
+                if b == 0 {
+                    if self.dead > 0 {
+                        return Ok(0);
+                    }
+                    return Err(format!(
+                        "division by 0 (error token is \"{}\")",
+                        self.rest_from(tok)
+                    ));
+                }
+                if op == "/" {
+                    a.wrapping_div(b)
+                } else {
+                    a.wrapping_rem(b)
+                }
+            }
+            "<<" => a.wrapping_shl(b as u32),
+            ">>" => a.wrapping_shr(b as u32),
+            "&" => a & b,
+            "^" => a ^ b,
+            "|" => a | b,
+            _ => return Err(self.syntax()),
+        })
+    }
+
+    fn assign(&mut self) -> ArithResult {
+        const OPS: [&str; 11] = [
+            "<<=", ">>=", "+=", "-=", "*=", "/=", "%=", "&=", "^=", "|=", "=",
+        ];
+        self.ws();
+        let save = self.i;
+        if let Some(name) = self.ident() {
+            self.ws();
+            for op in OPS {
+                if self.starts(op) && !(op == "=" && self.starts("==")) {
+                    self.i += op.chars().count();
+                    self.ws();
+                    let tok = self.i;
+                    let rhs = self.assign()?;
+                    let new = if op == "=" {
+                        rhs
+                    } else {
+                        let cur = self.ident_value(&name)?;
+                        self.binary(&op[..op.len() - 1], cur, rhs, tok)?
+                    };
+                    self.store(&name, new);
+                    return Ok(new);
+                }
+            }
+            self.i = save;
+        }
+        self.ternary()
+    }
+
+    fn ternary(&mut self) -> ArithResult {
+        let c = self.lor()?;
+        if !self.eat("?") {
+            return Ok(c);
+        }
+        let first = c != 0;
+        if !first {
+            self.dead += 1;
+        }
+        let a = self.assign();
+        if !first {
+            self.dead -= 1;
+        }
+        let a = a?;
+        if !self.eat(":") {
+            return Err(format!(
+                "`:' expected for conditional expression (error token is \"{}\")",
+                self.rest_from(self.i)
+            ));
+        }
+        if first {
+            self.dead += 1;
+        }
+        let b = self.ternary();
+        if first {
+            self.dead -= 1;
+        }
+        let b = b?;
+        Ok(if first { a } else { b })
+    }
+
+    fn lor(&mut self) -> ArithResult {
+        let mut v = self.land()?;
+        while self.eat("||") {
+            let skip = v != 0;
+            if skip {
+                self.dead += 1;
+            }
+            let r = self.land();
+            if skip {
+                self.dead -= 1;
+            }
+            let r = r?;
+            v = i64::from(v != 0 || r != 0);
+        }
+        Ok(v)
+    }
+
+    fn land(&mut self) -> ArithResult {
+        let mut v = self.bor()?;
+        while self.at("&&") {
+            self.i += 2;
+            let skip = v == 0;
+            if skip {
+                self.dead += 1;
+            }
+            let r = self.bor();
+            if skip {
+                self.dead -= 1;
+            }
+            let r = r?;
+            v = i64::from(v != 0 && r != 0);
+        }
+        Ok(v)
+    }
+
+    fn bor(&mut self) -> ArithResult {
+        let mut v = self.bxor()?;
+        while self.at("|") && !self.starts("||") && !self.starts("|=") {
+            self.i += 1;
+            v |= self.bxor()?;
+        }
+        Ok(v)
+    }
+
+    fn bxor(&mut self) -> ArithResult {
+        let mut v = self.band()?;
+        while self.at("^") && !self.starts("^=") {
+            self.i += 1;
+            v ^= self.band()?;
+        }
+        Ok(v)
+    }
+
+    fn band(&mut self) -> ArithResult {
+        let mut v = self.equality()?;
+        while self.at("&") && !self.starts("&&") && !self.starts("&=") {
+            self.i += 1;
+            v &= self.equality()?;
+        }
+        Ok(v)
+    }
+
+    fn equality(&mut self) -> ArithResult {
+        let mut v = self.relational()?;
+        loop {
+            if self.at("==") {
+                self.i += 2;
+                v = i64::from(v == self.relational()?);
+            } else if self.at("!=") {
+                self.i += 2;
+                v = i64::from(v != self.relational()?);
+            } else {
+                return Ok(v);
+            }
+        }
+    }
+
+    fn relational(&mut self) -> ArithResult {
+        let mut v = self.shift()?;
+        loop {
+            if self.at("<=") {
+                self.i += 2;
+                v = i64::from(v <= self.shift()?);
+            } else if self.at(">=") {
+                self.i += 2;
+                v = i64::from(v >= self.shift()?);
+            } else if self.at("<") && !self.starts("<<") {
+                self.i += 1;
+                v = i64::from(v < self.shift()?);
+            } else if self.at(">") && !self.starts(">>") {
+                self.i += 1;
+                v = i64::from(v > self.shift()?);
+            } else {
+                return Ok(v);
+            }
+        }
+    }
+
+    fn shift(&mut self) -> ArithResult {
+        let mut v = self.additive()?;
+        loop {
+            let op = if self.at("<<") && !self.starts("<<=") {
+                "<<"
+            } else if self.at(">>") && !self.starts(">>=") {
+                ">>"
+            } else {
+                return Ok(v);
+            };
+            self.i += 2;
+            self.ws();
+            let tok = self.i;
+            let r = self.additive()?;
+            v = self.binary(op, v, r, tok)?;
+        }
+    }
+
+    fn additive(&mut self) -> ArithResult {
+        let mut v = self.multiplicative()?;
+        loop {
+            let op = if self.at("+") && !self.starts("+=") {
+                "+"
+            } else if self.at("-") && !self.starts("-=") {
+                "-"
+            } else {
+                return Ok(v);
+            };
+            self.i += 1;
+            self.ws();
+            let tok = self.i;
+            let r = self.multiplicative()?;
+            v = self.binary(op, v, r, tok)?;
+        }
+    }
+
+    fn multiplicative(&mut self) -> ArithResult {
+        let mut v = self.power()?;
+        loop {
+            let op = if self.at("*") && !self.starts("**") && !self.starts("*=") {
+                "*"
+            } else if self.at("/") && !self.starts("/=") {
+                "/"
+            } else if self.at("%") && !self.starts("%=") {
+                "%"
+            } else {
+                return Ok(v);
+            };
+            self.i += 1;
+            self.ws();
+            let tok = self.i;
+            let r = self.power()?;
+            v = self.binary(op, v, r, tok)?;
+        }
+    }
+
+    /// `**` binds tighter than `*` and looser than the unary operators, and
+    /// groups to the right.
+    fn power(&mut self) -> ArithResult {
+        let base = self.unary()?;
+        if !self.at("**") {
+            return Ok(base);
+        }
+        self.i += 2;
+        self.ws();
+        let tok = self.i;
+        let exp = self.power()?;
+        if exp < 0 {
+            if self.dead > 0 {
+                return Ok(0);
+            }
+            return Err(format!(
+                "exponent less than 0 (error token is \"{}\")",
+                self.rest_from(tok)
+            ));
+        }
+        let (mut result, mut b, mut n) = (1i64, base, exp as u64);
+        while n > 0 {
+            if n & 1 == 1 {
+                result = result.wrapping_mul(b);
+            }
+            b = b.wrapping_mul(b);
+            n >>= 1;
+        }
+        Ok(result)
+    }
+
+    fn unary(&mut self) -> ArithResult {
+        self.ws();
+        if self.starts("++") || self.starts("--") {
+            let delta = if self.starts("++") { 1 } else { -1 };
+            self.i += 2;
+            let Some(name) = self.ident() else {
+                return Err(format!(
+                    "syntax error: operand expected (error token is \"{}\")",
+                    self.rest_from(self.i)
+                ));
+            };
+            let v = self.ident_value(&name)?.wrapping_add(delta);
+            self.store(&name, v);
+            return Ok(v);
+        }
+        match self.s.get(self.i).copied() {
+            Some('+') => {
+                self.i += 1;
+                self.unary()
+            }
+            Some('-') => {
+                self.i += 1;
+                Ok(self.unary()?.wrapping_neg())
+            }
+            Some('!') => {
+                self.i += 1;
+                Ok(i64::from(self.unary()? == 0))
+            }
+            Some('~') => {
+                self.i += 1;
+                Ok(!self.unary()?)
+            }
+            _ => self.primary(),
+        }
+    }
+
+    fn primary(&mut self) -> ArithResult {
+        self.ws();
+        match self.s.get(self.i).copied() {
+            Some('(') => {
+                self.i += 1;
+                let v = self.comma()?;
+                if !self.eat(")") {
+                    return Err(format!(
+                        "missing `)' (error token is \"{}\")",
+                        self.rest_from(self.i)
+                    ));
+                }
+                Ok(v)
+            }
+            Some(c) if c.is_ascii_digit() => {
+                let start = self.i;
+                while self
+                    .s
+                    .get(self.i)
+                    .is_some_and(|c| c.is_ascii_alphanumeric() || *c == '_')
+                {
+                    self.i += 1;
+                }
+                let tok: String = self.s[start..self.i].iter().collect();
+                arith_number(&tok)
+                    .ok_or_else(|| format!("value too great for base (error token is \"{tok}\")"))
+            }
+            Some(c) if is_name_start(c) => {
+                let name = self.ident().unwrap_or_default();
+                let v = self.ident_value(&name)?;
+                if self.starts("++") || self.starts("--") {
+                    let delta = if self.starts("++") { 1 } else { -1 };
+                    self.i += 2;
+                    self.store(&name, v.wrapping_add(delta));
+                }
+                Ok(v)
+            }
+            _ => Err(format!(
+                "syntax error: operand expected (error token is \"{}\")",
+                self.rest_from(self.i)
+            )),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -8813,6 +9597,89 @@ mod tests {
         assert_eq!(sh("exit 3; echo no"), (String::new(), 3));
     }
 
+    /// `$((...))` as bash computes it (the expected values are bash's).
+    #[test]
+    fn arithmetic_expansion_matches_bash() {
+        let cases: &[(&str, &str)] = &[
+            ("echo $((1+2))", "3"),
+            ("echo $((7/2))", "3"),
+            ("echo $((-7/2))", "-3"),
+            ("echo $((-7%2))", "-1"),
+            ("echo $((7%-2))", "1"),
+            ("echo $((2**3))", "8"),
+            ("echo $((2**3**2))", "512"),
+            ("echo $((-2**2))", "4"),
+            ("echo $((2*3+4))", "10"),
+            ("echo $((2+3*4))", "14"),
+            ("echo $(( (2+3)*4 ))", "20"),
+            ("echo $((10-3-2))", "5"),
+            ("echo $((0x1F))", "31"),
+            ("echo $((010))", "8"),
+            ("echo $((1<<4))", "16"),
+            ("echo $((256>>2))", "64"),
+            ("echo $((~5))", "-6"),
+            ("echo $((!0)) $((!5))", "1 0"),
+            (
+                "echo $((3<4)) $((4<3)) $((3<=3)) $((3>=4)) $((3==3)) $((3!=3))",
+                "1 0 1 0 1 0",
+            ),
+            ("echo $((6&3)) $((6|3)) $((6^3))", "2 7 5"),
+            ("echo $((1&&0)) $((1||0)) $((0||0))", "0 1 0"),
+            ("echo $((5>3?10:20)) $((5<3?10:20))", "10 20"),
+            ("echo $((9223372036854775807+1))", "-9223372036854775808"),
+            ("echo $((9223372036854775807*2))", "-2"),
+            ("echo $(( ))", "0"),
+            ("n=4; echo $((n+1)) $(($n+1))", "5 5"),
+            ("echo $((unset_ae_x+1))", "1"),
+            ("n=0; n=$((n+1)); n=$((n+1)); echo $n", "2"),
+            ("a=6; b=7; echo $((a*b))", "42"),
+            ("i=2; echo $(( i < 3 ))", "1"),
+            ("x=5; echo $((x+=3)) $x", "8 8"),
+            ("x=5; echo $((y=x*2)) $y", "10 10"),
+            (
+                "x=7; echo $((x%=4)) $((x*=5)) $((x-=1)) $((x/=2))",
+                "3 15 14 7",
+            ),
+            (
+                "x=1; echo $((x<<=3)) $((x>>=1)) $((x|=1)) $((x&=6)) $((x^=2))",
+                "8 4 5 4 6",
+            ),
+            ("echo $((0&&(1/0)))", "0"),
+            ("echo $((1||(1/0)))", "1"),
+            ("echo $((1?2:(1/0)))", "2"),
+            (
+                "i=1; echo $((i++)) $((++i)) $((i--)) $((--i)) $i",
+                "1 3 3 1 1",
+            ),
+            ("echo $((1,2))", "2"),
+            ("x=1+2; echo $((x*2))", "6"),
+            ("echo \"$((1+1))\"", "2"),
+            (
+                "for i in $(seq 1 $((2+1))); do echo -n $i; done; echo",
+                "123",
+            ),
+        ];
+        for (src, want) in cases {
+            assert_eq!(sh(src), (format!("{want}\n"), 0), "{src}");
+        }
+    }
+
+    #[test]
+    fn arithmetic_errors_end_the_command_with_status_1() {
+        for src in [
+            "echo $((1/0))",
+            "echo $((1%0))",
+            "echo $((08))",
+            "echo $((1+))",
+            "echo $((2**-1))",
+            "echo $((1 2))",
+            "x='1 2'; echo $((x+1))",
+            "echo $((1/0)); echo after",
+        ] {
+            assert_eq!(sh(src), (String::new(), 1), "{src}");
+        }
+    }
+
     #[test]
     fn text_utilities_match_gnu() {
         let input = "b\na\nc\na\n";
@@ -8836,11 +9703,28 @@ mod tests {
     }
 
     #[test]
+    fn find_hints_name_what_does_the_job() {
+        let args = |a: &[&str]| a.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        let newer = ish_alternative("find", &args(&[".", "-newer", "ref"])).unwrap();
+        assert!(
+            newer.contains("f.modified > fs_stat(\"ref\").modified"),
+            "{newer}"
+        );
+        assert!(!newer.contains("glob"), "{newer}");
+        let either = ish_alternative("find", &args(&[".", "-name", "a", "-o", "-name", "b"]));
+        let either = either.unwrap();
+        assert!(either.contains("one find per alternative"), "{either}");
+        let plain = ish_alternative("find", &args(&[".", "-type", "f"])).unwrap();
+        assert!(plain.contains("glob("), "{plain}");
+        assert_eq!(ish_alternative("ls", &args(&[])), None);
+    }
+
+    #[test]
     fn declines_what_it_does_not_run() {
         for src in [
             "f() { echo; }",
             "case x in x) echo;; esac",
-            "echo $((1+2))",
+            "echo $!",
             "cat <<EOF\nx\nEOF",
             "(cd /tmp; ls)",
             "sleep 1 &",

@@ -44,12 +44,12 @@ fn refused_with(tag: &str, script: &str, named: &str, hint: &str) {
 }
 
 #[test]
-fn a_function_is_told_to_inline_its_body() {
+fn a_function_is_told_to_repeat_the_body() {
     refused_with(
         "function",
         "f() { echo hi; }\nf\n",
         "function definition at line 1, column 1",
-        "inline the body, or write the logic in ish.",
+        "functions are outside the subset; repeat the body, or put it in a .sh script run with ish -b, or write the logic in ish",
     );
 }
 

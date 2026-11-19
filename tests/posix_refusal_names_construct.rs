@@ -67,21 +67,21 @@ fn case_is_named_with_its_line() {
 }
 
 #[test]
-fn arithmetic_expansion_is_named_on_a_later_line() {
+fn a_special_parameter_is_named_on_a_later_line() {
     refused(
         "arith",
-        "echo one\necho two\necho $((1+2))\n",
-        "arithmetic expansion $((...)) at line 3, column 6",
+        "echo one\necho two\necho $!\n",
+        "special parameter at line 3, column 6",
     );
 }
 
 #[test]
-fn arithmetic_refusal_says_where_to_compute() {
-    let out = run("arith_hint", "echo $((1+2))\n", false);
+fn case_refusal_says_what_to_write_instead() {
+    let out = run("case_hint", "case x in x) echo y;; esac\n", false);
     let err = String::from_utf8_lossy(&out.stderr);
     assert_eq!(out.status.code(), Some(77), "{err:?}");
     assert!(
-        err.contains("arithmetic is not in the subset; compute in ish (ish -c) or set IRONSHELL_ALLOW_SH=true"),
+        err.contains("case is outside the subset: rewrite it as if/elif"),
         "{err:?}"
     );
 }
@@ -97,7 +97,7 @@ fn a_here_document_is_named_with_its_line() {
 
 #[test]
 fn agent_mode_refuses_with_the_json_form() {
-    let out = run("agent", "echo one\necho $((1+2))\n", true);
+    let out = run("agent", "echo one\necho $!\n", true);
     let err = String::from_utf8_lossy(&out.stderr);
     assert_eq!(out.status.code(), Some(77));
     assert!(out.stdout.is_empty());
@@ -108,6 +108,6 @@ fn agent_mode_refuses_with_the_json_form() {
     assert_eq!(json["error"]["builtin"], "posix");
     assert_eq!(
         json["error"]["message"],
-        "arithmetic expansion $((...)) at line 2, column 6 is not in the in-process POSIX subset, so nothing in this script was run"
+        "special parameter at line 2, column 6 is not in the in-process POSIX subset, so nothing in this script was run"
     );
 }
