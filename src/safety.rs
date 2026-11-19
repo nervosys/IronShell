@@ -3912,8 +3912,8 @@ fn operand_candidates(arg: &str, out: &mut Vec<String>) {
 }
 
 /// Add to an exec approval's blast radius what the command will run on: a
-/// content hash of each operand that names an existing regular file inside the
-/// workspace (`operand_hashes`), and the environment changes this process made
+/// content hash of each operand that names an existing regular file, wherever it
+/// resolves (`operand_hashes`), and the environment changes this process made
 /// (`env_changes`, sorted). Nothing is added when there is neither, so the
 /// token of a command that names no file and follows no `set_env` is as it was.
 fn bind_exec_context(builtin: &str, radius: &mut Json) -> Result<(), SafetyError> {
@@ -3961,9 +3961,8 @@ fn bind_exec_context(builtin: &str, radius: &mut Json) -> Result<(), SafetyError
         if names_a_remote_share(&operand) || !std::path::Path::new(&operand).is_file() {
             continue;
         }
-        if !within_workspace(&operand) {
-            continue;
-        }
+        // Wherever the name resolves, through a link or junction too: the
+        // command will read the file itself, and hashing it here only reads.
         // One file named in two spellings (`x`, `./x`) counts once.
         let file = std::fs::canonicalize(&operand)
             .map(|p| p.to_string_lossy().into_owned())

@@ -140,3 +140,45 @@ fn more_than_256_workspace_files_are_refused() {
     );
     assert!(!t.contains("apv_"), "a token was offered: {}", head(&out));
 }
+
+// ---- A6: a file reached through a link out of the workspace is bound -------
+
+/// Make `link` a link (a junction on Windows) to the directory `target`.
+fn link_dir(link: &Path, target: &Path) -> bool {
+    #[cfg(unix)]
+    {
+        std::os::unix::fs::symlink(target, link).is_ok()
+    }
+    #[cfg(windows)]
+    {
+        Command::new("cmd")
+            .arg("/C")
+            .arg("mklink")
+            .arg("/J")
+            .arg(link)
+            .arg(target)
+            .output()
+            .is_ok_and(|o| o.status.success())
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        let _ = (link, target);
+        false
+    }
+}
+
+#[test]
+fn a_file_outside_the_workspace_named_through_a_link_is_bound() {
+    let dir = scratch("link");
+    let outside = dir.join("outside");
+    std::fs::create_dir_all(&outside).expect("outside");
+    std::fs::write(outside.join("s.ps1"), "one").expect("write");
+    if !link_dir(&dir.join("proj").join("jout"), &outside) {
+        eprintln!("cannot make a link here; skipped");
+        return;
+    }
+    let call = r#"sh(["pwsh", "-NoProfile", "-File", "jout/s.ps1"])"#;
+    let before = sh_token(&dir, call);
+    std::fs::write(outside.join("s.ps1"), "two").expect("rewrite");
+    assert_ne!(before, sh_token(&dir, call), "the linked file is not bound");
+}
