@@ -3379,7 +3379,7 @@ pub static SIGNATURES: &[Signature] = &[
         subject: None,
         params: &[req("path", Ty::Str, "directory to search"), opt("pattern", Ty::Str, "glob such as *.rs; omit for every file")],
         returns: "Array",
-        doc: "Files under a directory, optionally matching a glob. At most 1,000,000 entries; more is E_BUDGET_EXCEEDED.",
+        doc: "Files (not directories) under a directory, optionally matching a glob on the file name. Paths are written as glob writes them: the directory as given, then `/` and the path below it. At most 1,000,000 entries; more is E_BUDGET_EXCEEDED.",
         examples: &[(r#"(find("src", "*.rs") | len) > 0"#, "true"), (r#"(find("src") | len) > 0"#, "true")],
     },
     Signature {

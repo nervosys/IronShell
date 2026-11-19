@@ -9863,10 +9863,27 @@ fn bi_find(args: Vec<Value>, _input: Option<Value>) -> Result<Value> {
                 });
             }
         };
-        // Reported without the verbatim prefix `canonicalize` put on the root.
-        let path_str = crate::safety::strip_verbatim_prefix(entry.path())
-            .to_string_lossy()
-            .to_string();
+        // Files only, as documented: not the root and not a directory.
+        if entry.file_type().is_dir() {
+            continue;
+        }
+        // Reported in the form `glob` and `fs_walk` use: the directory as the
+        // caller wrote it, then `/` and the path below it, never the absolute
+        // or verbatim-prefixed form `canonicalize` gave the root.
+        let rel = slash_path(
+            &entry
+                .path()
+                .strip_prefix(&validated_path)
+                .unwrap_or_else(|_| entry.path())
+                .to_string_lossy(),
+        );
+        let root_text = slash_path(&path_str);
+        let root_text = root_text.trim_end_matches('/');
+        let path_str = if root_text == "." {
+            rel
+        } else {
+            format!("{root_text}/{rel}")
+        };
 
         if let Some(ref pattern) = pattern {
             // Simple glob matching: support * for any characters
