@@ -142,3 +142,38 @@ fn many_names_joined_by_plus_are_refused() {
     let err = first_error(&agent(&dir, &code));
     assert_eq!(err["error"]["code"], "E_POLICY_DENY", "{err}");
 }
+
+fn approval_after(dir: &Path, setup: &str) -> serde_json::Value {
+    let exe = env!("CARGO_BIN_EXE_ish").replace('\\', "/");
+    let code = format!(r#"{setup}sh(["{exe}", "--version"])"#);
+    let err = first_error(&agent(dir, &code));
+    assert_eq!(err["error"]["code"], "E_NEEDS_APPROVAL", "{err}");
+    err["error"].clone()
+}
+
+#[test]
+fn the_approval_shows_the_environment_it_binds() {
+    let dir = scratch("envsummary");
+    let plain = approval_after(&dir, "");
+    assert!(plain["approval"].get("env").is_none(), "{plain}");
+
+    let long = "a".repeat(100);
+    let setup = format!(
+        r#"set_env("MY_APP_FLAG", "1"); set_env("MY_NOTE", "{long}"); set_env("MY_SECRET_KEY", "hunter2hunter2"); "#
+    );
+    let err = approval_after(&dir, &setup);
+    let env = err["approval"]["env"].as_str().unwrap_or("");
+    assert!(env.starts_with("with "), "{err}");
+    assert!(env.contains("MY_APP_FLAG=1"), "{env}");
+    assert!(
+        env.contains(&format!("MY_NOTE={}...", "a".repeat(60))),
+        "{env}"
+    );
+    assert!(env.contains("MY_SECRET_KEY=[REDACTED]"), "{env}");
+    assert!(!env.contains("hunter2"), "{env}");
+    let hint = err["hint"].as_str().unwrap_or("");
+    assert!(hint.contains("MY_APP_FLAG=1"), "{hint}");
+    // The summary is not the token's input: the plain call's token is as before.
+    let again = approval_after(&dir, "");
+    assert_eq!(again["approval"]["token"], plain["approval"]["token"]);
+}

@@ -3740,6 +3740,88 @@ pub struct ApprovalDescriptor {
     pub blast_radius: Json,
     pub reversible: bool,
     pub token: String,
+    /// The environment changes the token binds, for a person to read: `with
+    /// FOO=1, BAR=2; without HTTPS_PROXY`. Absent when there are none. Shown,
+    /// not bound: the values it summarises are already in the token.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub env: Option<String>,
+}
+
+/// The longest environment value shown in an approval's `env` summary.
+const ENV_SUMMARY_VALUE_CHARS: usize = 60;
+
+/// `with FOO=1, BAR=2; without HTTPS_PROXY` for the environment a command's
+/// approval binds (`child_env`, `child_env_removed` and `env_changes` of its
+/// blast radius), or `None` when it binds none. A value is cut at
+/// [`ENV_SUMMARY_VALUE_CHARS`] characters and a secret is redacted.
+fn env_summary(radius: &Json) -> Option<String> {
+    let mut with: std::collections::BTreeMap<String, String> = std::collections::BTreeMap::new();
+    let mut without: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    let pairs = |key: &str| -> Vec<(String, Option<String>)> {
+        radius
+            .get(key)
+            .and_then(Json::as_array)
+            .map(|rows| {
+                rows.iter()
+                    .filter_map(|row| {
+                        let name = row.get(0)?.as_str()?.to_string();
+                        Some((name, row.get(1).and_then(Json::as_str).map(str::to_string)))
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
+    for (name, value) in pairs("child_env").into_iter().chain(pairs("env_changes")) {
+        match value {
+            Some(v) => {
+                without.remove(&name);
+                with.insert(name, v);
+            }
+            None => {
+                with.remove(&name);
+                without.insert(name);
+            }
+        }
+    }
+    if let Some(names) = radius.get("child_env_removed").and_then(Json::as_array) {
+        for name in names.iter().filter_map(Json::as_str) {
+            with.remove(name);
+            without.insert(name.to_string());
+        }
+    }
+    if with.is_empty() && without.is_empty() {
+        return None;
+    }
+    let show = |name: &str, value: &str| -> String {
+        // Redacted whole, then cut, so a secret is not cut into an unrecognised
+        // piece first.
+        let redacted = if redaction_enabled() {
+            if is_secret_name(name) {
+                REDACTION_MARKER.to_string()
+            } else {
+                redact_str_counted(value).0
+            }
+        } else {
+            value.to_string()
+        };
+        let shown = if redacted.chars().count() > ENV_SUMMARY_VALUE_CHARS {
+            let head: String = redacted.chars().take(ENV_SUMMARY_VALUE_CHARS).collect();
+            format!("{head}...")
+        } else {
+            redacted
+        };
+        format!("{name}={shown}")
+    };
+    let mut parts: Vec<String> = Vec::new();
+    if !with.is_empty() {
+        let list: Vec<String> = with.iter().map(|(k, v)| show(k, v)).collect();
+        parts.push(format!("with {}", list.join(", ")));
+    }
+    if !without.is_empty() {
+        let list: Vec<&str> = without.iter().map(String::as_str).collect();
+        parts.push(format!("without {}", list.join(", ")));
+    }
+    Some(parts.join("; "))
 }
 
 impl ApprovalDescriptor {
@@ -3779,6 +3861,7 @@ impl ApprovalDescriptor {
             blast_radius,
             reversible,
             token,
+            env: None,
         })
     }
 }
@@ -5489,6 +5572,7 @@ pub fn plan_needs_approval(
             // as irreversible.
             reversible: false,
             token: token.to_string(),
+            env: None,
         }),
         did_you_mean: Vec::new(),
         expected: String::new(),
@@ -9203,7 +9287,7 @@ pub fn guard(ctx: GuardCtx) -> Result<(), SafetyError> {
             if ctx.effect == Effect::Exec {
                 bind_exec_context(ctx.builtin, &mut blast_radius)?;
             }
-            let descriptor = ApprovalDescriptor::new(
+            let mut descriptor = ApprovalDescriptor::new(
                 ctx.what,
                 ctx.builtin,
                 ctx.targets.clone(),
@@ -9211,6 +9295,7 @@ pub fn guard(ctx: GuardCtx) -> Result<(), SafetyError> {
                 ctx.reversible,
             )
             .map_err(|e| ic_refusal(ctx.builtin, e))?;
+            descriptor.env = env_summary(&descriptor.blast_radius);
             if is_token_approved(&descriptor.token) {
                 let _ = audit(
                     ctx.builtin,
@@ -9234,6 +9319,9 @@ pub fn guard(ctx: GuardCtx) -> Result<(), SafetyError> {
                     hint.push_str(
                         "; the token also binds the contents of workspace files the command names and the environment set_env changed, so editing a script or changing the environment needs a new approval",
                     );
+                }
+                if let Some(env) = &descriptor.env {
+                    hint.push_str(&format!("; environment the token binds: {env}"));
                 }
                 if matches!(ctx.builtin, "db_sqlite_exec" | "sqlite_exec") {
                     hint.push_str(
