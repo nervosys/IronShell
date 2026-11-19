@@ -3842,9 +3842,6 @@ fn push_name_variants(s: &str, out: &mut Vec<String>) {
     if t.is_empty() {
         return;
     }
-    if t.len() != s.len() {
-        out.push(t.to_string());
-    }
     let t = match t.strip_prefix('&') {
         Some(rest) if rest.starts_with(char::is_whitespace) => {
             let rest = rest.trim_start();
@@ -3974,8 +3971,16 @@ fn bind_exec_context(builtin: &str, radius: &mut Json) -> Result<(), SafetyError
         if names_a_remote_share(&operand) || !std::path::Path::new(&operand).is_file() {
             continue;
         }
-        // Wherever the name resolves, through a link or junction too: the
-        // command will read the file itself, and hashing it here only reads.
+        // A relative name resolves from the working directory, so it can reach
+        // outside the workspace through a link or `..`: it is bound wherever it
+        // resolves. An absolute path outside the workspace names a program or
+        // file of the system and is not bound, so a tool upgrade does not
+        // change every token that names it.
+        let p = std::path::Path::new(&operand);
+        let absolute = p.is_absolute() || operand.starts_with(['/', '\\']);
+        if absolute && !within_workspace(&operand) {
+            continue;
+        }
         // One file named in two spellings (`x`, `./x`) counts once.
         let file = std::fs::canonicalize(&operand)
             .map(|p| p.to_string_lossy().into_owned())

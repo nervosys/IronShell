@@ -266,7 +266,10 @@ fn unset_of_an_inherited_variable_changes_the_token_and_the_child() {
 fn export_with_an_option_and_set_dash_a_are_refused_by_name() {
     let dir = scratch("refused");
     for script in ["export -n FOO", "set -a"] {
+        // `base` sets IRONSHELL_ALLOW_SH, which lets a construct outside the
+        // subset fall back to the transpiler; the refusal is without it.
         let out = base(&dir)
+            .env_remove("IRONSHELL_ALLOW_SH")
             .args(["-b", "-c", script])
             .output()
             .expect("run ish");
