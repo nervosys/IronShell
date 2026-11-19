@@ -232,9 +232,9 @@ fn agent_mode_refusals_do_not_offer_allow_sh() {
         "agent mode must not be told to set it: {err}"
     );
 
-    let arithmetic = ish_agent(&dir, &["-b", "-c", "echo $((1+2))"]);
+    let arithmetic = ish_agent(&dir, &["-b", "-c", "case x in x) echo y;; esac"]);
     let err = stderr_of(&arithmetic);
-    assert!(err.contains("compute in ish (ish -c)"), "{err}");
+    assert!(err.contains("case is outside the subset"), "{err}");
     assert!(!err.contains("IRONSHELL_ALLOW_SH"), "{err}");
 }
 

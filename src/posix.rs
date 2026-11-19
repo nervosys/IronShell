@@ -19,7 +19,7 @@
 //! mode gates each one. A redirection that writes a file goes through the same
 //! guard as `file.write`, jail included.
 //!
-//! What it does not parse (functions, `case`, arithmetic, here-documents,
+//! What it does not parse (functions, `case`, here-documents,
 //! subshells, background jobs) makes [`run`] return `None` before anything has
 //! executed, and the caller falls back to the transpiler exactly as before.
 
@@ -43,6 +43,9 @@ enum Part {
     Len(String),
     /// `$(…)` or backquotes, and whether quoted.
     Cmd(String, bool),
+    /// `$((…))`: the expression as a word (its `$` expansions come first), and
+    /// whether quoted.
+    Arith(Vec<Part>, bool),
 }
 
 type Word = Vec<Part>;
@@ -769,7 +772,21 @@ impl<'a> Lexer<'a> {
         match self.peek() {
             Some('(') => {
                 if self.peek_at(1) == Some('(') {
-                    return unsupported_at("arithmetic expansion $((...))", dollar_at);
+                    if let Some(end) = self.arith_end() {
+                        // The expression is read as double-quoted text, so
+                        // `$n`, `${n}` and `$(cmd)` in it expand first, as in
+                        // bash; its names and operators are read at run time.
+                        let start = self.i + 2;
+                        let inner: Vec<char> = self.s[start..end].to_vec();
+                        if inner.contains(&'"') || inner.contains(&'`') {
+                            return unsupported_at("arithmetic expansion $((...))", dollar_at);
+                        }
+                        let mut w = Vec::new();
+                        lex_quoted(&inner, &mut w).map_err(|e| relocate(e, start, dollar_at))?;
+                        self.i = end + 2;
+                        parts.push(Part::Arith(w, quoted));
+                        return Ok(());
+                    }
                 }
                 self.i += 1;
                 let start = self.i;
@@ -979,6 +996,27 @@ impl<'a> Lexer<'a> {
         Ok(())
     }
 
+    /// With `self.i` at the `(` of `$((`: the offset of the first `)` of the
+    /// closing `))`, when the text up to it holds balanced parentheses. `None`
+    /// when the first unbalanced `)` is not followed by another (`$((cmd) ...)`
+    /// is a command substitution holding a subshell) or the text ends.
+    fn arith_end(&self) -> Option<usize> {
+        let mut depth = 0usize;
+        let mut j = self.i + 2;
+        while let Some(&c) = self.s.get(j) {
+            match c {
+                '(' => depth += 1,
+                ')' if depth == 0 => {
+                    return (self.s.get(j + 1) == Some(&')')).then_some(j);
+                }
+                ')' => depth -= 1,
+                _ => {}
+            }
+            j += 1;
+        }
+        None
+    }
+
     fn name(&mut self) -> String {
         let mut n = String::new();
         while let Some(c) = self.peek() {
@@ -1028,6 +1066,7 @@ fn token_text(t: &Tok) -> String {
                 Part::Var(name, _, _) => format!("${name}"),
                 Part::Len(name) => format!("${{#{name}}}"),
                 Part::Cmd(..) => "$(...)".to_string(),
+                Part::Arith(..) => "$((...))".to_string(),
             })
             .collect(),
         Tok::Pipe => "|".into(),
@@ -2093,6 +2132,10 @@ impl Shell {
                     let value = self.substitute(body);
                     self.splice(&value, *quoted, &mut fields, &mut cur, &mut mask, &mut have);
                 }
+                Part::Arith(expr, quoted) => {
+                    let value = self.arith_expand(expr, stdin);
+                    self.splice(&value, *quoted, &mut fields, &mut cur, &mut mask, &mut have);
+                }
             }
         }
         if have {
@@ -2427,7 +2470,9 @@ impl Shell {
                         out.push_str(s);
                     }
                 }
-                Part::Var(_, _, part_quoted) | Part::Cmd(_, part_quoted) => {
+                Part::Var(_, _, part_quoted)
+                | Part::Cmd(_, part_quoted)
+                | Part::Arith(_, part_quoted) => {
                     let text = self.expand_assign(&vec![part.clone()], stdin);
                     if *part_quoted {
                         out.push_str(&escape_glob(&text));
@@ -2547,9 +2592,30 @@ impl Shell {
                     let value = self.substitute(body);
                     out.push_str(&value);
                 }
+                Part::Arith(expr, _) => {
+                    let value = self.arith_expand(expr, stdin);
+                    out.push_str(&value);
+                }
             }
         }
         out
+    }
+
+    /// `$((expr))`: the expression's `$` expansions are made first, then the
+    /// text is evaluated as 64-bit integer arithmetic (see [`ArithEval`]). An
+    /// error ends the command and the script with status 1, as an unbound
+    /// parameter does (see [`Shell::note_unbound`]).
+    fn arith_expand(&mut self, expr: &Word, stdin: &mut Input) -> String {
+        let text = self.expand_assign(expr, stdin);
+        match arith_eval(self, &text) {
+            Ok(n) => n.to_string(),
+            Err(why) => {
+                if self.unbound.is_none() {
+                    self.unbound = Some(self.expansion_message(text.trim(), &why));
+                }
+                String::new()
+            }
+        }
     }
 
     // ── running ──
@@ -8634,6 +8700,514 @@ fn literal_text(word: &Word) -> String {
         .unwrap_or_default()
 }
 
+// ── arithmetic expansion ─────────────────────────────────────────────────
+
+/// `text` evaluated as `$((...))` does in bash: 64-bit signed integers that
+/// wrap on overflow; decimal, `0x` hex and leading-0 octal literals; names (an
+/// unset or empty one is 0, a value is itself evaluated as an expression);
+/// `+ - * / % **`, unary `+ - ! ~`, `<< >> < <= > >= == != & ^ | && ||`, `?:`,
+/// `,`, the assignments `= += -= *= /= %= <<= >>= &= ^= |=` and `++`/`--`.
+/// `Err` holds bash's message, without the place.
+fn arith_eval(sh: &mut Shell, text: &str) -> Result<i64, String> {
+    ArithEval {
+        s: text.chars().collect(),
+        i: 0,
+        dead: 0,
+        depth: 0,
+        sh,
+    }
+    .run()
+}
+
+struct ArithEval<'a> {
+    s: Vec<char>,
+    i: usize,
+    /// Above 0 while an operand bash would not evaluate is read (`0 && x=1`,
+    /// the unchosen side of `?:`): nothing is assigned and `1/0` is no error.
+    dead: u32,
+    /// How deep a variable's value is being evaluated as an expression.
+    depth: u32,
+    sh: &'a mut Shell,
+}
+
+type ArithResult = Result<i64, String>;
+
+/// A C integer constant as the arithmetic reads it, wrapping into 64 bits.
+fn arith_number(tok: &str) -> Option<i64> {
+    let u = if let Some(h) = tok.strip_prefix("0x").or_else(|| tok.strip_prefix("0X")) {
+        u64::from_str_radix(h, 16).ok()?
+    } else if tok.len() > 1 && tok.starts_with('0') {
+        u64::from_str_radix(&tok[1..], 8).ok()?
+    } else {
+        tok.parse::<u64>().ok()?
+    };
+    Some(u as i64)
+}
+
+impl ArithEval<'_> {
+    fn ws(&mut self) {
+        while self.s.get(self.i).is_some_and(|c| c.is_whitespace()) {
+            self.i += 1;
+        }
+    }
+
+    fn rest_from(&self, at: usize) -> String {
+        self.s[at.min(self.s.len())..].iter().collect()
+    }
+
+    /// Whether the text at the cursor (no blanks skipped) starts with `op`.
+    fn starts(&self, op: &str) -> bool {
+        let o: Vec<char> = op.chars().collect();
+        self.s[self.i..].starts_with(&o)
+    }
+
+    /// Skips blanks, then whether the text starts with `op`.
+    fn at(&mut self, op: &str) -> bool {
+        self.ws();
+        self.starts(op)
+    }
+
+    fn eat(&mut self, op: &str) -> bool {
+        if self.at(op) {
+            self.i += op.chars().count();
+            true
+        } else {
+            false
+        }
+    }
+
+    fn syntax(&self) -> String {
+        format!(
+            "syntax error in expression (error token is \"{}\")",
+            self.rest_from(self.i)
+        )
+    }
+
+    fn run(&mut self) -> ArithResult {
+        self.ws();
+        if self.i >= self.s.len() {
+            return Ok(0);
+        }
+        let v = self.comma()?;
+        self.ws();
+        if self.i < self.s.len() {
+            return Err(self.syntax());
+        }
+        Ok(v)
+    }
+
+    fn comma(&mut self) -> ArithResult {
+        let mut v = self.assign()?;
+        while self.eat(",") {
+            v = self.assign()?;
+        }
+        Ok(v)
+    }
+
+    fn ident(&mut self) -> Option<String> {
+        self.ws();
+        if !self.s.get(self.i).is_some_and(|c| is_name_start(*c)) {
+            return None;
+        }
+        let start = self.i;
+        while self.s.get(self.i).is_some_and(|c| is_name_char(*c)) {
+            self.i += 1;
+        }
+        Some(self.s[start..self.i].iter().collect())
+    }
+
+    /// The value of a name: 0 when unset or empty, else its text read as a
+    /// number or, failing that, evaluated as an expression.
+    fn ident_value(&mut self, name: &str) -> ArithResult {
+        let value = self.sh.var(name);
+        if value.is_none() && self.dead == 0 {
+            self.sh.note_unbound(name);
+        }
+        let text = value.unwrap_or_default();
+        let t = text.trim();
+        if t.is_empty() {
+            return Ok(0);
+        }
+        if let Some(n) = arith_number(t) {
+            return Ok(n);
+        }
+        if self.depth >= 16 {
+            return Err(format!(
+                "{t}: expression recursion level exceeded (error token is \"{name}\")"
+            ));
+        }
+        let mut inner = ArithEval {
+            s: t.chars().collect(),
+            i: 0,
+            dead: self.dead,
+            depth: self.depth + 1,
+            sh: &mut *self.sh,
+        };
+        inner.run()
+    }
+
+    fn store(&mut self, name: &str, value: i64) {
+        if self.dead == 0 {
+            self.sh.set_var(name, value.to_string());
+        }
+    }
+
+    /// `a op b` for the arithmetic operators; `tok` is where `b` starts, for the
+    /// error token of a division by zero.
+    fn binary(&self, op: &str, a: i64, b: i64, tok: usize) -> ArithResult {
+        Ok(match op {
+            "+" => a.wrapping_add(b),
+            "-" => a.wrapping_sub(b),
+            "*" => a.wrapping_mul(b),
+            "/" | "%" => {
+                if b == 0 {
+                    if self.dead > 0 {
+                        return Ok(0);
+                    }
+                    return Err(format!(
+                        "division by 0 (error token is \"{}\")",
+                        self.rest_from(tok)
+                    ));
+                }
+                if op == "/" {
+                    a.wrapping_div(b)
+                } else {
+                    a.wrapping_rem(b)
+                }
+            }
+            "<<" => a.wrapping_shl(b as u32),
+            ">>" => a.wrapping_shr(b as u32),
+            "&" => a & b,
+            "^" => a ^ b,
+            "|" => a | b,
+            _ => return Err(self.syntax()),
+        })
+    }
+
+    fn assign(&mut self) -> ArithResult {
+        const OPS: [&str; 11] = [
+            "<<=", ">>=", "+=", "-=", "*=", "/=", "%=", "&=", "^=", "|=", "=",
+        ];
+        self.ws();
+        let save = self.i;
+        if let Some(name) = self.ident() {
+            self.ws();
+            for op in OPS {
+                if self.starts(op) && !(op == "=" && self.starts("==")) {
+                    self.i += op.chars().count();
+                    self.ws();
+                    let tok = self.i;
+                    let rhs = self.assign()?;
+                    let new = if op == "=" {
+                        rhs
+                    } else {
+                        let cur = self.ident_value(&name)?;
+                        self.binary(&op[..op.len() - 1], cur, rhs, tok)?
+                    };
+                    self.store(&name, new);
+                    return Ok(new);
+                }
+            }
+            self.i = save;
+        }
+        self.ternary()
+    }
+
+    fn ternary(&mut self) -> ArithResult {
+        let c = self.lor()?;
+        if !self.eat("?") {
+            return Ok(c);
+        }
+        let first = c != 0;
+        if !first {
+            self.dead += 1;
+        }
+        let a = self.assign();
+        if !first {
+            self.dead -= 1;
+        }
+        let a = a?;
+        if !self.eat(":") {
+            return Err(format!(
+                "`:' expected for conditional expression (error token is \"{}\")",
+                self.rest_from(self.i)
+            ));
+        }
+        if first {
+            self.dead += 1;
+        }
+        let b = self.ternary();
+        if first {
+            self.dead -= 1;
+        }
+        let b = b?;
+        Ok(if first { a } else { b })
+    }
+
+    fn lor(&mut self) -> ArithResult {
+        let mut v = self.land()?;
+        while self.eat("||") {
+            let skip = v != 0;
+            if skip {
+                self.dead += 1;
+            }
+            let r = self.land();
+            if skip {
+                self.dead -= 1;
+            }
+            let r = r?;
+        }
+        Ok(v)
+    }
+
+    fn land(&mut self) -> ArithResult {
+        let mut v = self.bor()?;
+        while self.at("&&") {
+            self.i += 2;
+            let skip = v == 0;
+            if skip {
+                self.dead += 1;
+            }
+            let r = self.bor();
+            if skip {
+                self.dead -= 1;
+            }
+            let r = r?;
+        }
+        Ok(v)
+    }
+
+    fn bor(&mut self) -> ArithResult {
+        let mut v = self.bxor()?;
+        while self.at("|") && !self.starts("||") && !self.starts("|=") {
+            self.i += 1;
+            v |= self.bxor()?;
+        }
+        Ok(v)
+    }
+
+    fn bxor(&mut self) -> ArithResult {
+        let mut v = self.band()?;
+        while self.at("^") && !self.starts("^=") {
+            self.i += 1;
+            v ^= self.band()?;
+        }
+        Ok(v)
+    }
+
+    fn band(&mut self) -> ArithResult {
+        let mut v = self.equality()?;
+        while self.at("&") && !self.starts("&&") && !self.starts("&=") {
+            self.i += 1;
+            v &= self.equality()?;
+        }
+        Ok(v)
+    }
+
+    fn equality(&mut self) -> ArithResult {
+        let mut v = self.relational()?;
+        loop {
+            if self.at("==") {
+                self.i += 2;
+                v = i64::from(v == self.relational()?);
+            } else if self.at("!=") {
+                self.i += 2;
+                v = i64::from(v != self.relational()?);
+            } else {
+                return Ok(v);
+            }
+        }
+    }
+
+    fn relational(&mut self) -> ArithResult {
+        let mut v = self.shift()?;
+        loop {
+            if self.at("<=") {
+                self.i += 2;
+                v = i64::from(v <= self.shift()?);
+            } else if self.at(">=") {
+                self.i += 2;
+                v = i64::from(v >= self.shift()?);
+            } else if self.at("<") && !self.starts("<<") {
+                self.i += 1;
+                v = i64::from(v < self.shift()?);
+            } else if self.at(">") && !self.starts(">>") {
+                self.i += 1;
+                v = i64::from(v > self.shift()?);
+            } else {
+                return Ok(v);
+            }
+        }
+    }
+
+    fn shift(&mut self) -> ArithResult {
+        let mut v = self.additive()?;
+        loop {
+            let op = if self.at("<<") && !self.starts("<<=") {
+                "<<"
+            } else if self.at(">>") && !self.starts(">>=") {
+                ">>"
+            } else {
+                return Ok(v);
+            };
+            self.i += 2;
+            self.ws();
+            let tok = self.i;
+            let r = self.additive()?;
+            v = self.binary(op, v, r, tok)?;
+        }
+    }
+
+    fn additive(&mut self) -> ArithResult {
+        let mut v = self.multiplicative()?;
+        loop {
+            let op = if self.at("+") && !self.starts("+=") {
+                "+"
+            } else if self.at("-") && !self.starts("-=") {
+                "-"
+            } else {
+                return Ok(v);
+            };
+            self.i += 1;
+            self.ws();
+            let tok = self.i;
+            let r = self.multiplicative()?;
+            v = self.binary(op, v, r, tok)?;
+        }
+    }
+
+    fn multiplicative(&mut self) -> ArithResult {
+        let mut v = self.power()?;
+        loop {
+            let op = if self.at("*") && !self.starts("**") && !self.starts("*=") {
+                "*"
+            } else if self.at("/") && !self.starts("/=") {
+                "/"
+            } else if self.at("%") && !self.starts("%=") {
+                "%"
+            } else {
+                return Ok(v);
+            };
+            self.i += 1;
+            self.ws();
+            let tok = self.i;
+            let r = self.power()?;
+            v = self.binary(op, v, r, tok)?;
+        }
+    }
+
+    /// `**` binds tighter than `*` and looser than the unary operators, and
+    /// groups to the right.
+    fn power(&mut self) -> ArithResult {
+        let base = self.unary()?;
+        if !self.at("**") {
+            return Ok(base);
+        }
+        self.i += 2;
+        self.ws();
+        let tok = self.i;
+        let exp = self.power()?;
+        if exp < 0 {
+            if self.dead > 0 {
+                return Ok(0);
+            }
+            return Err(format!(
+                "exponent less than 0 (error token is \"{}\")",
+                self.rest_from(tok)
+            ));
+        }
+        let (mut result, mut b, mut n) = (1i64, base, exp as u64);
+        while n > 0 {
+            if n & 1 == 1 {
+                result = result.wrapping_mul(b);
+            }
+            b = b.wrapping_mul(b);
+            n >>= 1;
+        }
+        Ok(result)
+    }
+
+    fn unary(&mut self) -> ArithResult {
+        self.ws();
+        if self.starts("++") || self.starts("--") {
+            let delta = if self.starts("++") { 1 } else { -1 };
+            self.i += 2;
+            let Some(name) = self.ident() else {
+                return Err(format!(
+                    "syntax error: operand expected (error token is \"{}\")",
+                    self.rest_from(self.i)
+                ));
+            };
+            let v = self.ident_value(&name)?.wrapping_add(delta);
+            self.store(&name, v);
+            return Ok(v);
+        }
+        match self.s.get(self.i).copied() {
+            Some('+') => {
+                self.i += 1;
+                self.unary()
+            }
+            Some('-') => {
+                self.i += 1;
+                Ok(self.unary()?.wrapping_neg())
+            }
+            Some('!') => {
+                self.i += 1;
+                Ok(i64::from(self.unary()? == 0))
+            }
+            Some('~') => {
+                self.i += 1;
+                Ok(!self.unary()?)
+            }
+            _ => self.primary(),
+        }
+    }
+
+    fn primary(&mut self) -> ArithResult {
+        self.ws();
+        match self.s.get(self.i).copied() {
+            Some('(') => {
+                self.i += 1;
+                let v = self.comma()?;
+                if !self.eat(")") {
+                    return Err(format!(
+                        "missing `)' (error token is \"{}\")",
+                        self.rest_from(self.i)
+                    ));
+                }
+                Ok(v)
+            }
+            Some(c) if c.is_ascii_digit() => {
+                let start = self.i;
+                while self
+                    .s
+                    .get(self.i)
+                    .is_some_and(|c| c.is_ascii_alphanumeric() || *c == '_')
+                {
+                    self.i += 1;
+                }
+                let tok: String = self.s[start..self.i].iter().collect();
+                arith_number(&tok)
+                    .ok_or_else(|| format!("value too great for base (error token is \"{tok}\")"))
+            }
+            Some(c) if is_name_start(c) => {
+                let name = self.ident().unwrap_or_default();
+                let v = self.ident_value(&name)?;
+                if self.starts("++") || self.starts("--") {
+                    let delta = if self.starts("++") { 1 } else { -1 };
+                    self.i += 2;
+                    self.store(&name, v.wrapping_add(delta));
+                }
+                Ok(v)
+            }
+            _ => Err(format!(
+                "syntax error: operand expected (error token is \"{}\")",
+                self.rest_from(self.i)
+            )),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -8723,6 +9297,89 @@ mod tests {
         assert_eq!(sh("exit 3; echo no"), (String::new(), 3));
     }
 
+    /// `$((...))` as bash computes it (the expected values are bash's).
+    #[test]
+    fn arithmetic_expansion_matches_bash() {
+        let cases: &[(&str, &str)] = &[
+            ("echo $((1+2))", "3"),
+            ("echo $((7/2))", "3"),
+            ("echo $((-7/2))", "-3"),
+            ("echo $((-7%2))", "-1"),
+            ("echo $((7%-2))", "1"),
+            ("echo $((2**3))", "8"),
+            ("echo $((2**3**2))", "512"),
+            ("echo $((-2**2))", "4"),
+            ("echo $((2*3+4))", "10"),
+            ("echo $((2+3*4))", "14"),
+            ("echo $(( (2+3)*4 ))", "20"),
+            ("echo $((10-3-2))", "5"),
+            ("echo $((0x1F))", "31"),
+            ("echo $((010))", "8"),
+            ("echo $((1<<4))", "16"),
+            ("echo $((256>>2))", "64"),
+            ("echo $((~5))", "-6"),
+            ("echo $((!0)) $((!5))", "1 0"),
+            (
+                "echo $((3<4)) $((4<3)) $((3<=3)) $((3>=4)) $((3==3)) $((3!=3))",
+                "1 0 1 0 1 0",
+            ),
+            ("echo $((6&3)) $((6|3)) $((6^3))", "2 7 5"),
+            ("echo $((1&&0)) $((1||0)) $((0||0))", "0 1 0"),
+            ("echo $((5>3?10:20)) $((5<3?10:20))", "10 20"),
+            ("echo $((9223372036854775807+1))", "-9223372036854775808"),
+            ("echo $((9223372036854775807*2))", "-2"),
+            ("echo $(( ))", "0"),
+            ("n=4; echo $((n+1)) $(($n+1))", "5 5"),
+            ("echo $((unset_ae_x+1))", "1"),
+            ("n=0; n=$((n+1)); n=$((n+1)); echo $n", "2"),
+            ("a=6; b=7; echo $((a*b))", "42"),
+            ("i=2; echo $(( i < 3 ))", "1"),
+            ("x=5; echo $((x+=3)) $x", "8 8"),
+            ("x=5; echo $((y=x*2)) $y", "10 10"),
+            (
+                "x=7; echo $((x%=4)) $((x*=5)) $((x-=1)) $((x/=2))",
+                "3 15 14 7",
+            ),
+            (
+                "x=1; echo $((x<<=3)) $((x>>=1)) $((x|=1)) $((x&=6)) $((x^=2))",
+                "8 4 5 4 6",
+            ),
+            ("echo $((0&&(1/0)))", "0"),
+            ("echo $((1||(1/0)))", "1"),
+            ("echo $((1?2:(1/0)))", "2"),
+            (
+                "i=1; echo $((i++)) $((++i)) $((i--)) $((--i)) $i",
+                "1 3 3 1 1",
+            ),
+            ("echo $((1,2))", "2"),
+            ("x=1+2; echo $((x*2))", "6"),
+            ("echo \"$((1+1))\"", "2"),
+            (
+                "for i in $(seq 1 $((2+1))); do echo -n $i; done; echo",
+                "123",
+            ),
+        ];
+        for (src, want) in cases {
+            assert_eq!(sh(src), (format!("{want}\n"), 0), "{src}");
+        }
+    }
+
+    #[test]
+    fn arithmetic_errors_end_the_command_with_status_1() {
+        for src in [
+            "echo $((1/0))",
+            "echo $((1%0))",
+            "echo $((08))",
+            "echo $((1+))",
+            "echo $((2**-1))",
+            "echo $((1 2))",
+            "x='1 2'; echo $((x+1))",
+            "echo $((1/0)); echo after",
+        ] {
+            assert_eq!(sh(src), (String::new(), 1), "{src}");
+        }
+    }
+
     #[test]
     fn text_utilities_match_gnu() {
         let input = "b\na\nc\na\n";
@@ -8750,7 +9407,7 @@ mod tests {
         for src in [
             "f() { echo; }",
             "case x in x) echo;; esac",
-            "echo $((1+2))",
+            "echo $!",
             "cat <<EOF\nx\nEOF",
             "(cd /tmp; ls)",
             "sleep 1 &",

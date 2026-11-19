@@ -47,18 +47,18 @@ impl Drop for Sandbox {
     }
 }
 
-// ── 1. `$((` inside a command substitution is refused up front ───────────
+// ── 1. `$!` inside a command substitution is refused up front ───────────
 
 #[test]
-fn arithmetic_inside_a_command_substitution_refuses_the_whole_script() {
+fn unsupported_inside_a_command_substitution_refuses_the_whole_script() {
     let sb = Sandbox::new("subst-arith");
-    // Each `$((` is named at its own column in the outer source, and nothing
+    // Each `$!` is named at its own column in the outer source, and nothing
     // runs: the `echo` before it is not printed.
     let cases = [
-        ("echo $(echo $((1+1)))", "line 1, column 13"),
-        ("echo a\nx=$(echo $((1+1)))\n", "line 2, column 10"),
-        ("echo `echo $((1+1))`", "line 1, column 12"),
-        ("echo \"$(echo $((2)))\"", "line 1, column 14"),
+        ("echo $(echo $!)", "line 1, column 13"),
+        ("echo a\nx=$(echo $!)\n", "line 2, column 10"),
+        ("echo `echo $!`", "line 1, column 12"),
+        ("echo \"$(echo $!)\"", "line 1, column 14"),
     ];
     for (script, place) in cases {
         let (out, err, code) = sb.run(script);
@@ -66,7 +66,7 @@ fn arithmetic_inside_a_command_substitution_refuses_the_whole_script() {
         assert_eq!(code, 77, "{script}: {err}");
         assert!(
             err.contains(&format!(
-                "arithmetic expansion $((...)) at {place} is not in the in-process POSIX subset"
+                "special parameter at {place} is not in the in-process POSIX subset"
             )),
             "{script}: {err}"
         );
@@ -130,30 +130,30 @@ fn an_array_assignment_is_named_as_an_array() {
     assert!(err.contains("space-separated string"), "{err}");
 }
 
-// ── 5. an error inside a ${...} operand is placed at the operand's own `$((` ──
+// ── 5. an error inside a ${...} operand is placed at the operand's own `$` ──
 
 #[test]
-fn an_arithmetic_refusal_in_an_operand_is_at_its_own_dollar_sign() {
+fn a_refusal_in_an_operand_is_at_its_own_dollar_sign() {
     let sb = Sandbox::new("operand-arith");
-    // The `$((` is at column 11, after `${x:-`; not the `${` at column 6.
-    let (out, err, code) = sb.run("echo ${x:-$((1+1))}\n");
+    // The `$!` is at column 11, after `${x:-`; not the `${` at column 6.
+    let (out, err, code) = sb.run("echo ${x:-$!}\n");
     assert_eq!((out.as_str(), code), ("", 77), "{err}");
     assert!(
-        err.contains("arithmetic expansion $((...)) at line 1, column 11 is not in the in-process POSIX subset"),
+        err.contains("special parameter at line 1, column 11 is not in the in-process POSIX subset"),
         "{err}"
     );
-    // Quoted, the operand is read as double-quoted text: the `$((` at column 12.
-    let (out, err, code) = sb.run("echo \"${x:-$((1+1))}\"\n");
+    // Quoted, the operand is read as double-quoted text: the `$!` at column 12.
+    let (out, err, code) = sb.run("echo \"${x:-$!}\"\n");
     assert_eq!((out.as_str(), code), ("", 77), "{err}");
     assert!(
-        err.contains("arithmetic expansion $((...)) at line 1, column 12"),
+        err.contains("special parameter at line 1, column 12"),
         "{err}"
     );
-    // Nested operands add their own offsets: the `$((` at column 16.
-    let (_, err, code) = sb.run("echo ${x:-${y:-$((1))}}\n");
+    // Nested operands add their own offsets: the `$!` at column 16.
+    let (_, err, code) = sb.run("echo ${x:-${y:-$!}}\n");
     assert_eq!(code, 77, "{err}");
     assert!(
-        err.contains("arithmetic expansion $((...)) at line 1, column 16"),
+        err.contains("special parameter at line 1, column 16"),
         "{err}"
     );
 }

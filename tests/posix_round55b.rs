@@ -75,3 +75,45 @@ fn b1_export_and_a_prefix_assignment_of_a_steering_name_stay_refused() {
     assert_eq!((code, out.as_str()), (0, "x"), "{err}");
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+// ── B2: $((...)) arithmetic ────────────────────────────────────────────────
+
+#[test]
+fn b2_arithmetic_expansion_matches_bash() {
+    let dir = scratch("b2_arith");
+    let cases = [
+        ("echo $((7/2)) $((-7/2)) $((-7%2)) $((2**3))", "3 -3 -1 8"),
+        ("n=0; n=$((n+1)); n=$((n+1)); echo $n", "2"),
+        ("a=6; b=7; echo $((a*b)) $(($a*$b))", "42 42"),
+        ("i=2; echo $(( i < 3 )) $(( i > 3 ))", "1 0"),
+        ("echo $((0x10 + 010))", "24"),
+        ("echo $((5>3 ? 10 : 20))", "10"),
+        ("x=5; echo $((x+=3)) $x", "8 8"),
+        ("echo $((9223372036854775807 + 1))", "-9223372036854775808"),
+        ("for i in 1 2 3; do s=$((s+i)); done; echo $s", "6"),
+    ];
+    for agent in [false, true] {
+        for (script, want) in cases {
+            let (out, err, code) = ish_bash(agent, script, &dir);
+            assert_eq!((out.as_str(), code), (want, 0), "{script}: {err}");
+        }
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn b2_an_arithmetic_error_names_the_expression_and_exits_1() {
+    let dir = scratch("b2_err");
+    for (script, text) in [
+        ("echo $((1/0))", "division by 0"),
+        ("echo $((5%0))", "division by 0"),
+        ("echo $((1+))", "operand expected"),
+        ("echo $((08))", "value too great"),
+    ] {
+        let (out, err, code) = ish_bash(false, script, &dir);
+        assert_eq!(code, 1, "{script}: {out} {err}");
+        assert_eq!(out, "", "{script}: the command must not run");
+        assert!(err.contains(text), "{script}: {err}");
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
