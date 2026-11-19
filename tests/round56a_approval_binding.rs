@@ -177,3 +177,38 @@ fn the_approval_shows_the_environment_it_binds() {
     let again = approval_after(&dir, "");
     assert_eq!(again["approval"]["token"], plain["approval"]["token"]);
 }
+
+#[test]
+fn an_agent_cannot_unset_a_steering_variable_under_ish_b() {
+    let dir = scratch("unset");
+    for name in ["HTTPS_PROXY", "GIT_CONFIG_GLOBAL", "SSL_CERT_FILE", "GOENV"] {
+        let out = Command::new(env!("CARGO_BIN_EXE_ish"))
+            .args(["-b", "--agent", "-c", &format!("unset {name}")])
+            .current_dir(dir.join("proj"))
+            .env("IRONSHELL_SESSION_DIR", dir.join("session"))
+            .env("NO_COLOR", "1")
+            .env(name, "operator-set")
+            .env_remove("IRONSHELL_MODE")
+            .env_remove("IRONSHELL_WORKSPACE")
+            .output()
+            .expect("run ish");
+        let shown = format!(
+            "{}{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert_eq!(out.status.code(), Some(77), "unset {name}: {shown}");
+        assert!(shown.contains("E_POLICY_DENY"), "unset {name}: {shown}");
+    }
+    // An ordinary name is still unset without trouble.
+    let out = Command::new(env!("CARGO_BIN_EXE_ish"))
+        .args(["-b", "--agent", "-c", "unset MY_APP_FLAG"])
+        .current_dir(dir.join("proj"))
+        .env("IRONSHELL_SESSION_DIR", dir.join("session"))
+        .env("NO_COLOR", "1")
+        .env_remove("IRONSHELL_MODE")
+        .env_remove("IRONSHELL_WORKSPACE")
+        .output()
+        .expect("run ish");
+    assert_eq!(out.status.code(), Some(0));
+}

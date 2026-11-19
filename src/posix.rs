@@ -3080,6 +3080,12 @@ impl Shell {
             }
             "unset" => {
                 for a in args {
+                    // Removing a variable the operator set (`HTTPS_PROXY`,
+                    // `GIT_CONFIG_GLOBAL`) changes what children get, so an
+                    // agent may no more unset a steering name than export one.
+                    if refuse_steering(sink, a) {
+                        return Flow::Next(POLICY_DENY_STATUS);
+                    }
                     self.vars.remove(a);
                     self.exported.retain(|n| n != a);
                     // An inherited variable is removed from what children get.
