@@ -18475,6 +18475,34 @@ fn expand_week_or_ordinal(builtin: &str, text: &str) -> Result<Option<String>> {
     use chrono::Datelike as _;
     let b = text.as_bytes();
     let digits = |s: &[u8]| s.iter().all(u8::is_ascii_digit);
+    // A week without its weekday (`2024-W09`) and the basic week form
+    // (`2024W093`) are named for what they are, not blamed on zero padding.
+    if text.is_ascii() && b.len() >= 7 && digits(&b[0..4]) {
+        let end_or_time = |at: usize| text.len() == at || matches!(b[at], b'T' | b't' | b' ');
+        let week_only =
+            b.len() >= 8 && b[4] == b'-' && b[5] == b'W' && digits(&b[6..8]) && end_or_time(8);
+        let basic_week = b[4] == b'W' && digits(&b[5..7]);
+        if week_only {
+            return Err(crate::safety::bad_arg_in(
+                builtin,
+                format!(
+                    "{builtin}: {text:?} is an ISO week without a weekday: write {}-W{}-1 (Monday) .. {}-W{}-7 (Sunday)",
+                    &text[0..4],
+                    &text[6..8],
+                    &text[0..4],
+                    &text[6..8]
+                ),
+                "accepted forms: 2024-02-29, 20240229, 2024-W09-4 (week date, weekday 1-7), 2024-060 (ordinal), each optionally followed by T13:05[:09][Z|+05:30]",
+            ));
+        }
+        if basic_week {
+            return Err(crate::safety::bad_arg_in(
+                builtin,
+                format!("{builtin}: {text:?} is the basic ISO week form, which is not read"),
+                "accepted forms: 2024-02-29, 20240229, 2024-W09-4 (week date, weekday 1-7), 2024-060 (ordinal), each optionally followed by T13:05[:09][Z|+05:30]",
+            ));
+        }
+    }
     if !text.is_ascii() || b.len() < 8 || !digits(&b[0..4]) || b[4] != b'-' {
         return Ok(None);
     }
@@ -26625,6 +26653,9 @@ fn rewind_record(
         let mut m = std::collections::BTreeMap::new();
         // The step's id, as journal() and session_history() name it.
         if let Some(seq) = r.seq {
+            // `id` is the name journal() gives the same number, and the one
+            // undo({id: N}) takes; `seq` stays for callers that read it.
+            m.insert("id".to_string(), Value::Int(seq as i64));
             m.insert("seq".to_string(), Value::Int(seq as i64));
         }
         let (action, what, why) = match &r.outcome {
@@ -26691,7 +26722,7 @@ fn journal_rows(entries: &[crate::journal::Entry]) -> Vec<Value> {
             m.insert("builtin".to_string(), Value::Str(e.builtin.clone()));
             m.insert("effect".to_string(), Value::Str(e.effect.clone()));
             if !e.path.is_empty() {
-                m.insert("path".to_string(), Value::Str(e.path.clone()));
+                m.insert("path".to_string(), Value::Str(e.path.replace('\\', "/")));
             }
             m.insert("reversible".to_string(), Value::Bool(e.reversible()));
             if let crate::journal::Before::Irreversible(why) = &e.before {
@@ -26825,6 +26856,26 @@ fn bi_handle_drop(args: Vec<Value>) -> Result<Value> {
     Ok(Value::Bool(crate::handles::drop_handle(&id)))
 }
 
+/// The call that narrows a handle to `v`, with `{id}` where the id goes. An
+/// Array is narrowed with `where`; a Record cannot be, so the hint names its
+/// largest Array field (`journal()` holds its rows in `entries`).
+fn handle_narrow_text(v: &Value) -> String {
+    if let Value::Record(m) = v {
+        let field = m
+            .iter()
+            .filter_map(|(k, val)| match val {
+                Value::Array(a) => Some((a.len(), k)),
+                _ => None,
+            })
+            .max_by_key(|(n, _)| *n);
+        if let Some((_, k)) = field {
+            return format!("handle(\"{{id}}\").{k} | where(...) | take(5)");
+        }
+        return "handle(\"{id}\").field reads one field of the Record".to_string();
+    }
+    "handle(\"{id}\") | where(...) | take(5)".to_string()
+}
+
 /// Render a large result as a handle: what it is, how big, a short preview, and
 /// the exact call that narrows it down.
 ///
@@ -26833,6 +26884,7 @@ fn bi_handle_drop(args: Vec<Value>) -> Result<Value> {
 /// site teaches itself at the moment it is needed, which beats requiring a
 /// discovery round-trip to learn how to avoid a discovery round-trip.
 fn render_handle(v: Value, full_bytes: usize) -> anyhow::Result<String> {
+    let narrow = handle_narrow_text(&v);
     let preview = crate::handles::preview_of(&v);
     let omitted = crate::handles::omitted(&v);
     let h = crate::handles::put(v, full_bytes)?;
@@ -26848,8 +26900,8 @@ fn render_handle(v: Value, full_bytes: usize) -> anyhow::Result<String> {
         out.push_str(&format!("\n@omitted {omitted}"));
     }
     out.push_str(&format!(
-        "\n@hint handle(\"{}\") | where(...) | take(5)  — full value kept, nothing lost",
-        h.id
+        "\n@hint {}  — full value kept, nothing lost",
+        narrow.replace("{id}", &h.id)
     ));
     Ok(out)
 }
@@ -26867,6 +26919,7 @@ pub fn handle_summary_for_agent(v: &Value) -> Option<Value> {
     if !crate::handles::worth_handling(v, full_bytes) {
         return None;
     }
+    let narrow = handle_narrow_text(v);
     let mut out = BTreeMap::new();
     match crate::handles::put(v.clone(), full_bytes) {
         Ok(h) => {
@@ -26880,8 +26933,8 @@ pub fn handle_summary_for_agent(v: &Value) -> Option<Value> {
             out.insert(
                 "hint".to_string(),
                 Value::Str(format!(
-                    "handle(\"{}\") | where(...) | take(5): the full value is kept, nothing is lost",
-                    h.id
+                    "{}: the full value is kept, nothing is lost",
+                    narrow.replace("{id}", &h.id)
                 )),
             );
         }
@@ -56872,7 +56925,9 @@ fn bi_file_patch(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
     for (index, patch) in patches.iter().enumerate() {
         let Value::Record(record) = patch else {
             return Err(crate::safety::arg_err(format!(
-                "{builtin}: patch {index} must be a record"
+                "{builtin}: patch {} of {} must be a record",
+                index + 1,
+                patches.len()
             )));
         };
         for names in [["find", "old", "search"], ["replace", "new", "with"]] {
@@ -56884,7 +56939,9 @@ fn bi_file_patch(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
                 Some(Value::Str(_))
             ) {
                 return Err(crate::safety::arg_err(format!(
-                    "{builtin}: patch {index} requires a {} string",
+                    "{builtin}: patch {} of {} requires a {} string",
+                    index + 1,
+                    patches.len(),
                     names[0]
                 )));
             }
@@ -56917,7 +56974,11 @@ fn bi_file_patch(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
             Value::Record(r) => r,
             _ => {
                 failed_at.push(i);
-                failed.push(Value::Str(format!("patch {}: not a record", i)));
+                failed.push(Value::Str(format!(
+                    "patch {} of {}: not a record",
+                    i + 1,
+                    patches.len()
+                )));
                 continue;
             }
         };
@@ -56930,7 +56991,11 @@ fn bi_file_patch(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
             Some(Value::Str(s)) => s.clone(),
             _ => {
                 failed_at.push(i);
-                failed.push(Value::Str(format!("patch {}: missing 'find' string", i)));
+                failed.push(Value::Str(format!(
+                    "patch {} of {}: missing 'find' string",
+                    i + 1,
+                    patches.len()
+                )));
                 continue;
             }
         };
@@ -56943,7 +57008,11 @@ fn bi_file_patch(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
             Some(Value::Str(s)) => s.clone(),
             _ => {
                 failed_at.push(i);
-                failed.push(Value::Str(format!("patch {}: missing 'replace' string", i)));
+                failed.push(Value::Str(format!(
+                    "patch {} of {}: missing 'replace' string",
+                    i + 1,
+                    patches.len()
+                )));
                 continue;
             }
         };
@@ -56963,8 +57032,9 @@ fn bi_file_patch(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
             failed_at.push(i);
             failed_find.push(find_str.clone());
             failed.push(Value::Str(format!(
-                "patch {}: '{}' not found",
-                i,
+                "patch {} of {}: '{}' not found",
+                i + 1,
+                patches.len(),
                 if find_str.chars().nth(40).is_some() {
                     format!("{}...", find_str.chars().take(40).collect::<String>())
                 } else {
@@ -56984,9 +57054,11 @@ fn bi_file_patch(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
             builtin,
             format!("{builtin}: pattern not found in {path}"),
             &format!(
-                "patch {first} looks for {find:?}, which is not in the file as written. \
+                "patch {} of {} looks for {find:?}, which is not in the file as written. \
                  Nothing was written. Read the file first and copy the exact text: a \
-                 match is an exact, case-sensitive substring."
+                 match is an exact, case-sensitive substring.",
+                first + 1,
+                patches.len()
             ),
         ));
     }
@@ -61735,7 +61807,7 @@ fn bi_session_history(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
             m.insert("builtin".to_string(), Value::Str(r.builtin.clone()));
             m.insert("effect".to_string(), Value::Str(r.effect.clone()));
             if !r.path.is_empty() {
-                m.insert("path".to_string(), Value::Str(r.path.clone()));
+                m.insert("path".to_string(), Value::Str(r.path.replace('\\', "/")));
             }
             Value::Record(m)
         })
@@ -86847,5 +86919,29 @@ mod ai_local_generate_chat_tests {
         extra.insert("content".to_string(), Value::Str("hi".to_string()));
         extra.insert("name".to_string(), Value::Str("x".to_string()));
         assert_eq!(refused(vec![Value::Record(extra)]), BadArg);
+    }
+}
+
+#[cfg(test)]
+mod handle_hint_tests {
+    use super::*;
+
+    #[test]
+    fn a_record_handle_is_narrowed_through_its_array_field() {
+        let mut m = BTreeMap::new();
+        m.insert("enabled".to_string(), Value::Bool(true));
+        m.insert("steps".to_string(), Value::Int(2));
+        m.insert(
+            "entries".to_string(),
+            Value::Array(vec![Value::Int(1), Value::Int(2)]),
+        );
+        assert_eq!(
+            handle_narrow_text(&Value::Record(m)),
+            "handle(\"{id}\").entries | where(...) | take(5)"
+        );
+        assert_eq!(
+            handle_narrow_text(&Value::Array(vec![])),
+            "handle(\"{id}\") | where(...) | take(5)"
+        );
     }
 }

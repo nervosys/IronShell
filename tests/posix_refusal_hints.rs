@@ -59,7 +59,7 @@ fn a_case_is_told_to_become_if_elif() {
         "case",
         "case x in x) echo y;; esac\n",
         "case ... esac at line 1, column 1",
-        "rewrite it as if/elif with [ \"$x\" = value ] tests",
+        "rewrite it as if/elif with [ \"$x\" = a ] tests",
     );
 }
 
@@ -122,4 +122,12 @@ fn a_case_conversion_names_its_operator_and_suggests_tr() {
         "${...} operator `^^` at line 1, column 13",
         "change the text with tr or sed",
     );
+}
+
+#[test]
+fn a_for_without_a_list_is_told_to_write_dollar_at() {
+    let out = run("for_no_in", "for x; do echo $x; done\n");
+    let err = String::from_utf8_lossy(&out.stderr).into_owned();
+    assert_eq!(out.status.code(), Some(77), "{err}");
+    assert!(err.contains("for x in \"$@\"; do"), "{err}");
 }

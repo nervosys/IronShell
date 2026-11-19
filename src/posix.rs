@@ -8259,8 +8259,9 @@ pub fn refusal_hint(construct: &str) -> String {
     let tip: String = match construct {
         "function definition" => "inline the body, or write the logic in ish".into(),
         "case ... esac" => {
-            "rewrite it as if/elif with [ \"$x\" = value ] tests".into()
+            "case is outside the subset: rewrite it as if/elif with [ \"$x\" = a ] tests, one elif per pattern".into()
         }
+        "for without in" => "a loop over the arguments needs its list spelled out: write for x in \"$@\"; do ...; done".into(),
         "subshell" => "drop the parentheses, or group the commands with { ...; } when they need not run isolated".into(),
         "array assignment" => "arrays are not in the subset: keep the words in a space-separated string and loop over it with `for w in $words; do ...; done`".into(),
         "background job" => "run it in the foreground: drop the trailing &".into(),
