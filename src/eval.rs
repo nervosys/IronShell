@@ -2909,11 +2909,23 @@ fn binop_unchecked(op: &BinOp, a: Value, b: Value) -> Result<Value> {
 /// The refusal for a non-Bool operand of `&&` or `||`. Truthiness is not used
 /// for these operators, so `1 && 2` is refused rather than read as true.
 fn logic_operand_error(op: &BinOp, got: &Value) -> anyhow::Error {
+    // A Record such as file.exists's {exists, is_dir, is_file, path} often
+    // carries the Bool that was meant: name the field.
+    let field = match got {
+        Value::Record(r) => ["exists", "ok", "success", "found", "matched"]
+            .into_iter()
+            .find(|k| matches!(r.get(*k), Some(Value::Bool(_)))),
+        _ => None,
+    };
+    let hint = match field {
+        Some(k) => format!("this Record has a Bool field `{k}`; use .{k}"),
+        None => "compare explicitly, e.g. x != 0, s != \"\", len(a) > 0".to_string(),
+    };
     crate::safety::bad_arg_with_hint(
         &format!("operator {op:?}"),
         "Bool operands",
         got.type_name(),
-        "compare explicitly, e.g. x != 0, s != \"\", len(a) > 0",
+        &hint,
     )
 }
 

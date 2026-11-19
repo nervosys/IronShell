@@ -173,7 +173,7 @@ open("issues.json") | where(fn(r) => (r.title | lower | contains("x")) || (r.bod
 # `|.field` projects, `open` parses by extension (JSON, JSONL, TOML, YAML, CSV, TSV)
 open("issues.json") | where(.state == "open" && .comments > 5) |.number
 open("Cargo.toml").package.version
-cat("src/*.rs") | lines | len          # globs in cat/ls; glob("src/**/*.rs"); {a,b} alternation: glob("**/*.{rs,py}")
+cat("src/*.rs") | lines | len          # globs in cat/ls; glob("src/**/*.rs") (`**` does not enter dot-directories: name them, e.g. `.github/**/*.yml`); {a,b} alternation: glob("**/*.{rs,py}")
 grep("TODO\\|FIXME", "src/*.rs")       # grep is BRE (as grep without -E): a bare | + ? ( ) { } is literal, so "TODO|FIXME" matches nothing; write \\| or pass {extended: true}; no recursive option, grep a glob
 
 # SQL over values or files (read-only, in-process)

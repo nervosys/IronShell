@@ -7980,14 +7980,16 @@ pub static SIGNATURES: &[Signature] = &[
         name: "index_of",        category: Some("String"),
         subject_required: false,
         aliases: &[],
-        subject: Some(Ty::Str),
-        params: &[req("sub", Ty::Str, "the text to look for")],
+        subject: Some(Ty::Any),
+        params: &[req("sub", Ty::Any, "the text to look for (a String), or for an Array subject the value to look for")],
         returns: "Int",
-        doc: "The character offset (not the byte offset; regex_find's start and end are character offsets too) of the first occurrence of sub in a String, or -1 when absent. An empty sub is found at 0. Direct index_of(text, sub) or text | index_of(sub).",
+        doc: "The character offset (not the byte offset; regex_find's start and end are character offsets too) of the first occurrence of sub in a String, or -1 when absent. An empty sub is found at 0. An Array subject gives the index of its first element equal to the value, or -1 when none is. Direct index_of(text, sub) or text | index_of(sub).",
         examples: &[
             (r#"index_of("hello", "l")"#, "2"),
             (r#"index_of("héllo", "l")"#, "2"),
             (r#""hello" | index_of("z")"#, "-1"),
+            (r#"[1, 2, 3] | index_of(2)"#, "1"),
+            (r#"index_of(["a", "b"], "z")"#, "-1"),
         ],
     },
     Signature {
@@ -9787,7 +9789,7 @@ pub static SIGNATURES: &[Signature] = &[
         subject: Some(Ty::Str),
         params: &[],
         returns: "Record",
-        doc: "Whether a path exists, and whether it is a file or a directory. A path that cannot be checked is an error, not absent.",
+        doc: "A Record {exists, is_dir, is_file, path}, not a Bool (write file_exists(p).exists in a condition): whether a path exists, and whether it is a file or a directory. A path that cannot be checked is an error, not absent.",
         examples: &[
             (r#"file_exists("Cargo.toml").exists"#, r#"true"#),
             (r#"(file_exists("Cargo.toml")).is_file"#, r#"true"#),
@@ -9840,7 +9842,7 @@ pub static SIGNATURES: &[Signature] = &[
         subject: None,
         params: &[req("pattern", Ty::Str, "a glob such as src/*.rs or src/**/*.rs")],
         returns: "Array",
-        doc: "Paths matching a glob, sorted; ** matches any depth of directories, `{a,b}` matches either alternative (`**/*.{rs,py}`; nested groups work, and a path matched twice appears once; a group with one alternative, `{rs}`, is that alternative; a brace that is never closed, or a } with no {, is E_BAD_ARG), and a directory in the pattern that does not exist is E_NOT_FOUND. At most 1,000,000 entries; more is E_BUDGET_EXCEEDED.",
+        doc: "Paths matching a glob, sorted; ** matches any depth of directories, `{a,b}` matches either alternative (`**/*.{rs,py}`; nested groups work, and a path matched twice appears once; a group with one alternative, `{rs}`, is that alternative; a brace that is never closed, or a } with no {, is E_BAD_ARG), and a directory in the pattern that does not exist is E_NOT_FOUND. `**` does not enter dot-directories, as in a shell: name them (`.github/**/*.yml`). At most 1,000,000 entries; more is E_BUDGET_EXCEEDED.",
         examples: &[
             (r#"(glob("src/*.rs") | len) > 10"#, r#"true"#),
             (r#"(glob("src/**/*.rs") | len) > (glob("src/*.rs") | len)"#, r#"true"#),

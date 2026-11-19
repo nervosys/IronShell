@@ -273,3 +273,19 @@ fn escaped_dollar_still_stops_interpolation() {
         "n=3\t!"
     );
 }
+
+#[test]
+fn a_record_operand_with_a_bool_field_names_the_field() {
+    let text = run_refusal("r = {exists: true, path: \"x\"}\nr && true");
+    assert!(
+        text.contains("expected Bool operands, got Record"),
+        "{text}"
+    );
+    assert!(
+        text.contains("has a Bool field `exists`; use .exists"),
+        "{text}"
+    );
+    // A Record with no such field keeps the general hint.
+    let text = run_refusal("r = {n: 1}\nr && true");
+    assert!(text.contains("compare explicitly"), "{text}");
+}
