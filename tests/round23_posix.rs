@@ -139,7 +139,9 @@ fn a_refusal_in_an_operand_is_at_its_own_dollar_sign() {
     let (out, err, code) = sb.run("echo ${x:-$!}\n");
     assert_eq!((out.as_str(), code), ("", 77), "{err}");
     assert!(
-        err.contains("special parameter at line 1, column 11 is not in the in-process POSIX subset"),
+        err.contains(
+            "special parameter at line 1, column 11 is not in the in-process POSIX subset"
+        ),
         "{err}"
     );
     // Quoted, the operand is read as double-quoted text: the `$!` at column 12.

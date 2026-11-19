@@ -9179,6 +9179,7 @@ impl ArithEval<'_> {
                 self.dead -= 1;
             }
             let r = r?;
+            v = i64::from(v != 0 || r != 0);
         }
         Ok(v)
     }
@@ -9196,6 +9197,7 @@ impl ArithEval<'_> {
                 self.dead -= 1;
             }
             let r = r?;
+            v = i64::from(v != 0 && r != 0);
         }
         Ok(v)
     }
