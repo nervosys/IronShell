@@ -3807,7 +3807,13 @@ fn module_describe_record(q: &str, defs: &[BuiltinDefinition]) -> JsonValue {
             let description = match builtin.as_deref() {
                 Some(b) => defs
                     .iter()
-                    .find(|d| d.name == b)
+                    .find(|d| {
+                        // The catalogue names an entry by the shortest spelling
+                        // of its dispatch row (`sqlite_query`), while a module
+                        // member runs the long one (`db_sqlite_query`): a
+                        // lookup by name alone left those descriptions empty.
+                        d.name == b || d.aliases.as_ref().is_some_and(|a| a.iter().any(|x| x == b))
+                    })
                     .map(|d| {
                         let first = d
                             .description

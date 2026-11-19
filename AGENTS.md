@@ -205,6 +205,7 @@ now_iso()                      # the current time, e.g. 2026-11-08T14:03:05Z; no
 date_add("2024-02-28", 1, "days"); date_diff("2024-02-29", "2026-11-09"); date_format("2024-02-29", "%d %B %Y")    # ISO 8601 dates, in UTC
 from_toml(to_toml({a: 1})).a           # TOML: to_toml(record) -> String; from_toml(text) -> Record
 merge({a: 1, b: 2}, {b: 3}).b         # merge(a, b): shallow Record merge, b's fields win; `a | merge(b)` pipes
+diff_values({a: 1}, {a: 2})         # [{path: "a", op: "changed", old: 1, new: 2}]: structural diff of two values (op added/removed/changed; paths "b.c", "items[2]"; 1 and 1.0 are equal); `a | diff_values(b)` pipes
 [1, 2] + [3]   # [1, 2, 3]: + concatenates Arrays
 -7.5 % 2       # -1.5: % takes the sign of the dividend, unlike Python; Int and Float mix as Float
 6 / 2          # 3.0: / is true division, so two Ints give a Float; use math.floor(6 / 2) or int(6 / 2) for integer division

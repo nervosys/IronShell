@@ -813,6 +813,8 @@ lazy_static::lazy_static! {
         map.insert("count_by", 1215);
         // Radix text (1216)
         map.insert("to_base", 1216);
+        // Structural difference of two values (1218)
+        map.insert("diff_values", 1218);
         // 500-519: Database
         map.insert("db_sqlite_open", 500);
         map.insert("db_sqlite_query", 1217);
@@ -3914,6 +3916,8 @@ static BUILTIN_DISPATCH: &[fn(Vec<Value>, Option<Value>, &mut Env) -> Result<Val
     // Radix text (1216)
     |args, input, _| bi_to_base(args, input),         // 1216
     |args, input, _| bi_db_sqlite_query(args, input), // 1217
+    // Structural difference of two values
+    |args, input, _| bi_diff_values(args, input), // 1218
 ];
 
 /// The dispatch row that serves `name`, if the fast table has one.
@@ -4017,6 +4021,16 @@ pub fn did_you_mean_among<'a>(name: &str, extra: impl Iterator<Item = &'a str>) 
             out.push(spelled);
         }
     }
+    // A bare member name that exactly one module has (`csv_to_sqlite` is
+    // `db.csv_to_sqlite`) names that member.
+    if !name.contains('.') {
+        if let Some(module) = crate::modules::unique_module_for_member(name) {
+            let spelled = format!("{module}.{name}");
+            if !out.contains(&spelled) {
+                out.push(spelled);
+            }
+        }
+    }
     for near in nearest_names(name, extra.chain(BUILTIN_LOOKUP.keys().copied())) {
         if out.len() == 3 {
             break;
@@ -4034,6 +4048,21 @@ pub fn did_you_mean_among<'a>(name: &str, extra: impl Iterator<Item = &'a str>) 
 fn mapped_spelling(name: &str) -> Vec<String> {
     match name {
         "to_int" | "parse_int" | "as_int" => vec!["int".to_string()],
+        // The ontology has no search: ontology_manifest() lists the categories,
+        // and ontology_describe(category) lists the builtins in one.
+        "ontology_search" | "ontology_find" | "ontology_query" | "search_builtins"
+        | "builtin_search" | "find_builtin" => {
+            vec![
+                "ontology_manifest".to_string(),
+                "ontology_describe".to_string(),
+            ]
+        }
+        // A structural difference of two values is diff_values; `diff` of two
+        // files is file.diff.
+        "diff" => vec!["diff_values".to_string(), "file.diff".to_string()],
+        "json_diff" | "deep_diff" | "record_diff" | "diff_json" | "diff_records" => {
+            vec!["diff_values".to_string()]
+        }
         "to_float" | "parse_float" | "as_float" => vec!["float".to_string()],
         "number" | "to_number" | "parse_number" => {
             vec!["int".to_string(), "float".to_string()]
@@ -9332,11 +9361,9 @@ fn bi_ls(args: Vec<Value>, _input: Option<Value>) -> Result<Value> {
         // verbatim prefix; report the ordinary drive path.
         record.insert(
             "path".to_string(),
-            Value::Str(
-                crate::safety::strip_verbatim_prefix(&path)
-                    .to_string_lossy()
-                    .to_string(),
-            ),
+            Value::Str(slash_path(
+                &crate::safety::strip_verbatim_prefix(&path).to_string_lossy(),
+            )),
         );
         record.insert("ext".to_string(), Value::Str(ext));
         record.insert("is_dir".to_string(), Value::Bool(metadata.is_dir()));
@@ -19208,6 +19235,73 @@ pub(crate) fn toml_nonfinite_refusal(builtin: &str, value: &toml::Value) -> Opti
 /// Example:
 ///   merge({a: 1, b: 2}, {b: 3}).b    # 3
 ///   {a: 1} | merge({a: 0, c: 4}).a   # 0
+fn bi_diff_values(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
+    const B: &str = "diff_values";
+    let (a, b) = match (input, args.as_slice()) {
+        (Some(a), [b]) => (a, b.clone()),
+        (None, [a, b]) => (a.clone(), b.clone()),
+        _ => {
+            return Err(arity_error(
+                B,
+                "two values: diff_values(a, b), or a | diff_values(b)",
+                args.len(),
+            ))
+        }
+    };
+    let mut rows = Vec::new();
+    diff_values_walk("", &a, &b, &mut rows);
+    Ok(Value::Array(rows))
+}
+
+/// One {path, op, old, new} row of `diff_values`.
+fn diff_row(path: &str, op: &str, old: Value, new: Value) -> Value {
+    let mut row = BTreeMap::new();
+    row.insert("path".to_string(), Value::Str(path.to_string()));
+    row.insert("op".to_string(), Value::Str(op.to_string()));
+    row.insert("old".to_string(), old);
+    row.insert("new".to_string(), new);
+    Value::Record(row)
+}
+
+/// The rows that turn `a` into `b`: Records are compared key by key (in sorted
+/// order), Arrays by index, anything else whole (1 and 1.0 are equal).
+fn diff_values_walk(path: &str, a: &Value, b: &Value, out: &mut Vec<Value>) {
+    match (a, b) {
+        (Value::Record(x), Value::Record(y)) => {
+            let keys: std::collections::BTreeSet<&String> = x.keys().chain(y.keys()).collect();
+            for k in keys {
+                let sub = if path.is_empty() {
+                    k.to_string()
+                } else {
+                    format!("{path}.{k}")
+                };
+                match (x.get(k), y.get(k)) {
+                    (Some(l), Some(r)) => diff_values_walk(&sub, l, r, out),
+                    (Some(l), None) => out.push(diff_row(&sub, "removed", l.clone(), Value::Null)),
+                    (None, Some(r)) => out.push(diff_row(&sub, "added", Value::Null, r.clone())),
+                    (None, None) => {}
+                }
+            }
+        }
+        (Value::Array(x), Value::Array(y)) => {
+            for i in 0..x.len().max(y.len()) {
+                let sub = format!("{path}[{i}]");
+                match (x.get(i), y.get(i)) {
+                    (Some(l), Some(r)) => diff_values_walk(&sub, l, r, out),
+                    (Some(l), None) => out.push(diff_row(&sub, "removed", l.clone(), Value::Null)),
+                    (None, Some(r)) => out.push(diff_row(&sub, "added", Value::Null, r.clone())),
+                    (None, None) => {}
+                }
+            }
+        }
+        _ => {
+            if !values_equal(a, b) {
+                out.push(diff_row(path, "changed", a.clone(), b.clone()));
+            }
+        }
+    }
+}
+
 fn bi_merge(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
     const B: &str = "merge";
     let (first, second) = match (input, args.as_slice()) {
@@ -28106,14 +28200,30 @@ fn bi_ontology_describe(args: Vec<Value>, _input: Option<Value>) -> Result<Value
                 ));
             }
         }
+        // A bare name that exactly one module has as a member describes that
+        // member: help("csv_to_sqlite") is help("db.csv_to_sqlite").
+        if !q.contains('.') {
+            if let Some(module) = crate::modules::unique_module_for_member(q.trim()) {
+                let qualified =
+                    crate::agent_api::ontology_describe_json(&format!("{module}.{}", q.trim()));
+                if qualified.get("error").is_none() {
+                    return Ok(Value::from_json(&qualified));
+                }
+            }
+        }
         let categories = crate::agent_api::ontology_category_names();
-        let candidates = nearest_names(
-            q.trim(),
-            BUILTIN_LOOKUP
-                .keys()
-                .copied()
-                .chain(categories.iter().map(String::as_str)),
-        );
+        let mapped = mapped_spelling(q.trim());
+        let candidates = if mapped.is_empty() {
+            nearest_names(
+                q.trim(),
+                BUILTIN_LOOKUP
+                    .keys()
+                    .copied()
+                    .chain(categories.iter().map(String::as_str)),
+            )
+        } else {
+            mapped
+        };
         return Err(crate::safety::unknown_builtin(q.trim(), candidates));
     }
     Ok(Value::from_json(&described))
@@ -35139,6 +35249,17 @@ fn first_project_text(builtin: &str, names: &[&str]) -> Result<Value> {
 /// A directory that cannot be listed is an error, not an empty subtree. The
 /// walk used to skip it, and an unreadable root returned []: a shorter listing
 /// that looked complete.
+/// A path as text with `/` separators on every platform, as `glob` and the
+/// `path_*` builtins write it. On Windows `\` separates, so it becomes `/`;
+/// elsewhere a backslash is a legal file-name character and stays.
+fn slash_path(path: &str) -> String {
+    if cfg!(windows) {
+        path.replace('\\', "/")
+    } else {
+        path.to_string()
+    }
+}
+
 fn walk_entries_capped(dir: &std::path::Path, max_depth: usize, max: usize) -> Result<Vec<Value>> {
     fn walk_recursive(
         dir: &std::path::Path,
@@ -35155,7 +35276,7 @@ fn walk_entries_capped(dir: &std::path::Path, max_depth: usize, max: usize) -> R
         for entry in entries {
             let entry = entry.map_err(|e| crate::safety::fs_error("fs_walk", dir, &e))?;
             let path = entry.path();
-            let shown = Value::Str(path.to_string_lossy().to_string());
+            let shown = Value::Str(slash_path(&path.to_string_lossy()));
             push_capped("fs_walk", results, shown, max)?;
             // Only a directory the walk would descend into needs its type
             // checked; one at the depth limit is listed and not opened.

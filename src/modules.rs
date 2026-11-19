@@ -1508,6 +1508,23 @@ pub fn is_module_record(module: &str, map: &std::collections::BTreeMap<String, V
     })
 }
 
+/// The one module that has a builtin member named `member`, or None when no
+/// module has one or several do (`read` is a member of more than one).
+pub fn unique_module_for_member(member: &str) -> Option<&'static str> {
+    let mut found: Option<&'static str> = None;
+    for (m, v) in module_table() {
+        let Value::Record(members) = v else { continue };
+        if !matches!(members.get(member), Some(Value::Builtin(_))) {
+            continue;
+        }
+        match found {
+            Some(f) if f != *m => return None,
+            _ => found = Some(*m),
+        }
+    }
+    found
+}
+
 /// The member names of the registered module `module`, in key order. A module
 /// registered more than once (`platform`) lists the members of every record.
 pub fn module_member_names(module: &str) -> Vec<&'static str> {
