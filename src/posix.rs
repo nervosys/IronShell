@@ -3259,7 +3259,23 @@ impl Shell {
             sink.eline(&message);
             return 2;
         }
-        if let Err(e) = crate::safety::guard_exec("posix", argv.join(" ")) {
+        // What the child gets beyond this process's environment (exports and
+        // prefix assignments) is part of what is approved.
+        let mut child_env: Vec<(String, String)> = Vec::new();
+        for n in &self.exported {
+            if let Some(v) = self.vars.get(n) {
+                child_env.push((n.clone(), v.clone()));
+            }
+        }
+        child_env.extend(env.iter().cloned());
+        // Later entries win, as they do on the command below.
+        let mut deduped: std::collections::BTreeMap<String, String> =
+            std::collections::BTreeMap::new();
+        for (n, v) in child_env {
+            deduped.insert(n, v);
+        }
+        let child_env: Vec<(String, String)> = deduped.into_iter().collect();
+        if let Err(e) = crate::safety::guard_exec_env("posix", argv.join(" "), &child_env) {
             sink.eline(&e.to_string());
             return e.code.exit_code();
         }
@@ -3419,6 +3435,14 @@ impl Shell {
         } else {
             std::process::Stdio::inherit()
         });
+        // With a run deadline (`--timeout`) the child leads its own process
+        // group (unix), so the whole tree can be killed when the deadline passes.
+        let bounded = crate::safety::remaining_deadline().is_some();
+        #[cfg(unix)]
+        if bounded {
+            use std::os::unix::process::CommandExt;
+            cmd.process_group(0);
+        }
         let mut child = match cmd.spawn() {
             Ok(c) => c,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
@@ -3451,11 +3475,30 @@ impl Shell {
         } else {
             None
         };
-        let out = match child.wait_with_output() {
-            Ok(o) => o,
-            Err(e) => {
-                sink.eline(&format!("{SHELL_NAME}: {name}: {}", io_reason(&e)));
-                return 1;
+        let out = if bounded {
+            let guard = crate::builtins::TreeGuard::new(&child);
+            match wait_output_bounded(child, &guard) {
+                Ok(Some(o)) => o,
+                Ok(None) => {
+                    let refusal = crate::safety::run_deadline_error("posix", name);
+                    sink.eline(&refusal.to_string());
+                    return refusal
+                        .downcast_ref::<crate::safety::SafetyError>()
+                        .map(|e| e.code.exit_code())
+                        .unwrap_or(1);
+                }
+                Err(e) => {
+                    sink.eline(&format!("{SHELL_NAME}: {name}: {}", io_reason(&e)));
+                    return 1;
+                }
+            }
+        } else {
+            match child.wait_with_output() {
+                Ok(o) => o,
+                Err(e) => {
+                    sink.eline(&format!("{SHELL_NAME}: {name}: {}", io_reason(&e)));
+                    return 1;
+                }
             }
         };
         if let Some(w) = writer {
@@ -3467,6 +3510,53 @@ impl Shell {
         }
         out.status.code().unwrap_or(128)
     }
+}
+
+/// Wait for `child` and collect its output like `wait_with_output`, but stop at
+/// the run's deadline: the child's tree is killed and `Ok(None)` returned. The
+/// pipes are read on their own threads, and after a kill they are given two
+/// seconds, not joined, so a descendant that kept one open cannot hold the call.
+fn wait_output_bounded(
+    mut child: std::process::Child,
+    guard: &crate::builtins::TreeGuard,
+) -> std::io::Result<Option<std::process::Output>> {
+    use std::io::Read;
+    fn drain<R: Read + Send + 'static>(pipe: Option<R>) -> std::sync::mpsc::Receiver<Vec<u8>> {
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let mut buf = Vec::new();
+            if let Some(mut p) = pipe {
+                let _ = p.read_to_end(&mut buf);
+            }
+            let _ = tx.send(buf);
+        });
+        rx
+    }
+    let out_rx = drain(child.stdout.take());
+    let err_rx = drain(child.stderr.take());
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) => {}
+            Err(e) => {
+                guard.kill(&mut child);
+                return Err(e);
+            }
+        }
+        if crate::safety::deadline_passed() {
+            guard.kill(&mut child);
+            return Ok(None);
+        }
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    };
+    let grace = std::time::Duration::from_secs(2);
+    let stdout = out_rx.recv_timeout(grace).unwrap_or_default();
+    let stderr = err_rx.recv_timeout(grace).unwrap_or_default();
+    Ok(Some(std::process::Output {
+        status,
+        stdout,
+        stderr,
+    }))
 }
 
 /// The environment variable that counts how deeply scripts nest: a script's

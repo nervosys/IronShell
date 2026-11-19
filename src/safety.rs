@@ -2317,6 +2317,26 @@ pub fn not_found(builtin: &str, kind: &str, name: &str) -> anyhow::Error {
     })
 }
 
+/// [`not_found`] for a script named on the command line (`ish x.ish`). A script
+/// argument is resolved against the directory `ish` was started in, and is made
+/// absolute before `--workspace` moves the working directory, so the hint must
+/// not say the path was resolved against the workspace.
+pub fn script_not_found(builtin: &str, path: &str) -> anyhow::Error {
+    let err = not_found(builtin, "file", path);
+    if path.is_empty() || control_char_path_hint(path).is_some() {
+        return err;
+    }
+    match err.downcast::<SafetyError>() {
+        Ok(mut se) => {
+            se.hint = format!(
+                "no script at this path; a script argument is resolved against the directory ish was started in (not against --workspace), so look for it at {path} and check the spelling and that directory"
+            );
+            anyhow::Error::new(se)
+        }
+        Err(other) => other,
+    }
+}
+
 /// `E_NOT_FOUND` for a journal step id that no step has. The journal's own
 /// word is "step": an id names a step, and "entry" is the file-edit term.
 pub fn journal_step_not_found(builtin: &str, id: usize, by_step: bool) -> anyhow::Error {
@@ -2577,6 +2597,13 @@ pub fn output_with_timeout(
     })?;
     let status = match run.status {
         Some(status) if !run.timed_out => status,
+        _ if run.timed_out && deadline_passed() => {
+            return Err(std::io::Error::other(budget_error(
+                &program,
+                "was killed: the run's --timeout expired".to_string(),
+                "the child and its process tree were stopped and its result discarded; give the run a longer --timeout SECONDS",
+            )))
+        }
         _ => {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::TimedOut,
@@ -3767,6 +3794,56 @@ fn file_hash16(path: &str) -> Option<String> {
     Some(hex(&digest)[..16].to_string())
 }
 
+/// The most workspace files an exec approval hashes.
+const OPERAND_HASH_LIMIT: usize = 32;
+/// The most candidate names examined for those hashes.
+const OPERAND_CANDIDATE_LIMIT: usize = 512;
+/// The longest argument that is split into words to look for file names.
+const OPERAND_SPLIT_MAX_CHARS: usize = 4096;
+
+/// Push the names in one argument that may be a file the command runs or
+/// reads: the argument itself; the part after the first `:` or `=` of a
+/// `-Flag:value` or `--flag=value` argument; and, for an argument that is a
+/// piece of script (`. ./x.ps1`, `call x.cmd`, `& 'a b.ps1'`), each word of it
+/// split on whitespace, quotes, `;`, `&`, `|`, `(`, `)` and `,`, with the part
+/// after a `:` or `=` of a word as well. A name that is no existing file is
+/// dropped later, so over-collecting here costs nothing.
+fn operand_candidates(arg: &str, out: &mut Vec<String>) {
+    out.push(arg.to_string());
+    let after_flag = |s: &str| -> Option<String> {
+        let rest = s.strip_prefix('-')?;
+        let i = rest.find([':', '='])?;
+        let v = rest[i + 1..].trim_matches(['\x27', '"']);
+        (!v.is_empty()).then(|| v.to_string())
+    };
+    if let Some(v) = after_flag(arg) {
+        out.push(v);
+    }
+    if arg.chars().count() > OPERAND_SPLIT_MAX_CHARS {
+        return;
+    }
+    let splits = |c: char| {
+        c.is_whitespace() || matches!(c, '\x27' | '"' | ';' | '&' | '|' | '(' | ')' | ',')
+    };
+    if !arg.contains(splits) {
+        return;
+    }
+    for word in arg.split(splits).filter(|w| !w.is_empty()) {
+        out.push(word.to_string());
+        if let Some(v) = after_flag(word) {
+            out.push(v);
+        }
+        if !word.starts_with('-') {
+            if let Some(i) = word.find('=') {
+                let v = &word[i + 1..];
+                if !v.is_empty() {
+                    out.push(v.to_string());
+                }
+            }
+        }
+    }
+}
+
 /// Add to an exec approval's blast radius what the command will run on: a
 /// content hash of each operand that names an existing regular file inside the
 /// workspace (`operand_hashes`), and the environment changes this process made
@@ -3776,7 +3853,7 @@ fn bind_exec_context(radius: &mut Json) {
     let mut operands: Vec<String> = Vec::new();
     let mut take = |v: &Json| {
         if let Some(s) = v.as_str() {
-            operands.push(s.to_string());
+            operand_candidates(s, &mut operands);
         }
     };
     if let Some(p) = radius.get("program") {
@@ -3787,11 +3864,14 @@ fn bind_exec_context(radius: &mut Json) {
     }
     if let Some(command) = radius.get("command").and_then(Json::as_str) {
         for word in command.split_whitespace() {
-            operands.push(word.trim_matches(['\x27', '"']).to_string());
+            operand_candidates(word.trim_matches(['\x27', '"']), &mut operands);
         }
     }
     let mut hashes = serde_json::Map::new();
-    for operand in operands.into_iter().take(64) {
+    for operand in operands.into_iter().take(OPERAND_CANDIDATE_LIMIT) {
+        if hashes.len() >= OPERAND_HASH_LIMIT {
+            break;
+        }
         if operand.is_empty() || operand.starts_with('-') || hashes.contains_key(&operand) {
             continue;
         }
@@ -6223,6 +6303,37 @@ pub fn guard_exec(builtin: &str, command: impl Into<String>) -> Result<(), Safet
         blast_radius: serde_json::json!({ "command": command }),
         reversible: false,
         // A command string is not a path, so it must not be jailed as one.
+        fs_paths: false,
+    })
+}
+
+/// [`guard_exec`] for a command that also gets environment beyond this
+/// process's own: `env` (name, value) pairs from prefix assignments and
+/// exports. They are bound into the approval, sorted by name, so a change of
+/// name or value gives a new token. With no pairs the descriptor, and so the
+/// token, is exactly [`guard_exec`]'s.
+pub fn guard_exec_env(
+    builtin: &str,
+    command: impl Into<String>,
+    env: &[(String, String)],
+) -> Result<(), SafetyError> {
+    let command = command.into();
+    let sorted: std::collections::BTreeMap<&str, &str> =
+        env.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
+    let mut radius = serde_json::json!({ "command": command });
+    if !sorted.is_empty() {
+        let pairs: Vec<Json> = sorted.iter().map(|(k, v)| json!([k, v])).collect();
+        if let Some(map) = radius.as_object_mut() {
+            map.insert("child_env".to_string(), Json::Array(pairs));
+        }
+    }
+    guard(GuardCtx {
+        builtin,
+        effect: Effect::Exec,
+        what: "exec",
+        targets: vec![command.clone()],
+        blast_radius: radius,
+        reversible: false,
         fs_paths: false,
     })
 }
@@ -9478,6 +9589,12 @@ pub(crate) fn env_name_steers_children(name: &str) -> bool {
         "TMP",
         "TMPDIR",
         "AETHER_SESSION_DIR",
+        // .NET and Windows names that load code into, or redirect, a program:
+        // `DOTNET_STARTUP_HOOKS` loads a DLL into an approved `pwsh`.
+        "WINDIR",
+        "__COMPAT_LAYER",
+        "NUGET_PACKAGES",
+        "PSDEFAULTPARAMETERVALUES",
     ];
     const PREFIXES: &[&str] = &[
         "IRONSHELL_",
@@ -9494,6 +9611,10 @@ pub(crate) fn env_name_steers_children(name: &str) -> bool {
         "BUNDLE_",
         "PYTHON",
         "UV_",
+        "DOTNET_",
+        "COMPLUS_",
+        "CORECLR_",
+        "COR_",
     ];
     const SUFFIXES: &[&str] = &[
         "_PROXY",
@@ -9837,6 +9958,20 @@ pub fn check_deadline_now() -> anyhow::Result<()> {
         )),
         _ => Ok(()),
     })
+}
+
+/// The coded budget error for a child process the run's own deadline killed:
+/// it names `--timeout` (and its length when the command line set one).
+pub(crate) fn run_deadline_error(builtin: &str, command: &str) -> anyhow::Error {
+    let limit = match CLI_TIMEOUT_SECS.load(std::sync::atomic::Ordering::Relaxed) {
+        0 => String::new(),
+        n => format!(" of {n} s"),
+    };
+    budget_exceeded(
+        builtin,
+        format!("`{command}` was killed: the run's --timeout{limit} expired"),
+        "the child and its process tree were stopped and its result discarded; it can have left work half done, so check the state before retrying, or give the run a longer --timeout SECONDS",
+    )
 }
 
 /// Whether this thread's evaluation deadline has passed (false when none is set).
@@ -11545,5 +11680,34 @@ mod mirror_and_git_install_tests {
             ("PATH", r"\\ae-no-such-host\share"),
         ]));
         assert_eq!(none, plain);
+    }
+}
+
+#[cfg(test)]
+mod operand_candidate_tests {
+    use super::operand_candidates;
+
+    fn names(arg: &str) -> Vec<String> {
+        let mut out = Vec::new();
+        operand_candidates(arg, &mut out);
+        out
+    }
+
+    #[test]
+    fn a_file_inside_an_argument_is_a_candidate() {
+        assert!(names("-File:x.ps1").contains(&"x.ps1".to_string()));
+        assert!(names("--config=a.toml").contains(&"a.toml".to_string()));
+        assert!(names(". ./x.ps1").contains(&"./x.ps1".to_string()));
+        assert!(names("call x.cmd").contains(&"x.cmd".to_string()));
+        assert!(names("& 'x y.ps1'").contains(&"x".to_string()));
+        assert!(names("a;b.ps1").contains(&"b.ps1".to_string()));
+        assert!(names("-Command:\". ./z.ps1\"").contains(&"./z.ps1".to_string()));
+    }
+
+    #[test]
+    fn a_huge_argument_is_not_split() {
+        let long = format!("a {}", "b ".repeat(5000));
+        let found = names(&long);
+        assert_eq!(found.len(), 1, "a {}-char argument was split", long.len());
     }
 }

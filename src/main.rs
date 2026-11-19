@@ -728,7 +728,7 @@ fn run(mut cli: Cli) -> Result<()> {
                 // As a run reports a missing script: E_NOT_FOUND, exit 66, the
                 // JSON error shape under --agent.
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                    let err = iron_shell::safety::not_found("explain", "file", f);
+                    let err = iron_shell::safety::script_not_found("explain", f);
                     iron_shell::repl::report_error(&err);
                     std::process::exit(iron_shell::repl::exit_status_for(&err));
                 }
@@ -1509,7 +1509,7 @@ fn run_file(path: &str, explicit_mode: Option<TranspileMode>) -> Result<()> {
         // file is anywhere else in the language; under --agent it is the JSON
         // error shape.
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            let err = iron_shell::safety::not_found("ish", "file", path);
+            let err = iron_shell::safety::script_not_found("ish", path);
             iron_shell::repl::report_error(&err);
             std::process::exit(iron_shell::repl::exit_status_for(&err));
         }

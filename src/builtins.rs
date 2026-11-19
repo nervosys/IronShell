@@ -68159,6 +68159,9 @@ pub(crate) fn run_bounded(
         TreeError::Wait(e) => crate::safety::tool_failed(builtin, &command, None, &e.to_string()),
     })?;
     if run.timed_out {
+        if crate::safety::deadline_passed() {
+            return Err(crate::safety::run_deadline_error(builtin, &command));
+        }
         return Err(crate::safety::budget_exceeded(
             builtin,
             format!("`{command}` did not finish within {deadline_secs} s"),
@@ -68305,6 +68308,12 @@ pub(crate) fn run_tree_cmd_observed(
     let err = PipeReader::start(child.stderr.take(), stderr_keep);
 
     let started = std::time::Instant::now();
+    // The run's own deadline (`--timeout`) bounds the child too: past it the
+    // tree is killed, whatever limit the caller gave.
+    let limit = match crate::safety::remaining_deadline() {
+        Some(left) => limit.min(left),
+        None => limit,
+    };
     let exited = loop {
         match child.try_wait() {
             Ok(Some(status)) => break Some(status),
@@ -68429,6 +68438,9 @@ pub(crate) fn run_output(
                 stdout: run.stdout,
                 stderr: run.stderr,
             })
+        }
+        _ if crate::safety::deadline_passed() => {
+            Err(crate::safety::run_deadline_error(builtin, tool))
         }
         _ => Err(crate::safety::budget_exceeded(
             builtin,
@@ -68608,6 +68620,38 @@ fn kill_tree(child: &mut std::process::Child) {
     }
     let _ = child.kill();
     let _ = child.wait();
+}
+
+/// Kills a child's process tree: made right after the spawn, used at a
+/// deadline. On unix the child must have been started as the leader of its own
+/// process group (`process_group(0)`); on Windows it holds the child's job
+/// object, if one could be made, and falls back to `taskkill /T`.
+pub(crate) struct TreeGuard {
+    #[cfg(windows)]
+    job: Option<TreeJob>,
+}
+
+impl TreeGuard {
+    pub(crate) fn new(child: &std::process::Child) -> Self {
+        #[cfg(windows)]
+        {
+            TreeGuard {
+                job: TreeJob::for_child(child),
+            }
+        }
+        #[cfg(not(windows))]
+        {
+            let _ = child;
+            TreeGuard {}
+        }
+    }
+
+    /// Kill the whole tree, then reap the child.
+    pub(crate) fn kill(&self, child: &mut std::process::Child) {
+        #[cfg(windows)]
+        kill_job(self.job.as_ref());
+        kill_tree(child);
+    }
 }
 
 /// Windows: a job object that holds one bounded run's child and what it starts.
