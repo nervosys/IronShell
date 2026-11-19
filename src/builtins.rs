@@ -29205,31 +29205,37 @@ fn bi_sort_by(args: Vec<Value>, input: Option<Value>, env: &mut Env) -> Result<V
     // given a Null key: a Null key has no place in the order.
     let mut keyed: Vec<(Value, Value)> = Vec::with_capacity(arr.len());
     for (row, item) in arr.iter().enumerate() {
-        let key =
-            match (lambda, field) {
-                (Some(l), _) => call_lambda(l, &[item.clone()], env)?,
-                (None, Some(f)) => match item {
-                    Value::Record(m) => match m.get(f) {
-                        Some(v) => v.clone(),
-                        None => {
-                            let keys: Vec<&str> = m.keys().map(String::as_str).collect();
-                            return Err(sort_by_missing_field(
-                                row,
-                                f,
-                                crate::builtins::nearest_names(f, keys.iter().copied()),
-                                crate::safety::record_keys_hint(keys.iter().copied()),
-                            ));
-                        }
-                    },
-                    other => return Err(crate::safety::bad_arg_with_hint(
+        let key = match (lambda, field) {
+            (Some(l), _) => call_lambda(l, &[item.clone()], env)?,
+            (None, Some(f)) => match item {
+                Value::Record(m) => match m.get(f) {
+                    Some(v) => v.clone(),
+                    None => {
+                        let keys: Vec<&str> = m.keys().map(String::as_str).collect();
+                        return Err(sort_by_missing_field(
+                            row,
+                            f,
+                            crate::builtins::nearest_names(f, keys.iter().copied()),
+                            crate::safety::record_keys_hint(keys.iter().copied()),
+                        ));
+                    }
+                },
+                other => {
+                    let hint = if matches!(other, Value::Str(_)) {
+                        "use the lambda form, sort_by(fn(r) => ...), for rows that are not records; fs_walk returns path strings; ls(\"dir/**/*\") returns rows with size and modified"
+                    } else {
+                        "use the lambda form, sort_by(fn(r) => ...), for rows that are not records"
+                    };
+                    return Err(crate::safety::bad_arg_with_hint(
                         "sort_by",
                         "records when sorting by a field name",
                         other.type_name(),
-                        "use the lambda form, sort_by(fn(r) => ...), for rows that are not records",
-                    )),
-                },
-                (None, None) => Value::Null,
-            };
+                        hint,
+                    ));
+                }
+            },
+            (None, None) => Value::Null,
+        };
         keyed.push((key, item.clone()));
     }
 

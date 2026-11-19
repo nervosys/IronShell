@@ -105,3 +105,14 @@ fn c3_schema_for_one_module_has_no_language_wide_header() {
     }
     assert!(text.len() < 60_000, "module schema is {} bytes", text.len());
 }
+
+#[test]
+fn c4_sort_by_field_on_path_strings_points_at_ls() {
+    let s = Scratch::new("c4");
+    let hint = s.json(r#"try { fs_walk("sub") | sort_by("size") } catch e { e.error.hint }"#);
+    assert!(
+        hint.contains("fs_walk returns path strings") && hint.contains("ls("),
+        "hint was: {}",
+        &hint[..hint.len().min(400)]
+    );
+}
