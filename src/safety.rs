@@ -9932,6 +9932,67 @@ pub(crate) fn env_name_steers_children(name: &str) -> bool {
         "PSHOME",
         "PSLOCKDOWNPOLICY",
         "__PSLOCKDOWNPOLICY",
+        // Go, Rust, JVM and C toolchain names: `GOENV` redirects `go env`, the
+        // others pick the proxy, the compiler, its wrapper or its flags.
+        "GOENV",
+        "GOFLAGS",
+        "GOPROXY",
+        "GOROOT",
+        "GOPATH",
+        "GOTOOLCHAIN",
+        "GONOSUMDB",
+        "GOPRIVATE",
+        "GOINSECURE",
+        "GONOSUMCHECK",
+        "GOSUMDB",
+        "GONOPROXY",
+        "GOVCS",
+        "GOMODCACHE",
+        "GOCACHE",
+        "GOWORK",
+        "RUSTC",
+        "RUSTC_WRAPPER",
+        "RUSTDOC",
+        "RUSTDOCFLAGS",
+        "GOOGLE_APPLICATION_CREDENTIALS",
+        "MAVEN_OPTS",
+        "GRADLE_OPTS",
+        "JAVA_OPTS",
+        "GRADLE_USER_HOME",
+        "M2_HOME",
+        "MAVEN_HOME",
+        "CFLAGS",
+        "CXXFLAGS",
+        "CPPFLAGS",
+        "LDFLAGS",
+        "INCLUDE",
+        "LIB",
+        "LIBPATH",
+        "SSLKEYLOGFILE",
+        // Names a pager, editor, interpreter or resolver reads to run a program
+        // or to find its configuration.
+        "LESSOPEN",
+        "LESSCLOSE",
+        "LESS",
+        "MAKEFILES",
+        "LUA_INIT",
+        "LUA_PATH",
+        "LUA_CPATH",
+        "R_PROFILE",
+        "R_PROFILE_USER",
+        "PHPRC",
+        "PHP_INI_SCAN_DIR",
+        "GCONV_PATH",
+        "HOSTALIASES",
+        "RES_OPTIONS",
+        "LOCALDOMAIN",
+        "NLSPATH",
+        "TERMINFO",
+        "TERMCAP",
+        "HISTFILE",
+        "VIRTUAL_ENV",
+        "WSLENV",
+        "DISPLAY",
     ];
     const PREFIXES: &[&str] = &[
         "IRONSHELL_",
@@ -9956,6 +10017,26 @@ pub(crate) fn env_name_steers_children(name: &str) -> bool {
         "MSBUILD",
         "NUGET_",
         "PWSH_",
+        // Cloud, infrastructure, package-manager and build families.
+        "RUSTUP_",
+        "AWS_",
+        "AZURE_",
+        "CLOUDSDK_",
+        "TF_",
+        "ANSIBLE_",
+        "YARN_",
+        "COREPACK_",
+        "CMAKE_",
+        "PKG_CONFIG",
+        "OPENSSL_",
+        "R_LIBS",
+        "CONDA_",
+        "POETRY_",
+        "DENO_",
+        "BUN_",
+        "PNPM_",
+        "VOLTA_",
+        "SSH_",
     ];
     const SUFFIXES: &[&str] = &[
         "_PROXY",
@@ -12127,5 +12208,91 @@ mod operand_candidate_tests {
         let long = format!("a {}", "b ".repeat(5000));
         let found = names(&long);
         assert_eq!(found.len(), 1, "a {}-char argument was split", long.len());
+    }
+}
+
+#[cfg(test)]
+mod steering_name_tests {
+    use super::env_name_steers_children;
+
+    #[test]
+    fn toolchain_cloud_and_loader_names_steer() {
+        for name in [
+            "GOENV",
+            "GOPROXY",
+            "goflags",
+            "GOTOOLCHAIN",
+            "RUSTC",
+            "RUSTC_WRAPPER",
+            "RUSTDOCFLAGS",
+            "RUSTUP_HOME",
+            "AWS_CONFIG_FILE",
+            "AWS_PROFILE",
+            "AZURE_CONFIG_DIR",
+            "GOOGLE_APPLICATION_CREDENTIALS",
+            "CLOUDSDK_CONFIG",
+            "TF_CLI_CONFIG_FILE",
+            "ANSIBLE_CONFIG",
+            "YARN_RC_FILENAME",
+            "COREPACK_HOME",
+            "MAVEN_OPTS",
+            "GRADLE_OPTS",
+            "JAVA_OPTS",
+            "GRADLE_USER_HOME",
+            "CMAKE_TOOLCHAIN_FILE",
+            "PKG_CONFIG_PATH",
+            "CFLAGS",
+            "LDFLAGS",
+            "INCLUDE",
+            "LIB",
+            "LIBPATH",
+            "OPENSSL_CONF",
+            "SSLKEYLOGFILE",
+            "LESSOPEN",
+            "MAKEFILES",
+            "LUA_INIT",
+            "R_PROFILE_USER",
+            "R_LIBS_USER",
+            "PHPRC",
+            "PERL5OPT",
+            "GCONV_PATH",
+            "HOSTALIASES",
+            "TERMINFO",
+            "HISTFILE",
+            "VIRTUAL_ENV",
+            "CONDA_PREFIX",
+            "POETRY_HOME",
+            "DENO_DIR",
+            "BUN_INSTALL",
+            "PNPM_HOME",
+            "VOLTA_HOME",
+            "WSLENV",
+            "DISPLAY",
+            "SSH_ASKPASS",
+            "SSH_CONFIG",
+        ] {
+            assert!(env_name_steers_children(name), "{name} is not refused");
+        }
+    }
+
+    #[test]
+    fn harmless_names_stay_allowed() {
+        for name in [
+            "LANG",
+            "LC_ALL",
+            "TZ",
+            "TERM",
+            "NO_COLOR",
+            "FORCE_COLOR",
+            "CI",
+            "DEBUG",
+            "RUST_LOG",
+            "RUST_BACKTRACE",
+            "USERNAME",
+            "PROMPT",
+            "MY_SETTING",
+        ] {
+            assert!(!env_name_steers_children(name), "{name} is refused");
+        }
     }
 }
