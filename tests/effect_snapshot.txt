@@ -322,6 +322,7 @@ diag_suppress	Pure
 diag_warnings	Exec
 diagnose	Pure
 diff_files	ReadLocal
+diff_values	Pure
 digest	Pure
 direnv	ReadLocal
 direnv_allow	Exec

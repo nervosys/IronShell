@@ -8164,6 +8164,22 @@ pub static SIGNATURES: &[Signature] = &[
         ],
     },
     Signature {
+        name: "diff_values",
+        category: None,
+        subject_required: false,
+        aliases: &[],
+        subject: Some(Ty::Any),
+        params: &[req("b", Ty::Any, "the value to compare the subject with")],
+        returns: "Array",
+        doc: "Structural difference of two values: an Array of {path, op, old, new} rows, empty when they are equal. op is \"added\" (only b has it; old is null), \"removed\" (only a has it; new is null) or \"changed\". A path is text such as \"b.c\" or \"items[2]\" (empty for the whole value). Records are compared key by key in sorted order, Arrays by index, other values whole; 1 and 1.0 are equal.",
+        examples: &[
+            (r#"diff_values({a: 1, b: {c: 2}}, {a: 1, b: {c: 3}}) | map(fn(r) => r.old * 10 + r.new)"#, "[23]"),
+            (r#"[{a: 1}] | first | diff_values({a: 1.0}) | len"#, "0"),
+            (r#"diff_values({items: [1, 2]}, {items: [1, 2, 3], z: 0}) | map(fn(r) => r.path + ":" + r.op)"#, r#"["items[2]:added", "z:added"]"#),
+            (r#"diff_values({a: 1, b: 2}, {a: 1}) | map(fn(r) => r.path + ":" + r.op)"#, r#"["b:removed"]"#),
+        ],
+    },
+    Signature {
         name: "merge",
         category: None,
         subject_required: false,
