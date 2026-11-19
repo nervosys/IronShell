@@ -246,6 +246,10 @@ fn a_name_is_pinned_to_its_checked_addresses_and_reached() {
         loop {
             match listener.accept() {
                 Ok((mut stream, _)) => {
+                    // On Windows an accepted socket inherits the listener's
+                    // non-blocking mode, so reads would fail with WouldBlock
+                    // before the request arrives and the reply would be reset.
+                    let _ = stream.set_nonblocking(false);
                     let _ = stream.set_read_timeout(Some(Duration::from_secs(5)));
                     let mut seen = Vec::new();
                     let mut buf = [0u8; 1024];
