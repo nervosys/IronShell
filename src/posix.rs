@@ -1963,13 +1963,10 @@ impl Shell {
     }
 
     fn set_var(&mut self, name: &str, value: String) {
-        // A steering name is not stored at all in agent mode, so no path into
-        // here can make `$PATH` or `$HOME` something the agent chose. The callers
-        // that can report it (assignment, export, for, read) refuse first; this
-        // catches the rest, such as `${NAME:=value}`, which cannot.
-        if crate::safety::env_change_refused(name) {
-            return;
-        }
+        // A variable that is not exported never reaches a child, so a steering
+        // name may be a plain shell variable even in agent mode (`tmp=x`). The
+        // check is made where a value reaches a child: `export`, a prefix
+        // assignment on a command (see `run_simple` and `refuse_steering`).
         self.vars.insert(name.to_string(), value);
     }
 
@@ -2826,9 +2823,6 @@ impl Shell {
             Cmd::For {
                 var, items, body, ..
             } => {
-                if refuse_steering(sink, var) {
-                    return Flow::Next(POLICY_DENY_STATUS);
-                }
                 let mut values = Vec::new();
                 for w in items {
                     values.extend(self.expand(w, stdin));
@@ -2917,7 +2911,9 @@ impl Shell {
         }
         let mut env_overrides = Vec::new();
         for (name, w) in assigns {
-            if refuse_steering(sink, name) {
+            // A prefix assignment on a command reaches that command's
+            // environment; a bare assignment stays in the shell.
+            if !argv.is_empty() && refuse_steering(sink, name) {
                 return Flow::Next(POLICY_DENY_STATUS);
             }
             let v = self.expand_assign(w, stdin);
@@ -3173,17 +3169,6 @@ impl Shell {
         let default_reply = names.is_empty();
         if default_reply {
             names.push("REPLY".into());
-        }
-        if let Some(name) = names.iter().find(|n| crate::safety::env_change_refused(n)) {
-            let refusal = crate::safety::policy_deny(
-                "posix",
-                format!(
-                    "{name}: an agent may not read into this variable: it steers child programs"
-                ),
-                "variables that steer child programs are set by whoever launches the agent",
-            );
-            let _ = writeln!(std::io::stderr(), "{refusal}");
-            return POLICY_DENY_STATUS;
         }
         // As bash does, the prompt goes to stderr and only when the input is a
         // terminal, so a script reading a pipe prints nothing extra.
