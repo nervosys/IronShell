@@ -8938,6 +8938,11 @@ pub fn guard(ctx: GuardCtx) -> Result<(), SafetyError> {
                         "; the token also binds the contents of workspace files the command names and the environment set_env changed, so editing a script or changing the environment needs a new approval",
                     );
                 }
+                if matches!(ctx.builtin, "db_sqlite_exec" | "sqlite_exec") {
+                    hint.push_str(
+                        "; build a database with db.csv_to_sqlite(db, csv, table) or db.json_to_sqlite(db, json, table), which need no approval",
+                    );
+                }
                 Err(SafetyError {
                     code: ErrorCode::NeedsApproval,
                     message: format!("{}: requires approval ({})", ctx.builtin, ctx.what),
