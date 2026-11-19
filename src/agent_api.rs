@@ -1398,11 +1398,27 @@ fn get_schema(format: &SchemaFormat, module: Option<&str>, q: Option<&str>) -> A
         None => {
             // Only a request that is accepted is cached, so an unknown module
             // is refused on every ask rather than remembered.
-            let mut ontology = build_language_ontology();
+            let filtered = module.is_some() || q.is_some();
+            let with_tools = match format {
+                SchemaFormat::JsonSchema => true,
+                SchemaFormat::Ontology => !filtered,
+                _ => false,
+            };
+            let mut ontology = build_language_ontology_with(with_tools);
             if let Err(refused) = narrow_ontology(&mut ontology, module.as_deref(), q.as_deref()) {
                 return refused;
             }
-            let built = build_schema_value(format, &ontology);
+            let mut built = build_schema_value(format, &ontology);
+            // A narrowed compact schema is the entries asked for and a short
+            // header: the language-wide types, operators, syntax and OS
+            // ontology are most of the 85 KB and are not what was asked for.
+            if (module.is_some() || q.is_some()) && matches!(format, SchemaFormat::Ontology) {
+                if let JsonValue::Object(map) = &mut built {
+                    for key in ["types", "ops", "syntax", "os_ontology", "cli_tools"] {
+                        map.remove(key);
+                    }
+                }
+            }
             let mut cache_map = cache
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -2044,6 +2060,15 @@ fn value_type_name(value: &Value) -> String {
 
 /// Build the complete language ontology
 pub fn build_language_ontology() -> LanguageOntology {
+    build_language_ontology_with(true)
+}
+
+/// The catalogue, with the OS ontology and the CLI tool registry only when
+/// `with_tools`. Building the registry probes every tool it lists for an
+/// installed binary and its version, which is the slow part of `ish agent
+/// schema`; only the compact and JSON Schema formats print it, so every other
+/// format, and a compact schema narrowed to one module, skip it.
+fn build_language_ontology_with(with_tools: bool) -> LanguageOntology {
     LanguageOntology {
         ontology_version: "1.0.0".to_string(),
         language: LanguageInfo {
@@ -2072,8 +2097,9 @@ pub fn build_language_ontology() -> LanguageOntology {
             pattern_matching: "match <expr> { pattern => result, ... }".to_string(),
         },
         categories: get_category_info(),
-        os_ontology: Some(crate::providers::ontology::OS_ONTOLOGY.to_json_schema()),
-        cli_tools: Some(crate::providers::ontology::CLI_TOOL_REGISTRY.to_json_schema()),
+        os_ontology: with_tools.then(|| crate::providers::ontology::OS_ONTOLOGY.to_json_schema()),
+        cli_tools: with_tools
+            .then(|| crate::providers::ontology::CLI_TOOL_REGISTRY.to_json_schema()),
     }
 }
 

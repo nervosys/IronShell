@@ -80,3 +80,28 @@ fn c2_string_hash_help_points_at_the_file_hash() {
         &wc[..wc.len().min(400)]
     );
 }
+
+#[test]
+fn c3_schema_for_one_module_has_no_language_wide_header() {
+    let s = Scratch::new("c3");
+    let out = s.ish(&["agent", "schema", "--module", "file"]);
+    let text = String::from_utf8_lossy(&out.stdout).to_string();
+    assert!(
+        out.status.success(),
+        "schema --module file failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        text.contains("\"builtins\""),
+        "no builtins in the module schema (len {})",
+        text.len()
+    );
+    for key in ["\"os_ontology\"", "\"cli_tools\"", "\"syntax\"", "\"ops\""] {
+        assert!(
+            !text.contains(key),
+            "module schema still carries {key} (len {})",
+            text.len()
+        );
+    }
+    assert!(text.len() < 60_000, "module schema is {} bytes", text.len());
+}
