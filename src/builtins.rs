@@ -19600,14 +19600,16 @@ fn bi_set_env(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
 }
 
 /// An environment variable name. `set_var` panics on an empty name, one with
-/// '=' or NUL, and a value with NUL, so each is refused here as E_BAD_ARG.
+/// '=' or NUL, and a value with NUL, so each is refused here as E_BAD_ARG; so is
+/// a name with leading or trailing whitespace, which no denylist entry matches
+/// (`PATH ` is not `PATH`).
 fn env_name(builtin: &str, value: &Value) -> Result<String> {
     let name = expect_string(builtin, value)?;
-    if name.is_empty() || name.len() > 1024 || name.contains(['=', '\0']) {
-        return Err(crate::safety::bad_arg(
+    if name.is_empty() || name.len() > 1024 || name.contains(['=', '\0']) || name.trim() != name {
+        return Err(crate::safety::bad_arg_in(
             builtin,
-            "a name of 1 to 1024 bytes with no '=' and no NUL",
-            &format!("{name:?}"),
+            format!("{builtin}: {name:?} is not a valid environment variable name"),
+            "a name of 1 to 1024 bytes with no '=', no NUL and no leading or trailing whitespace",
         ));
     }
     Ok(name.to_string())

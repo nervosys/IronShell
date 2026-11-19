@@ -9749,6 +9749,23 @@ pub(crate) fn env_name_steers_children(name: &str) -> bool {
         "__COMPAT_LAYER",
         "NUGET_PACKAGES",
         "PSDEFAULTPARAMETERVALUES",
+        // Names a shell or PowerShell expands or consults on its own: with
+        // `SHELLOPTS=xtrace` and a `PS4` holding `$(...)`, an approved
+        // `bash -c true` runs the agent's command.
+        "SHELLOPTS",
+        "BASHOPTS",
+        "PS0",
+        "PS1",
+        "PS2",
+        "PS4",
+        "GLOBIGNORE",
+        "CDPATH",
+        "JAVA_HOME",
+        "PSMODULEANALYSISCACHEPATH",
+        "PSMODULEAUTOLOADINGPREFERENCE",
+        "PSHOME",
+        "PSLOCKDOWNPOLICY",
+        "__PSLOCKDOWNPOLICY",
     ];
     const PREFIXES: &[&str] = &[
         "IRONSHELL_",
@@ -9769,6 +9786,10 @@ pub(crate) fn env_name_steers_children(name: &str) -> bool {
         "COMPLUS_",
         "CORECLR_",
         "COR_",
+        "NODE_",
+        "MSBUILD",
+        "NUGET_",
+        "PWSH_",
     ];
     const SUFFIXES: &[&str] = &[
         "_PROXY",
@@ -9778,7 +9799,7 @@ pub(crate) fn env_name_steers_children(name: &str) -> bool {
         "_API_BASE",
         "_ENDPOINT",
     ];
-    let upper = name.to_ascii_uppercase();
+    let upper = name.trim().to_ascii_uppercase();
     EXACT.contains(&upper.as_str())
         || PREFIXES.iter().any(|p| upper.starts_with(p))
         || SUFFIXES.iter().any(|s| upper.ends_with(s))

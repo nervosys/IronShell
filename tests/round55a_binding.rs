@@ -277,3 +277,76 @@ fn export_with_an_option_and_set_dash_a_are_refused_by_name() {
         );
     }
 }
+
+// ---- A4: more names that steer a child, and names that are no names --------
+
+#[test]
+fn shell_and_toolchain_names_are_refused_everywhere() {
+    let dir = scratch("denylist");
+    let names = [
+        "SHELLOPTS",
+        "BASHOPTS",
+        "PS4",
+        "ps1",
+        "PS2",
+        "PS0",
+        "GLOBIGNORE",
+        "CDPATH",
+        "NODE_TLS_REJECT_UNAUTHORIZED",
+        "NODE_REPL_EXTERNAL_MODULE",
+        "NODE_EXTRA_CA_CERTS",
+        "JAVA_HOME",
+        "MSBUILDENABLEALLPROPERTYFUNCTIONS",
+        "MSBuildSDKsPath",
+        "NUGET_PLUGIN_PATHS",
+        "PSMODULEANALYSISCACHEPATH",
+        "PSModuleAutoLoadingPreference",
+        "PSHOME",
+        "PSLockdownPolicy",
+        "__PSLockdownPolicy",
+        "PWSH_FOO",
+    ];
+    for name in names {
+        for call in ["set_env", "env_set"] {
+            let out = base(&dir)
+                .args(["--agent", "-c", &format!(r#"{call}("{name}", "x")"#)])
+                .output()
+                .expect("run ish");
+            assert!(
+                text(&out).contains("E_POLICY_DENY"),
+                "{call}({name}) was not refused: {}",
+                head(&out)
+            );
+        }
+        let out = base(&dir)
+            .args(["-b", "--agent", "-c", &format!("export {name}=x")])
+            .output()
+            .expect("run ish");
+        assert_eq!(out.status.code(), Some(77), "export {name}");
+    }
+}
+
+#[test]
+fn a_name_with_whitespace_or_equals_is_not_a_valid_name() {
+    let dir = scratch("bad_names");
+    for name in ["PATH ", " PATH", "A=B", "", "\tTMP"] {
+        let call = format!(r#"set_env("{name}", "x")"#);
+        let out = base(&dir)
+            .args(["--agent", "-c", &call])
+            .output()
+            .expect("run ish");
+        let t = text(&out);
+        assert!(t.contains("E_BAD_ARG"), "{name:?}: {}", head(&out));
+        assert!(
+            t.contains("not a valid environment variable name"),
+            "{name:?}: {}",
+            head(&out)
+        );
+    }
+    // An ordinary name still works.
+    let out = base(&dir)
+        .args(["--agent", "-c", r#"set_env("A4_PLAIN", "x")"#])
+        .output()
+        .expect("run ish");
+    assert!(out.status.success(), "{}", head(&out));
+}
