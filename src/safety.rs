@@ -3784,7 +3784,8 @@ impl ApprovalDescriptor {
 }
 
 /// The environment changes this process made with `set_env`, `env_set` and
-/// `env_unset`, by name: `Some(value)` for a set, `None` for an unset.
+/// `env_unset`, by name (see [`fold_env_name`]): `Some(value)` for a set,
+/// `None` for an unset.
 static ENV_CHANGES: Mutex<std::collections::BTreeMap<String, Option<String>>> =
     Mutex::new(std::collections::BTreeMap::new());
 
@@ -3792,7 +3793,19 @@ static ENV_CHANGES: Mutex<std::collections::BTreeMap<String, Option<String>>> =
 /// run afterwards is bound to it (see [`bind_exec_context`]).
 pub fn note_env_change(name: &str, value: Option<&str>) {
     let mut changes = ENV_CHANGES.lock().unwrap_or_else(|e| e.into_inner());
-    changes.insert(name.to_string(), value.map(str::to_string));
+    changes.insert(fold_env_name(name), value.map(str::to_string));
+}
+
+/// The name under which the system keeps the environment variable `name`:
+/// upper-cased where names are matched without regard to case (Windows), as
+/// given elsewhere. An approval binds the variables a child sees, so two names
+/// that are one variable must be one entry, the later assignment winning.
+pub fn fold_env_name(name: &str) -> String {
+    if cfg!(windows) {
+        name.to_ascii_uppercase()
+    } else {
+        name.to_string()
+    }
 }
 
 /// Hex of the first 8 bytes of the SHA-256 of a file's bytes, read in chunks.
@@ -6426,21 +6439,34 @@ pub fn guard_exec(builtin: &str, command: impl Into<String>) -> Result<(), Safet
 /// process's own: `env` (name, value) pairs from prefix assignments and
 /// exports. They are bound into the approval, sorted by name, so a change of
 /// name or value gives a new token. With no pairs the descriptor, and so the
-/// token, is exactly [`guard_exec`]'s.
+/// token, is exactly [`guard_exec`]'s. `removed` names inherited variables the
+/// child does not get, and is bound the same way.
 pub fn guard_exec_env(
     builtin: &str,
     command: impl Into<String>,
     argv: &[String],
     env: &[(String, String)],
+    removed: &[String],
 ) -> Result<(), SafetyError> {
     let command = command.into();
-    let sorted: std::collections::BTreeMap<&str, &str> =
-        env.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
+    // Names that are one variable to the system are one entry, the later
+    // assignment winning, as it does on the child's environment.
+    let sorted: std::collections::BTreeMap<String, &str> = env
+        .iter()
+        .map(|(k, v)| (fold_env_name(k), v.as_str()))
+        .collect();
     let mut radius = serde_json::json!({ "command": command });
     if !sorted.is_empty() {
         let pairs: Vec<Json> = sorted.iter().map(|(k, v)| json!([k, v])).collect();
         if let Some(map) = radius.as_object_mut() {
             map.insert("child_env".to_string(), Json::Array(pairs));
+        }
+    }
+    // Inherited variables the command's child does not get (`unset NAME`).
+    if !removed.is_empty() {
+        let names: Vec<Json> = removed.iter().map(|n| json!(fold_env_name(n))).collect();
+        if let Some(map) = radius.as_object_mut() {
+            map.insert("child_env_removed".to_string(), Json::Array(names));
         }
     }
     // The words are read by the file binding of the approval (see

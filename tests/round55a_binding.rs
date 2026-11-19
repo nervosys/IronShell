@@ -182,3 +182,98 @@ fn a_file_outside_the_workspace_named_through_a_link_is_bound() {
     std::fs::write(outside.join("s.ps1"), "two").expect("rewrite");
     assert_ne!(before, sh_token(&dir, call), "the linked file is not bound");
 }
+
+// ---- A3: names that differ only in case ------------------------------------
+
+#[test]
+fn exports_differing_in_case_follow_the_platform() {
+    let dir = scratch("case_posix");
+    let one_two = posix_token(&dir, "export FOO=1; export foo=2; git --version");
+    let two_one = posix_token(&dir, "export foo=2; export FOO=1; git --version");
+    if cfg!(windows) {
+        // One variable there: the later export is what the child sees.
+        assert_ne!(one_two, two_one, "the two orders share a token");
+        let only_two = posix_token(&dir, "export FOO=2; git --version");
+        assert_eq!(one_two, only_two, "FOO then foo=2 is FOO=2");
+    } else {
+        // Two variables here, and the child sees both either way.
+        assert_eq!(one_two, two_one, "two variables, one set");
+    }
+}
+
+#[test]
+fn set_env_names_differing_in_case_follow_the_platform() {
+    let dir = scratch("case_set_env");
+    let call = r#"sh(["git", "--version"])"#;
+    let a = sh_token(
+        &dir,
+        &format!(r#"set_env("foo", "2"); set_env("FOO", "1"); {call}"#),
+    );
+    let b = sh_token(
+        &dir,
+        &format!(r#"set_env("FOO", "1"); set_env("foo", "2"); {call}"#),
+    );
+    if cfg!(windows) {
+        assert_ne!(a, b, "the two orders share a token");
+    } else {
+        assert_eq!(a, b, "two variables, one set");
+    }
+}
+
+// ---- A7: unset of an inherited variable ------------------------------------
+
+#[test]
+fn unset_of_an_inherited_variable_changes_the_token_and_the_child() {
+    let dir = scratch("unset");
+    let plain = {
+        let out = base(&dir)
+            .env("A7_VAR", "SENTINEL_7a1")
+            .args(["-b", "--agent", "-c", "git --version"])
+            .output()
+            .expect("run ish");
+        token_of(&out)
+    };
+    let unset = {
+        let out = base(&dir)
+            .env("A7_VAR", "SENTINEL_7a1")
+            .args(["-b", "--agent", "-c", "unset A7_VAR; git --version"])
+            .output()
+            .expect("run ish");
+        token_of(&out)
+    };
+    assert_ne!(plain, unset, "an unset inherited variable is not bound");
+
+    let exe = env!("CARGO_BIN_EXE_ish").replace('\\', "/");
+    let show = |pre: &str| {
+        let script = format!(r#"{pre}"{exe}" -c 'env("A7_VAR")'"#);
+        let out = base(&dir)
+            .env("A7_VAR", "SENTINEL_7a1")
+            .args(["-b", "-c", &script])
+            .output()
+            .expect("run ish");
+        text(&out)
+    };
+    assert!(show("").contains("SENTINEL_7a1"), "control: {}", show(""));
+    let after = show("unset A7_VAR; ");
+    assert!(
+        !after.contains("SENTINEL_7a1"),
+        "the child still sees it: {}",
+        after.chars().take(300).collect::<String>()
+    );
+}
+
+#[test]
+fn export_with_an_option_and_set_dash_a_are_refused_by_name() {
+    let dir = scratch("refused");
+    for script in ["export -n FOO", "set -a"] {
+        let out = base(&dir)
+            .args(["-b", "-c", script])
+            .output()
+            .expect("run ish");
+        assert_eq!(out.status.code(), Some(77), "{script}: {}", head(&out));
+        assert!(
+            text(&out).contains(script.split(' ').next().unwrap()),
+            "{script}"
+        );
+    }
+}
