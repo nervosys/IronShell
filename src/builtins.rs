@@ -9361,11 +9361,9 @@ fn bi_ls(args: Vec<Value>, _input: Option<Value>) -> Result<Value> {
         // verbatim prefix; report the ordinary drive path.
         record.insert(
             "path".to_string(),
-            Value::Str(
-                crate::safety::strip_verbatim_prefix(&path)
-                    .to_string_lossy()
-                    .to_string(),
-            ),
+            Value::Str(slash_path(
+                &crate::safety::strip_verbatim_prefix(&path).to_string_lossy(),
+            )),
         );
         record.insert("ext".to_string(), Value::Str(ext));
         record.insert("is_dir".to_string(), Value::Bool(metadata.is_dir()));
@@ -35249,6 +35247,17 @@ fn first_project_text(builtin: &str, names: &[&str]) -> Result<Value> {
 /// A directory that cannot be listed is an error, not an empty subtree. The
 /// walk used to skip it, and an unreadable root returned []: a shorter listing
 /// that looked complete.
+/// A path as text with `/` separators on every platform, as `glob` and the
+/// `path_*` builtins write it. On Windows `\` separates, so it becomes `/`;
+/// elsewhere a backslash is a legal file-name character and stays.
+fn slash_path(path: &str) -> String {
+    if cfg!(windows) {
+        path.replace('\\', "/")
+    } else {
+        path.to_string()
+    }
+}
+
 fn walk_entries_capped(dir: &std::path::Path, max_depth: usize, max: usize) -> Result<Vec<Value>> {
     fn walk_recursive(
         dir: &std::path::Path,
@@ -35265,7 +35274,7 @@ fn walk_entries_capped(dir: &std::path::Path, max_depth: usize, max: usize) -> R
         for entry in entries {
             let entry = entry.map_err(|e| crate::safety::fs_error("fs_walk", dir, &e))?;
             let path = entry.path();
-            let shown = Value::Str(path.to_string_lossy().to_string());
+            let shown = Value::Str(slash_path(&path.to_string_lossy()));
             push_capped("fs_walk", results, shown, max)?;
             // Only a directory the walk would descend into needs its type
             // checked; one at the depth limit is listed and not opened.
