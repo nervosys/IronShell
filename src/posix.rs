@@ -3503,7 +3503,11 @@ impl Shell {
                         "{SHELL_NAME}: {name} is not part of ish -b's in-process subset, so it runs only as a program of that name on PATH, and none was found"
                     ));
                 }
-                if let Some(alt) = ish_alternative(name) {
+                let spawned_args: Vec<String> = cmd
+                    .get_args()
+                    .map(|a| a.to_string_lossy().into_owned())
+                    .collect();
+                if let Some(alt) = ish_alternative(name, &spawned_args) {
                     sink.eline(&alt);
                 }
                 if let Some(hint) = windows_tools_hint() {
@@ -3775,7 +3779,7 @@ fn resolve_program(
             Some(p) => Ok(p.to_string_lossy().into_owned()),
             None => {
                 let mut msg = format!("{SHELL_NAME}: {name}: command not found");
-                if let Some(alt) = ish_alternative(name) {
+                if let Some(alt) = ish_alternative(name, &argv[1..]) {
                     msg.push('\n');
                     msg.push_str(&alt);
                 }
@@ -3814,7 +3818,7 @@ fn resolve_program(
     let mut msg = format!(
         "{SHELL_NAME}: {name}: the in-process {name} does not support {what}; a GNU-compatible {name} on PATH would run it, and none was found"
     );
-    if let Some(alt) = ish_alternative(name) {
+    if let Some(alt) = ish_alternative(name, &argv[1..]) {
         msg.push('\n');
         msg.push_str(&alt);
     }
@@ -3829,11 +3833,24 @@ fn resolve_program(
 /// `name` would, for a command the subset does not run: `cp` and `mv` are
 /// builtins of that name, and `find`'s `-name` with `-o` is `glob` with a
 /// `{a,b}` alternation. `None` for any other name.
-fn ish_alternative(name: &str) -> Option<String> {
+fn ish_alternative(name: &str, args: &[String]) -> Option<String> {
     let alt = match name {
-        "cp" => r#"cp("a", "b")"#,
-        "mv" => r#"mv("a", "b")"#,
-        "find" => r#"glob("**/*.{rs,py}")"#,
+        "cp" => r#"cp("a", "b")"#.to_string(),
+        "mv" => r#"mv("a", "b")"#.to_string(),
+        // `glob` matches names, not times, so `-newer` is a filter on `ls`.
+        "find" if args.iter().any(|a| a.starts_with("-newer")) => {
+            return Some(
+                r#"  hint: in ish, ls(dir) | where(fn(f) => f.modified > fs_stat("ref").modified) (ish -c '...')"#
+                    .to_string(),
+            );
+        }
+        "find" if args.iter().any(|a| a == "-o") => {
+            return Some(
+                r#"  hint: run one find per alternative, or in ish use glob("**/*.{a,b}") (ish -c '...')"#
+                    .to_string(),
+            );
+        }
+        "find" => r#"glob("**/*.{rs,py}")"#.to_string(),
         _ => return None,
     };
     Some(format!("  hint: in ish, use {alt} (ish -c '...')"))
@@ -8501,7 +8518,10 @@ pub fn refusal_hint(construct: &str) -> String {
     // The operator of a `${name...}` form, named in its refusal as `op`.
     let op = construct.split('`').nth(1).unwrap_or("");
     let tip: String = match construct {
-        "function definition" => "inline the body, or write the logic in ish".into(),
+        "function definition" => "functions are outside the subset; repeat the body, or put it in a .sh script run with ish -b, or write the logic in ish".into(),
+        "`trap` builtin" => "trap is outside the subset; put cleanup after the commands and use `|| cleanup` / set -e".into(),
+        "`source` builtin" | "`.` builtin" => "source and . are outside the subset; run the script as a command (ish -b ./x.sh) or write its commands here".into(),
+        c if c.starts_with("brace expansion") => "write the words out (d/a d/b) or use a for loop".into(),
         "case ... esac" => {
             "case is outside the subset: rewrite it as if/elif with [ \"$x\" = a ] tests, one elif per pattern".into()
         }
@@ -9603,6 +9623,23 @@ mod tests {
         assert_eq!(sh("echo abc | head -c 2").0, "ab");
         assert_eq!(sh("grep x /nonexistent/ae-x").1, 2);
         assert_eq!(p("grep zzz").1, 1);
+    }
+
+    #[test]
+    fn find_hints_name_what_does_the_job() {
+        let args = |a: &[&str]| a.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        let newer = ish_alternative("find", &args(&[".", "-newer", "ref"])).unwrap();
+        assert!(
+            newer.contains("f.modified > fs_stat(\"ref\").modified"),
+            "{newer}"
+        );
+        assert!(!newer.contains("glob"), "{newer}");
+        let either = ish_alternative("find", &args(&[".", "-name", "a", "-o", "-name", "b"]));
+        let either = either.unwrap();
+        assert!(either.contains("one find per alternative"), "{either}");
+        let plain = ish_alternative("find", &args(&[".", "-type", "f"])).unwrap();
+        assert!(plain.contains("glob("), "{plain}");
+        assert_eq!(ish_alternative("ls", &args(&[])), None);
     }
 
     #[test]

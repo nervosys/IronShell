@@ -173,3 +173,44 @@ fn b3_grep_context_across_files_and_bad_length() {
     assert!(err.contains("invalid context length argument"), "{err}");
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+// ── B4 / B5: refusal hints; source and . are refused up front ──────────────
+
+#[test]
+fn b4_b5_refusals_say_what_to_write_instead() {
+    let dir = scratch("b4_hints");
+    for (script, named, hint) in [
+        (
+            "trap 'echo x' EXIT\necho hi\n",
+            "`trap` builtin at line 1, column 1",
+            "put cleanup after the commands and use `|| cleanup` / set -e",
+        ),
+        (
+            "mkdir -p d/{a,b}\n",
+            "brace expansion {a,b} or {a..b} at line 1, column",
+            "write the words out (d/a d/b) or use a for loop",
+        ),
+        (
+            "f() { echo hi; }\n",
+            "function definition at line 1, column 1",
+            "functions are outside the subset; repeat the body, or put it in a .sh script run with ish -b, or write the logic in ish",
+        ),
+        (
+            "echo before\nsource ./x.sh\n",
+            "`source` builtin at line 2, column 1",
+            "run the script as a command (ish -b ./x.sh)",
+        ),
+        (
+            "echo before\n. ./x.sh\n",
+            "`.` builtin at line 2, column 1",
+            "run the script as a command (ish -b ./x.sh)",
+        ),
+    ] {
+        let (out, err, code) = ish_bash(false, script, &dir);
+        assert_eq!(code, 77, "{script}: {err}");
+        assert_eq!(out, "", "{script}: nothing may run: {err}");
+        assert!(err.contains(named), "{script}: {err}");
+        assert!(err.contains(hint), "{script}: {err}");
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
