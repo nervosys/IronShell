@@ -3812,10 +3812,12 @@ fn file_hash16(path: &str) -> Option<String> {
     Some(hex(&digest)[..16].to_string())
 }
 
-/// The most workspace files an exec approval hashes.
-const OPERAND_HASH_LIMIT: usize = 32;
-/// The most candidate names examined for those hashes.
-const OPERAND_CANDIDATE_LIMIT: usize = 512;
+/// The most workspace files an exec approval hashes; a command that names more
+/// is refused, not approved with the rest unbound.
+const OPERAND_HASH_LIMIT: usize = 256;
+/// The most distinct candidate names examined for those hashes; a command with
+/// more is refused likewise.
+const OPERAND_CANDIDATE_LIMIT: usize = 2048;
 /// The longest argument that is split into words to look for file names.
 const OPERAND_SPLIT_MAX_CHARS: usize = 4096;
 
@@ -3914,7 +3916,7 @@ fn operand_candidates(arg: &str, out: &mut Vec<String>) {
 /// workspace (`operand_hashes`), and the environment changes this process made
 /// (`env_changes`, sorted). Nothing is added when there is neither, so the
 /// token of a command that names no file and follows no `set_env` is as it was.
-fn bind_exec_context(radius: &mut Json) {
+fn bind_exec_context(builtin: &str, radius: &mut Json) -> Result<(), SafetyError> {
     let mut operands: Vec<String> = Vec::new();
     let mut take = |v: &Json| {
         if let Some(s) = v.as_str() {
@@ -3940,19 +3942,43 @@ fn bind_exec_context(radius: &mut Json) {
             operand_candidates(word, &mut operands);
         }
     });
+    let mut seen = std::collections::HashSet::new();
+    operands.retain(|o| !o.is_empty() && !o.starts_with('-') && seen.insert(o.clone()));
+    // Past the bound, a name is not looked at, so a file named there would go
+    // unbound: refuse rather than drop it silently.
+    if operands.len() > OPERAND_CANDIDATE_LIMIT {
+        return Err(unbindable_refusal(
+            builtin,
+            &format!(
+                "this command has more than {OPERAND_CANDIDATE_LIMIT} distinct words to check for \
+                 workspace files; an approval cannot bind them all"
+            ),
+        ));
+    }
     let mut hashes = serde_json::Map::new();
-    for operand in operands.into_iter().take(OPERAND_CANDIDATE_LIMIT) {
-        if hashes.len() >= OPERAND_HASH_LIMIT {
-            break;
-        }
-        if operand.is_empty() || operand.starts_with('-') || hashes.contains_key(&operand) {
-            continue;
-        }
+    let mut files = std::collections::HashSet::new();
+    for operand in operands {
         if names_a_remote_share(&operand) || !std::path::Path::new(&operand).is_file() {
             continue;
         }
         if !within_workspace(&operand) {
             continue;
+        }
+        // One file named in two spellings (`x`, `./x`) counts once.
+        let file = std::fs::canonicalize(&operand)
+            .map(|p| p.to_string_lossy().into_owned())
+            .unwrap_or_else(|_| operand.clone());
+        if !files.insert(file) {
+            continue;
+        }
+        if hashes.len() >= OPERAND_HASH_LIMIT {
+            return Err(unbindable_refusal(
+                builtin,
+                &format!(
+                    "this command names more than {OPERAND_HASH_LIMIT} workspace files; an \
+                     approval cannot bind them all"
+                ),
+            ));
         }
         let hash = file_hash16(&operand).unwrap_or_else(|| "unreadable".to_string());
         hashes.insert(operand, Json::String(hash));
@@ -3964,7 +3990,7 @@ fn bind_exec_context(radius: &mut Json) {
         .map(|(k, v)| json!([k, v]))
         .collect();
     if hashes.is_empty() && env.is_empty() {
-        return;
+        return Ok(());
     }
     if !radius.is_object() {
         let old = std::mem::take(radius);
@@ -3981,6 +4007,23 @@ fn bind_exec_context(radius: &mut Json) {
         if !env.is_empty() {
             map.insert("env_changes".to_string(), Json::Array(env));
         }
+    }
+    Ok(())
+}
+
+/// The refusal of an exec whose approval cannot bind everything the command
+/// names (see [`bind_exec_context`]).
+fn unbindable_refusal(builtin: &str, message: &str) -> SafetyError {
+    SafetyError {
+        code: ErrorCode::PolicyDeny,
+        message: format!("{builtin}: {message}"),
+        builtin: builtin.to_string(),
+        hint: "split the command so each call names fewer files; nothing was run".to_string(),
+        approval: None,
+        did_you_mean: Vec::new(),
+        expected: String::new(),
+        got: String::new(),
+        extra: serde_json::Map::new(),
     }
 }
 
@@ -8972,7 +9015,7 @@ pub fn guard(ctx: GuardCtx) -> Result<(), SafetyError> {
             // needs a new one.
             let mut blast_radius = ctx.blast_radius.clone();
             if ctx.effect == Effect::Exec {
-                bind_exec_context(&mut blast_radius);
+                bind_exec_context(ctx.builtin, &mut blast_radius)?;
             }
             let descriptor = ApprovalDescriptor::new(
                 ctx.what,

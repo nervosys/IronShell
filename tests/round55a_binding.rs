@@ -91,3 +91,52 @@ fn a_quoted_file_name_with_a_space_is_bound() {
     // Unchanged, the token is stable.
     assert_eq!(sh_token(&dir, sh_call), sh_token(&dir, sh_call));
 }
+
+// ---- A2: the file cap is 256 and past it the command is refused ------------
+
+fn names_call(prefix: &str, count: usize) -> String {
+    let names: Vec<String> = (1..=count)
+        .map(|i| format!("\"m/{prefix}{i:03}.txt\""))
+        .collect();
+    format!(r#"sh(["cmd", "/c", "echo", {}])"#, names.join(", "))
+}
+
+#[test]
+fn a_file_past_the_old_cap_of_32_is_bound() {
+    let dir = scratch("cap");
+    let m = dir.join("proj").join("m");
+    std::fs::create_dir_all(&m).expect("m");
+    for i in 1..=40 {
+        std::fs::write(m.join(format!("f{i:03}.txt")), "one").expect("write");
+    }
+    let call = names_call("f", 40);
+    let before = sh_token(&dir, &call);
+    std::fs::write(m.join("f040.txt"), "two").expect("rewrite");
+    assert_ne!(before, sh_token(&dir, &call), "f040 is not bound");
+    std::fs::write(m.join("f033.txt"), "two").expect("rewrite");
+    let mid = sh_token(&dir, &call);
+    std::fs::write(m.join("f033.txt"), "three").expect("rewrite");
+    assert_ne!(mid, sh_token(&dir, &call), "f033 is not bound");
+}
+
+#[test]
+fn more_than_256_workspace_files_are_refused() {
+    let dir = scratch("over_cap");
+    let m = dir.join("proj").join("m");
+    std::fs::create_dir_all(&m).expect("m");
+    for i in 1..=300 {
+        std::fs::write(m.join(format!("g{i:03}.txt")), "x").expect("write");
+    }
+    let out = base(&dir)
+        .args(["--agent", "-c", &names_call("g", 300)])
+        .output()
+        .expect("run ish");
+    let t = text(&out);
+    assert!(t.contains("E_POLICY_DENY"), "{}", head(&out));
+    assert!(
+        t.contains("more than 256 workspace files"),
+        "{}",
+        head(&out)
+    );
+    assert!(!t.contains("apv_"), "a token was offered: {}", head(&out));
+}
