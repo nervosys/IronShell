@@ -3882,7 +3882,7 @@ fn quoted_substrings(s: &str, depth: u8, out: &mut Vec<String>) {
 /// split on whitespace, quotes, `;`, `&`, `|`, `(`, `)` and `,`, with the part
 /// after a `:` or `=` of a word as well. A name that is no existing file is
 /// dropped later, so over-collecting here costs nothing.
-fn operand_candidates(arg: &str, out: &mut Vec<String>) {
+fn operand_words(arg: &str, out: &mut Vec<String>) {
     push_name_variants(arg, out);
     let after_flag = |s: &str| -> Option<String> {
         let rest = s.strip_prefix('-')?;
@@ -3918,6 +3918,109 @@ fn operand_candidates(arg: &str, out: &mut Vec<String>) {
                 }
             }
         }
+    }
+}
+
+/// The path `s` names without its extended-length or device prefix (`\\?\`,
+/// `//?/`, `\\.\`, `//./`, in any mix of separators), or `None` when it has none.
+/// `\\?\UNC\host\share` is a network path, not a local one: it gives `None`, so
+/// it is never turned into a name that could be probed.
+fn strip_device_prefix(s: &str) -> Option<&str> {
+    let b = s.as_bytes();
+    if b.len() < 4
+        || !matches!(b[0], b'/' | b'\\')
+        || !matches!(b[1], b'/' | b'\\')
+        || !matches!(b[2], b'?' | b'.')
+        || !matches!(b[3], b'/' | b'\\')
+    {
+        return None;
+    }
+    let rest = &s[4..];
+    let head = rest.get(..3).unwrap_or(rest);
+    if head.eq_ignore_ascii_case("unc")
+        && (rest.len() == 3 || matches!(rest.as_bytes()[3], b'/' | b'\\'))
+    {
+        return None;
+    }
+    Some(rest)
+}
+
+/// Decode the `%XX` escapes of `s`; a malformed escape stays as written.
+fn percent_decode(s: &str) -> String {
+    let b = s.as_bytes();
+    let mut out: Vec<u8> = Vec::with_capacity(b.len());
+    let mut i = 0;
+    while i < b.len() {
+        if b[i] == b'%' && i + 2 < b.len() {
+            let hex = |c: u8| (c as char).to_digit(16);
+            if let (Some(h), Some(l)) = (hex(b[i + 1]), hex(b[i + 2])) {
+                out.push((h * 16 + l) as u8);
+                i += 3;
+                continue;
+            }
+        }
+        out.push(b[i]);
+        i += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+/// The local path a `file:` URL names (`file:///C:/a%20b.txt` is `C:/a b.txt`,
+/// `file:///home/x` is `/home/x`), or `None` for anything else, including a URL
+/// with a host other than `localhost` (a network share).
+fn file_url_path(s: &str) -> Option<String> {
+    let t = s.trim();
+    let scheme = t.get(..5)?;
+    if !scheme.eq_ignore_ascii_case("file:") {
+        return None;
+    }
+    let rest = &t[5..];
+    let path = match rest.strip_prefix("//") {
+        Some(after) => {
+            let slash = after.find('/')?;
+            let (authority, path) = after.split_at(slash);
+            if !(authority.is_empty() || authority.eq_ignore_ascii_case("localhost")) {
+                return None;
+            }
+            path
+        }
+        None => rest,
+    };
+    let decoded = percent_decode(path);
+    let b = decoded.as_bytes();
+    // `/C:/x` is the drive path `C:/x`.
+    if b.len() >= 3 && b[0] == b'/' && b[1].is_ascii_alphabetic() && b[2] == b':' {
+        return Some(decoded[1..].to_string());
+    }
+    Some(decoded)
+}
+
+/// Push `name`, and the local paths it may name under another spelling: without
+/// an extended-length or device prefix (see [`strip_device_prefix`]), and as the
+/// path of a `file:` URL. Applied repeatedly, so a prefix on a prefix is peeled.
+fn push_path_spellings(name: String, out: &mut Vec<String>) {
+    let mut cur = name.trim().to_string();
+    out.push(name);
+    for _ in 0..4 {
+        let next = if let Some(rest) = strip_device_prefix(&cur) {
+            rest.to_string()
+        } else if let Some(path) = file_url_path(&cur) {
+            path
+        } else {
+            return;
+        };
+        out.push(next.clone());
+        cur = next;
+    }
+}
+
+/// [`operand_words`], and every name found under its other spellings (see
+/// [`push_path_spellings`]).
+fn operand_candidates(arg: &str, out: &mut Vec<String>) {
+    let mut words = Vec::new();
+    operand_words(arg, &mut words);
+    for word in words {
+        push_path_spellings(word, out);
     }
 }
 
@@ -11909,6 +12012,59 @@ mod operand_candidate_tests {
         assert!(names("& 'x y.ps1'").contains(&"x".to_string()));
         assert!(names("a;b.ps1").contains(&"b.ps1".to_string()));
         assert!(names("-Command:\". ./z.ps1\"").contains(&"./z.ps1".to_string()));
+    }
+
+    #[test]
+    fn extended_length_and_device_prefixes_are_peeled() {
+        let has = |arg: &str, want: &str| {
+            let found = names(arg);
+            assert!(found.contains(&want.to_string()), "{arg}: {found:?}");
+        };
+        has(r"\\?\C:\ws\f.txt", r"C:\ws\f.txt");
+        has("//?/C:/ws/f.txt", "C:/ws/f.txt");
+        has(r"\\.\C:\ws\f.txt", r"C:\ws\f.txt");
+        has("//./C:/ws/f.txt", "C:/ws/f.txt");
+        has(r"\\?\C:\ws\..\ws\f.txt", r"C:\ws\..\ws\f.txt");
+        has(r"-File:\\?\C:\ws\x.ps1", r"C:\ws\x.ps1");
+    }
+
+    #[test]
+    fn a_unc_extended_path_is_never_turned_into_a_name() {
+        for arg in [
+            r"\\?\UNC\host\share\f.txt",
+            "//?/UNC/host/share/f.txt",
+            r"\\.\unc\host\share",
+        ] {
+            let found = names(arg);
+            assert!(
+                !found
+                    .iter()
+                    .any(|n| n.to_ascii_lowercase().starts_with("unc")),
+                "{arg}: {found:?}"
+            );
+            assert!(
+                !found.iter().any(|n| n.starts_with("host")),
+                "{arg}: {found:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_file_url_is_a_local_path() {
+        let has = |arg: &str, want: &str| {
+            let found = names(arg);
+            assert!(found.contains(&want.to_string()), "{arg}: {found:?}");
+        };
+        has("file:///C:/ws/f.txt", "C:/ws/f.txt");
+        has("file:///C:/ws/a%20b.txt", "C:/ws/a b.txt");
+        has("file:///home/u/f.txt", "/home/u/f.txt");
+        has("FILE://localhost/home/u/f.txt", "/home/u/f.txt");
+        has("file:/home/u/f.txt", "/home/u/f.txt");
+        // A URL with a host names a network share: no local name comes of it.
+        let found = names("file://host/share/f.txt");
+        assert!(!found
+            .iter()
+            .any(|n| n.contains("/share/f.txt") && !n.starts_with("file:")));
     }
 
     #[test]
