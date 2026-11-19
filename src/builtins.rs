@@ -4048,6 +4048,15 @@ pub fn did_you_mean_among<'a>(name: &str, extra: impl Iterator<Item = &'a str>) 
 fn mapped_spelling(name: &str) -> Vec<String> {
     match name {
         "to_int" | "parse_int" | "as_int" => vec!["int".to_string()],
+        // The ontology has no search: ontology_manifest() lists the categories,
+        // and ontology_describe(category) lists the builtins in one.
+        "ontology_search" | "ontology_find" | "ontology_query" | "search_builtins"
+        | "builtin_search" | "find_builtin" => {
+            vec![
+                "ontology_manifest".to_string(),
+                "ontology_describe".to_string(),
+            ]
+        }
         // A structural difference of two values is diff_values; `diff` of two
         // files is file.diff.
         "diff" => vec!["diff_values".to_string(), "file.diff".to_string()],
@@ -28203,13 +28212,18 @@ fn bi_ontology_describe(args: Vec<Value>, _input: Option<Value>) -> Result<Value
             }
         }
         let categories = crate::agent_api::ontology_category_names();
-        let candidates = nearest_names(
-            q.trim(),
-            BUILTIN_LOOKUP
-                .keys()
-                .copied()
-                .chain(categories.iter().map(String::as_str)),
-        );
+        let mapped = mapped_spelling(q.trim());
+        let candidates = if mapped.is_empty() {
+            nearest_names(
+                q.trim(),
+                BUILTIN_LOOKUP
+                    .keys()
+                    .copied()
+                    .chain(categories.iter().map(String::as_str)),
+            )
+        } else {
+            mapped
+        };
         return Err(crate::safety::unknown_builtin(q.trim(), candidates));
     }
     Ok(Value::from_json(&described))
