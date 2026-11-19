@@ -117,3 +117,59 @@ fn b2_an_arithmetic_error_names_the_expression_and_exits_1() {
     }
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+// ── B3: grep -A / -B / -C / -NUM ───────────────────────────────────────────
+
+#[test]
+fn b3_grep_context_lines_match_gnu() {
+    let dir = scratch("b3_ctx");
+    let seven = r"printf 'a\nb\nc\nd\ne\nf\ng\n' | ";
+    let cases = [
+        ("grep -A1 -e c -e f", "c\nd\n--\nf\ng\n"),
+        ("grep -A 1 -e c -e f", "c\nd\n--\nf\ng\n"),
+        ("grep --after-context=1 -e c -e f", "c\nd\n--\nf\ng\n"),
+        ("grep -n -C1 -e b -e g", "1-a\n2:b\n3-c\n--\n6-f\n7:g\n"),
+        // Context groups that touch are one group: no separator.
+        ("grep -n -C1 -e c -e f", "2-b\n3:c\n4-d\n5-e\n6:f\n7-g\n"),
+        ("grep -2 -e d", "b\nc\nd\ne\nf\n"),
+        ("grep -nB1 -e c", "2-b\n3:c\n"),
+        (
+            "grep -B1 --group-separator=XX -e c -e g",
+            "b\nc\nXX\nf\ng\n",
+        ),
+        ("grep -A1 --no-group-separator -e c -e f", "c\nd\nf\ng\n"),
+        // -A and -B win over -C, whatever the order.
+        ("grep -A0 -C1 -e d", "c\nd\n"),
+        // The inverted match: the context lines are the matching ones.
+        ("grep -v -A1 -e a -e b -e c -e e -e f -e g", "d\ne\n"),
+        // -c ignores context.
+        ("grep -c -A1 -e c", "1\n"),
+    ];
+    for (cmd, want) in cases {
+        let script = format!("{seven}{cmd}");
+        let (out, err, code) = ish_bash(false, &script, &dir);
+        assert_eq!(
+            (out.replace("\r\n", "\n").trim_end().to_string(), code),
+            (want.trim_end().to_string(), 0),
+            "{cmd}: {err}"
+        );
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn b3_grep_context_across_files_and_bad_length() {
+    let dir = scratch("b3_files");
+    std::fs::write(dir.join("one.txt"), "x\nhit\ny\n").unwrap();
+    std::fs::write(dir.join("two.txt"), "hit\nz\n").unwrap();
+    let (out, err, code) = ish_bash(false, "grep -A1 hit one.txt two.txt", &dir);
+    assert_eq!(code, 0, "{err}");
+    assert_eq!(
+        out.replace("\r\n", "\n"),
+        "one.txt:hit\none.txt-y\n--\ntwo.txt:hit\ntwo.txt-z"
+    );
+    let (out, err, code) = ish_bash(false, "echo a | grep -A x a", &dir);
+    assert_eq!((out.as_str(), code), ("", 2), "{err}");
+    assert!(err.contains("invalid context length argument"), "{err}");
+    let _ = std::fs::remove_dir_all(&dir);
+}

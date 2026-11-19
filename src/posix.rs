@@ -6278,6 +6278,103 @@ fn grep_glob_opt(a: &str) -> Option<(&'static str, Option<String>)> {
     None
 }
 
+/// The plain flags of a cluster of short grep options (`-rn`, `-nA2`, `-3`),
+/// and the context options in it: `A`, `B` or `C` with the value written in the
+/// same word (`-A2`), or `None` when it is the next word; a run of digits is
+/// `-C` of that number. `Err(c)` is the first flag the in-process grep does
+/// not run.
+type GrepCluster = (Vec<char>, Vec<(char, Option<String>)>);
+
+fn grep_cluster(a: &str) -> Result<GrepCluster, char> {
+    let mut plain = Vec::new();
+    let mut context = Vec::new();
+    let chars: Vec<char> = a[1..].chars().collect();
+    let mut k = 0;
+    while k < chars.len() {
+        let c = chars[k];
+        if matches!(c, 'A' | 'B' | 'C') {
+            let rest: String = chars[k + 1..].iter().collect();
+            context.push((c, if rest.is_empty() { None } else { Some(rest) }));
+            break;
+        } else if c.is_ascii_digit() {
+            let mut digits = String::new();
+            while k < chars.len() && chars[k].is_ascii_digit() {
+                digits.push(chars[k]);
+                k += 1;
+            }
+            context.push(('C', Some(digits)));
+            continue;
+        } else if "rRnclLivEFwoqshHx".contains(c) {
+            plain.push(c);
+        } else {
+            return Err(c);
+        }
+        k += 1;
+    }
+    Ok((plain, context))
+}
+
+/// A long context option: `--after-context`, `--before-context`, `--context`
+/// or `--group-separator`, with its value when written `--name=VALUE` (`None`
+/// when it is the next word). The name may be abbreviated, as getopt allows.
+fn grep_long_context(a: &str) -> Option<(&'static str, Option<String>)> {
+    let body = a.strip_prefix("--")?;
+    let (name, value) = match body.split_once('=') {
+        Some((n, v)) => (n, Some(v.to_string())),
+        None => (body, None),
+    };
+    if name.is_empty() {
+        return None;
+    }
+    for full in [
+        "after-context",
+        "before-context",
+        "context",
+        "group-separator",
+    ] {
+        if full.starts_with(name) && name.len() >= 3 {
+            return Some((full, value));
+        }
+    }
+    None
+}
+
+/// The lines of context `grep -A/-B/-C/-NUM` ask for.
+#[derive(Default)]
+struct GrepContext {
+    after: Option<usize>,
+    before: Option<usize>,
+    both: Option<usize>,
+    separator: Option<String>,
+    no_separator: bool,
+}
+
+impl GrepContext {
+    /// Apply one option; `Err` is the value GNU calls an invalid context length.
+    fn set(&mut self, kind: &str, value: &str) -> Result<(), String> {
+        if kind == "group-separator" {
+            self.separator = Some(value.to_string());
+            self.no_separator = false;
+            return Ok(());
+        }
+        let n: usize = value.parse().map_err(|_| value.to_string())?;
+        match kind {
+            "A" | "after-context" => self.after = Some(n),
+            "B" | "before-context" => self.before = Some(n),
+            _ => self.both = Some(n),
+        }
+        Ok(())
+    }
+
+    /// Lines before and after a match: `-A` and `-B` win over `-C`, in any order.
+    fn lines(&self) -> (usize, usize) {
+        (
+            self.before.or(self.both).unwrap_or(0),
+            self.after.or(self.both).unwrap_or(0),
+        )
+    }
+}
+
 /// What GNU getopt says about an argument that starts with `-` and is no option
 /// of the utility: `invalid option -- 'c'` for a short one, `unrecognized option
 /// '--name'` for a long one, then the usage line(s). `short` lists the short
@@ -6403,12 +6500,35 @@ fn grep(args: &[String], stdin: &mut Input, sink: &mut Sink) -> Util {
     let mut patterns: Vec<String> = Vec::new();
     let mut ops = Vec::new();
     let mut filter = GrepFilter::default();
+    let mut context = GrepContext::default();
     let mut i = 0;
     let mut done = false;
     while i < args.len() {
         let a = &args[i];
         if !done && a == "--" {
             done = true;
+        } else if !done && a == "--no-group-separator" {
+            context.no_separator = true;
+        } else if let Some((kind, inline)) = grep_long_context(a).filter(|_| !done) {
+            let value = match inline {
+                Some(v) => v,
+                None => {
+                    i += 1;
+                    match args.get(i) {
+                        Some(v) => v.clone(),
+                        None => {
+                            sink.eline(&format!(
+                                "grep: option '--{kind}' requires an argument\nUsage: grep [OPTION]... PATTERNS [FILE]...\nTry 'grep --help' for more information."
+                            ));
+                            return Util::Done(2);
+                        }
+                    }
+                }
+            };
+            if let Err(bad) = context.set(kind, &value) {
+                sink.eline(&format!("grep: {bad}: invalid context length argument"));
+                return Util::Done(2);
+            }
         } else if !done && a == "-e" {
             match args.get(i + 1) {
                 Some(p) => patterns.push(p.clone()),
@@ -6439,11 +6559,31 @@ fn grep(args: &[String], stdin: &mut Input, sink: &mut Sink) -> Util {
         } else if !done && a.starts_with("--") {
             return Util::DeclineFor(a.clone());
         } else if !done && a.len() > 1 && a.starts_with('-') {
-            for c in a[1..].chars() {
-                if !"rRnclLivEFwoqshHx".contains(c) {
-                    return Util::DeclineFor(format!("-{c}"));
+            let (plain, with_value) = match grep_cluster(a) {
+                Ok(parsed) => parsed,
+                Err(c) => return Util::DeclineFor(format!("-{c}")),
+            };
+            flags.extend(plain);
+            for (kind, inline) in with_value {
+                let value = match inline {
+                    Some(v) => v,
+                    None => {
+                        i += 1;
+                        match args.get(i) {
+                            Some(v) => v.clone(),
+                            None => {
+                                sink.eline(&format!(
+                                    "grep: option requires an argument -- '{kind}'\nUsage: grep [OPTION]... PATTERNS [FILE]...\nTry 'grep --help' for more information."
+                                ));
+                                return Util::Done(2);
+                            }
+                        }
+                    }
+                };
+                if let Err(bad) = context.set(&kind.to_string(), &value) {
+                    sink.eline(&format!("grep: {bad}: invalid context length argument"));
+                    return Util::Done(2);
                 }
-                flags.insert(c);
             }
         } else {
             ops.push(a.clone());
@@ -6545,6 +6685,9 @@ fn grep(args: &[String], stdin: &mut Input, sink: &mut Sink) -> Util {
     let walks_dir = recursive && (ops.is_empty() || ops.iter().any(|o| Path::new(o).is_dir()));
     let prefix = (targets.len() > 1 || walks_dir || ops.len() > 1) && !f('h') || f('H');
     let mut any = false;
+    // Whether an earlier file printed a group of lines with context, which a
+    // later group is then separated from by `--`.
+    let mut printed_group = false;
     for (name, path) in &targets {
         let data = match path {
             Some(p) => match read_file(p) {
@@ -6562,26 +6705,73 @@ fn grep(args: &[String], stdin: &mut Input, sink: &mut Sink) -> Util {
         let binary = data.iter().take(32 * 1024).any(|&b| b == 0);
         let mut count = 0usize;
         let mut out = Vec::new();
-        for (n, line) in lines_of(&data).into_iter().enumerate() {
+        let all_lines = lines_of(&data);
+        // The prefix of a line: the file name (when several), then the line
+        // number, each ended by `:` for a selected line and `-` for context.
+        let lead_of = |n: usize, sep: u8| {
+            let mut s = Vec::new();
+            if prefix {
+                s.extend_from_slice(name.as_bytes());
+                s.push(sep);
+            }
+            if f('n') {
+                s.extend_from_slice(format!("{}", n + 1).as_bytes());
+                s.push(sep);
+            }
+            s
+        };
+        let (before, after) = context.lines();
+        let with_context = (before > 0 || after > 0) && !f('o');
+        let mut last_printed: Option<usize> = None;
+        let mut after_left = 0usize;
+        for (n, line) in all_lines.iter().copied().enumerate() {
             let hit = re.is_match(line) != f('v');
             if !hit {
+                if with_context
+                    && after_left > 0
+                    && !f('q')
+                    && !f('l')
+                    && !f('L')
+                    && !f('c')
+                    && !binary
+                {
+                    after_left -= 1;
+                    out.extend_from_slice(&lead_of(n, b'-'));
+                    out.extend_from_slice(line);
+                    out.push(b'\n');
+                    last_printed = Some(n);
+                }
                 continue;
             }
             count += 1;
             if f('q') || f('l') || f('L') || f('c') || binary {
                 continue;
             }
-            let lead = {
-                let mut s = Vec::new();
-                if prefix {
-                    s.extend_from_slice(name.as_bytes());
-                    s.push(b':');
+            let lead = lead_of(n, b':');
+            if with_context {
+                let first = n
+                    .saturating_sub(before)
+                    .max(last_printed.map_or(0, |p| p + 1));
+                let gap = match last_printed {
+                    Some(p) => first > p + 1,
+                    None => printed_group,
+                };
+                if gap && !context.no_separator {
+                    out.extend_from_slice(context.separator.as_deref().unwrap_or("--").as_bytes());
+                    out.push(b'\n');
                 }
-                if f('n') {
-                    s.extend_from_slice(format!("{}:", n + 1).as_bytes());
+                for (k, before_line) in all_lines.iter().enumerate().take(n).skip(first) {
+                    out.extend_from_slice(&lead_of(k, b'-'));
+                    out.extend_from_slice(before_line);
+                    out.push(b'\n');
                 }
-                s
-            };
+                out.extend_from_slice(&lead);
+                out.extend_from_slice(line);
+                out.push(b'\n');
+                last_printed = Some(n);
+                after_left = after;
+                continue;
+            }
             if f('o') && !f('v') {
                 for m in re.find_iter(line) {
                     if m.as_bytes().is_empty() {
@@ -6599,6 +6789,9 @@ fn grep(args: &[String], stdin: &mut Input, sink: &mut Sink) -> Util {
         }
         if count > 0 {
             any = true;
+        }
+        if with_context && !out.is_empty() {
+            printed_group = true;
         }
         if f('q') {
             if any {
@@ -8484,11 +8677,21 @@ fn grep_operands(args: &[String]) -> Option<Vec<String>> {
                 i += 1;
                 args.get(i)?;
             }
+        } else if !done && a == "--no-group-separator" {
+        } else if let Some((_, inline)) = grep_long_context(a).filter(|_| !done) {
+            if inline.is_none() {
+                i += 1;
+                args.get(i)?;
+            }
         } else if !done && a.starts_with("--") {
             return None;
         } else if !done && a.len() > 1 && a.starts_with('-') {
-            if !a[1..].chars().all(|c| "rRnclLivEFwoqshHx".contains(c)) {
-                return None;
+            let (_, with_value) = grep_cluster(a).ok()?;
+            for (_, inline) in with_value {
+                if inline.is_none() {
+                    i += 1;
+                    args.get(i)?;
+                }
             }
         } else {
             ops.push(a.clone());
