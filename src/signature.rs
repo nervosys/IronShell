@@ -9704,7 +9704,7 @@ pub static SIGNATURES: &[Signature] = &[
         subject: Some(Ty::Str),
         params: &[opt("algorithm", Ty::Str, "md5, sha1, sha256 (default), sha384 or sha512; written first when the data follows it"), opt("data", Ty::Str, "text to hash; omit when piping it in")],
         returns: "String",
-        doc: "Hex digest of a string. An unknown algorithm is refused, never substituted. The canonical call is `crypto.hash(\"sha256\", data)`, the algorithm first, or `data | crypto.hash(\"sha256\")` piped; `crypto.hash(data, \"sha256\")` also works when only the second argument names an algorithm. When both arguments are algorithm names the call is E_BAD_ARG (which is the data?): pipe the data in to hash an algorithm name. A lone algorithm name with nothing piped in (`crypto.hash(\"sha256\")`) is E_BAD_ARG, not the hash of that word.",
+        doc: "Hex digest of a string, not of a file; for a file use crypto_hash_file(path). An unknown algorithm is refused, never substituted. The canonical call is `crypto.hash(\"sha256\", data)`, the algorithm first, or `data | crypto.hash(\"sha256\")` piped; `crypto.hash(data, \"sha256\")` also works when only the second argument names an algorithm. When both arguments are algorithm names the call is E_BAD_ARG (which is the data?): pipe the data in to hash an algorithm name. A lone algorithm name with nothing piped in (`crypto.hash(\"sha256\")`) is E_BAD_ARG, not the hash of that word.",
         examples: &[
             (r#"crypto_hash("sha256", "hello")"#, r#"2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"#),
             (r#"crypto_hash("md5", "hello")"#, r#"5d41402abc4b2a76b9719d911017c592"#),
@@ -9723,7 +9723,7 @@ pub static SIGNATURES: &[Signature] = &[
         subject: Some(Ty::Str),
         params: &[],
         returns: "String",
-        doc: "MD5 hex digest of a string. Refused under IRONSHELL_FIPS.",
+        doc: "MD5 hex digest of a string, not of a file; for a file use crypto_hash_file(path, \"md5\"). Refused under IRONSHELL_FIPS.",
         examples: &[
             (r#"md5("hello")"#, r#"5d41402abc4b2a76b9719d911017c592"#),
         ],
@@ -9736,7 +9736,7 @@ pub static SIGNATURES: &[Signature] = &[
         subject: Some(Ty::Str),
         params: &[],
         returns: "String",
-        doc: "SHA-256 hex digest of a string.",
+        doc: "SHA-256 hex digest of a string, not of a file: `sha256(\"words.txt\")` hashes the text \"words.txt\". For a file use crypto_hash_file(path).",
         examples: &[
             (r#"sha256("hello")"#, r#"2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"#),
         ],
@@ -12374,7 +12374,7 @@ pub static SIGNATURES: &[Signature] = &[
         subject: Some(Ty::Str),
         params: &[opt_rest("flags", Ty::Str, "-l, -w or -c to count only lines, words or characters")],
         returns: "Record",
-        doc: "Line, word and character counts of piped text, or of a file named as the subject. An unknown flag is refused.",
+        doc: "Line, word and character counts of piped text, or of a file named as the subject: `wc(path)` reads the file, while `\"text\" | wc()` counts the text itself. An unknown flag is refused.",
         examples: &[
             (r#""a b\nc" | wc()"#, r#"{chars: 5, lines: 2, words: 3}"#),
             (r#""a b\nc" | wc("-l")"#, r#"{lines: 2}"#),

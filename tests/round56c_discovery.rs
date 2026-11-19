@@ -61,3 +61,22 @@ fn c1_find_returns_files_only_in_glob_form() {
     assert_eq!(s.json(r#"find("sub", "*.rs")"#), r#"["sub/deep/g.rs"]"#);
     assert_eq!(s.json(r#"find("sub/") | len"#), "2");
 }
+
+#[test]
+fn c2_string_hash_help_points_at_the_file_hash() {
+    let s = Scratch::new("c2");
+    for name in ["sha256", "md5", "crypto_hash"] {
+        let text = s.json(&format!(r#"help("{name}")"#));
+        assert!(
+            text.contains("crypto_hash_file"),
+            "help({name}) does not mention crypto_hash_file: {}",
+            &text[..text.len().min(400)]
+        );
+    }
+    let wc = s.json(r#"help("wc")"#);
+    assert!(
+        wc.contains("reads the file") && wc.contains("counts the text"),
+        "help(wc) lacks the file/text distinction: {}",
+        &wc[..wc.len().min(400)]
+    );
+}
