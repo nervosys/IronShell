@@ -3819,6 +3819,50 @@ const OPERAND_CANDIDATE_LIMIT: usize = 512;
 /// The longest argument that is split into words to look for file names.
 const OPERAND_SPLIT_MAX_CHARS: usize = 4096;
 
+/// Push `s` as a candidate file name, and again without a leading `& ` (the
+/// PowerShell call operator) and without a leading `./` or `.\`.
+fn push_name_variants(s: &str, out: &mut Vec<String>) {
+    out.push(s.to_string());
+    let t = s.trim();
+    if t.is_empty() {
+        return;
+    }
+    if t.len() != s.len() {
+        out.push(t.to_string());
+    }
+    let t = match t.strip_prefix('&') {
+        Some(rest) if rest.starts_with(char::is_whitespace) => {
+            let rest = rest.trim_start();
+            out.push(rest.to_string());
+            rest
+        }
+        _ => t,
+    };
+    if let Some(rest) = t.strip_prefix("./").or_else(|| t.strip_prefix(".\\")) {
+        out.push(rest.to_string());
+    }
+}
+
+/// Push each `'...'` and `"..."` piece of `s` whole, as a candidate file name
+/// (see [`push_name_variants`]), and look inside it for quoted pieces too, down
+/// to `depth` levels (`"& 'a b.ps1'"`). An unmatched quote ends the scan.
+fn quoted_substrings(s: &str, depth: u8, out: &mut Vec<String>) {
+    let mut rest = s;
+    while let Some(i) = rest.find(['\x27', '"']) {
+        let quote = rest.as_bytes()[i] as char;
+        let after = &rest[i + 1..];
+        let Some(j) = after.find(quote) else {
+            break;
+        };
+        let inner = &after[..j];
+        push_name_variants(inner, out);
+        if depth > 0 {
+            quoted_substrings(inner, depth - 1, out);
+        }
+        rest = &after[j + 1..];
+    }
+}
+
 /// Push the names in one argument that may be a file the command runs or
 /// reads: the argument itself; the part after the first `:` or `=` of a
 /// `-Flag:value` or `--flag=value` argument; and, for an argument that is a
@@ -3827,7 +3871,7 @@ const OPERAND_SPLIT_MAX_CHARS: usize = 4096;
 /// after a `:` or `=` of a word as well. A name that is no existing file is
 /// dropped later, so over-collecting here costs nothing.
 fn operand_candidates(arg: &str, out: &mut Vec<String>) {
-    out.push(arg.to_string());
+    push_name_variants(arg, out);
     let after_flag = |s: &str| -> Option<String> {
         let rest = s.strip_prefix('-')?;
         let i = rest.find([':', '='])?;
@@ -3846,6 +3890,9 @@ fn operand_candidates(arg: &str, out: &mut Vec<String>) {
     if !arg.contains(splits) {
         return;
     }
+    // A name with a space in it is one quoted piece (`& 'a b.ps1'`), which
+    // the split below would cut in two.
+    quoted_substrings(arg, 3, out);
     for word in arg.split(splits).filter(|w| !w.is_empty()) {
         out.push(word.to_string());
         if let Some(v) = after_flag(word) {
@@ -3881,10 +3928,18 @@ fn bind_exec_context(radius: &mut Json) {
         args.iter().for_each(&mut take);
     }
     if let Some(command) = radius.get("command").and_then(Json::as_str) {
+        operand_candidates(command, &mut operands);
         for word in command.split_whitespace() {
             operand_candidates(word.trim_matches(['\x27', '"']), &mut operands);
         }
     }
+    // The words of a command run by `ish -b`, whole: its `command` text joins
+    // them with spaces, so `-File 'a b.ps1'` would otherwise be two words.
+    EXEC_ARGV.with(|argv| {
+        for word in argv.borrow().iter() {
+            operand_candidates(word, &mut operands);
+        }
+    });
     let mut hashes = serde_json::Map::new();
     for operand in operands.into_iter().take(OPERAND_CANDIDATE_LIMIT) {
         if hashes.len() >= OPERAND_HASH_LIMIT {
@@ -6333,6 +6388,7 @@ pub fn guard_exec(builtin: &str, command: impl Into<String>) -> Result<(), Safet
 pub fn guard_exec_env(
     builtin: &str,
     command: impl Into<String>,
+    argv: &[String],
     env: &[(String, String)],
 ) -> Result<(), SafetyError> {
     let command = command.into();
@@ -6345,7 +6401,10 @@ pub fn guard_exec_env(
             map.insert("child_env".to_string(), Json::Array(pairs));
         }
     }
-    guard(GuardCtx {
+    // The words are read by the file binding of the approval (see
+    // `bind_exec_context`) and are not part of the token themselves.
+    EXEC_ARGV.with(|a| *a.borrow_mut() = argv.to_vec());
+    let result = guard(GuardCtx {
         builtin,
         effect: Effect::Exec,
         what: "exec",
@@ -6353,7 +6412,16 @@ pub fn guard_exec_env(
         blast_radius: radius,
         reversible: false,
         fs_paths: false,
-    })
+    });
+    EXEC_ARGV.with(|a| a.borrow_mut().clear());
+    result
+}
+
+thread_local! {
+    /// The words of the command [`guard_exec_env`] is judging, for the file
+    /// binding of its approval.
+    static EXEC_ARGV: std::cell::RefCell<Vec<String>> =
+        const { std::cell::RefCell::new(Vec::new()) };
 }
 
 /// Reject caller-supplied *positional* arguments that a tool would parse as

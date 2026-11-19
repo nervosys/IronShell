@@ -3275,7 +3275,7 @@ impl Shell {
             deduped.insert(n, v);
         }
         let child_env: Vec<(String, String)> = deduped.into_iter().collect();
-        if let Err(e) = crate::safety::guard_exec_env("posix", argv.join(" "), &child_env) {
+        if let Err(e) = crate::safety::guard_exec_env("posix", argv.join(" "), argv, &child_env) {
             sink.eline(&e.to_string());
             return e.code.exit_code();
         }
