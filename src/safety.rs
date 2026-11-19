@@ -3992,7 +3992,25 @@ fn bind_exec_context(builtin: &str, radius: &mut Json) -> Result<(), SafetyError
                 ),
             ));
         }
-        let hash = file_hash16(&operand).unwrap_or_else(|| "unreadable".to_string());
+        // A file inside the workspace is bound by its content. One outside it
+        // (reached through a link, or named by an absolute path) is bound by its
+        // size and modification time only: a content hash in a token the agent
+        // sees would let it confirm guesses about a file it may not read.
+        let hash = if within_workspace(&operand) {
+            file_hash16(&operand).unwrap_or_else(|| "unreadable".to_string())
+        } else {
+            std::fs::metadata(&operand)
+                .map(|m| {
+                    let mtime = m
+                        .modified()
+                        .ok()
+                        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                        .map(|d| d.as_nanos())
+                        .unwrap_or(0);
+                    format!("stamp:{}:{}", m.len(), mtime)
+                })
+                .unwrap_or_else(|_| "unreadable".to_string())
+        };
         hashes.insert(operand, Json::String(hash));
     }
     let env: Vec<Json> = ENV_CHANGES
