@@ -3884,20 +3884,22 @@ fn quoted_substrings(s: &str, depth: u8, out: &mut Vec<String>) {
 /// dropped later, so over-collecting here costs nothing.
 fn operand_words(arg: &str, out: &mut Vec<String>) {
     push_name_variants(arg, out);
-    let after_flag = |s: &str| -> Option<String> {
-        let rest = s.strip_prefix('-')?;
-        let i = rest.find([':', '='])?;
-        let v = rest[i + 1..].trim_matches(['\x27', '"']);
-        (!v.is_empty()).then(|| v.to_string())
-    };
-    if let Some(v) = after_flag(arg) {
-        out.push(v);
-    }
     if arg.chars().count() > OPERAND_SPLIT_MAX_CHARS {
+        // Too long to take apart: only the part after the first `:` or `=` of
+        // a flag, as before.
+        if let Some(rest) = arg.strip_prefix('-') {
+            if let Some(i) = rest.find([':', '=']) {
+                let v = rest[i + 1..].trim_matches(['\x27', '"']);
+                if !v.is_empty() {
+                    out.push(v.to_string());
+                }
+            }
+        }
         return;
     }
+    word_forms(arg, out);
     let splits = |c: char| {
-        c.is_whitespace() || matches!(c, '\x27' | '"' | ';' | '&' | '|' | '(' | ')' | ',')
+        c.is_whitespace() || matches!(c, '\x27' | '"' | ';' | '&' | '|' | '(' | ')' | ',' | '+')
     };
     if !arg.contains(splits) {
         return;
@@ -3907,14 +3909,47 @@ fn operand_words(arg: &str, out: &mut Vec<String>) {
     quoted_substrings(arg, 3, out);
     for word in arg.split(splits).filter(|w| !w.is_empty()) {
         out.push(word.to_string());
-        if let Some(v) = after_flag(word) {
-            out.push(v);
+        word_forms(word, out);
+    }
+}
+
+/// The most `:` or `=` separators of one word that are tried as the start of a
+/// name.
+const WORD_SEPARATOR_LIMIT: usize = 64;
+
+/// Push the names a single word may hold besides itself: the part after each
+/// `:` or `=` (`--opt=a:x.txt`, `/F:x.txt`); for a word that starts with `-` or
+/// `/`, what follows its first one and two characters (`-Ox.txt`, `/Fx.txt`);
+/// and each of those without a leading `-@`, `@` or `!` (a response file
+/// `@x.txt`, an alias `alias.x=!x.sh`).
+fn word_forms(word: &str, out: &mut Vec<String>) {
+    let mut pieces: Vec<&str> = vec![word];
+    pieces.extend(
+        word.char_indices()
+            .filter(|(_, c)| matches!(c, ':' | '='))
+            .take(WORD_SEPARATOR_LIMIT)
+            .map(|(i, _)| &word[i + 1..]),
+    );
+    if word.starts_with(['-', '/']) {
+        let mut chars = word.char_indices().skip(1);
+        for _ in 0..2 {
+            if let Some((i, _)) = chars.next() {
+                pieces.push(&word[i..]);
+            }
         }
-        if !word.starts_with('-') {
-            if let Some(i) = word.find('=') {
-                let v = &word[i + 1..];
-                if !v.is_empty() {
-                    out.push(v.to_string());
+    }
+    for (n, piece) in pieces.into_iter().enumerate() {
+        let piece = piece.trim_matches(['\x27', '"']);
+        if piece.is_empty() {
+            continue;
+        }
+        if n > 0 || piece != word {
+            out.push(piece.to_string());
+        }
+        for prefix in ["-@", "@", "!"] {
+            if let Some(rest) = piece.strip_prefix(prefix) {
+                if !rest.is_empty() {
+                    out.push(rest.to_string());
                 }
             }
         }
@@ -12065,6 +12100,26 @@ mod operand_candidate_tests {
         assert!(!found
             .iter()
             .any(|n| n.contains("/share/f.txt") && !n.starts_with("file:")));
+    }
+
+    #[test]
+    fn more_argument_shapes_name_a_file() {
+        for (arg, want) in [
+            ("@t1.txt", "t1.txt"),
+            ("-@t1.txt", "t1.txt"),
+            ("-Ot1.txt", "t1.txt"),
+            ("/Ft1.txt", "t1.txt"),
+            ("/F:t1.txt", "t1.txt"),
+            ("--opt=a:t1.txt", "t1.txt"),
+            ("alias.x=!x.sh", "x.sh"),
+            ("n1.txt+t1.txt", "t1.txt"),
+            ("n1.txt+t1.txt", "n1.txt"),
+            ("a.txt,b.txt", "b.txt"),
+            ("copy n1.txt+t1.txt out.txt", "t1.txt"),
+        ] {
+            let found = names(arg);
+            assert!(found.contains(&want.to_string()), "{arg}: {found:?}");
+        }
     }
 
     #[test]

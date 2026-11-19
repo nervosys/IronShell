@@ -111,3 +111,34 @@ fn a_file_url_is_bound() {
     };
     assert_bound(&dir, &url);
 }
+
+#[test]
+fn glued_and_decorated_file_names_are_bound() {
+    let dir = scratch("shapes");
+    for arg in [
+        "@x.txt",
+        "-@x.txt",
+        "-Ox.txt",
+        "/Fx.txt",
+        "/F:x.txt",
+        "--opt=a:x.txt",
+        "alias.x=!x.txt",
+        "n1.txt+x.txt",
+        "x.txt,n2.txt",
+    ] {
+        assert_bound(&dir, arg);
+    }
+}
+
+#[test]
+fn many_names_joined_by_plus_are_refused() {
+    let dir = scratch("plus");
+    let names: Vec<String> = (0..300).map(|i| format!("f{i}.txt")).collect();
+    for n in &names {
+        std::fs::write(dir.join("proj").join(n), "x").expect("file");
+    }
+    let exe = env!("CARGO_BIN_EXE_ish").replace('\\', "/");
+    let code = format!(r#"sh(["{exe}", "{}"])"#, names.join("+"));
+    let err = first_error(&agent(&dir, &code));
+    assert_eq!(err["error"]["code"], "E_POLICY_DENY", "{err}");
+}
