@@ -262,3 +262,60 @@ fn the_predicate_is_exact_about_what_it_claims() {
     );
     std::env::remove_var("IRONSHELL_AUDIT_LOG");
 }
+
+#[test]
+fn agent_temp_files_under_the_audit_directory_stay_writable() {
+    // `fs_tempdir` and `fs_tempfile` create under `.ironshell/tmp/` in agent
+    // mode; refusing writes there made both useless to an agent.
+    let _g = lock();
+    let ws = Ws::new("tmpdir");
+    let dir = call("fs_tempdir", vec![Value::Str("ex".into())]).expect("fs_tempdir");
+    let Value::Str(dir) = dir else {
+        panic!("fs_tempdir gave {dir:?}")
+    };
+    assert!(
+        dir.replace('\\', "/").contains("/.ironshell/tmp/"),
+        "agent temp dir: {dir}"
+    );
+    let f = format!("{dir}/a.txt");
+    call(
+        "file_write",
+        vec![Value::Str(f.clone()), Value::Str("hello".into())],
+    )
+    .expect("a write inside the agent temp dir is allowed");
+    assert_eq!(std::fs::read_to_string(&f).unwrap_or_default(), "hello");
+    // A delete still needs approval in agent mode, as anywhere in the
+    // workspace; the exception is about the audit guard, not the delete gate.
+    let tf = call("fs_tempfile", vec![Value::Str("ex".into())]).expect("fs_tempfile");
+    let Value::Str(tf) = tf else {
+        panic!("fs_tempfile gave {tf:?}")
+    };
+    call(
+        "file_write",
+        vec![Value::Str(tf.clone()), Value::Str("hi".into())],
+    )
+    .expect("and so is a write to an agent temp file");
+
+    // The exception is the subtree only: the log and the rest of the directory
+    // stay protected, however the path is spelled.
+    let ish = ws.root.join(".ironshell");
+    let back = ish.join("tmp").join("..").join("audit.log");
+    let rbac = ish.join("tmp").join("..").join("rbac.toml");
+    for p in [
+        ish.join("audit.log"),
+        ish.join("other.txt"),
+        ish.join("rbac.toml"),
+        ish.join("tmp"),
+        back,
+        rbac,
+    ] {
+        let r = call(
+            "file_write",
+            vec![
+                Value::Str(p.to_string_lossy().into_owned()),
+                Value::Str("x".into()),
+            ],
+        );
+        assert!(r.is_err(), "{} must still be refused: {r:?}", p.display());
+    }
+}
