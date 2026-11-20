@@ -25,6 +25,9 @@ ignore = [
     "RUSTSEC-2026-0369", # zip 0.6.6 — extract() permissions via symlinks (utoipa-swagger-ui build-dep)
     "RUSTSEC-2026-0441", # pin-utils 0.1.0 — unmaintained (archived 2026-10-01), no safe upgrade; transitive through futures-util 0.3.31 (axum, futures). Remove when futures-util drops it.
     "RUSTSEC-2026-0429", # zip 0.6.6, 1.1.4 — extract() aborts on a large declared symlink size; neither copy calls extract() (utoipa-swagger-ui build-dep; candle-core .npz/pickle, by_index/by_name)
+    "RUSTSEC-2026-0545", # zip 0.6.6, 1.1.4 — AES entries returned unauthenticated; neither copy is built with aes-crypto (no aes/hmac/pbkdf2 in their resolved deps)
+    "RUSTSEC-2026-0548", # zip 0.6.6, 1.1.4 — ZipStreamReader trusts local-header names; neither user reads a stream (utoipa-swagger-ui build.rs and candle-core npy.rs use ZipArchive)
+    "RUSTSEC-2026-0543", # chrono 0.4.43 — unmaintained, no successor release; a direct dependency (about 94 uses in src/). Moving to jiff or time is tracked in PLAN.md; remove then.
     # Removed 2026-07-29 — cargo-deny reported these as `advisory-not-detected`,
     # i.e. no crate in the tree matches them any more. Stale ignores are worse
     # than none: they read as accepted risk while silently covering nothing.
