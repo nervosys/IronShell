@@ -11380,7 +11380,7 @@ pub static SIGNATURES: &[Signature] = &[
         doc: "Direct less(text,options?) or text | less(options?); pager is an alias. Return text of at most 40 lines unchanged, including its line endings, or a record with the first 40 lines joined with LF, total_lines, page_size 40, pages and a head/tail hint for longer input. File mode resolves paths against the workspace, guards the actual target and bounds regular UTF-8 reads to 64 MiB. Reject invalid or unknown options, non-Bool file and conflicting direct/piped input. Consume owned text, retain only first-page line references and count remaining lines without collecting them.",
         examples: &[
             (r#"less("a")"#, r#"a"#),
-            (r#"let d = fs_tempdir("ae_ex"); let f = d + "/a.txt"; file_write(f, arr.range(50) | map(fn(i) => "line")); let r = typeof(less(f, {file: true})); rmdir(d, true); r"#, r#"Record"#),
+            (r#"let d = fs_tempdir("ae_ex"); let f = d + "/a.txt"; file_write(f, range(50) | map(fn(i) => "line")); let r = typeof(less(f, {file: true})); rmdir(d, true); r"#, r#"Record"#),
             (r#""a" | pager({file: false})"#, r#""a""#),
         ],
     },
