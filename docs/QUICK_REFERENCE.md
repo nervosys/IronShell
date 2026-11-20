@@ -478,7 +478,7 @@ result := match operation() {
 
 - [Type System Guide](TYPE_SYSTEM_GUIDE.md) - Deep dive into `:=` vs `=`
 - [MCP Servers Guide](MCP_SERVERS_GUIDE.md) - Complete MCP reference
-- [AI Protocols Report](AI_PROTOCOLS_FINAL_REPORT.md) - A2A and NANDA details
+- [AI Protocols Report](archive/AI_PROTOCOLS_FINAL_REPORT.md) - A2A and NANDA details
 - [Examples Directory](../examples/) - 17 complete examples
 
 ---

@@ -363,8 +363,8 @@ Protocol Responsibilities:
 - `tests/ai_swarm_comprehensive.rs` - Swarm tests (29 tests)
 
 ### Documentation
-- `docs/AI_IMPLEMENTATION_REPORT.md` - Phase 1 report
-- `docs/AI_PROTOCOLS_FINAL_REPORT.md` - This document
+- `docs/archive/AI_IMPLEMENTATION_REPORT.md` - Phase 1 report
+- `docs/archive/AI_PROTOCOLS_FINAL_REPORT.md` - This document
 
 ---
 

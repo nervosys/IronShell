@@ -1,5 +1,7 @@
 # IronShell Productization Plan
 
+> Historical: superseded by PLAN.md and ROADMAP.md as of 2026-11-20; the open items are carried over there.
+
 A comprehensive strategy for taking IronShell from development project to market-ready product.
 
 ## Executive Summary
@@ -293,15 +295,15 @@ Patreon: Community building
 - [x] WASM compilation
 - [x] Python SDK
 - [x] Browser extension
-- [ ] Stable API surface
+- [x] Stable API surface (docs/STABILITY.md and docs/LTS.md exist)
 - [ ] Comprehensive documentation
-- [ ] Performance benchmarks
+- [x] Performance benchmarks (benches/ holds the benchmark suites declared in Cargo.toml)
 
 **Distribution:**
-- [ ] Homebrew formula
-- [ ] Cargo publish
+- [x] Homebrew formula (Formula/ironshell.rb)
+- [x] Cargo publish (iron-shell 14.0.5 is on crates.io, checked 2026-11-20)
 - [ ] Chrome Web Store
-- [ ] GitHub Releases automation
+- [x] GitHub Releases automation (.github/workflows/release.yml; GitHub release v14.0.5 exists)
 
 ### Version 1.1 - Q2 2025
 
@@ -309,8 +311,8 @@ Patreon: Community building
 - [ ] Interactive debugger
 - [ ] Shell history search (fzf-like)
 - [ ] Custom plugin system
-- [ ] VSCode extension
-- [ ] Jupyter kernel
+- [x] VSCode extension (editors/vscode, version 1.6.1)
+- [x] Jupyter kernel (extensions/jupyterlab, version 0.1.0)
 
 **Business:**
 - [ ] Pro tier launch
@@ -322,20 +324,20 @@ Patreon: Community building
 **Features:**
 - [ ] Distributed agent execution
 - [ ] Workflow persistence
-- [ ] Multi-modal file handling (images, audio)
-- [ ] Remote shell execution
+- [x] Multi-modal file handling (images, audio) (ai() takes an images option, see AGENTS.md)
+- [x] Remote shell execution (ssh_exec and the repl_serve and repl_connect builtins exist)
 
 **Enterprise:**
 - [ ] Enterprise tier launch
 - [ ] SSO integration
-- [ ] Audit logging
+- [x] Audit logging (audit_log, audit_query and audit_export builtins)
 
 ### Version 2.0 - Q4 2025
 
 **Major Features:**
 - [ ] Visual workflow builder
 - [ ] Collaborative sessions
-- [ ] Marketplace for agents/scripts
+- [x] Marketplace for agents/scripts (marketplace module, builtins such as marketplace_publish)
 - [ ] Mobile companion app
 
 ---
@@ -419,21 +421,21 @@ Patreon: Community building
 ## 10. Immediate Action Items
 
 ### Week 1-2: Foundation
-- [ ] Set up CI/CD for releases
-- [ ] Create Homebrew formula
-- [ ] Publish to crates.io
+- [x] Set up CI/CD for releases (ci.yml and release.yml in .github/workflows)
+- [x] Create Homebrew formula (Formula/ironshell.rb)
+- [x] Publish to crates.io (see line 302)
 - [ ] Submit browser extension to Chrome Web Store
-- [ ] Create landing page (ironshell.io domain)
+- [x] Create landing page (ironshell.io domain) (website/ is deployed by .github/workflows/website.yml; the ironshell.io domain was not checked)
 
 ### Week 3-4: Documentation
-- [ ] Write comprehensive getting-started guide
-- [ ] Create API reference documentation
+- [x] Write comprehensive getting-started guide (docs/book and docs/QUICK_REFERENCE.md exist; not reviewed for completeness)
+- [x] Create API reference documentation (docs/api holds AGENT_API.md, AI_API.md and PYTHON_SDK.md)
 - [ ] Record introduction video
 - [ ] Prepare HN/Reddit launch post
 
 ### Week 5-6: Community
 - [ ] Set up Discord server
-- [ ] Create contribution guidelines
+- [x] Create contribution guidelines (CONTRIBUTING.md and CLA.md)
 - [ ] Draft code of conduct
 - [ ] Plan first community call
 

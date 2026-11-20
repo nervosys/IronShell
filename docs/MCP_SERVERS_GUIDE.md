@@ -761,7 +761,7 @@ print("Errors: ${status.error_count}")
 - **Examples**: `examples/16_mcp_servers.ish` - Comprehensive MCP server examples
 - **Specification**: [MCP Protocol Spec](https://modelcontextprotocol.io)
 - **Community**: Share your MCP servers with the IronShell community
-- **Documentation**: See `docs/AI_PROTOCOLS_FINAL_REPORT.md` for protocol details
+- **Documentation**: See `docs/archive/AI_PROTOCOLS_FINAL_REPORT.md` for protocol details
 
 ---
 

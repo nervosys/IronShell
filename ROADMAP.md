@@ -1,12 +1,18 @@
 # IronShell Roadmap
 
-> Current release status, 2026-10-19: workspace packages remain **12.0.2**;
-> **14.0.0 is in preparation and has not been published by this work**.
-> The [completion plan](docs/COMPLETION_PLAN.md) contains the current scope,
-> owners, evidence and release gates. Every one of the 1,319
-> names in the dispatch table has a declared signature.
-> Measured evaluator improvements are recorded in the linked performance
-> report; final-tree cross-platform measurements remain pending.
+> Current release status, 2026-11-20: crate **`iron-shell` 14.0.5** and
+> **`iron-shell-lsp` 14.0.5** are on crates.io. The binary is `ish`, and `ae`
+> is installed as an alias. The 14.0.x releases are tagged `v14.0.0` to
+> `v14.0.5`; the GitHub release `v14.0.5` is marked Latest. The
+> [completion plan](docs/COMPLETION_PLAN.md) and the
+> [productization plan](docs/PRODUCTIZATION_PLAN.md) are historical. Their open
+> items are carried over in the section "Carried over from the completion and
+> productization plans" below.
+
+## 14.0.0 preparation notes (2026-10, historical)
+
+These paragraphs describe the state on 2026-10-19 and are kept as a record.
+Where they say something "remains open", check the carried-over section below.
 
 The user expanded the 13.0.0 implementation scope on 2026-10-02 to all unsupported
 builtins. Scheduler mutation adapters, DQN weight training and native TCP socket lifecycle now have working
@@ -72,16 +78,16 @@ This document tracks the development progress of IronShell, the world's first ag
 | Plugin System     | ⚠️ Partial  | TOML metadata registration; script builtins refused |
 | Standard Library  | ✅ Complete | 7 modules (lib/)                          |
 | Performance       | ✅ Complete | 5 benchmark suites                        |
-| Test Coverage     | ✅ Complete | 3,572 tests on Windows, 3,582 on Linux    |
+| Test Coverage     | ✅ Complete | 6,701 `#[test]` functions (see Metrics)   |
 | Documentation     | ✅ Complete | Comprehensive                             |
-| Publishing        | ✅ Complete | crates.io v12.0.2                         |
+| Publishing        | ✅ Complete | crates.io `iron-shell` 14.0.5             |
 | WASM Support      | ✅ Complete | Browser REPL ready                        |
 | Enterprise        | ⚠️ Partial  | RBAC, Audit; sso_auth refuses             |
 | LSP Server        | ✅ Complete | tower-lsp, crates.io                      |
 | VS Code Extension | ✅ Complete | Marketplace published                     |
 | MCP Protocol      | ✅ Complete | 130+ tools, HTTP server                   |
 | Agent API         | ✅ Complete | 27 provider schema formats                |
-| Distribution      | ✅ Complete | Homebrew, npm, PyPI                       |
+| Distribution      | ⚠️ Partial  | crates.io, GitHub Releases, Homebrew formula in repo, PyPI; no npm package |
 | CI/CD             | ✅ Complete | GitHub Actions, CLA check                 |
 | Licensing         | ✅ Complete | AGPL-3.0 + commercial                     |
 
@@ -256,7 +262,7 @@ This document tracks the development progress of IronShell, the world's first ag
 - [x] LSP server (`iron-shell-lsp`) — completions, diagnostics, symbols, go-to-def
 - [x] TextMate grammar + Markdown injection grammar
 - [x] Homebrew formula
-- [x] npm package (`@nervosys/aethershell`)
+- [ ] npm package: none has ever been published (`@nervosys/aethershell` returns 404 on the registry, checked 2026-11-20)
 - [x] Python SDK (`integrations/python/`)
 - [x] WASM support with browser REPL
 - [x] GitHub Actions CI/CD (test, release, security audit, CLA)
@@ -265,9 +271,9 @@ This document tracks the development progress of IronShell, the world's first ag
 
 ## In Progress
 
-### Q1 2026
-- [ ] **GitHub Linguist submission** — Grammar, samples, and submission guide ready; blocked on ecosystem threshold (~200 repos with `.ish` files)
-- [ ] **VS Code extension v0.3.1 marketplace update** — VSIX built, blocked on PAT renewal
+### Q1 2026 items, status on 2026-11-20
+- [ ] **GitHub Linguist submission** — Grammar, samples, and submission guide ready; blocked on ecosystem threshold (~200 repos with `.ish` files). Not rechecked; carried over below.
+- [x] **VS Code extension marketplace update** — superseded. The extension in `editors/vscode` is at 1.6.1 (publisher `admercs`, name `ironshell`), and the completion plan recorded `admercs.aethershell` 1.6.1 on the Marketplace and Open VSX on 2026-10-27. The listing under the new name was not checked.
 
 ---
 
@@ -351,8 +357,8 @@ This document tracks the development progress of IronShell, the world's first ag
 - [x] All 88 compiler warnings fixed
 
 ### Open
-- [ ] VS Code marketplace PAT expired (publisher `admercs`)
-- [ ] Pre-existing test failure: `security_user_simulation::friendly_user_allowed_commands` (validate_command assertion)
+- [ ] VS Code marketplace PAT expired (publisher `admercs`). Not rechecked; the completion plan found `VSCE_PAT` set on 2026-10-28.
+- [ ] Pre-existing test failure: `security_user_simulation::friendly_user_allowed_commands` (validate_command assertion). Not rerun for this edit; the test still exists in `tests/security_user_simulation.rs`.
 
 ### Recently Resolved (v1.2.0)
 - [x] Flaky `cfg_feature_enabled` test — fixed with Mutex-based env var serialization
@@ -367,26 +373,90 @@ This document tracks the development progress of IronShell, the world's first ag
 ## Metrics
 
 ### Test Coverage
-- **Tests (2026-10-23, `cargo test --workspace`):** 3,572 passed on Windows with 5 ignored;
-  3,582 passed on Linux with 49 ignored, 45 of which run only in a disposable distro
-- **Test Files:** 255 integration test files
-- **Test Suites:** 260 test binaries (unit + integration, all three workspace crates)
-- **CI Status:** not rerun for this tree; see the completion plan's release gates
+- **Test functions (2026-11-20):** 6,701 `#[test]` attributes, counted with
+  `grep -rn "#\[test\]" tests src --include=*.rs | wc -l`: 5,683 under `tests/` and
+  1,018 under `src/`. This counts declarations only. It misses other test attributes
+  (for example `#[tokio::test]`), counts any `#[test]` in a comment, and says nothing
+  about how many pass. `#[ignore` appears 141 times in the same two folders.
+- **Test files:** 601 `.rs` files directly under `tests/` (2026-11-20)
+- **Pass counts:** none claimed here. The last pass counts in this file were from
+  2026-10-23 and are removed. Run `cargo test --workspace` for a current result.
 
 ### Codebase
 - **Language:** Rust
-- **Source Lines:** ~198,000 (src/)
-- **Test Lines:** ~85,000 (tests/)
-- **Builtins:** 1,190 in the ontology (1,400+ names including aliases)
+- **Source and test line counts:** not recounted for 2026-11-20; the earlier figures were removed
+- **Builtins:** 1,200+ in the ontology, 1,400+ callable names counting aliases (as AGENTS.md states; `tests/documented_builtin_count.rs` pins the counts)
 - **Modules:** 108
 - **Themes:** 38
 
 ### Distribution
-- **crates.io:** [aethershell v12.0.2](https://crates.io/crates/aethershell) + [aethershell-lsp v12.0.2](https://crates.io/crates/aethershell-lsp)
-- **VS Code:** [admercs.ironshell](https://marketplace.visualstudio.com/items?itemName=admercs.ironshell)
-- **GitHub:** [nervosys/IronShell](https://github.com/nervosys/IronShell) — v12.0.2 release with binaries
-- **Homebrew:** `brew tap nervosys/ironshell https://github.com/nervosys/IronShell`, then `brew install nervosys/ironshell/ironshell`
-- **npm:** `npm install @nervosys/aethershell`
+Checked against the registries on 2026-11-20 unless noted.
+
+- **crates.io:** [iron-shell 14.0.5](https://crates.io/crates/iron-shell) and [iron-shell-lsp 14.0.5](https://crates.io/crates/iron-shell-lsp). The binary is `ish`; `ae` is an alias.
+- **PyPI:** `ironshell` 1.5.2 (the Python SDK; `integrations/python/pyproject.toml` also says 1.5.2)
+- **VS Code:** extension `admercs.ironshell`, source version 1.6.1 in `editors/vscode`. The Marketplace listing was not checked.
+- **GitHub:** [nervosys/IronShell](https://github.com/nervosys/IronShell), release v14.0.5 (Latest)
+- **Homebrew:** `brew tap nervosys/ironshell https://github.com/nervosys/IronShell`, then `brew install nervosys/ironshell/ironshell`. `Formula/ironshell.rb` names the v14.0.5 tarball, and its sha256 matches the tarball GitHub serves for that tag.
+- **npm:** nothing has ever been published. `@nervosys/aethershell` returns 404, and no `iron-shell` npm package is claimed.
+
+---
+
+## Carried over from the completion and productization plans
+
+Written 2026-11-20. These are the boxes that stayed open in
+[docs/COMPLETION_PLAN.md](docs/COMPLETION_PLAN.md) and
+[docs/PRODUCTIZATION_PLAN.md](docs/PRODUCTIZATION_PLAN.md) after each was checked
+against CHANGELOG.md, the source and the registries. Items are merged where both
+plans listed them. Each is open because no evidence of completion was found, not
+because it was shown to be undone.
+
+### Builtin contracts and implementations
+- [ ] Classify the roughly 123 `bi_*` functions with explicit unsupported branches into always-missing, platform-conditional and policy constraints (completion plan, section 1).
+- [ ] Web, clipboard, UI and input operations: verify on a desktop host. The plan found `gui_*` and `clipboard_*` desktop paths unverified.
+- [ ] Package managers: `dnf`/`yum` and `brew` adapters are tested through their parsers only, not end to end on a host that uses them.
+- [ ] Verify each operation's positive result against real effects in owned fixtures or disposable environments, not only malformed-call refusals.
+- [ ] Finish the remaining unsupported branches, by module. Source shows `job_submit` refuses with E_UNIMPLEMENTED (no job executor). `sso_auth` cannot verify a callback and mints no session. ROADMAP's own entries list `finetune_start`, the `cloud_*` builtins, `workspace_sync` and `repl_broadcast` as refusing the same way; those were not rechecked.
+- [ ] Declaration quality: read each body before declaring it; reject surplus, mistyped and conflicting input before any effect; give every declaration examples that exercise optional parameters both ways; check return shape and refusal code on every applicable platform.
+- [ ] Effectful contracts: finish containment, audit identity, effect classification, budget and transaction checks, and refuse transaction use where rollback cannot restore the operation.
+- [ ] Reach full coverage of implementations and callable names, then remove the interim undeclared-builtin assertions.
+- [ ] Keep coded refusals distinct (unsupported, absent tool, failed tool, bad input, policy). `tests/uncoded_error_ratchet.rs` pins a ceiling of remaining uncoded errors.
+- [ ] Atomic publication, temporary-file cleanup and rollback for all supported filesystem changes: keep extending the tranche tests.
+
+### Security and reliability follow-ups
+- [ ] Recheck agent policy enforcement, effect provenance, aliases, audit protection and network restrictions once the catalogue is final. Reads of the audit key file are still allowed anywhere in agent mode.
+- [ ] Close the remaining findings of the 2026-10-30 rename audit (security, then discoverability, usability and performance).
+- [ ] CI gaps left for decision: the `#[ignore]` disposable-only tests never run in CI; tests that skip when `tmux`, `openssl`, `git`, `kubectl` or `sqlite3` is absent report green; no memory cap on the test run; the MSRV job only checks; `release.yml` builds tag binaries with no test run; branches without a PR are not tested.
+
+### Build, platforms and release checks
+- [ ] MSRV: the manifest now says `rust-version = "1.89"`; the plan validated 1.88. Recheck the MSRV and the `native,candle` and `native,onnx` feature sets against the current tree.
+- [ ] Hardware checks (`hw_battery`, `hw_gpu`, `hw_sensors`, `sys_cpu_freq`) on hardware with a battery, GPU and sensors; `hw_sensors` was null on the maintainer's host. GUI, clipboard and service contracts on a desktop host.
+- [ ] Rerun `scripts/test_release_version.py` and `scripts/test-release-preflight.ps1` on a release commit under PowerShell 5.1 and 7.
+- [ ] Update install, upgrade and troubleshooting instructions and verify each channel's package name and version. Not checked: the VS Code Marketplace listing under the new name, the PyPI extras.
+- [ ] Download the release assets and test a clean install on Windows, Linux and macOS (each architecture and channel); smoke-test `ish --version`, typed pipelines, the Agent API, SDK and LSP, upgrade and uninstall; verify published checksums and documentation links.
+- [ ] Final pass: every number in the docs matches the command that produced it.
+- [ ] Decide the global git `user.email` (maintainer); push the amended `infra` commit if it still exists (not checked).
+
+### Distribution and ecosystem
+- [ ] GitHub Linguist submission (needs about 200 repositories with `.ish` files).
+- [ ] Chrome Web Store submission of `integrations/browser-extension` (0.2.0). No evidence of a listing.
+- [ ] npm package: none exists. Publish one or drop the item.
+- [ ] Landing page on the `ironshell.io` domain. `website/` is deployed by `.github/workflows/website.yml`; the domain was not checked.
+- [ ] Documentation: a review of the book and API reference for completeness; an introduction video; a launch post.
+- [ ] Community: Discord server, a code of conduct (no `CODE_OF_CONDUCT.md` exists), a first community call, a developer-preview announcement, feedback collection, Product Hunt.
+
+### Product features without evidence of completion
+- [ ] Interactive debugger (only the `debug` builtin and related tools exist; no interactive debugger was found).
+- [ ] Shell history search (fzf-like).
+- [ ] Custom plugin system beyond TOML metadata registration; script builtins are refused.
+- [ ] Distributed agent execution and workflow persistence (`job_submit` refuses; no workflow persistence builtins were found).
+- [ ] Business items: Pro tier, payment integration, license server, enterprise tier launch.
+- [ ] SSO (see `sso_auth` above), visual workflow builder, collaborative sessions (`workspace_sync` refuses), mobile companion app.
+
+Two groups of boxes were left unchecked and not carried over. The six "working
+checklist for each migration tranche" items in the completion plan are a
+recurring procedure, not deliverables. The E7 live-model run is treated as
+closed: results exist under `benches/agentic/results/e7-*.md` from Claude
+subagent and local-model runs, and no run used an API credential.
 
 ---
 

@@ -30,7 +30,7 @@ Welcome to the IronShell documentation! This index provides a comprehensive guid
 | [AI_MCP_INTEGRATION.md](AI_MCP_INTEGRATION.md)               | Model Context Protocol integration |
 | [MCP_GETTING_STARTED.md](MCP_GETTING_STARTED.md)             | Getting started with MCP servers   |
 | [MCP_SERVERS_GUIDE.md](MCP_SERVERS_GUIDE.md)                 | Comprehensive MCP server guide     |
-| [AI_PROTOCOLS_FINAL_REPORT.md](AI_PROTOCOLS_FINAL_REPORT.md) | AI protocols implementation report |
+| [AI_PROTOCOLS_FINAL_REPORT.md](archive/AI_PROTOCOLS_FINAL_REPORT.md) | AI protocols implementation report |
 
 ## 🛡️ Security Documentation
 
@@ -67,7 +67,7 @@ Welcome to the IronShell documentation! This index provides a comprehensive guid
 | [WHY_IRONSHELL.md](WHY_IRONSHELL.md)           | Why choose IronShell over alternatives  |
 | [SHELL_COMPARISON.md](SHELL_COMPARISON.md)         | Detailed comparison with other shells     |
 | [COMPETITIVE_ANALYSIS.md](COMPETITIVE_ANALYSIS.md) | Comprehensive competitive analysis        |
-| [COMPETITIVE_SUMMARY.md](COMPETITIVE_SUMMARY.md)   | Executive summary of competitive position |
+| [COMPETITIVE_SUMMARY.md](archive/COMPETITIVE_SUMMARY.md)   | Executive summary of competitive position |
 
 ## 🎨 User Interface & Experience
 
@@ -84,7 +84,7 @@ Welcome to the IronShell documentation! This index provides a comprehensive guid
 | -------------------------------------------------------------- | ------------------------------- |
 | [SYNTAX_QUICK_REFERENCE.md](SYNTAX_QUICK_REFERENCE.md)         | Quick syntax reference card     |
 | [VARIABLE_SYNTAX_GUIDE.md](VARIABLE_SYNTAX_GUIDE.md)           | Variable declaration and usage  |
-| [TYPE_SYSTEM_UPDATE_SUMMARY.md](TYPE_SYSTEM_UPDATE_SUMMARY.md) | Type system updates and changes |
+| [TYPE_SYSTEM_UPDATE_SUMMARY.md](archive/TYPE_SYSTEM_UPDATE_SUMMARY.md) | Type system updates and changes |
 
 ## 🔧 Tools & Utilities
 
@@ -97,10 +97,10 @@ Welcome to the IronShell documentation! This index provides a comprehensive guid
 
 | Document                                                                 | Description                            |
 | ------------------------------------------------------------------------ | -------------------------------------- |
-| [COMPLETE_IMPLEMENTATION_SUMMARY.md](COMPLETE_IMPLEMENTATION_SUMMARY.md) | Complete implementation summary        |
-| [AI_IMPLEMENTATION_REPORT.md](AI_IMPLEMENTATION_REPORT.md)               | AI features implementation report      |
-| [IMPLEMENTATION_SUMMARY.md](IMPLEMENTATION_SUMMARY.md)                   | Core implementation summary            |
-| [EXAMPLES_TEST_REPORT.md](EXAMPLES_TEST_REPORT.md)                       | Examples testing and validation report |
+| [COMPLETE_IMPLEMENTATION_SUMMARY.md](archive/COMPLETE_IMPLEMENTATION_SUMMARY.md) | Complete implementation summary        |
+| [AI_IMPLEMENTATION_REPORT.md](archive/AI_IMPLEMENTATION_REPORT.md)               | AI features implementation report      |
+| [IMPLEMENTATION_SUMMARY.md](archive/IMPLEMENTATION_SUMMARY.md)                   | Core implementation summary            |
+| [EXAMPLES_TEST_REPORT.md](archive/EXAMPLES_TEST_REPORT.md)                       | Examples testing and validation report |
 
 ## 🔍 Testing & Quality Assurance
 
@@ -115,9 +115,9 @@ Welcome to the IronShell documentation! This index provides a comprehensive guid
 
 | Document                                                             | Description                   |
 | -------------------------------------------------------------------- | ----------------------------- |
-| [DOCUMENTATION_UPDATE_COMPLETE.md](DOCUMENTATION_UPDATE_COMPLETE.md) | Documentation update tracking |
-| [README_clean.md](README_clean.md)                                   | Clean version of README       |
-| [README_old.md](README_old.md)                                       | Historical README versions    |
+| [DOCUMENTATION_UPDATE_COMPLETE.md](archive/DOCUMENTATION_UPDATE_COMPLETE.md) | Documentation update tracking |
+| [README_clean.md](archive/README_clean.md)                                   | Clean version of README       |
+| [README_old.md](archive/README_old.md)                                       | Historical README versions    |
 
 ## 🏃‍♂️ Quick Navigation
 
