@@ -4547,17 +4547,34 @@ pub fn is_audit_artifact(path: &str) -> bool {
             // control.
             match log.parent() {
                 Some(dir) if dir.file_name().is_some_and(|n| n == ".ironshell") => {
-                    let dirs = audit_forms(dir);
-                    candidates.iter().any(|c| {
-                        dirs.iter()
-                            .any(|d| !d.is_empty() && (c == d || c.starts_with(&format!("{d}/"))))
-                    })
+                    in_guarded_dir(&candidates, dir)
                 }
                 _ => false,
             }
         }
         None => false,
     }
+}
+
+/// Whether any of `candidates` (resolved forms, from [`judged_forms`]) is the
+/// `.ironshell` directory `dir` or inside it, other than inside its `tmp/`.
+///
+/// `tmp/` is where `fs_tempfile` and `fs_tempdir` create things in agent mode,
+/// and refusing writes there made both useless to an agent. It is matched as
+/// the fixed spelling `<dir>/tmp/` under each form of `dir`, never by where
+/// `tmp` itself resolves: since the candidates are resolved, a link under
+/// `tmp/`, or a `tmp` replaced by a link, that leads back into `.ironshell/`
+/// lands outside the exception and is still refused. `tmp` itself is not
+/// inside the exception, so it cannot be removed or replaced by a guarded write.
+fn in_guarded_dir(candidates: &[String], dir: &Path) -> bool {
+    let dirs = audit_forms(dir);
+    candidates.iter().any(|c| {
+        dirs.iter().any(|d| {
+            !d.is_empty()
+                && (c == d || c.starts_with(&format!("{d}/")))
+                && !c.starts_with(&format!("{d}/tmp/"))
+        })
+    })
 }
 
 /// Where `path` lands, as strings comparable with [`audit_forms`]: lowercased,
@@ -4654,11 +4671,7 @@ pub fn is_governance_file(path: &str) -> bool {
         Some(config) if !config.is_empty() => files.push(PathBuf::from(config)),
         _ => {
             let dir = workspace_root().join(".ironshell");
-            let dirs = audit_forms(&dir);
-            if candidates.iter().any(|c| {
-                dirs.iter()
-                    .any(|d| !d.is_empty() && (c == d || c.starts_with(&format!("{d}/"))))
-            }) {
+            if in_guarded_dir(&candidates, &dir) {
                 return true;
             }
             files.push(dir.join("rbac.toml"));

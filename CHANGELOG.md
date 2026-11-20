@@ -144,6 +144,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `ish -b`: an arithmetic error fails its command and discards the rest of its line, as bash does, instead of ending the script; nesting past 1024 levels is an arithmetic error, not a stack overflow; `grep -A0`/`-B0`/`-C0` and `grep -o` with context print the `--` group separator as GNU grep does.
 - `cargo audit` and `cargo deny check` pass again: RUSTSEC-2026-0545 and RUSTSEC-2026-0548 (zip 0.6.6 and 1.1.4, reached only through utoipa-swagger-ui's build script and candle-core's .npz reader, neither built with AES nor reading a stream) and RUSTSEC-2026-0543 (chrono unmaintained, no successor release) are recorded as accepted, with the reasons, in `.cargo/audit.toml` and `deny.toml`.
 - `ish -b`: under `grep -o`, a context line prints its matches, as GNU grep does, so `grep -o -v -A1 c` prints the `c` after each selected line, and a line selected by `-o -v` prints nothing; before, `-o -v` printed whole selected lines.
+- `fs_tempdir` and `fs_tempfile` work in agent mode: they create under `<workspace>/.ironshell/tmp/`, and the guards that protect the audit log and the RBAC config refused every write there. `.ironshell/tmp/` is now exempt from those two guards; the rest of `.ironshell/` (the audit log, `rbac.toml`, and `tmp` itself) stays protected, and a link under `tmp/` that leads back into `.ironshell/` is still refused.
+- Help examples no longer read IronShell's own repo files (`Cargo.toml`, `src/`); each example that reads a file makes its input in a temp directory first, so it runs anywhere.
 
 ## [14.0.5] - 2026-11-16
 
