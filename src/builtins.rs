@@ -815,6 +815,8 @@ lazy_static::lazy_static! {
         map.insert("to_base", 1216);
         // Structural difference of two values (1218)
         map.insert("diff_values", 1218);
+        // The first value that is not null (1219)
+        map.insert("coalesce", 1219);
         // 500-519: Database
         map.insert("db_sqlite_open", 500);
         map.insert("db_sqlite_query", 1217);
@@ -3918,6 +3920,8 @@ static BUILTIN_DISPATCH: &[fn(Vec<Value>, Option<Value>, &mut Env) -> Result<Val
     |args, input, _| bi_db_sqlite_query(args, input), // 1217
     // Structural difference of two values
     |args, input, _| bi_diff_values(args, input), // 1218
+    // The value, or a fallback when it is null
+    |args, input, _| bi_coalesce(args, input), // 1219
 ];
 
 /// The dispatch row that serves `name`, if the fast table has one.
@@ -5995,11 +5999,15 @@ fn bi_sum(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
                                 "sum: array must contain only numbers, got {} at index {index}",
                                 item.type_name()
                             ),
-                            &format!(
-                                "every element must be an Int or a Float; element {index} is a {}: \
-                                 convert it first (int(x) or float(x)) or filter it out",
-                                item.type_name()
-                            ),
+                            &if matches!(item, Value::Null) {
+                                crate::safety::NULL_VALUE_HINT.to_string()
+                            } else {
+                                format!(
+                                    "every element must be an Int or a Float; element {index} is a {}: \
+                                     convert it first (int(x) or float(x)) or filter it out",
+                                    item.type_name()
+                                )
+                            },
                         ))
                     }
                 }
@@ -6137,11 +6145,15 @@ fn bi_avg(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
                                 "avg: array must contain only numbers, got {} at index {index}",
                                 item.type_name()
                             ),
-                            &format!(
-                                "every element must be an Int or a Float; element {index} is a {}: \
-                                 convert it first (int(x) or float(x)) or filter it out",
-                                item.type_name()
-                            ),
+                            &if matches!(item, Value::Null) {
+                                crate::safety::NULL_VALUE_HINT.to_string()
+                            } else {
+                                format!(
+                                    "every element must be an Int or a Float; element {index} is a {}: \
+                                     convert it first (int(x) or float(x)) or filter it out",
+                                    item.type_name()
+                                )
+                            },
                         ))
                     }
                 }
@@ -9959,12 +9971,17 @@ fn bi_sort(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
             Value::Record(_) | Value::Bool(_) | Value::Array(_) | Value::Null
         )
     }) {
+        let hint = if matches!(unordered, Value::Null) {
+            crate::safety::NULL_VALUE_HINT
+        } else {
+            "sort a list of records by a field with sort_by(fn(r) => r.field); a list of \
+             Bools, Arrays or nulls has no order to sort by"
+        };
         return Err(crate::safety::bad_arg_with_hint(
             "sort",
             "numbers or strings",
             unordered.type_name(),
-            "sort a list of records by a field with sort_by(fn(r) => r.field); a list of \
-             Bools, Arrays or nulls has no order to sort by",
+            hint,
         ));
     }
 
@@ -11965,8 +11982,17 @@ fn subject_refusal(builtin: &str, what: &str) -> anyhow::Error {
 }
 
 fn bi_from_csv(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
-    // Piped, the text is the input; called directly, it is the first argument.
-    let csv_str = match input.or_else(|| args.into_iter().next()) {
+    // Piped, the text is the input and the options are the first argument;
+    // called directly, the text is the first argument and the options the second.
+    let (text_arg, options) = match input {
+        Some(v) => (Some(v), args.into_iter().next()),
+        None => {
+            let mut it = args.into_iter();
+            (it.next(), it.next())
+        }
+    };
+    let delimiter = csv_delimiter_option(options)?;
+    let csv_str = match text_arg {
         Some(Value::Str(s)) => s,
         Some(_) => {
             return Err(crate::safety::arg_err(
@@ -11979,16 +12005,70 @@ fn bi_from_csv(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
     parse_delimited(
         "from_csv",
         &csv_str,
-        csv::ReaderBuilder::new().delimiter(b','),
+        csv::ReaderBuilder::new().delimiter(delimiter),
+        delimiter,
     )
+}
+
+/// The delimiter byte named by from_csv's options Record, `,` when none is
+/// given. It must be one ASCII character other than a quote or a line break.
+fn csv_delimiter_option(options: Option<Value>) -> Result<u8> {
+    let map = match options {
+        None => return Ok(b','),
+        Some(Value::Record(m)) => m,
+        Some(other) => {
+            return Err(crate::safety::bad_arg_in(
+                "from_csv",
+                format!(
+                    "from_csv: the options are a {}, not a Record",
+                    other.type_name()
+                ),
+                "pass options as a Record: from_csv(text, {delimiter: ';'})",
+            ))
+        }
+    };
+    if let Some(key) = map.keys().find(|k| k.as_str() != "delimiter") {
+        return Err(crate::safety::bad_arg_in(
+            "from_csv",
+            format!("from_csv: unknown option '{key}'"),
+            "the only option is delimiter, one ASCII character: from_csv(text, {delimiter: ';'})",
+        ));
+    }
+    match map.get("delimiter") {
+        None => Ok(b','),
+        Some(Value::Str(s)) => {
+            let mut chars = s.chars();
+            match (chars.next(), chars.next()) {
+                (Some(c), None) if c.is_ascii() && !matches!(c, '"' | '\n' | '\r') => Ok(c as u8),
+                _ => Err(crate::safety::bad_arg_in(
+                    "from_csv",
+                    format!("from_csv: delimiter {s:?} is not one ASCII character"),
+                    "use a single ASCII character other than a quote or a line break, such as ';', '|' or a tab",
+                )),
+            }
+        }
+        Some(other) => Err(crate::safety::bad_arg_in(
+            "from_csv",
+            format!(
+                "from_csv: delimiter is a {}, not a String",
+                other.type_name()
+            ),
+            "use a single ASCII character as a String: {delimiter: ';'}",
+        )),
+    }
 }
 
 /// Parse delimited text with a header row into an Array of Records, with the
 /// column type inference `from_csv` has. `open("x.tsv")` reads tab-separated
 /// text through this with a tab delimiter and no quoting (TSV has none).
-fn parse_delimited(builtin: &str, text: &str, builder: &mut csv::ReaderBuilder) -> Result<Value> {
+fn parse_delimited(
+    builtin: &str,
+    text: &str,
+    builder: &mut csv::ReaderBuilder,
+    delimiter: u8,
+) -> Result<Value> {
     if builtin == "from_csv" {
-        if let Some(e) = csv_quote_error(builtin, text) {
+        if let Some(e) = csv_quote_error(builtin, text, delimiter as char) {
             return Err(e);
         }
     }
@@ -12019,7 +12099,7 @@ fn parse_delimited(builtin: &str, text: &str, builder: &mut csv::ReaderBuilder) 
         }
         // A malformed row (unequal field counts, bad quoting) is the caller's
         // text, so E_BAD_ARG; it was an uncoded csv::Error, E_UNKNOWN.
-        records.push(record.map_err(|e| csv_row_error(builtin, text, &e))?);
+        records.push(record.map_err(|e| csv_row_error(builtin, text, &e, delimiter as char))?);
     }
 
     let rows = csv_rows(&headers, &records);
@@ -12051,11 +12131,11 @@ pub(crate) fn check_csv_headers(builtin: &str, headers: &[String]) -> Result<()>
 /// from the byte the error names: the newlines up to and including that byte,
 /// plus one. A row with the wrong number of fields is named by its line and by
 /// the two counts.
-fn csv_row_error(builtin: &str, text: &str, e: &csv::Error) -> anyhow::Error {
+fn csv_row_error(builtin: &str, text: &str, e: &csv::Error, delim: char) -> anyhow::Error {
     // A quote that is never closed swallows the rest of the text into one field,
     // which then shows as a short row; say what is wrong, not its symptom.
     if builtin == "from_csv" {
-        if let Some(line) = csv_unterminated_quote_line(text) {
+        if let Some(line) = csv_unterminated_quote_line(text, delim) {
             return crate::safety::bad_arg_in(
                 builtin,
                 format!("{builtin}: unterminated quoted field starting on line {line}"),
@@ -12092,8 +12172,8 @@ fn csv_row_error(builtin: &str, text: &str, e: &csv::Error) -> anyhow::Error {
 /// The line a quoted CSV field opens on when the text ends inside it, else None.
 /// A quote opens a field only at a field's start; inside one, `""` is a literal
 /// quote and a lone `"` closes it.
-fn csv_unterminated_quote_line(text: &str) -> Option<usize> {
-    match csv_quote_problem(text) {
+fn csv_unterminated_quote_line(text: &str, delim: char) -> Option<usize> {
+    match csv_quote_problem(text, delim) {
         Some(CsvQuoteProblem::Unterminated(line)) => Some(line),
         _ => None,
     }
@@ -12106,7 +12186,7 @@ enum CsvQuoteProblem {
     AfterClose(usize),
 }
 
-fn csv_quote_problem(text: &str) -> Option<CsvQuoteProblem> {
+fn csv_quote_problem(text: &str, delim: char) -> Option<CsvQuoteProblem> {
     let mut line = 1usize;
     let mut open_line = 0usize;
     let mut in_quotes = false;
@@ -12131,7 +12211,7 @@ fn csv_quote_problem(text: &str) -> Option<CsvQuoteProblem> {
         }
         if after_close {
             // Only a delimiter or a line end may follow a closing quote.
-            if !matches!(c, ',' | '\n' | '\r') {
+            if c != delim && !matches!(c, '\n' | '\r') {
                 return Some(CsvQuoteProblem::AfterClose(line));
             }
             after_close = false;
@@ -12141,7 +12221,7 @@ fn csv_quote_problem(text: &str) -> Option<CsvQuoteProblem> {
                 in_quotes = true;
                 open_line = line;
             }
-            ',' => field_start = true,
+            c if c == delim => field_start = true,
             '\n' => {
                 line += 1;
                 field_start = true;
@@ -12157,8 +12237,8 @@ fn csv_quote_problem(text: &str) -> Option<CsvQuoteProblem> {
 }
 
 /// The refusal for a `from_csv` text whose quoting is wrong, before it is read.
-fn csv_quote_error(builtin: &str, text: &str) -> Option<anyhow::Error> {
-    match csv_quote_problem(text)? {
+fn csv_quote_error(builtin: &str, text: &str, delim: char) -> Option<anyhow::Error> {
+    match csv_quote_problem(text, delim)? {
         CsvQuoteProblem::Unterminated(line) => Some(crate::safety::bad_arg_in(
             builtin,
             format!("{builtin}: unterminated quoted field starting on line {line}"),
@@ -16855,19 +16935,24 @@ fn fold_extremum(items: &[Value], want_max: bool) -> Result<Value> {
     // of Ints and Floats), as `sort` keeps its elements.
     let mut best: Option<(f64, &Value)> = None;
     for v in items {
-        let n =
-            match v {
-                Value::Int(i) => *i as f64,
-                Value::Float(f) => *f,
-                other => return Err(crate::safety::bad_arg_in(
+        let n = match v {
+            Value::Int(i) => *i as f64,
+            Value::Float(f) => *f,
+            other => {
+                return Err(crate::safety::bad_arg_in(
                     name,
                     format!(
                         "{name}: elements must all be numbers or all Strings, found {}",
                         other.type_name()
                     ),
-                    "min and max take a list of numbers or a list of Strings, not a mix of them",
-                )),
-            };
+                    if matches!(other, Value::Null) {
+                        crate::safety::NULL_VALUE_HINT
+                    } else {
+                        "min and max take a list of numbers or a list of Strings, not a mix of them"
+                    },
+                ))
+            }
+        };
         best = Some(match best {
             None => (n, v),
             Some((b, _)) if want_max && n > b => (n, v),
@@ -19238,6 +19323,25 @@ pub(crate) fn toml_nonfinite_refusal(builtin: &str, value: &toml::Value) -> Opti
 /// Example:
 ///   merge({a: 1, b: 2}, {b: 3}).b    # 3
 ///   {a: 1} | merge({a: 0, c: 4}).a   # 0
+fn bi_coalesce(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
+    const B: &str = "coalesce";
+    let (value, fallback) =
+        match (input, args.as_slice()) {
+            (Some(value), [fallback]) => (value, fallback.clone()),
+            (None, [value, fallback]) => (value.clone(), fallback.clone()),
+            _ => return Err(arity_error(
+                B,
+                "a value and a fallback: coalesce(value, fallback), or value | coalesce(fallback)",
+                args.len(),
+            )),
+        };
+    Ok(if matches!(value, Value::Null) {
+        fallback
+    } else {
+        value
+    })
+}
+
 fn bi_diff_values(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
     const B: &str = "diff_values";
     let (a, b) = match (input, args.as_slice()) {
@@ -27147,7 +27251,9 @@ fn redact_field_map(
 /// Found by driving the shell as an agent.
 fn redactable_by_name(v: &Value) -> bool {
     match v {
-        Value::Str(s) | Value::Uri(s) => !crate::safety::is_capability_token(s),
+        // An empty string is no secret, and the marker would make an unset cell
+        // look set.
+        Value::Str(s) | Value::Uri(s) => !s.is_empty() && !crate::safety::is_capability_token(s),
         // Containers are walked normally so genuine secrets inside are still
         // caught by shape and by their own field names.
         Value::Array(_) | Value::Record(_) | Value::Table(_) => false,
@@ -29304,7 +29410,11 @@ fn sort_by_unordered_key(row: usize, key: &Value) -> anyhow::Error {
     crate::safety::bad_arg_in(
         "sort_by",
         format!("sort_by: row {row}'s key is {shown}; keys must all be numbers or all strings"),
-        "filter the rows with where first, or give every row a key in the lambda, such as a default for a missing value",
+        if matches!(key, Value::Null) {
+            crate::safety::NULL_VALUE_HINT
+        } else {
+            "filter the rows with where first, or give every row a key in the lambda, such as a default for a missing value"
+        },
     )
 }
 
@@ -35186,6 +35296,7 @@ fn bi_open(args: Vec<Value>, _input: Option<Value>) -> Result<Value> {
             "open",
             &text,
             csv::ReaderBuilder::new().delimiter(b'\t').quoting(false),
+            b'\t',
         ),
         _ => Ok(Value::Str(text)),
     }

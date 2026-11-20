@@ -205,6 +205,7 @@ now_iso()                      # the current time, e.g. 2026-11-08T14:03:05Z; no
 date_add("2024-02-28", 1, "days"); date_diff("2024-02-29", "2026-11-09"); date_format("2024-02-29", "%d %B %Y")    # ISO 8601 dates, in UTC
 from_toml(to_toml({a: 1})).a           # TOML: to_toml(record) -> String; from_toml(text) -> Record
 merge({a: 1, b: 2}, {b: 3}).b         # merge(a, b): shallow Record merge, b's fields win; `a | merge(b)` pipes
+coalesce(null, 0)                  # 0: coalesce(value, fallback) returns fallback only when value is null (0, "" and false are kept); `.amount | coalesce(0)` pipes. An empty numeric CSV cell is null, and a comparison, sum or sort refuses null, so fill it first or skip it with where(.amount != null && .amount > 5)
 diff_values({a: 1}, {a: 2})         # [{path: "a", op: "changed", old: 1, new: 2}]: structural diff of two values (op added/removed/changed; paths "b.c", "items[2]"; 1 and 1.0 are equal); `a | diff_values(b)` pipes
 [1, 2] + [3]   # [1, 2, 3]: + concatenates Arrays
 -7.5 % 2       # -1.5: % takes the sign of the dividend, unlike Python; Int and Float mix as Float
@@ -216,7 +217,7 @@ mut r = {a: 1}
 r.a = 2                                # set a field of a `mut` record; r.a.b = v needs r.a to exist already; other copies keep theirs
 rows | sql("select * from t where amount > ?", [100])   # a trailing Array binds the ? placeholders
 to_csv(rows, ["id", "customer"])       # column order (Records sort their keys); csv_columns("orders.csv") is the header in file order
-from_csv("v\n1\n2.5\n")          # a CSV column's type is inferred from ALL its cells: any decimal makes the column Float in every row ([1.0, 2.5]), and a "1.0" written by to_csv reads back as the Float 1.0
+from_csv("v\n1\n2.5\n")          # a CSV column's type is inferred from ALL its cells: any decimal makes the column Float in every row ([1.0, 2.5]), and a "1.0" written by to_csv reads back as the Float 1.0; a semicolon-separated file is one column unless you pass the delimiter: from_csv(cat("x.csv"), {delimiter: ";"}) (one ASCII character; `open` takes no options)
 date_add("2024-01-31", 1, "months")    # "2024-02-29": weeks, months and years clamp to the month's end
 journal().entries                      # the journal rows (journal() is a Record {entries, steps, reversible, irreversible, enabled}: steps is a count, each row in entries carries id and step)
 undo({id: 3})                          # undo one journal step out of order (needs the journal: agent mode, or IRONSHELL_JOURNAL=on); refused if a later step changed the same file

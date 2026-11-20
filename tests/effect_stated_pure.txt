@@ -51,6 +51,7 @@ cloud_instance_create
 cloud_instance_status
 cloud_instances
 cloud_regions
+coalesce
 code_callees
 code_callers
 code_completions

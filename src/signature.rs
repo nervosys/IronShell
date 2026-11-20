@@ -1754,11 +1754,13 @@ pub static SIGNATURES: &[Signature] = &[
     },
     Signature {
         name: "from_csv", category: None, subject_required: false, aliases: &["from-csv"],
-        subject: Some(Ty::Str), params: &[], returns: "Array",
-        doc: "Parse a CSV string with headers. Each column is typed as a whole: it is numeric only when every non-empty cell is a number, with no leading \"+\" and no leading zero before another digit (\"007\" is text, \"0.5\" is a number). A numeric column holds Ints when every non-empty cell is an integer, else Floats, and its empty cells are null. A column whose non-empty cells are all true or false, in any case (TRUE, False), holds Bools, its empty cells null. Any other column holds only Strings, and its empty cells are \"\". A cell that spells NaN or an infinity (inf, -Infinity), or an integer past the 64-bit Int range, is text, so such a column is a String column: in CSV these are labels, JSON cannot hold a non-finite float, and a Float would lose the digits of a large integer. A header that names a column twice is E_BAD_ARG, since the second column would replace the first. A row whose field count differs from the header is E_BAD_ARG, and its message gives the CSV line, counting CRLF lines correctly. The text is piped in or passed as the argument: from_csv(text).",
+        subject: Some(Ty::Str), params: &[opt("options", Ty::Record, "{delimiter: one ASCII character}: the field separator, \",\" by default, such as \";\" for a semicolon-separated export")], returns: "Array",
+        doc: "Parse a CSV string with headers. The options Record has one key, delimiter, a single ASCII character other than a quote or a line break (\";\", \"|\", a tab); any other value or key is E_BAD_ARG. A semicolon-separated file read without it is one column named for the whole header, so read it as from_csv(cat(path), {delimiter: \";\"}); open reads by extension and takes no options. Each column is typed as a whole: it is numeric only when every non-empty cell is a number, with no leading \"+\" and no leading zero before another digit (\"007\" is text, \"0.5\" is a number). A numeric column holds Ints when every non-empty cell is an integer, else Floats, and its empty cells are null. A column whose non-empty cells are all true or false, in any case (TRUE, False), holds Bools, its empty cells null. Any other column holds only Strings, and its empty cells are \"\". A cell that spells NaN or an infinity (inf, -Infinity), or an integer past the 64-bit Int range, is text, so such a column is a String column: in CSV these are labels, JSON cannot hold a non-finite float, and a Float would lose the digits of a large integer. A header that names a column twice is E_BAD_ARG, since the second column would replace the first. A row whose field count differs from the header is E_BAD_ARG, and its message gives the CSV line, counting CRLF lines correctly. The text is piped in or passed as the argument: from_csv(text).",
         examples: &[
             (r#"("n\n7\n" | from_csv | first).n"#, "7"),
             (r#"from_csv("n\n7\n") | len"#, "1"),
+            (r#"(from_csv("a;b\n1;2\n", {delimiter: ";"}) | first).b"#, "2"),
+            (r#"(try { from_csv("a;b\n1;2\n", {delimiter: ";;"}) } catch e { e.error.code })"#, r#""E_BAD_ARG""#),
             (r#"from_csv("n,m\n7,\n8,2\n") | first | fn(r) => r.m"#, "null"),
             (r#"from_csv("n,s\n7,\n8,x\n") | first | fn(r) => r.s"#, r#""""#),
             (r#"from_csv("n\n007\nNA\n12\n") | first | fn(r) => r.n"#, r#""007""#),
@@ -8161,6 +8163,22 @@ pub static SIGNATURES: &[Signature] = &[
             (r#"(try { from_toml("[a]\n[a]\n") } catch e { e.message | contains("duplicate table") })"#, "true"),
             (r#"(try { from_toml("a = ") } catch e { e.error.code })"#, "E_BAD_VALUE"),
             (r#"(try { from_toml("n = 9223372036854775808") } catch e { e.error.code })"#, "E_BAD_VALUE"),
+        ],
+    },
+    Signature {
+        name: "coalesce",
+        category: None,
+        subject_required: false,
+        aliases: &[],
+        subject: Some(Ty::Any),
+        params: &[req("fallback", Ty::Any, "the value returned when the subject is null")],
+        returns: "Any",
+        doc: "The subject, or fallback when the subject is null. Only null is replaced: 0, \"\", false, [] and {} are values and come back unchanged. An empty numeric CSV cell and a missing-field read of null are both null, so `.amount | coalesce(0)` and `map(fn(r) => coalesce(r.amount, 0))` fill them in before a comparison or a sum. A wrong argument count is E_BAD_ARG.",
+        examples: &[
+            (r#"coalesce(null, 0)"#, "0"),
+            (r#"coalesce(5, 0)"#, "5"),
+            (r#"null | coalesce("n/a")"#, r#""n/a""#),
+            (r#"from_csv("n,m\n7,\n8,2\n") | map(fn(r) => coalesce(r.m, 0)) | sum"#, "2"),
         ],
     },
     Signature {

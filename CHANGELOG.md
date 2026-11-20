@@ -81,6 +81,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `port_scan`, `check_port` and similar names suggest `net_scan`; `python`, `pip`, `git_init` and `git_clone` suggest `sh`; `net_scan`'s help says a refused loopback connect takes about 2 s on Windows, so a short `timeout_ms` reads a closed port as filtered.
 ### Added
 
+- `coalesce(value, fallback)` returns fallback when value is null and value otherwise; only null is replaced, so 0, "" and false are kept. It pipes: `.amount | coalesce(0)`.
+- `from_csv(text, {delimiter: ";"})` reads a CSV with another field separator: one ASCII character other than a quote or a line break, else E_BAD_ARG. Quote checking and the field-count error follow the delimiter. `open` reads by extension and takes no options, so use `from_csv(cat(path), {delimiter: ";"})`.
 - `ish -b` decodes ANSI-C quoting (`$'a\tb'`), and `cd -` prints the directory it changes to, as bash does.
 - `db.sqlite_exec` takes an optional third argument, an Array of values bound to `?` placeholders (one statement).
 - `cut` takes an Array of field numbers.
@@ -106,6 +108,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `ish -b`: `grep -m N` (`--max-count`) stops after N selected lines per file and then prints the last one's trailing context, and `-b` (`--byte-offset`) prefixes the byte offset of each line, or of each match under `-o`; `$((...))` takes `base#digits` literals (bases 2 to 64) and reads a bare `0x` as 0.
 ### Fixed
 
+- The error for a null operand of a comparison or arithmetic operator, and the errors of `sum`, `avg`, `min`, `max`, `sort` and `sort_by` for a null element or key, now say that the value is null (an empty CSV cell or a missing field) and suggest `where(.x != null && ...)` or `coalesce(x, 0)`.
+- Agent-mode redaction no longer replaces an empty string under a secret-named field with `[REDACTED]`, so a blank password cell no longer looks set; the stderr count includes only values that were replaced.
 - `sum` and `math.sum` raise on Int overflow instead of wrapping silently (`sum([9223372036854775807, 1])` was a large negative number).
 - `sort` and `sort_by` order an Int against a Float exactly, as `>` does; above 2^53 they could disagree.
 - `to_csv` quotes a field holding a bare CR, so it round-trips; `from_csv` names the line of an unterminated quoted field instead of reporting a short row.

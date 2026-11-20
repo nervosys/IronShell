@@ -9848,6 +9848,10 @@ pub fn guard_dispatch(builtin: &str, args: &[crate::value::Value]) -> Result<(),
 /// house style (`[PATH]`, `[SECURITY WARNING]`) and to tokenize cheaply.
 pub const REDACTION_MARKER: &str = "[REDACTED]";
 
+/// The hint when a null reaches an operator or a builtin that has no order or
+/// sum for it. An empty numeric CSV cell and a missing field are both null.
+pub const NULL_VALUE_HINT: &str = "a value is null (an empty CSV cell or a missing field); skip it with where(.x != null && .x > 5), or give it a value first with coalesce(x, 0)";
+
 lazy_static! {
     /// Self-contained secret tokens — the whole match *is* the secret and is
     /// replaced wholesale. Ordered alternation; each branch is anchored on a
@@ -10367,8 +10371,8 @@ pub fn redact_json(v: &mut Json) {
                 // Only a *string* under a secret-sounding name can be a secret.
                 // `TOKEN` matches `full_tokens`/`page_tokens`, which are counts,
                 // and blanking a number destroys information for no gain.
-                let hide =
-                    is_secret_name(k) && matches!(val, Json::String(s) if !is_capability_token(s));
+                let hide = is_secret_name(k)
+                    && matches!(val, Json::String(s) if !s.is_empty() && !is_capability_token(s));
                 if hide {
                     *val = Json::String(REDACTION_MARKER.to_string());
                 } else {

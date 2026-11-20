@@ -198,6 +198,7 @@ cluster_remove_node	WriteLocal
 cluster_status	ReadLocal
 cmake_build	Exec
 cmake_configure	Exec
+coalesce	Pure
 code_callees	Pure
 code_callers	Pure
 code_comments	ReadLocal

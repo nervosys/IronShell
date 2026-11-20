@@ -2884,6 +2884,8 @@ fn binop_unchecked(op: &BinOp, a: Value, b: Value) -> Result<Value> {
         (op, a, b) => {
             let hint = if is_empty_string_number_mix(&a, &b) {
                 EMPTY_STRING_HINT
+            } else if matches!(a, Value::Null) || matches!(b, Value::Null) {
+                crate::safety::NULL_VALUE_HINT
             } else if is_lambda(&a) || is_lambda(&b) {
                 // `len > 0` after a pipe: the pipe binds loosest, so the
                 // comparison ran on the function, not on the piped value.
