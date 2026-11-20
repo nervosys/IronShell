@@ -6398,7 +6398,7 @@ fn grep_cluster(a: &str) -> Result<GrepCluster, char> {
     let mut k = 0;
     while k < chars.len() {
         let c = chars[k];
-        if matches!(c, 'A' | 'B' | 'C') {
+        if matches!(c, 'A' | 'B' | 'C' | 'm') {
             let rest: String = chars[k + 1..].iter().collect();
             context.push((c, if rest.is_empty() { None } else { Some(rest) }));
             break;
@@ -6410,7 +6410,7 @@ fn grep_cluster(a: &str) -> Result<GrepCluster, char> {
             }
             context.push(('C', Some(digits)));
             continue;
-        } else if "rRnclLivEFwoqshHx".contains(c) {
+        } else if "rRnclLivEFwoqshHxb".contains(c) {
             plain.push(c);
         } else {
             return Err(c);
@@ -6437,12 +6437,19 @@ fn grep_long_context(a: &str) -> Option<(&'static str, Option<String>)> {
         "before-context",
         "context",
         "group-separator",
+        "max-count",
     ] {
         if full.starts_with(name) && name.len() >= 3 {
             return Some((full, value));
         }
     }
     None
+}
+
+/// `--byte-offset`, or an abbreviation of it (`--byte`): the flag `-b`.
+fn grep_long_flag(a: &str) -> Option<char> {
+    let name = a.strip_prefix("--")?;
+    (name.len() >= 2 && "byte-offset".starts_with(name)).then_some('b')
 }
 
 /// The lines of context `grep -A/-B/-C/-NUM` ask for.
@@ -6453,17 +6460,52 @@ struct GrepContext {
     both: Option<usize>,
     separator: Option<String>,
     no_separator: bool,
+    /// `-m N` / `--max-count=N`: stop after this many selected lines per file.
+    /// `None` is no limit (also a negative or an overflowing N, as in GNU).
+    max: Option<usize>,
+}
+
+/// The digits of a count as GNU grep reads one: an optional `+`, then digits.
+/// `None` when it is anything else; `Some(None)` when the digits overflow a
+/// `usize`, which GNU clamps to its maximum.
+fn grep_count(value: &str) -> Option<Option<usize>> {
+    let digits = value.strip_prefix('+').unwrap_or(value);
+    if digits.is_empty() || !digits.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    Some(digits.parse::<usize>().ok())
 }
 
 impl GrepContext {
-    /// Apply one option; `Err` is the value GNU calls an invalid context length.
+    /// Whether any of `-A`, `-B`, `-C` was given, even as 0: GNU then prints
+    /// `--` between groups of lines that do not touch.
+    fn requested(&self) -> bool {
+        self.after.is_some() || self.before.is_some() || self.both.is_some()
+    }
+
+    /// Apply one option; `Err` is GNU's message, without the `grep: `.
     fn set(&mut self, kind: &str, value: &str) -> Result<(), String> {
         if kind == "group-separator" {
             self.separator = Some(value.to_string());
             self.no_separator = false;
             return Ok(());
         }
-        let n: usize = value.parse().map_err(|_| value.to_string())?;
+        if kind == "m" || kind == "max-count" {
+            // A negative count is no limit; text that is no number is an error.
+            self.max = match value.strip_prefix('-') {
+                Some(rest) if grep_count(rest).is_some() => None,
+                _ => match grep_count(value) {
+                    Some(n) => n,
+                    None => return Err("invalid max count".to_string()),
+                },
+            };
+            return Ok(());
+        }
+        // A context longer than any file is clamped, not refused.
+        let n: usize = match grep_count(value) {
+            Some(n) => n.unwrap_or(usize::MAX),
+            None => return Err(format!("{value}: invalid context length argument")),
+        };
         match kind {
             "A" | "after-context" => self.after = Some(n),
             "B" | "before-context" => self.before = Some(n),
@@ -6631,10 +6673,12 @@ fn grep(args: &[String], stdin: &mut Input, sink: &mut Sink) -> Util {
                     }
                 }
             };
-            if let Err(bad) = context.set(kind, &value) {
-                sink.eline(&format!("grep: {bad}: invalid context length argument"));
+            if let Err(msg) = context.set(kind, &value) {
+                sink.eline(&format!("grep: {msg}"));
                 return Util::Done(2);
             }
+        } else if let Some(flag) = grep_long_flag(a).filter(|_| !done) {
+            flags.insert(flag);
         } else if !done && a == "-e" {
             match args.get(i + 1) {
                 Some(p) => patterns.push(p.clone()),
@@ -6686,8 +6730,8 @@ fn grep(args: &[String], stdin: &mut Input, sink: &mut Sink) -> Util {
                         }
                     }
                 };
-                if let Err(bad) = context.set(&kind.to_string(), &value) {
-                    sink.eline(&format!("grep: {bad}: invalid context length argument"));
+                if let Err(msg) = context.set(&kind.to_string(), &value) {
+                    sink.eline(&format!("grep: {msg}"));
                     return Util::Done(2);
                 }
             }
@@ -6706,6 +6750,10 @@ fn grep(args: &[String], stdin: &mut Input, sink: &mut Sink) -> Util {
         patterns.push(ops.remove(0));
     }
     let f = |c| flags.contains(&c);
+    // GNU stops before it reads anything for `-m 0` (except under `-L`).
+    if context.max == Some(0) && !f('L') {
+        return Util::Done(1);
+    }
     let recursive = f('r') || f('R');
     let mut alts = Vec::new();
     for p in patterns.iter().flat_map(|p| p.split('\n')) {
@@ -6812,9 +6860,20 @@ fn grep(args: &[String], stdin: &mut Input, sink: &mut Sink) -> Util {
         let mut count = 0usize;
         let mut out = Vec::new();
         let all_lines = lines_of(&data);
+        // Where each line starts in the file, for `-b`.
+        let mut starts: Vec<usize> = Vec::new();
+        if f('b') {
+            let mut at = 0usize;
+            for l in &all_lines {
+                starts.push(at);
+                at += l.len() + 1;
+            }
+        }
         // The prefix of a line: the file name (when several), then the line
-        // number, each ended by `:` for a selected line and `-` for context.
-        let lead_of = |n: usize, sep: u8| {
+        // number, then (`-b`) the byte offset, each ended by `:` for a selected
+        // line and `-` for context. `skip` is how far into the line a `-o`
+        // match starts.
+        let lead_of = |n: usize, sep: u8, skip: usize| {
             let mut s = Vec::new();
             if prefix {
                 s.extend_from_slice(name.as_bytes());
@@ -6824,36 +6883,47 @@ fn grep(args: &[String], stdin: &mut Input, sink: &mut Sink) -> Util {
                 s.extend_from_slice(format!("{}", n + 1).as_bytes());
                 s.push(sep);
             }
+            if f('b') {
+                s.extend_from_slice(format!("{}", starts[n] + skip).as_bytes());
+                s.push(sep);
+            }
             s
         };
         let (before, after) = context.lines();
-        let with_context = (before > 0 || after > 0) && !f('o');
+        // `-o -v` prints whole lines here, as it always has; every other `-o`
+        // prints the matches and keeps the context bookkeeping (the `--`
+        // between groups) without printing the context lines.
+        let only_matching = f('o') && !f('v');
+        let with_context = context.requested() && !(f('o') && f('v'));
+        let silent = f('q') || f('l') || f('L') || f('c') || binary;
         let mut last_printed: Option<usize> = None;
         let mut after_left = 0usize;
         for (n, line) in all_lines.iter().copied().enumerate() {
-            let hit = re.is_match(line) != f('v');
+            // `-m N` is reached: only the trailing context of the last
+            // selected line is left to print, whatever those lines are.
+            // GNU 3.11 prints those lines as context even when they match.
+            let stopped = context.max.is_some_and(|m| count >= m);
+            if stopped && (silent || !with_context || after_left == 0) {
+                break;
+            }
+            let hit = !stopped && re.is_match(line) != f('v');
             if !hit {
-                if with_context
-                    && after_left > 0
-                    && !f('q')
-                    && !f('l')
-                    && !f('L')
-                    && !f('c')
-                    && !binary
-                {
+                if with_context && after_left > 0 && !silent {
                     after_left -= 1;
-                    out.extend_from_slice(&lead_of(n, b'-'));
-                    out.extend_from_slice(line);
-                    out.push(b'\n');
+                    if !only_matching {
+                        out.extend_from_slice(&lead_of(n, b'-', 0));
+                        out.extend_from_slice(line);
+                        out.push(b'\n');
+                    }
                     last_printed = Some(n);
                 }
                 continue;
             }
             count += 1;
-            if f('q') || f('l') || f('L') || f('c') || binary {
+            if silent {
                 continue;
             }
-            let lead = lead_of(n, b':');
+            let lead = lead_of(n, b':', 0);
             if with_context {
                 let first = n
                     .saturating_sub(before)
@@ -6866,24 +6936,21 @@ fn grep(args: &[String], stdin: &mut Input, sink: &mut Sink) -> Util {
                     out.extend_from_slice(context.separator.as_deref().unwrap_or("--").as_bytes());
                     out.push(b'\n');
                 }
-                for (k, before_line) in all_lines.iter().enumerate().take(n).skip(first) {
-                    out.extend_from_slice(&lead_of(k, b'-'));
-                    out.extend_from_slice(before_line);
-                    out.push(b'\n');
+                if !only_matching {
+                    for (k, before_line) in all_lines.iter().enumerate().take(n).skip(first) {
+                        out.extend_from_slice(&lead_of(k, b'-', 0));
+                        out.extend_from_slice(before_line);
+                        out.push(b'\n');
+                    }
                 }
-                out.extend_from_slice(&lead);
-                out.extend_from_slice(line);
-                out.push(b'\n');
-                last_printed = Some(n);
-                after_left = after;
-                continue;
             }
-            if f('o') && !f('v') {
+            if only_matching {
+                // `-b` gives each match's own offset, as GNU does under `-o`.
                 for m in re.find_iter(line) {
                     if m.as_bytes().is_empty() {
                         continue;
                     }
-                    out.extend_from_slice(&lead);
+                    out.extend_from_slice(&lead_of(n, b':', m.start()));
                     out.extend_from_slice(m.as_bytes());
                     out.push(b'\n');
                 }
@@ -6891,6 +6958,10 @@ fn grep(args: &[String], stdin: &mut Input, sink: &mut Sink) -> Util {
                 out.extend_from_slice(&lead);
                 out.extend_from_slice(line);
                 out.push(b'\n');
+            }
+            if with_context {
+                last_printed = Some(n);
+                after_left = after;
             }
         }
         if count > 0 {
