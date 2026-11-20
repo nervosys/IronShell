@@ -4023,6 +4023,22 @@ fn ontology_describe_inner(query: &str, modules: bool) -> JsonValue {
                 obj.insert("effect_declared".to_string(), json!(false));
             }
         }
+        // `each` read as "pure" although its whole use is to run file edits:
+        // the label is the builtin's own, and the calls a lambda argument makes
+        // are judged one by one as they run. Said only where a lambda is taken.
+        let takes_lambda = crate::signature::signature_of(&d.name).is_some_and(|s| {
+            s.params
+                .iter()
+                .any(|p| p.ty == crate::signature::Ty::Lambda)
+        });
+        if takes_lambda {
+            if let Some(obj) = detail.as_object_mut() {
+                obj.insert(
+                    "effect_note".to_string(),
+                    json!("the effect of this builtin itself; each call the lambda makes is judged by that call's own effect (a file.write in it is a write)"),
+                );
+            }
+        }
         // A module member described by its qualified name is described as the
         // builtin it runs; `implemented_by` and `builtin` already name it.
         return detail;

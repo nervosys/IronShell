@@ -4141,6 +4141,17 @@ fn mapped_spelling(name: &str) -> Vec<String> {
             vec!["crypto_hash_file".to_string()]
         }
         "hmac" => vec!["crypto_hmac".to_string()],
+        // Programs with no builtin of their own run through sh(["git", "init"]),
+        // which asks for approval in agent mode. `python` was offered
+        // devenv.python, which only reports the installed version.
+        "git_init" | "git_clone" | "python" | "python3" | "py" | "pip" | "pip3" => {
+            vec!["sh".to_string()]
+        }
+        // A first-time agent took four guesses to find the port probe.
+        "port_scan" | "portscan" | "scan_ports" | "check_port" | "port_check" | "port_open"
+        | "is_port_open" | "tcp_check" | "tcp_connect" | "probe_port" => {
+            vec!["net_scan".to_string()]
+        }
         // Epoch seconds to a date is from_epoch; a date to seconds is to_epoch.
         "from_timestamp" | "epoch" | "from_unix" | "fromtimestamp" | "from_unixtime" => {
             vec!["from_epoch".to_string()]
@@ -5247,7 +5258,7 @@ fn bi_help_entry(args: Vec<Value>) -> Result<Value> {
 }
 
 fn bi_help() -> Result<Value> {
-    let txt = r#"Æther (æ) built-ins:
+    let txt = r#"IronShell core built-ins (help("name") for any one in full):
 - help                         # this help
 - clear                        # clear screen (prints ANSI)
 - echo <...values>             # echo stringified values
@@ -5316,7 +5327,7 @@ File system:
 - tail       <file> [n]                     # last n lines
 - find       <path> [pattern]               # find files
 - grep       <pattern> [file]               # search lines (of file, or of piped text)
-- wc         <file|array>                   # count lines
+- wc         <file> | <text> | wc()         # {lines, words, chars} of a file or piped text
 
 HTTP:
 - http_get <url>                # fetch URL → {url,status,headers,body}
@@ -24216,6 +24227,21 @@ fn bi_tool_search(args: Vec<Value>, _input: Option<Value>) -> Result<Value> {
                 "safety".to_string(),
                 Value::Str(format!("{:?}", t.safety_level)),
             );
+            // These are external programs, not builtins: a first-time agent
+            // called `sha256sum(...)` and got "unknown name". Say how to run
+            // one, and name the builtin that does the same work in-process.
+            rec.insert(
+                "run".to_string(),
+                Value::Str(format!("tool_exec(\"{}\", [args])", t.name)),
+            );
+            let builtin = if is_dispatched(&t.name) {
+                Some(t.name.clone())
+            } else {
+                mapped_spelling(&t.name).into_iter().next()
+            };
+            if let Some(b) = builtin {
+                rec.insert("builtin".to_string(), Value::Str(b));
+            }
             Value::Record(rec)
         })
         .collect();
@@ -41187,6 +41213,19 @@ fn bi_zip_create(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
     crate::safety::reject_option_like("zip_create", std::slice::from_ref(&archive))?;
     crate::safety::reject_option_like("zip_create", &files)?;
     let archive = guard_local_write("zip_create", &crate::safety::resolve_path_str(&archive))?;
+    // `zip_create("proj", "out.zip")` said only "proj already exists": the
+    // arguments were the wrong way round, and nothing said which comes first.
+    if !crate::safety::names_a_remote_share(&archive) && std::path::Path::new(&archive).is_dir() {
+        let shown = match args.first() {
+            Some(Value::Str(s)) => s.clone(),
+            _ => archive.clone(),
+        };
+        return Err(crate::safety::bad_arg_in(
+            "zip_create",
+            format!("zip_create: {shown} is a directory, and the first argument is the archive to create"),
+            &format!("the archive comes first, then what goes in it: zip_create(\"{}.zip\", \"{shown}\")", shown.trim_end_matches(['/', '\\'])),
+        ));
+    }
     refuse_existing("zip_create", &archive)?;
     let members = zip_resolve_members("zip_create", &files)?;
     // The archive is new (refused above if it exists), so rollback removes it.
@@ -42371,6 +42410,16 @@ fn bi_tar_create(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
             "tar_create",
             "an archive path, then at least one member path",
             "no members",
+        ));
+    }
+    // The arguments the wrong way round, as for zip_create: say which is first.
+    if !crate::safety::names_a_remote_share(&archive)
+        && std::path::Path::new(&crate::safety::resolve_path_str(&archive)).is_dir()
+    {
+        return Err(crate::safety::bad_arg_in(
+            "tar_create",
+            format!("tar_create: {archive} is a directory, and the first argument is the archive to create"),
+            &format!("the archive comes first, then what goes in it: tar_create(\"{}.tar.gz\", \"{archive}\")", archive.trim_end_matches(['/', '\\'])),
         ));
     }
     let mut files: Vec<String> = Vec::with_capacity(args.len() - 1);

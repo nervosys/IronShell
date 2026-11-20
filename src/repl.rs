@@ -95,12 +95,12 @@ pub fn run(env: &mut Env) -> Result<()> {
             writeln!(
                 stdout,
                 "{}",
-                "Æther REPL — type 'exit', 'quit', or Ctrl-D to exit".dark_grey()
+                "IronShell REPL — type 'exit', 'quit', or Ctrl-D to exit".dark_grey()
             )?;
         } else {
             writeln!(
                 stdout,
-                "Æther REPL — type 'exit', 'quit', or Ctrl-D to exit"
+                "IronShell REPL — type 'exit', 'quit', or Ctrl-D to exit"
             )?;
         }
         stdout.flush()?;

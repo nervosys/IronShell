@@ -1206,7 +1206,7 @@ fn handle_assist(
     }
 
     if interactive {
-        println!("Æther Assist — natural language → IronShell");
+        println!("IronShell Assist — natural language → IronShell");
         println!("Type your request, press Enter. Type 'exit' or Ctrl-D to quit.");
         if context {
             println!("Context-aware mode: system info included in prompts.");

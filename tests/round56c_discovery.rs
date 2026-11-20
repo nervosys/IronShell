@@ -116,3 +116,81 @@ fn c4_sort_by_field_on_path_strings_points_at_ls() {
         &hint[..hint.len().min(400)]
     );
 }
+
+#[test]
+fn c5_help_names_ironshell_and_says_what_wc_returns() {
+    let s = Scratch::new("c5");
+    let out = s.ish(&["-c", "help()"]);
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        text.starts_with("IronShell core built-ins"),
+        "help() opens with: {}",
+        &text[..text.len().min(120)]
+    );
+    assert!(!text.contains("Æther"), "help() still names Æther");
+    assert!(
+        text.contains("{lines, words, chars}"),
+        "help() wc line is stale"
+    );
+}
+
+#[test]
+fn c6_a_lambda_taking_builtin_says_its_effect_is_its_own() {
+    let s = Scratch::new("c6");
+    let note = s.json(r#"help("each").effect_note"#);
+    assert!(note.contains("judged by that call's own effect"), "{note}");
+    // Only where a lambda is taken.
+    assert_eq!(s.json(r#"has(help("len"), "effect_note")"#), "false");
+}
+
+#[test]
+fn c7_tool_search_rows_say_how_to_run_the_program() {
+    let s = Scratch::new("c7");
+    let row = s.json(r#"tool_search("sha256") | where(.name == "sha256sum") | first"#);
+    assert!(
+        row.contains(r#""builtin":"crypto_hash_file""#),
+        "no in-process builtin named: {row}"
+    );
+    assert!(
+        row.contains(r#""run":"tool_exec(\"sha256sum\", [args])""#),
+        "no run form: {row}"
+    );
+}
+
+#[test]
+fn c8_archive_arguments_the_wrong_way_round_name_the_order() {
+    let s = Scratch::new("c8");
+    for (call, form) in [
+        (
+            r#"zip_create("sub", "out.zip")"#,
+            r#"zip_create(\"sub.zip\", \"sub\")"#,
+        ),
+        (
+            r#"tar_create("sub", "out.tar.gz")"#,
+            r#"tar_create(\"sub.tar.gz\", \"sub\")"#,
+        ),
+    ] {
+        let err = s.json(&format!("try {{ {call} }} catch e {{ e.error }}"));
+        assert!(err.contains("E_BAD_ARG"), "{call}: {err}");
+        assert!(err.contains("is a directory"), "{call}: {err}");
+        assert!(err.contains(form), "{call}: {err}");
+    }
+    assert!(!s.root.join("cwd").join("out.zip").exists());
+}
+
+#[test]
+fn c9_unknown_names_point_at_the_builtin_that_does_the_work() {
+    let s = Scratch::new("c9");
+    for (name, want) in [
+        ("sha256sum", "crypto_hash_file"),
+        ("port_scan", "net_scan"),
+        ("check_port", "net_scan"),
+        ("python", "sh"),
+        ("git_init", "sh"),
+    ] {
+        let got = s.json(&format!(
+            r#"try {{ {name}("x") }} catch e {{ e.error.did_you_mean }}"#
+        ));
+        assert_eq!(got, format!(r#"["{want}"]"#), "{name}");
+    }
+}
