@@ -3379,7 +3379,7 @@ pub static SIGNATURES: &[Signature] = &[
         subject: None,
         params: &[req("path", Ty::Str, "directory to search"), opt("pattern", Ty::Str, "glob such as *.rs; omit for every file")],
         returns: "Array",
-        doc: "Files under a directory, optionally matching a glob. At most 1,000,000 entries; more is E_BUDGET_EXCEEDED.",
+        doc: "Files (not directories) under a directory, optionally matching a glob on the file name. Paths are written as glob writes them: the directory as given, then `/` and the path below it. At most 1,000,000 entries; more is E_BUDGET_EXCEEDED.",
         examples: &[(r#"(find("src", "*.rs") | len) > 0"#, "true"), (r#"(find("src") | len) > 0"#, "true")],
     },
     Signature {
@@ -5473,7 +5473,7 @@ pub static SIGNATURES: &[Signature] = &[
         name: "net_scan", category: None, subject_required: false, aliases: &[], subject: None,
         params: &[req("host", Ty::Str, "localhost, 127.0.0.1 or ::1; any other host is refused by policy"), Param { range: Some((1, 65535)), ..req("first_port", Ty::Int, "First TCP port, 1..65535") }, Param { range: Some((1, 65535)), ..req("last_port", Ty::Int, "Last TCP port, inclusive, 1..65535") }, opt_range("timeout_ms", Ty::Int, 1, 10000, "Per-port wait for an answer in milliseconds, default 3000")],
         returns: "Array",
-        doc: "Probe a TCP port range on this machine and return Array of Records port and state, where state is open (accepted), closed (refused) or filtered (no answer within timeout_ms, 1..10000, default 3000). Ports are probed 128 at a time, each batch sharing one wait. Only localhost, 127.0.0.1 and ::1 are probed; another host is E_POLICY_DENY whatever IRONSHELL_NET_ALLOW says. At most 1024 ports per call; a larger range is E_BAD_ARG. The whole call is bounded at 30 s. Connect failures other than refusal are coded I/O errors. Network policy applies. Transactions and pipeline input are refused.",
+        doc: "Probe a TCP port range on this machine and return Array of Records port and state, where state is open (accepted), closed (refused) or filtered (no answer within timeout_ms, 1..10000, default 3000). On Windows a refused loopback connect takes about 2 s to come back (the stack retries the SYN), so with timeout_ms under about 2500 a closed port reads as filtered; keep the default to tell them apart. Ports are probed 128 at a time, each batch sharing one wait. Only localhost, 127.0.0.1 and ::1 are probed; another host is E_POLICY_DENY whatever IRONSHELL_NET_ALLOW says. At most 1024 ports per call; a larger range is E_BAD_ARG. The whole call is bounded at 30 s. Connect failures other than refusal are coded I/O errors. Network policy applies. Transactions and pipeline input are refused.",
         examples: &[(r#"(try { net_scan("example.com", 1, 2) } catch e { e.error.code })"#, "E_POLICY_DENY"), (r#"(try { net_scan("127.0.0.1", 1, 2000, 50) } catch e { e.error.code })"#, "E_BAD_ARG")],
     },
     Signature {
@@ -9704,7 +9704,7 @@ pub static SIGNATURES: &[Signature] = &[
         subject: Some(Ty::Str),
         params: &[opt("algorithm", Ty::Str, "md5, sha1, sha256 (default), sha384 or sha512; written first when the data follows it"), opt("data", Ty::Str, "text to hash; omit when piping it in")],
         returns: "String",
-        doc: "Hex digest of a string. An unknown algorithm is refused, never substituted. The canonical call is `crypto.hash(\"sha256\", data)`, the algorithm first, or `data | crypto.hash(\"sha256\")` piped; `crypto.hash(data, \"sha256\")` also works when only the second argument names an algorithm. When both arguments are algorithm names the call is E_BAD_ARG (which is the data?): pipe the data in to hash an algorithm name. A lone algorithm name with nothing piped in (`crypto.hash(\"sha256\")`) is E_BAD_ARG, not the hash of that word.",
+        doc: "Hex digest of a string, not of a file; for a file use crypto_hash_file(path). An unknown algorithm is refused, never substituted. The canonical call is `crypto.hash(\"sha256\", data)`, the algorithm first, or `data | crypto.hash(\"sha256\")` piped; `crypto.hash(data, \"sha256\")` also works when only the second argument names an algorithm. When both arguments are algorithm names the call is E_BAD_ARG (which is the data?): pipe the data in to hash an algorithm name. A lone algorithm name with nothing piped in (`crypto.hash(\"sha256\")`) is E_BAD_ARG, not the hash of that word.",
         examples: &[
             (r#"crypto_hash("sha256", "hello")"#, r#"2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"#),
             (r#"crypto_hash("md5", "hello")"#, r#"5d41402abc4b2a76b9719d911017c592"#),
@@ -9723,7 +9723,7 @@ pub static SIGNATURES: &[Signature] = &[
         subject: Some(Ty::Str),
         params: &[],
         returns: "String",
-        doc: "MD5 hex digest of a string. Refused under IRONSHELL_FIPS.",
+        doc: "MD5 hex digest of a string, not of a file; for a file use crypto_hash_file(path, \"md5\"). Refused under IRONSHELL_FIPS.",
         examples: &[
             (r#"md5("hello")"#, r#"5d41402abc4b2a76b9719d911017c592"#),
         ],
@@ -9736,7 +9736,7 @@ pub static SIGNATURES: &[Signature] = &[
         subject: Some(Ty::Str),
         params: &[],
         returns: "String",
-        doc: "SHA-256 hex digest of a string.",
+        doc: "SHA-256 hex digest of a string, not of a file: `sha256(\"words.txt\")` hashes the text \"words.txt\". For a file use crypto_hash_file(path).",
         examples: &[
             (r#"sha256("hello")"#, r#"2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"#),
         ],
@@ -12374,7 +12374,7 @@ pub static SIGNATURES: &[Signature] = &[
         subject: Some(Ty::Str),
         params: &[opt_rest("flags", Ty::Str, "-l, -w or -c to count only lines, words or characters")],
         returns: "Record",
-        doc: "Line, word and character counts of piped text, or of a file named as the subject. An unknown flag is refused.",
+        doc: "Line, word and character counts of piped text, or of a file named as the subject: `wc(path)` reads the file, while `\"text\" | wc()` counts the text itself. An unknown flag is refused.",
         examples: &[
             (r#""a b\nc" | wc()"#, r#"{chars: 5, lines: 2, words: 3}"#),
             (r#""a b\nc" | wc("-l")"#, r#"{lines: 2}"#),
