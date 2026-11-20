@@ -215,9 +215,12 @@ fn explain_judges_rm_inside_the_workspace_as_a_delete() {
     assert_eq!(report["decision"], "approve", "{report}");
     let calls = report["calls"].as_array().expect("calls");
     assert!(
-        calls
-            .iter()
-            .any(|c| c["call"] == "rm" && c["effect"] == "destructive"),
+        // Each operand is listed once (`rm sub`), not also as a bare `rm`
+        // (round 58b).
+        calls.iter().any(|c| c["call"]
+            .as_str()
+            .is_some_and(|n| n == "rm" || n.starts_with("rm "))
+            && c["effect"] == "destructive"),
         "{report}"
     );
     assert!(
