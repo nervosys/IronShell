@@ -25,7 +25,7 @@ How IronShell compares to Nushell, PowerShell, Oil Shell, and other modern shell
 **[MCP Servers Guide](MCP_SERVERS_GUIDE.md)** 🔧  
 Complete reference for Model Context Protocol servers—connect AI to infrastructure.
 
-**[AI Protocols Final Report](AI_PROTOCOLS_FINAL_REPORT.md)**  
+**[AI Protocols Final Report](archive/AI_PROTOCOLS_FINAL_REPORT.md)**  
 Implementation details for A2A (Agent-to-Agent) and NANDA (Negotiation) protocols.
 
 ## 📖 All Documentation
@@ -40,19 +40,19 @@ Implementation details for A2A (Agent-to-Agent) and NANDA (Negotiation) protocol
 
 ### AI & Infrastructure
 - **[MCP Servers Guide](MCP_SERVERS_GUIDE.md)** - Infrastructure integration via MCP
-- **[AI Protocols Final Report](AI_PROTOCOLS_FINAL_REPORT.md)** - A2A and NANDA implementation
-- **[Implementation Summary](IMPLEMENTATION_SUMMARY.md)** - Technical implementation details
+- **[AI Protocols Final Report](archive/AI_PROTOCOLS_FINAL_REPORT.md)** - A2A and NANDA implementation
+- **[Implementation Summary](archive/IMPLEMENTATION_SUMMARY.md)** - Technical implementation details
 
 ### Development & Updates
-- **[Documentation Update Complete](DOCUMENTATION_UPDATE_COMPLETE.md)** - Recent documentation improvements
-- **[Type System Update Summary](TYPE_SYSTEM_UPDATE_SUMMARY.md)** - Type system clarification update
-- **[VS Code Extension Complete](VSCODE_EXTENSION_COMPLETE.md)** - IDE tooling implementation
+- **[Documentation Update Complete](archive/DOCUMENTATION_UPDATE_COMPLETE.md)** - Recent documentation improvements
+- **[Type System Update Summary](archive/TYPE_SYSTEM_UPDATE_SUMMARY.md)** - Type system clarification update
+- **[VS Code Extension Complete](archive/VSCODE_EXTENSION_COMPLETE.md)** - IDE tooling implementation
 - **[Error Fixes](ERROR_FIXES.md)** - Quality improvements and warning resolutions
 
 ### Archived & Historical
 - **[TUI Guide](TUI_GUIDE.md)** - Terminal User Interface features
-- **[README Clean](README_clean.md)** - Clean version of main README
-- **[README Old](README_old.md)** - Historical README versions
+- **[README Clean](archive/README_clean.md)** - Clean version of main README
+- **[README Old](archive/README_old.md)** - Historical README versions
 - **dev-notes/** - Developer notes and implementation logs
 
 ## 🎯 Quick Links by Topic
@@ -65,7 +65,7 @@ Implementation details for A2A (Agent-to-Agent) and NANDA (Negotiation) protocol
 ### AI Features
 - [Quick Reference - AI Features](QUICK_REFERENCE.md#ai-features)
 - [MCP Servers Guide](MCP_SERVERS_GUIDE.md)
-- [AI Protocols Report](AI_PROTOCOLS_FINAL_REPORT.md)
+- [AI Protocols Report](archive/AI_PROTOCOLS_FINAL_REPORT.md)
 
 ### Pipelines
 - [Quick Reference - Pipelines](QUICK_REFERENCE.md#core-syntax)
@@ -74,7 +74,7 @@ Implementation details for A2A (Agent-to-Agent) and NANDA (Negotiation) protocol
 ### Multi-Agent Systems
 - [Quick Reference - Agents](QUICK_REFERENCE.md#agents)
 - [Multi-Agent Example](../examples/12_multi_agent_orchestration.ish)
-- [A2A Protocol](AI_PROTOCOLS_FINAL_REPORT.md#a2a-agent-to-agent-communication)
+- [A2A Protocol](archive/AI_PROTOCOLS_FINAL_REPORT.md#a2a-agent-to-agent-communication)
 
 ### MCP Integration
 - [MCP Servers Guide](MCP_SERVERS_GUIDE.md)
