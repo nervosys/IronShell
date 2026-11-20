@@ -64,7 +64,7 @@ pub struct Fact {
     pub confidence: f32,
     pub modalities: Vec<Modality>,
     pub source: String,
-    pub timestamp: chrono::DateTime<chrono::Utc>,
+    pub timestamp: crate::clock::UtcTime,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -102,7 +102,7 @@ pub struct Experience {
     pub strategy_used: ReasoningStrategy,
     pub outcome: TaskOutcome,
     pub lessons_learned: Vec<String>,
-    pub timestamp: chrono::DateTime<chrono::Utc>,
+    pub timestamp: crate::clock::UtcTime,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -138,7 +138,7 @@ pub struct PlanningGoal {
     pub input_data: MultiModalMessage,
     pub desired_output: GoalSpecification,
     pub constraints: Vec<Constraint>,
-    pub deadline: Option<chrono::DateTime<chrono::Utc>>,
+    pub deadline: Option<crate::clock::UtcTime>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -639,7 +639,7 @@ impl ReasoningEngine {
                 "Multi-step reasoning improved result quality".to_string(),
                 "Higher confidence thresholds led to better outcomes".to_string(),
             ],
-            timestamp: chrono::Utc::now(),
+            timestamp: crate::clock::UtcTime::now(),
         };
 
         self.knowledge_base.experiences.push(experience);
@@ -840,7 +840,7 @@ mod tests {
             confidence: 0.9,
             modalities: vec![Modality::Text],
             source: "test".to_string(),
-            timestamp: chrono::Utc::now(),
+            timestamp: crate::clock::UtcTime::now(),
         };
 
         kb.add_fact(fact.clone());

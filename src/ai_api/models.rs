@@ -1,4 +1,4 @@
-use chrono::{DateTime, Utc};
+use crate::clock::UtcTime;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use utoipa::ToSchema;
@@ -200,8 +200,8 @@ pub struct LocalModelMetadata {
     pub tokenizer_path: Option<String>,
     pub size_bytes: u64,
     pub sha256: String,
-    pub downloaded_at: DateTime<Utc>,
-    pub last_used: Option<DateTime<Utc>>,
+    pub downloaded_at: UtcTime,
+    pub last_used: Option<UtcTime>,
     pub usage_count: u64,
     pub capabilities: ModelCapabilities,
     pub parameters: HashMap<String, serde_json::Value>,

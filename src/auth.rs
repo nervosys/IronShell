@@ -7,8 +7,8 @@
 //! - Audit logging
 //! - Multi-factor authentication support
 
+use crate::clock::{Duration, UtcTime};
 use anyhow::{anyhow, Result};
-use chrono::{DateTime, Duration, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::{Arc, RwLock};
@@ -30,16 +30,16 @@ pub struct User {
     pub roles: Vec<String>,
     pub permissions: HashSet<String>,
     pub metadata: BTreeMap<String, String>,
-    pub created_at: DateTime<Utc>,
-    pub updated_at: DateTime<Utc>,
-    pub last_login: Option<DateTime<Utc>>,
+    pub created_at: UtcTime,
+    pub updated_at: UtcTime,
+    pub last_login: Option<UtcTime>,
     pub active: bool,
     pub mfa_enabled: bool,
 }
 
 impl User {
     pub fn new(username: impl Into<String>) -> Self {
-        let now = Utc::now();
+        let now = UtcTime::now();
         Self {
             id: Uuid::new_v4().to_string(),
             username: username.into(),
@@ -83,13 +83,13 @@ pub struct Role {
     pub description: Option<String>,
     pub permissions: HashSet<String>,
     pub parent_roles: Vec<String>,
-    pub created_at: DateTime<Utc>,
-    pub updated_at: DateTime<Utc>,
+    pub created_at: UtcTime,
+    pub updated_at: UtcTime,
 }
 
 impl Role {
     pub fn new(name: impl Into<String>) -> Self {
-        let now = Utc::now();
+        let now = UtcTime::now();
         let name = name.into();
         Self {
             id: Uuid::new_v4().to_string(),
@@ -162,8 +162,8 @@ pub struct AuthToken {
     pub token: String,
     pub token_type: TokenType,
     pub user_id: String,
-    pub issued_at: DateTime<Utc>,
-    pub expires_at: DateTime<Utc>,
+    pub issued_at: UtcTime,
+    pub expires_at: UtcTime,
     pub scopes: Vec<String>,
     pub metadata: BTreeMap<String, String>,
     pub revoked: bool,
@@ -171,7 +171,7 @@ pub struct AuthToken {
 
 impl AuthToken {
     pub fn new(user_id: impl Into<String>, token_type: TokenType, ttl_minutes: i64) -> Self {
-        let now = Utc::now();
+        let now = UtcTime::now();
         Self {
             token: generate_token(),
             token_type,
@@ -190,7 +190,7 @@ impl AuthToken {
     }
 
     pub fn is_valid(&self) -> bool {
-        !self.revoked && Utc::now() < self.expires_at
+        !self.revoked && UtcTime::now() < self.expires_at
     }
 
     pub fn has_scope(&self, scope: &str) -> bool {
@@ -225,9 +225,9 @@ pub struct ApiKey {
     pub user_id: String,
     pub scopes: Vec<String>,
     pub rate_limit: Option<u32>,
-    pub created_at: DateTime<Utc>,
-    pub expires_at: Option<DateTime<Utc>>,
-    pub last_used: Option<DateTime<Utc>>,
+    pub created_at: UtcTime,
+    pub expires_at: Option<UtcTime>,
+    pub last_used: Option<UtcTime>,
     pub revoked: bool,
 }
 
@@ -248,7 +248,7 @@ impl ApiKey {
             user_id: user_id.into(),
             scopes: Vec::new(),
             rate_limit: None,
-            created_at: Utc::now(),
+            created_at: UtcTime::now(),
             expires_at: None,
             last_used: None,
             revoked: false,
@@ -267,7 +267,9 @@ impl ApiKey {
     }
 
     pub fn is_expired(&self) -> bool {
-        self.expires_at.map(|exp| Utc::now() > exp).unwrap_or(false)
+        self.expires_at
+            .map(|exp| UtcTime::now() > exp)
+            .unwrap_or(false)
     }
 }
 
@@ -329,15 +331,15 @@ pub struct Session {
     pub refresh_token: Option<String>,
     pub ip_address: Option<String>,
     pub user_agent: Option<String>,
-    pub created_at: DateTime<Utc>,
-    pub expires_at: DateTime<Utc>,
-    pub last_activity: DateTime<Utc>,
+    pub created_at: UtcTime,
+    pub expires_at: UtcTime,
+    pub last_activity: UtcTime,
     pub active: bool,
 }
 
 impl Session {
     pub fn new(user_id: impl Into<String>, ttl_hours: i64) -> Self {
-        let now = Utc::now();
+        let now = UtcTime::now();
         Self {
             id: Uuid::new_v4().to_string(),
             user_id: user_id.into(),
@@ -353,11 +355,11 @@ impl Session {
     }
 
     pub fn is_valid(&self) -> bool {
-        self.active && Utc::now() < self.expires_at
+        self.active && UtcTime::now() < self.expires_at
     }
 
     pub fn touch(&mut self) {
-        self.last_activity = Utc::now();
+        self.last_activity = UtcTime::now();
     }
 }
 
@@ -390,7 +392,7 @@ pub enum AuditEventType {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AuditEntry {
     pub id: String,
-    pub timestamp: DateTime<Utc>,
+    pub timestamp: UtcTime,
     pub event_type: AuditEventType,
     pub user_id: Option<String>,
     pub resource: Option<String>,
@@ -410,7 +412,7 @@ impl AuditEntry {
     pub fn new(event_type: AuditEventType, action: impl Into<String>) -> Self {
         Self {
             id: Uuid::new_v4().to_string(),
-            timestamp: Utc::now(),
+            timestamp: UtcTime::now(),
             event_type,
             user_id: None,
             resource: None,
@@ -641,7 +643,7 @@ impl RbacManager {
 
         if !user.roles.contains(&role_name.to_string()) {
             user.roles.push(role_name.to_string());
-            user.updated_at = Utc::now();
+            user.updated_at = UtcTime::now();
         }
 
         // Invalidate permission cache
@@ -662,7 +664,7 @@ impl RbacManager {
             .ok_or_else(|| anyhow!("User not found"))?;
 
         user.roles.retain(|r| r != role_name);
-        user.updated_at = Utc::now();
+        user.updated_at = UtcTime::now();
 
         // Invalidate permission cache
         if let Ok(mut cache) = self.permission_cache.write() {
@@ -951,7 +953,7 @@ impl AuthManager {
         // Update last login
         if let Ok(mut users) = self.rbac.users.write() {
             if let Some(u) = users.get_mut(&user.id) {
-                u.last_login = Some(Utc::now());
+                u.last_login = Some(UtcTime::now());
             }
         }
 
@@ -1017,7 +1019,7 @@ impl AuthManager {
         // Update last used
         if let Ok(mut keys) = self.api_keys.write() {
             if let Some(k) = keys.get_mut(&api_key.id) {
-                k.last_used = Some(Utc::now());
+                k.last_used = Some(UtcTime::now());
             }
         }
 

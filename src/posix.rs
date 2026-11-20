@@ -8232,7 +8232,7 @@ fn emit_ls(entries: &[(String, String)], long: bool, total: bool, sink: &mut Sin
     #[cfg(unix)]
     {
         use std::os::unix::fs::MetadataExt;
-        let now = chrono::Local::now();
+        let now = crate::clock::LocalTime::now();
         let mut rows = Vec::new();
         let mut blocks: u64 = 0;
         for (name, path) in entries {
@@ -8282,9 +8282,7 @@ fn emit_ls(entries: &[(String, String)], long: bool, total: bool, sink: &mut Sin
             ]
             .iter()
             .collect();
-            let mtime = chrono::DateTime::from_timestamp(m.mtime(), 0)
-                .map(|t| t.with_timezone(&chrono::Local))
-                .unwrap_or(now);
+            let mtime = crate::clock::LocalTime::from_timestamp(m.mtime()).unwrap_or(now);
             let age = now.signed_duration_since(mtime);
             let recent = age.num_seconds() >= 0 && age.num_days() < 182;
             let date = if recent {
@@ -8534,15 +8532,13 @@ fn find(args: &[String], sink: &mut Sink) -> Util {
 fn date(args: &[String], sink: &mut Sink) -> Util {
     match args {
         [f] if f.starts_with('+') => {
-            let now = chrono::Local::now();
+            let now = crate::clock::LocalTime::now();
             let fmt = &f[1..];
-            // chrono panics on a format it cannot parse; ask it first.
-            use chrono::format::{Item, StrftimeItems};
-            if StrftimeItems::new(fmt).any(|i| matches!(i, Item::Error)) {
+            // A layout the formatter cannot read or write is declined, not a panic.
+            let Ok(text) = now.format(fmt).write() else {
                 return Util::Decline;
-            }
-            sink.out
-                .extend_from_slice(format!("{}\n", now.format(fmt)).as_bytes());
+            };
+            sink.out.extend_from_slice(format!("{text}\n").as_bytes());
             Util::Done(0)
         }
         _ => Util::Decline,

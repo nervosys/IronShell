@@ -62,8 +62,8 @@ pub struct NandaNegotiation {
     pub proposer: String,
     pub votes: HashMap<String, NandaVote>,
     pub status: NegotiationStatus,
-    pub timestamp: chrono::DateTime<chrono::Utc>,
-    pub deadline: Option<chrono::DateTime<chrono::Utc>>,
+    pub timestamp: crate::clock::UtcTime,
+    pub deadline: Option<crate::clock::UtcTime>,
 }
 
 impl NandaNegotiation {
@@ -74,19 +74,19 @@ impl NandaNegotiation {
             proposer,
             votes: HashMap::new(),
             status: NegotiationStatus::Open,
-            timestamp: chrono::Utc::now(),
+            timestamp: crate::clock::UtcTime::now(),
             deadline: None,
         }
     }
 
-    pub fn with_deadline(mut self, duration: chrono::Duration) -> Self {
-        self.deadline = Some(chrono::Utc::now() + duration);
+    pub fn with_deadline(mut self, duration: crate::clock::Duration) -> Self {
+        self.deadline = Some(crate::clock::UtcTime::now() + duration);
         self
     }
 
     pub fn is_expired(&self) -> bool {
         if let Some(deadline) = self.deadline {
-            chrono::Utc::now() > deadline
+            crate::clock::UtcTime::now() > deadline
         } else {
             false
         }
@@ -162,7 +162,7 @@ impl NandaCoordinator {
         &mut self,
         proposer: String,
         proposal: NandaProposal,
-        duration: chrono::Duration,
+        duration: crate::clock::Duration,
     ) -> Uuid {
         let negotiation = NandaNegotiation::new(proposer, proposal).with_deadline(duration);
         let id = negotiation.id;

@@ -39,6 +39,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Agents can no longer set the plugin and module paths of GUI and media toolkits (`GIO_*`, `GTK_*`, `QT_*`, `GST_PLUGIN*`), `CGO_*`, `DBUS_*`, `JULIA_*`, `HELM_*`, `COMPOSER_*`, `VAGRANT_*`, `MALLOC_CONF`, `INPUTRC`, `LOCPATH`, `TCLLIBPATH`, `TCL_LIBRARY`, `TK_LIBRARY`, `AR`, or bash's exported functions (`BASH_FUNC_name%%`, which defines `name` in every child bash); a round 57 probe of 125 steering names found these 15 still settable.
 ### Changed
 
+- Dropped the unmaintained `chrono` dependency (RUSTSEC-2026-0543) for `jiff`; dates, times and their formats are unchanged.
 - `ish --zsh` refuses `setopt extendedglob` (in every spelling) by name; it was accepted and then ignored, so `^a.txt` globbed literally.
 - `ish -b` refuses brace expansion (`{a,b}`, `{1..3}`) by name instead of printing it literally; `{}`, `{a}`, `${x}` and `find -exec {} \;` are unaffected.
 - Match arms must be separated by a comma or a newline, like every other list.

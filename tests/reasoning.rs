@@ -26,7 +26,7 @@ fn test_knowledge_base_operations() {
         confidence: 0.9,
         modalities: vec![Modality::Text],
         source: "test_source".to_string(),
-        timestamp: chrono::Utc::now(),
+        timestamp: iron_shell::clock::UtcTime::now(),
     };
 
     kb.add_fact(fact.clone());
@@ -465,7 +465,7 @@ async fn test_experience_storage() {
             execution_time: 500.0,
         },
         lessons_learned: vec!["Test lesson learned".to_string()],
-        timestamp: chrono::Utc::now(),
+        timestamp: iron_shell::clock::UtcTime::now(),
     };
 
     assert_eq!(experience.task_description, goal.description);

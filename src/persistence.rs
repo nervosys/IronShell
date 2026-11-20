@@ -1181,7 +1181,7 @@ impl PersistenceManager {
                             agent_id: agent_id.clone(),
                             name: format!(
                                 "Auto checkpoint {}",
-                                chrono::Utc::now().format("%Y-%m-%d %H:%M:%S")
+                                crate::clock::UtcTime::now().format("%Y-%m-%d %H:%M:%S")
                             ),
                             description: Some("Automatic checkpoint".to_string()),
                             agent_state,

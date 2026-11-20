@@ -170,7 +170,7 @@ fn test_propose_with_deadline() {
         rationale: "Test".to_string(),
     };
 
-    let duration = chrono::Duration::seconds(60);
+    let duration = iron_shell::clock::Duration::seconds(60);
     let neg_id = coordinator.propose_with_deadline("agent1".to_string(), proposal, duration);
 
     let neg = coordinator.get_negotiation(neg_id).unwrap();
@@ -402,7 +402,7 @@ fn test_negotiation_expiration() {
     };
 
     let neg = NandaNegotiation::new("proposer".to_string(), proposal)
-        .with_deadline(chrono::Duration::milliseconds(-1)); // Already expired
+        .with_deadline(iron_shell::clock::Duration::milliseconds(-1)); // Already expired
 
     assert!(neg.is_expired());
 }

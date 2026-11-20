@@ -16,8 +16,8 @@ pub struct ChatSession {
     pub title: String,
     pub messages: Vec<ChatMessage>,
     pub participants: Vec<Participant>,
-    pub created_at: chrono::DateTime<chrono::Utc>,
-    pub updated_at: chrono::DateTime<chrono::Utc>,
+    pub created_at: crate::clock::UtcTime,
+    pub updated_at: crate::clock::UtcTime,
     pub settings: ChatSettings,
 }
 
@@ -67,20 +67,20 @@ impl ChatSession {
             title,
             messages: Vec::new(),
             participants: Vec::new(),
-            created_at: chrono::Utc::now(),
-            updated_at: chrono::Utc::now(),
+            created_at: crate::clock::UtcTime::now(),
+            updated_at: crate::clock::UtcTime::now(),
             settings: ChatSettings::default(),
         }
     }
 
     pub fn add_participant(&mut self, participant: Participant) {
         self.participants.push(participant);
-        self.updated_at = chrono::Utc::now();
+        self.updated_at = crate::clock::UtcTime::now();
     }
 
     pub fn add_message(&mut self, message: ChatMessage) {
         self.messages.push(message);
-        self.updated_at = chrono::Utc::now();
+        self.updated_at = crate::clock::UtcTime::now();
 
         // Auto-summarize if enabled and context window is full
         if self.settings.auto_summarize && self.messages.len() > self.settings.context_window_size {
@@ -96,7 +96,7 @@ impl ChatSession {
     ) -> Result<ChatMessage> {
         let mut message = ChatMessage {
             id: Uuid::new_v4(),
-            timestamp: chrono::Utc::now(),
+            timestamp: crate::clock::UtcTime::now(),
             role: MessageRole::User,
             content: content.clone(),
             media_attachments: media_files.clone(),
@@ -171,7 +171,7 @@ impl ChatSession {
         // Replace old messages with summary
         let summary_message = ChatMessage {
             id: Uuid::new_v4(),
-            timestamp: chrono::Utc::now(),
+            timestamp: crate::clock::UtcTime::now(),
             role: MessageRole::System,
             content: format!("[Conversation Summary] {}", summary),
             media_attachments: Vec::new(),
@@ -344,7 +344,7 @@ impl ChatManager {
             if let Some(session) = self.sessions.get_mut(&session_id) {
                 let message = ChatMessage {
                     id: Uuid::new_v4(),
-                    timestamp: chrono::Utc::now(),
+                    timestamp: crate::clock::UtcTime::now(),
                     role: MessageRole::Assistant,
                     content: response.clone(),
                     media_attachments: Vec::new(),

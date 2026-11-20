@@ -35,8 +35,8 @@ pub struct SwarmTask {
     pub description: String,
     pub assigned_agent: Option<Uuid>,
     pub status: TaskStatus,
-    pub created_at: chrono::DateTime<chrono::Utc>,
-    pub completed_at: Option<chrono::DateTime<chrono::Utc>>,
+    pub created_at: crate::clock::UtcTime,
+    pub completed_at: Option<crate::clock::UtcTime>,
     pub result: Option<String>,
     pub dependencies: Vec<Uuid>,
 }
@@ -79,7 +79,7 @@ impl AgentSwarm {
             description: task_description,
             assigned_agent: None,
             status: TaskStatus::Pending,
-            created_at: chrono::Utc::now(),
+            created_at: crate::clock::UtcTime::now(),
             completed_at: None,
             result: None,
             dependencies: Vec::new(),
@@ -95,7 +95,7 @@ impl AgentSwarm {
     pub fn update_agent_status(&mut self, agent_id: Uuid, status: AgentStatus) {
         if let Some(agent) = self.agents.get_mut(&agent_id) {
             agent.status = status;
-            agent.last_activity = chrono::Utc::now();
+            agent.last_activity = crate::clock::UtcTime::now();
         }
     }
 
@@ -126,7 +126,11 @@ impl AgentSwarm {
     pub fn broadcast_message(&mut self, message: &str) {
         self.shared_memory.insert(
             "broadcast".to_string(),
-            format!("{}: {}", chrono::Utc::now().format("%H:%M:%S"), message),
+            format!(
+                "{}: {}",
+                crate::clock::UtcTime::now().format("%H:%M:%S"),
+                message
+            ),
         );
     }
 }
@@ -166,7 +170,7 @@ impl SwarmCoordinator {
                 if let Some(agent) = agents.get_mut(&agent_id) {
                     agent.status = AgentStatus::Working;
                     agent.current_task = Some(self.task_queue[task_idx].description.clone());
-                    agent.last_activity = chrono::Utc::now();
+                    agent.last_activity = crate::clock::UtcTime::now();
                 }
             }
         }
@@ -206,7 +210,7 @@ impl SwarmCoordinator {
             let mut task = self.task_queue.remove(task_idx);
             task.status = TaskStatus::Completed;
             task.result = Some(result);
-            task.completed_at = Some(chrono::Utc::now());
+            task.completed_at = Some(crate::clock::UtcTime::now());
 
             self.completed_tasks.push(task);
         }

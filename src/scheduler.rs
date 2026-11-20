@@ -3,7 +3,6 @@
 use super::{cron_success_output, parse_cron_listing, CRON_CHANGE_LOCK};
 use crate::{safety, value::Value};
 use anyhow::Result;
-use chrono::TimeZone;
 use std::process::Output;
 
 /// Deadline for a crontab, at, atrm or schtasks call.
@@ -194,20 +193,18 @@ fn add_backend(
     Ok(Value::Str(entry))
 }
 
-fn local_time(text: &str) -> Result<chrono::NaiveDateTime> {
+fn local_time(text: &str) -> Result<crate::clock::Naive> {
     if text.len() != 16 {
         return Err(safety::arg_err("time must be exactly YYYY-MM-DDTHH:MM"));
     }
-    let time = chrono::NaiveDateTime::parse_from_str(text, "%Y-%m-%dT%H:%M")
-        .map_err(|_| safety::arg_err("time must be YYYY-MM-DDTHH:MM in the local timezone"))?;
-    if time.format("%Y-%m-%dT%H:%M").to_string() != text {
+    let time = crate::clock::parse_naive_datetime(text, "%Y-%m-%dT%H:%M")
+        .ok_or_else(|| safety::arg_err("time must be YYYY-MM-DDTHH:MM in the local timezone"))?;
+    if crate::clock::format_naive("%Y-%m-%dT%H:%M", &time, None).unwrap_or_default() != text {
         return Err(safety::arg_err("time must be exactly YYYY-MM-DDTHH:MM"));
     }
-    let local = chrono::Local
-        .from_local_datetime(&time)
-        .single()
+    let local = crate::clock::local_instant(&time)
         .ok_or_else(|| safety::arg_err("time is ambiguous or nonexistent in the local timezone"))?;
-    if local <= chrono::Local::now() {
+    if local <= crate::clock::LocalTime::now() {
         return Err(safety::arg_err("one-time job must be in the future"));
     }
     Ok(time)

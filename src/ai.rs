@@ -82,7 +82,7 @@ impl CostTracker {
             completion_tokens,
             total_tokens,
             cost_usd,
-            timestamp: chrono::Utc::now().to_rfc3339(),
+            timestamp: crate::clock::UtcTime::now().to_rfc3339(),
         });
     }
 

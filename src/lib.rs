@@ -138,6 +138,9 @@ pub mod auth;
 /// Built-in functions — 1,200+ typed builtins across 108 modules.
 #[cfg(feature = "native")]
 pub mod builtins;
+/// Dates and times on `jiff`, in the text forms the shell has always written.
+#[cfg(feature = "native")]
+pub mod clock;
 /// Configuration — XDG-compliant config, themes, and settings.
 #[cfg(feature = "native")]
 pub mod config;

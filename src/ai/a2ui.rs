@@ -231,7 +231,7 @@ pub enum A2UIEventType {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct A2UIEvent {
     pub id: Uuid,
-    pub timestamp: chrono::DateTime<chrono::Utc>,
+    pub timestamp: crate::clock::UtcTime,
     pub source: String,
     pub priority: EventPriority,
     pub event_type: A2UIEventType,
@@ -241,7 +241,7 @@ impl A2UIEvent {
     pub fn new(source: impl Into<String>, event_type: A2UIEventType) -> Self {
         Self {
             id: Uuid::new_v4(),
-            timestamp: chrono::Utc::now(),
+            timestamp: crate::clock::UtcTime::now(),
             source: source.into(),
             priority: EventPriority::default(),
             event_type,

@@ -39,7 +39,7 @@ pub struct NetworkAgent {
     pub capabilities: Vec<String>,
     pub load: f32,
     pub status: NetworkAgentStatus,
-    pub last_heartbeat: chrono::DateTime<chrono::Utc>,
+    pub last_heartbeat: crate::clock::UtcTime,
     #[serde(default)]
     pub location: Option<GeoLocation>,
     #[serde(default)]
@@ -86,9 +86,9 @@ pub struct DistributedTask {
     pub required_capabilities: Vec<String>,
     pub input_data: MultiModalMessage,
     pub result: Option<TaskResult>,
-    pub created_at: chrono::DateTime<chrono::Utc>,
-    pub started_at: Option<chrono::DateTime<chrono::Utc>>,
-    pub completed_at: Option<chrono::DateTime<chrono::Utc>>,
+    pub created_at: crate::clock::UtcTime,
+    pub started_at: Option<crate::clock::UtcTime>,
+    pub completed_at: Option<crate::clock::UtcTime>,
     pub dependencies: Vec<Uuid>,
     pub status: DistributedTaskStatus,
 }
@@ -620,7 +620,7 @@ async fn handle_connection(
                         if let Some(agent) = agents_write.get_mut(agent_id) {
                             agent.load = *load;
                             agent.status = status.clone();
-                            agent.last_heartbeat = chrono::Utc::now();
+                            agent.last_heartbeat = crate::clock::UtcTime::now();
                         }
                         let _ = message_tx.send(message.clone());
                     }
@@ -1748,7 +1748,7 @@ mod tests {
             capabilities: vec!["text".to_string(), "image".to_string()],
             load: 0.0,
             status: NetworkAgentStatus::Available,
-            last_heartbeat: chrono::Utc::now(),
+            last_heartbeat: crate::clock::UtcTime::now(),
             location: None,
             cost_per_task: 0.01,
             latency_ms: 0.0,
@@ -1772,7 +1772,7 @@ mod tests {
             capabilities: vec!["text".to_string(), "image".to_string(), "audio".to_string()],
             load: 0.0,
             status: NetworkAgentStatus::Available,
-            last_heartbeat: chrono::Utc::now(),
+            last_heartbeat: crate::clock::UtcTime::now(),
             location: None,
             cost_per_task: 0.0,
             latency_ms: 0.0,

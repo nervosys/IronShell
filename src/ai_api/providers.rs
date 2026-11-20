@@ -766,7 +766,7 @@ impl ModelProvider for AnthropicProvider {
                 .unwrap_or("")
                 .to_string(),
             object: "chat.completion".to_string(),
-            created: chrono::Utc::now().timestamp(),
+            created: crate::clock::UtcTime::now().timestamp(),
             model: request.model,
             choices: vec![ChatChoice {
                 index: 0,
@@ -1191,7 +1191,7 @@ impl ModelProvider for LocalProvider {
                             .unwrap_or("local-0")
                             .to_string(),
                         object: "chat.completion".to_string(),
-                        created: chrono::Utc::now().timestamp(),
+                        created: crate::clock::UtcTime::now().timestamp(),
                         model: request.model.clone(),
                         choices: vec![ChatChoice {
                             index: 0,
@@ -1363,7 +1363,7 @@ impl ModelProvider for VLLMProvider {
                         .unwrap_or("")
                         .to_string(),
                     object: "model".to_string(),
-                    created: chrono::Utc::now().timestamp(),
+                    created: crate::clock::UtcTime::now().timestamp(),
                     owned_by: "vllm".to_string(),
                     provider: "vllm".to_string(),
                     context_length: model
@@ -1503,7 +1503,7 @@ impl ModelProvider for TensorRTLLMProvider {
                         .unwrap_or("")
                         .to_string(),
                     object: "model".to_string(),
-                    created: chrono::Utc::now().timestamp(),
+                    created: crate::clock::UtcTime::now().timestamp(),
                     owned_by: "tensorrt-llm".to_string(),
                     provider: "tensorrt-llm".to_string(),
                     context_length: Some(8192), // TensorRT-LLM typically has good context support
@@ -1637,7 +1637,7 @@ impl ModelProvider for SGLangProvider {
                         .unwrap_or("")
                         .to_string(),
                     object: "model".to_string(),
-                    created: chrono::Utc::now().timestamp(),
+                    created: crate::clock::UtcTime::now().timestamp(),
                     owned_by: "sglang".to_string(),
                     provider: "sglang".to_string(),
                     context_length: Some(32768), // SGLang supports long contexts
@@ -1781,7 +1781,7 @@ impl ModelProvider for LlamaCppProvider {
             let models = vec![ModelInfo {
                 id: model_name.clone(),
                 object: "model".to_string(),
-                created: chrono::Utc::now().timestamp(),
+                created: crate::clock::UtcTime::now().timestamp(),
                 owned_by: "llama.cpp".to_string(),
                 provider: "llama.cpp".to_string(),
                 context_length: Some(context_length),
@@ -1881,10 +1881,12 @@ impl ModelProvider for LlamaCppProvider {
         Ok(ChatCompletionResponse {
             id: format!(
                 "llamacpp-{}",
-                chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0)
+                crate::clock::UtcTime::now()
+                    .timestamp_nanos_opt()
+                    .unwrap_or(0)
             ),
             object: "chat.completion".to_string(),
-            created: chrono::Utc::now().timestamp(),
+            created: crate::clock::UtcTime::now().timestamp(),
             model: request.model,
             choices: vec![ChatChoice {
                 index: 0,
@@ -2191,9 +2193,9 @@ impl ModelProvider for OllamaProvider {
             .unwrap_or(0) as u32;
 
         Ok(ChatCompletionResponse {
-            id: format!("ollama-{}", chrono::Utc::now().timestamp()),
+            id: format!("ollama-{}", crate::clock::UtcTime::now().timestamp()),
             object: "chat.completion".to_string(),
-            created: chrono::Utc::now().timestamp(),
+            created: crate::clock::UtcTime::now().timestamp(),
             model: request.model,
             choices: vec![ChatChoice {
                 index: 0,

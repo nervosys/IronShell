@@ -473,8 +473,7 @@ impl RoutingCondition {
                 start_hour,
                 end_hour,
             } => {
-                use chrono::Timelike;
-                let hour = chrono::Local::now().hour() as u8;
+                let hour = crate::clock::LocalTime::now().hour() as u8;
                 if start_hour <= end_hour {
                     hour >= *start_hour && hour < *end_hour
                 } else {

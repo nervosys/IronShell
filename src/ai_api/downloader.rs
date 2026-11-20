@@ -177,7 +177,7 @@ impl ModelDownloader {
             tokenizer_path: self.find_tokenizer_file(&downloaded_files),
             size_bytes: total_size,
             sha256: checksum,
-            downloaded_at: chrono::Utc::now(),
+            downloaded_at: crate::clock::UtcTime::now(),
             last_used: None,
             usage_count: 0,
             capabilities: self.infer_capabilities(&model_info),
@@ -244,7 +244,7 @@ impl ModelDownloader {
             tokenizer_path: None,
             size_bytes: downloaded_size,
             sha256: checksum,
-            downloaded_at: chrono::Utc::now(),
+            downloaded_at: crate::clock::UtcTime::now(),
             last_used: None,
             usage_count: 0,
             capabilities: ModelCapabilities {
