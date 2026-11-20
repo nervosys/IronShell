@@ -18,7 +18,9 @@ env:
 jobs:
     test:
         name: Test (${{ matrix.os }})
-        timeout-minutes: 40
+        # Windows takes 27 to 38 minutes on master (November 2026), so 40 cut off
+        # a branch that only added code, mid doc-tests, with every test passed.
+        timeout-minutes: 60
         runs-on: ${{ matrix.os }}
         # Over 300 test binaries each link the whole library. With full debug
         # info they fill the runner's disk, and ld then dies with a bus error

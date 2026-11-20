@@ -1,6 +1,6 @@
 use crate::ai_api::models::*;
+use crate::clock::UtcTime;
 use anyhow::Result;
-use chrono::{DateTime, Utc};
 use ironcrypto::core_types::traits::Digest;
 use ironcrypto::hash::Sha256;
 use serde::{Deserialize, Serialize};
@@ -123,7 +123,7 @@ pub struct ModelStorage {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ModelIndex {
     pub version: String,
-    pub last_updated: DateTime<Utc>,
+    pub last_updated: UtcTime,
     pub models: HashMap<String, LocalModelMetadata>,
     pub aliases: HashMap<String, String>,
     pub total_size: u64,
@@ -162,7 +162,7 @@ impl ModelStorage {
             cache_dir,
             index: ModelIndex {
                 version: "1.0".to_string(),
-                last_updated: Utc::now(),
+                last_updated: UtcTime::now(),
                 models: HashMap::new(),
                 aliases: HashMap::new(),
                 total_size: 0,
@@ -359,7 +359,7 @@ impl ModelStorage {
         self.index
             .models
             .insert(updated_metadata.id.clone(), updated_metadata);
-        self.index.last_updated = Utc::now();
+        self.index.last_updated = UtcTime::now();
         self.index.total_size = self.index.models.values().map(|m| m.size_bytes).sum();
         self.save_index()?;
 
@@ -408,7 +408,7 @@ impl ModelStorage {
         }
 
         self.index.models.remove(model_id);
-        self.index.last_updated = Utc::now();
+        self.index.last_updated = UtcTime::now();
         self.index.total_size = self.index.models.values().map(|m| m.size_bytes).sum();
         self.save_index()?;
 
@@ -423,7 +423,7 @@ impl ModelStorage {
     /// Update model usage statistics
     pub fn update_model_usage(&mut self, model_id: &str) -> Result<()> {
         if let Some(metadata) = self.index.models.get_mut(model_id) {
-            metadata.last_used = Some(Utc::now());
+            metadata.last_used = Some(UtcTime::now());
             metadata.usage_count += 1;
             self.save_index()?;
         }
@@ -453,7 +453,7 @@ impl ModelStorage {
     /// Clean up cache directory
     pub fn cleanup_cache(&self, max_age_days: u64) -> Result<u64> {
         let cache_dir = &self.cache_dir;
-        let cutoff_time = Utc::now() - chrono::Duration::days(max_age_days as i64);
+        let cutoff_time = UtcTime::now() - crate::clock::Duration::days(max_age_days as i64);
         let mut cleaned_size = 0u64;
 
         if cache_dir.exists() {
@@ -462,7 +462,7 @@ impl ModelStorage {
                 let metadata = entry.metadata()?;
 
                 if let Ok(modified) = metadata.modified() {
-                    let modified_time: DateTime<Utc> = modified.into();
+                    let modified_time: UtcTime = modified.into();
                     if modified_time < cutoff_time && metadata.is_file() {
                         cleaned_size += metadata.len();
                         fs::remove_file(entry.path())?;
@@ -612,7 +612,7 @@ mod tests {
             tokenizer_path: None,
             size_bytes: 0,
             sha256: String::new(),
-            downloaded_at: Utc::now(),
+            downloaded_at: UtcTime::now(),
             last_used: None,
             usage_count: 0,
             capabilities: ModelCapabilities {

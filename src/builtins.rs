@@ -7930,7 +7930,7 @@ fn bi_cluster_create(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
     // counts it. Nothing is started and no node is contacted. Nodes added with
     // cluster_add_node join a separate process-wide node registry that does not
     // record which cluster they belong to.
-    let created_at = chrono::Utc::now().to_rfc3339();
+    let created_at = crate::clock::UtcTime::now().to_rfc3339();
     {
         let mut clusters = CLUSTERS
             .write()
@@ -17774,9 +17774,9 @@ fn bi_now_iso(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
         }
     };
     let text = if local {
-        chrono::Local::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, false)
+        crate::clock::LocalTime::now().to_rfc3339_secs()
     } else {
-        chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
+        crate::clock::now_utc_secs()
     };
     Ok(Value::Str(text))
 }
@@ -18327,18 +18327,18 @@ fn unit_seconds(builtin: &str, unit: &str) -> Result<i64> {
 
 /// An ISO 8601 / RFC 3339 datetime, or a `YYYY-MM-DD` date, as a UTC instant.
 /// The flag is true for a date alone, which is midnight UTC.
-fn iso_instant(text: &str) -> Option<(chrono::DateTime<chrono::Utc>, bool)> {
-    if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(text) {
-        return Some((dt.with_timezone(&chrono::Utc), false));
+fn iso_instant(text: &str) -> Option<(crate::clock::Naive, bool)> {
+    if let Some(utc) = crate::clock::parse_rfc3339(text) {
+        return Some((utc, false));
     }
     // A datetime with a space or a T and no zone is UTC, as the RFC 3339 form is.
-    let naive = chrono::NaiveDateTime::parse_from_str(text, "%Y-%m-%d %H:%M:%S")
-        .or_else(|_| chrono::NaiveDateTime::parse_from_str(text, "%Y-%m-%dT%H:%M:%S"));
-    if let Ok(naive) = naive {
-        return Some((naive.and_utc(), false));
+    let naive = crate::clock::parse_naive_datetime(text, "%Y-%m-%d %H:%M:%S")
+        .or_else(|| crate::clock::parse_naive_datetime(text, "%Y-%m-%dT%H:%M:%S"));
+    if let Some(naive) = naive {
+        return Some((naive, false));
     }
-    let date = chrono::NaiveDate::parse_from_str(text, "%Y-%m-%d").ok()?;
-    Some((date.and_hms_opt(0, 0, 0)?.and_utc(), true))
+    let date = crate::clock::parse_naive_date(text, "%Y-%m-%d")?;
+    Some((date, true))
 }
 
 /// The refusal for text that is not a date in the form asked for.
@@ -18425,12 +18425,11 @@ fn leap_second(builtin: &str, text: &str) -> anyhow::Error {
 }
 
 /// The checks on a parsed instant: no leap second, and a year from 0001 to 9999.
-fn check_instant(builtin: &str, text: &str, instant: chrono::DateTime<chrono::Utc>) -> Result<()> {
-    use chrono::{Datelike as _, Timelike as _};
-    if instant.nanosecond() >= 1_000_000_000 {
+fn check_instant(builtin: &str, text: &str, instant: crate::clock::Naive) -> Result<()> {
+    if instant.nano >= 1_000_000_000 {
         return Err(leap_second(builtin, text));
     }
-    if !year_in_range(instant.year()) {
+    if !year_in_range(instant.year) {
         return Err(year_out_of_range(builtin, text));
     }
     Ok(())
@@ -18527,7 +18526,6 @@ fn canonical_iso(text: &str) -> String {
 /// as `YYYY-MM-DD...`. Text in neither shape is `Ok(None)`; a week or day that
 /// the year does not have is refused by name.
 fn expand_week_or_ordinal(builtin: &str, text: &str) -> Result<Option<String>> {
-    use chrono::Datelike as _;
     let b = text.as_bytes();
     let digits = |s: &[u8]| s.iter().all(u8::is_ascii_digit);
     // A week without its weekday (`2024-W09`) and the basic week form
@@ -18579,21 +18577,16 @@ fn expand_week_or_ordinal(builtin: &str, text: &str) -> Result<Option<String>> {
         && after(10)
     {
         let week: u32 = text[6..8].parse().unwrap_or(0);
+        // 1 is Monday .. 7 is Sunday.
         let day = match b[9] {
-            b'1' => chrono::Weekday::Mon,
-            b'2' => chrono::Weekday::Tue,
-            b'3' => chrono::Weekday::Wed,
-            b'4' => chrono::Weekday::Thu,
-            b'5' => chrono::Weekday::Fri,
-            b'6' => chrono::Weekday::Sat,
-            b'7' => chrono::Weekday::Sun,
+            d @ b'1'..=b'7' => u32::from(d - b'0'),
             _ => return Err(refuse("the weekday must be 1 (Monday) to 7 (Sunday)")),
         };
-        chrono::NaiveDate::from_isoywd_opt(year, week, day)
+        crate::clock::Naive::from_iso_week(year, week, day)
             .ok_or_else(|| refuse(&format!("the ISO year {year} has no week {week}")))?
     } else if digits(&b[5..8]) && after(8) {
         let ordinal: u32 = text[5..8].parse().unwrap_or(0);
-        chrono::NaiveDate::from_yo_opt(year, ordinal)
+        crate::clock::Naive::from_ordinal(year, ordinal)
             .ok_or_else(|| refuse(&format!("the year {year} has no day {ordinal}")))?
     } else {
         return Ok(None);
@@ -18601,14 +18594,14 @@ fn expand_week_or_ordinal(builtin: &str, text: &str) -> Result<Option<String>> {
     let consumed = if b[5] == b'W' { 10 } else { 8 };
     Ok(Some(format!(
         "{:04}-{:02}-{:02}{}",
-        date.year(),
-        chrono::Datelike::month(&date),
-        chrono::Datelike::day(&date),
+        date.year,
+        date.month,
+        date.day,
         &text[consumed..]
     )))
 }
 
-fn parse_iso(builtin: &str, text: &str) -> Result<(chrono::DateTime<chrono::Utc>, bool)> {
+fn parse_iso(builtin: &str, text: &str) -> Result<(crate::clock::Naive, bool)> {
     let text = text.trim();
     let expanded = expand_week_or_ordinal(builtin, text)?;
     let canon = canonical_iso(expanded.as_deref().unwrap_or(text));
@@ -18620,20 +18613,17 @@ fn parse_iso(builtin: &str, text: &str) -> Result<(chrono::DateTime<chrono::Utc>
 
 /// The ISO 8601 text of an instant: `2024-02-29` for a date, otherwise the UTC
 /// datetime to the second, or with its fraction, ending in `Z`.
-fn iso_text(instant: chrono::DateTime<chrono::Utc>, date_only: bool) -> String {
+fn iso_text(instant: crate::clock::Naive, date_only: bool) -> String {
     if date_only {
-        instant.format("%Y-%m-%d").to_string()
+        crate::clock::format_naive("%Y-%m-%d", &instant, None).unwrap_or_default()
     } else {
-        instant.to_rfc3339_opts(chrono::SecondsFormat::AutoSi, true)
+        instant.rfc3339(0, true)
     }
 }
 
 /// A strftime layout is refused when chrono cannot read one of its specifiers.
 fn check_strftime(builtin: &str, layout: &str) -> Result<()> {
-    let has_error = |text: &str| {
-        chrono::format::StrftimeItems::new(text)
-            .any(|item| matches!(item, chrono::format::Item::Error))
-    };
+    let has_error = crate::clock::layout_has_error;
     if has_error(layout) {
         // Name the first specifier chrono cannot read: each `%` with its flags
         // and width, up to the letter that ends it, is tried on its own.
@@ -18677,21 +18667,17 @@ fn check_strftime(builtin: &str, layout: &str) -> Result<()> {
 /// Parse text in a strftime layout: with an offset it is that instant, without
 /// one it is UTC, and a layout with no time is midnight UTC.
 fn parse_with_layout(builtin: &str, text: &str, layout: &str) -> Result<Value> {
-    if let Ok(dt) = chrono::DateTime::parse_from_str(text, layout) {
-        let instant = dt.with_timezone(&chrono::Utc);
+    if let Some(instant) = crate::clock::parse_with_offset(text, layout) {
         check_instant(builtin, text, instant)?;
         return Ok(Value::Str(iso_text(instant, false)));
     }
-    if let Ok(naive) = chrono::NaiveDateTime::parse_from_str(text, layout) {
-        check_instant(builtin, text, naive.and_utc())?;
-        return Ok(Value::Str(iso_text(naive.and_utc(), false)));
+    if let Some(naive) = crate::clock::parse_naive_datetime(text, layout) {
+        check_instant(builtin, text, naive)?;
+        return Ok(Value::Str(iso_text(naive, false)));
     }
-    if let Some(midnight) = chrono::NaiveDate::parse_from_str(text, layout)
-        .ok()
-        .and_then(|date| date.and_hms_opt(0, 0, 0))
-    {
-        check_instant(builtin, text, midnight.and_utc())?;
-        return Ok(Value::Str(iso_text(midnight.and_utc(), true)));
+    if let Some(midnight) = crate::clock::parse_naive_date(text, layout) {
+        check_instant(builtin, text, midnight)?;
+        return Ok(Value::Str(iso_text(midnight, true)));
     }
     // With a format the format is what failed: naming the text as "not a date"
     // sent the agent to the ISO forms when its layout was the problem.
@@ -18785,7 +18771,9 @@ fn bi_date_diff(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
         )
     })?;
     match unit {
-        "weeks" => Ok(Value::Int((b - a).num_seconds() / (7 * 86_400))),
+        "weeks" => Ok(Value::Int(
+            crate::clock::whole_secs_between(&a, &b) / (7 * 86_400),
+        )),
         "months" => Ok(Value::Int(whole_calendar_months(a, b))),
         "years" => Ok(Value::Int(whole_calendar_months(a, b) / 12)),
         _ => {
@@ -18796,7 +18784,7 @@ fn bi_date_diff(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
                     unit,
                 )
             })?;
-            Ok(Value::Int((b - a).num_seconds() / per))
+            Ok(Value::Int(crate::clock::whole_secs_between(&a, &b) / per))
         }
     }
 }
@@ -18804,12 +18792,8 @@ fn bi_date_diff(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
 /// The whole calendar months from `a` to `b`, truncated toward zero: the
 /// largest n (by magnitude, with b's sign) for which add_calendar_months(a, n)
 /// does not pass b. The inverse of date_add's "months".
-fn whole_calendar_months(
-    a: chrono::DateTime<chrono::Utc>,
-    b: chrono::DateTime<chrono::Utc>,
-) -> i64 {
-    use chrono::Datelike as _;
-    let index = |d: chrono::DateTime<chrono::Utc>| i64::from(d.year()) * 12 + i64::from(d.month0());
+fn whole_calendar_months(a: crate::clock::Naive, b: crate::clock::Naive) -> i64 {
+    let index = |d: crate::clock::Naive| i64::from(d.year) * 12 + i64::from(d.month - 1);
     let mut n = index(b) - index(a);
     let passes = |n: i64| match add_calendar_months(a, n) {
         Some(d) if n >= 0 => d > b,
@@ -18833,7 +18817,6 @@ fn whole_calendar_months(
 ///   date_format("2024-02-29T10:00:00.123456789Z", "%f")    # "123456789"
 ///   date_format("2024-02-29T10:00:00.123456789Z", "%6f")   # "123456"
 fn bi_date_format(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
-    use std::fmt::Write as _;
     const B: &str = "date_format";
     let (text, rest) = text_subject(B, args, input)?;
     let [layout] = rest.as_slice() else {
@@ -18842,38 +18825,34 @@ fn bi_date_format(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
     let layout = string_arg(B, "a strftime format String", layout)?;
     check_strftime(B, layout)?;
     let (instant, _) = parse_iso(B, &text)?;
-    let mut out = String::new();
-    write!(out, "{}", instant.format(layout)).map_err(|_| {
-        crate::safety::bad_arg_in(
-            B,
-            format!("{B}: {layout:?} cannot be written for {text:?}"),
-            "use chrono's strftime specifiers, such as %Y-%m-%d or %d %B %Y",
-        )
-    })?;
+    let out = crate::clock::format_naive(layout, &instant, Some(&crate::clock::Zone::utc()))
+        .map_err(|_| {
+            crate::safety::bad_arg_in(
+                B,
+                format!("{B}: {layout:?} cannot be written for {text:?}"),
+                "use chrono's strftime specifiers, such as %Y-%m-%d or %d %B %Y",
+            )
+        })?;
     Ok(Value::Str(out))
 }
 
 /// The date a whole number of calendar months from `instant`. The day of the
 /// month is kept, or clamped to the last day of the month it lands in, and the
 /// time of day is kept. None when the date would leave chrono's range.
-fn add_calendar_months(
-    instant: chrono::DateTime<chrono::Utc>,
-    months: i64,
-) -> Option<chrono::DateTime<chrono::Utc>> {
-    use chrono::Datelike as _;
-    let index = i64::from(instant.year())
+fn add_calendar_months(instant: crate::clock::Naive, months: i64) -> Option<crate::clock::Naive> {
+    let index = i64::from(instant.year)
         .checked_mul(12)?
-        .checked_add(i64::from(instant.month0()))?
+        .checked_add(i64::from(instant.month - 1))?
         .checked_add(months)?;
     let year = i32::try_from(index.div_euclid(12)).ok()?;
     if !year_in_range(year) {
         return None;
     }
     let month = u32::try_from(index.rem_euclid(12)).ok()? + 1;
-    let date = (1..=instant.day())
+    let date = (1..=instant.day)
         .rev()
-        .find_map(|day| chrono::NaiveDate::from_ymd_opt(year, month, day))?;
-    Some(date.and_time(instant.time()).and_utc())
+        .find_map(|day| crate::clock::Naive::date(year, month, day))?;
+    Some(instant.with_date(date))
 }
 
 /// date_add(iso, amount, unit) - Move a date or datetime by a whole amount.
@@ -18921,14 +18900,10 @@ fn bi_date_add(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
             .and_then(|total| add_calendar_months(instant, total)),
         None => amount
             .checked_mul(per)
-            .and_then(chrono::TimeDelta::try_seconds)
-            .and_then(|delta| instant.checked_add_signed(delta)),
+            .and_then(|secs| instant.add_secs(secs)),
     };
     // The answer stays in the years 0001 to 9999, the four-digit years of ISO 8601.
-    let moved = moved.filter(|m| {
-        use chrono::Datelike as _;
-        year_in_range(m.year())
-    });
+    let moved = moved.filter(|m| year_in_range(m.year));
     let Some(moved) = moved else {
         return Err(crate::safety::value_not_representable(
             B,
@@ -30773,7 +30748,7 @@ fn bi_compliance_report(args: Vec<Value>, input: Option<Value>) -> Result<Value>
     let mut result = compliance_verdict(&standard);
     result.insert(
         "generated_at".to_string(),
-        Value::Str(chrono::Utc::now().to_rfc3339()),
+        Value::Str(crate::clock::UtcTime::now().to_rfc3339()),
     );
     result.insert(
         "audit_entries".to_string(),
@@ -33510,9 +33485,11 @@ fn bi_from_epoch(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
     if !(EPOCH_MIN..=EPOCH_MAX).contains(&secs) {
         return Err(epoch_range("from_epoch", &secs.to_string()));
     }
-    let at = chrono::DateTime::<chrono::Utc>::from_timestamp(secs, 0)
+    let at = crate::clock::Naive::from_unix(secs, 0)
         .ok_or_else(|| epoch_range("from_epoch", &secs.to_string()))?;
-    Ok(Value::Str(at.format("%Y-%m-%dT%H:%M:%SZ").to_string()))
+    Ok(Value::Str(
+        crate::clock::format_naive("%Y-%m-%dT%H:%M:%SZ", &at, None).unwrap_or_default(),
+    ))
 }
 
 /// to_epoch(date) - The whole seconds since 1970-01-01T00:00:00Z of an ISO 8601
@@ -33533,13 +33510,10 @@ fn bi_to_epoch(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
     if !rest.is_empty() {
         return Err(arity_error("to_epoch", "one date", rest.len()));
     }
-    let at = if let Ok(datetime) = chrono::DateTime::parse_from_rfc3339(&text) {
-        datetime.timestamp()
-    } else if let Some(midnight) = chrono::NaiveDate::parse_from_str(&text, "%Y-%m-%d")
-        .ok()
-        .and_then(|date| date.and_hms_opt(0, 0, 0))
-    {
-        midnight.and_utc().timestamp()
+    let at = if let Some(datetime) = crate::clock::parse_rfc3339(&text) {
+        datetime.unix_secs()
+    } else if let Some(midnight) = crate::clock::parse_naive_date(&text, "%Y-%m-%d") {
+        midnight.unix_secs()
     } else {
         return Err(crate::safety::value_not_representable(
             "to_epoch",
@@ -33558,8 +33532,8 @@ fn bi_to_epoch(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
 /// `ps lstart` and `ToString('o')` gave three different spellings, and the
 /// Unix one changed with the locale.
 fn utc_iso_seconds(secs: i64) -> Option<String> {
-    chrono::DateTime::<chrono::Utc>::from_timestamp(secs, 0)
-        .map(|at| at.format("%Y-%m-%dT%H:%M:%SZ").to_string())
+    crate::clock::Naive::from_unix(secs, 0)
+        .and_then(|at| crate::clock::format_naive("%Y-%m-%dT%H:%M:%SZ", &at, None).ok())
 }
 
 /// Seconds since the Unix epoch, as UTC ISO 8601 to the second. One form on
@@ -38234,8 +38208,9 @@ fn bi_sys_boot_time(_args: Vec<Value>, _input: Option<Value>) -> Result<Value> {
         // now - uptime moves by a second between calls (two roundings); the
         // first answer is kept so repeated calls in one process agree.
         static BOOT: std::sync::OnceLock<i64> = std::sync::OnceLock::new();
-        let secs = *BOOT
-            .get_or_init(|| chrono::Utc::now().timestamp() - (windows_uptime_ms() / 1000) as i64);
+        let secs = *BOOT.get_or_init(|| {
+            crate::clock::UtcTime::now().timestamp() - (windows_uptime_ms() / 1000) as i64
+        });
         return boot_time_value(secs);
     }
     // `uptime -s` is a procps/GNU flag. macOS `uptime` does not have it, so
@@ -38273,11 +38248,9 @@ fn bi_sys_boot_time(_args: Vec<Value>, _input: Option<Value>) -> Result<Value> {
                 "a `YYYY-MM-DD HH:MM:SS` local boot time",
             )
         };
-        let naive = chrono::NaiveDateTime::parse_from_str(text.trim(), "%Y-%m-%d %H:%M:%S")
-            .map_err(|_| bad())?;
-        let local = chrono::TimeZone::from_local_datetime(&chrono::Local, &naive)
-            .single()
-            .ok_or_else(bad)?;
+        let naive =
+            crate::clock::parse_naive_datetime(text.trim(), "%Y-%m-%d %H:%M:%S").ok_or_else(bad)?;
+        let local = crate::clock::local_instant(&naive).ok_or_else(bad)?;
         return boot_time_value(local.timestamp());
     }
     // Every arm above returns. Were one to fall through, this is an error, not
@@ -38852,13 +38825,13 @@ mod quiet_sys_tests {
         let Value::Str(boot) = bi_sys_boot_time(vec![], None).unwrap() else {
             panic!("sys_boot_time is not a String");
         };
-        let boot = chrono::DateTime::parse_from_rfc3339(&boot).expect("an RFC 3339 time");
+        let boot = crate::clock::parse_rfc3339(&boot).expect("an RFC 3339 time");
         let Value::Int(up) = bi_sys_uptime(vec![], None).unwrap() else {
             panic!("sys_uptime is not an Int");
         };
-        let now = chrono::Local::now().fixed_offset();
-        assert!(boot < now && up > 0);
-        let gap = ((now - boot).num_seconds() - up).abs();
+        let now = crate::clock::LocalTime::now().timestamp();
+        assert!(boot.unix_secs() < now && up > 0);
+        let gap = ((now - boot.unix_secs()) - up).abs();
         assert!(gap <= 2, "boot time and uptime disagree by {gap} s");
     }
 
@@ -39046,8 +39019,11 @@ fn dotnet_date_iso(text: &str) -> Option<String> {
         .map(|(i, _)| i)
         .unwrap_or(inner.len());
     let ms: i64 = inner[..digits_end].parse().ok()?;
-    chrono::DateTime::<chrono::Utc>::from_timestamp_millis(ms)
-        .map(|at| at.format("%Y-%m-%dT%H:%M:%SZ").to_string())
+    crate::clock::Naive::from_unix(
+        ms.div_euclid(1000),
+        (ms.rem_euclid(1000) * 1_000_000) as u32,
+    )
+    .and_then(|at| crate::clock::format_naive("%Y-%m-%dT%H:%M:%SZ", &at, None).ok())
 }
 
 fn bi_sys_users(_args: Vec<Value>, _input: Option<Value>) -> Result<Value> {
@@ -51602,9 +51578,7 @@ fn parse_date(text: &str) -> Option<String> {
     if !shaped {
         return None;
     }
-    chrono::NaiveDate::parse_from_str(text, "%Y-%m-%d")
-        .ok()
-        .map(|_| text.to_string())
+    crate::clock::parse_naive_date(text, "%Y-%m-%d").map(|_| text.to_string())
 }
 
 /// `input_read_line(prompt?)`: one line from stdin, without its terminator.
@@ -74722,7 +74696,7 @@ fn monitor_history_push(store: &mut MonitorStore, event: &str, rule: &serde_json
         "event": event,
         "rule_id": rule.get("id").cloned().unwrap_or(serde_json::Value::Null),
         "name": rule.get("name").cloned().unwrap_or(serde_json::Value::Null),
-        "at": chrono::Local::now().to_rfc3339(),
+        "at": crate::clock::LocalTime::now().to_rfc3339(),
     }));
     let overflow = store.history.len().saturating_sub(MONITOR_MAX_HISTORY);
     store.history.drain(..overflow);
@@ -74938,7 +74912,7 @@ pub fn bi_nmon_snapshot(args: Vec<Value>, input: Option<Value>) -> Result<Value>
     rec.insert("disk_available".to_string(), Value::Int(avail_disk as i64));
     rec.insert(
         "timestamp".to_string(),
-        Value::Str(chrono::Local::now().to_rfc3339()),
+        Value::Str(crate::clock::LocalTime::now().to_rfc3339()),
     );
     Ok(Value::Record(rec))
 }
@@ -75056,9 +75030,9 @@ fn bi_glances_info(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
     load_fields(&mut rec);
     Ok(Value::Record(rec))
 }
-// chrono_timestamp helper - returns RFC3339 timestamp
-fn chrono_timestamp() -> String {
-    chrono::Local::now().to_rfc3339()
+// local_timestamp helper - returns RFC3339 timestamp
+fn local_timestamp() -> String {
+    crate::clock::LocalTime::now().to_rfc3339()
 }
 
 // ---------------------------------------------------------------------------
@@ -76279,7 +76253,7 @@ pub fn bi_dstat_info(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
     stats.insert("network".to_string(), Value::Array(net_entries));
     stats.insert(
         "timestamp".to_string(),
-        Value::Str(chrono::Local::now().to_rfc3339()),
+        Value::Str(crate::clock::LocalTime::now().to_rfc3339()),
     );
     Ok(Value::Record(stats))
 }
@@ -76394,7 +76368,7 @@ pub fn bi_health_check(args: Vec<Value>, input: Option<Value>) -> Result<Value> 
     rec.insert("alerts".to_string(), Value::Array(alerts));
     rec.insert(
         "timestamp".to_string(),
-        Value::Str(chrono::Local::now().to_rfc3339()),
+        Value::Str(crate::clock::LocalTime::now().to_rfc3339()),
     );
     Ok(Value::Record(rec))
 }
@@ -76440,7 +76414,7 @@ pub fn bi_alert_create(args: Vec<Value>, input: Option<Value>) -> Result<Value> 
     let base = format!(
         "alert_{}_{}",
         metric,
-        chrono::Local::now().timestamp_millis()
+        crate::clock::LocalTime::now().timestamp_millis()
     );
     let mut id = base.clone();
     let mut n = 1usize;
@@ -76460,7 +76434,7 @@ pub fn bi_alert_create(args: Vec<Value>, input: Option<Value>) -> Result<Value> 
         "threshold": threshold,
         "severity": severity,
         "status": "active",
-        "created_at": chrono::Local::now().to_rfc3339(),
+        "created_at": crate::clock::LocalTime::now().to_rfc3339(),
     });
     store.rules.push(rule.clone());
     monitor_history_push(&mut store, "created", &rule);
@@ -76553,7 +76527,7 @@ pub fn bi_alert_remove(args: Vec<Value>, input: Option<Value>) -> Result<Value> 
     Ok(json_to_value(serde_json::json!({
         "id": id,
         "removed": true,
-        "timestamp": chrono::Local::now().to_rfc3339(),
+        "timestamp": crate::clock::LocalTime::now().to_rfc3339(),
     })))
 }
 
@@ -76585,7 +76559,7 @@ pub fn bi_watch_cpu(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
         sample.insert("above_threshold".to_string(), Value::Bool(above));
         sample.insert(
             "timestamp".to_string(),
-            Value::Str(chrono::Local::now().to_rfc3339()),
+            Value::Str(crate::clock::LocalTime::now().to_rfc3339()),
         );
         readings.push(Value::Record(sample));
     }
@@ -76649,7 +76623,7 @@ pub fn bi_watch_memory(args: Vec<Value>, input: Option<Value>) -> Result<Value> 
     rec.insert("swap_percent".to_string(), Value::Float(swap_pct));
     rec.insert(
         "timestamp".to_string(),
-        Value::Str(chrono::Local::now().to_rfc3339()),
+        Value::Str(crate::clock::LocalTime::now().to_rfc3339()),
     );
     Ok(Value::Record(rec))
 }
@@ -76712,7 +76686,7 @@ pub fn bi_watch_disk(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
     rec.insert("disks".to_string(), Value::Array(disk_entries));
     rec.insert(
         "timestamp".to_string(),
-        Value::Str(chrono::Local::now().to_rfc3339()),
+        Value::Str(crate::clock::LocalTime::now().to_rfc3339()),
     );
     Ok(Value::Record(rec))
 }
@@ -77437,7 +77411,7 @@ fn bi_repl_disconnect(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
     rec.insert("status".to_string(), Value::Str("disconnected".to_string()));
     rec.insert(
         "disconnected_at".to_string(),
-        Value::Str(chrono::Local::now().to_rfc3339()),
+        Value::Str(crate::clock::LocalTime::now().to_rfc3339()),
     );
     Ok(Value::Record(rec))
 }
@@ -77582,7 +77556,7 @@ fn bi_workspace_create(args: Vec<Value>, input: Option<Value>) -> Result<Value> 
 
     let id = uuid::Uuid::new_v4().to_string();
     let owner = get_current_username("workspace_create")?;
-    let created_at = chrono::Local::now().to_rfc3339();
+    let created_at = crate::clock::LocalTime::now().to_rfc3339();
     let mut workspaces = WORKSPACES
         .write()
         .map_err(|_| crate::safety::lock_poisoned("workspace_create", "the workspace registry"))?;
@@ -77651,7 +77625,7 @@ fn bi_workspace_join(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
     ws.members.push(WorkspaceMember {
         user: user.clone(),
         role: "member".to_string(),
-        joined_at: chrono::Local::now().to_rfc3339(),
+        joined_at: crate::clock::LocalTime::now().to_rfc3339(),
     });
     let mut rec = BTreeMap::new();
     rec.insert("workspace_id".to_string(), Value::Str(ws_id));
@@ -78092,7 +78066,7 @@ fn bi_marketplace_publish(args: Vec<Value>, _input: Option<Value>) -> Result<Val
         None => "local",
     };
 
-    let published_at = chrono::Local::now().to_rfc3339();
+    let published_at = crate::clock::LocalTime::now().to_rfc3339();
     let package = MarketplacePackage {
         name: name.clone(),
         version: version.clone(),
@@ -78368,7 +78342,7 @@ fn bi_marketplace_install(args: Vec<Value>, _input: Option<Value>) -> Result<Val
     );
     rec.insert(
         "installed_at".to_string(),
-        Value::Str(chrono::Local::now().to_rfc3339()),
+        Value::Str(crate::clock::LocalTime::now().to_rfc3339()),
     );
     Ok(Value::Record(rec))
 }
@@ -78423,7 +78397,7 @@ fn bi_marketplace_uninstall(args: Vec<Value>, _input: Option<Value>) -> Result<V
     rec.insert("files_removed".to_string(), Value::Bool(files_removed));
     rec.insert(
         "uninstalled_at".to_string(),
-        Value::Str(chrono::Local::now().to_rfc3339()),
+        Value::Str(crate::clock::LocalTime::now().to_rfc3339()),
     );
     Ok(Value::Record(rec))
 }
@@ -78611,7 +78585,7 @@ fn bi_marketplace_update(args: Vec<Value>, _input: Option<Value>) -> Result<Valu
         }
         rec.insert(
             "checked_at".to_string(),
-            Value::Str(chrono::Local::now().to_rfc3339()),
+            Value::Str(crate::clock::LocalTime::now().to_rfc3339()),
         );
         out.push(Value::Record(rec));
     }
@@ -78638,7 +78612,7 @@ fn bi_telemetry_enable(_args: Vec<Value>, _input: Option<Value>) -> Result<Value
         event_type: "telemetry_enabled".to_string(),
         category: "system".to_string(),
         data: HashMap::new(),
-        timestamp: chrono::Local::now().to_rfc3339(),
+        timestamp: crate::clock::LocalTime::now().to_rfc3339(),
         session_id: uuid::Uuid::new_v4().to_string(),
     };
     if let Ok(mut events) = TELEMETRY_EVENTS.write() {
@@ -78773,7 +78747,7 @@ fn bi_telemetry_report(args: Vec<Value>, _input: Option<Value>) -> Result<Value>
     rec.insert("by_type".to_string(), Value::Array(types));
     rec.insert(
         "generated_at".to_string(),
-        Value::Str(chrono::Local::now().to_rfc3339()),
+        Value::Str(crate::clock::LocalTime::now().to_rfc3339()),
     );
     Ok(Value::Record(rec))
 }
@@ -78839,7 +78813,7 @@ fn bi_telemetry_reset(args: Vec<Value>, _input: Option<Value>) -> Result<Value> 
     );
     rec.insert(
         "timestamp".to_string(),
-        Value::Str(chrono::Local::now().to_rfc3339()),
+        Value::Str(crate::clock::LocalTime::now().to_rfc3339()),
     );
     Ok(Value::Record(rec))
 }

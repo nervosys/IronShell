@@ -49,7 +49,7 @@ fn is_coded_absence(code: &str) -> bool {
     )
 }
 
-/// `YYYY-MM-DDTHH:MM:SSZ`: UTC, to the second, and a date chrono reads back.
+/// `YYYY-MM-DDTHH:MM:SSZ`: UTC, to the second, and a date the shell reads back.
 fn is_utc_iso_second(text: &str) -> bool {
     let bytes = text.as_bytes();
     bytes.len() == 20
@@ -60,7 +60,7 @@ fn is_utc_iso_second(text: &str) -> bool {
             19 => *c == b'Z',
             _ => c.is_ascii_digit(),
         })
-        && chrono::DateTime::parse_from_rfc3339(text).is_ok()
+        && iron_shell::clock::parse_rfc3339(text).is_some()
 }
 
 #[test]

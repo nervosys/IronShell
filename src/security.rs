@@ -87,7 +87,7 @@ impl SecurityAuditEvent {
     /// Builder for command validation events
     pub fn command_validation(command: &str, allowed: bool) -> Self {
         Self {
-            timestamp: chrono::Utc::now().to_rfc3339(),
+            timestamp: crate::clock::UtcTime::now().to_rfc3339(),
             event_type: SecurityEventType::CommandValidation,
             severity: if allowed { "info" } else { "warn" }.to_string(),
             allowed,
@@ -110,7 +110,7 @@ impl SecurityAuditEvent {
         reason: Option<&str>,
     ) -> Self {
         Self {
-            timestamp: chrono::Utc::now().to_rfc3339(),
+            timestamp: crate::clock::UtcTime::now().to_rfc3339(),
             event_type: SecurityEventType::PathValidation,
             severity: if allowed { "info" } else { "warn" }.to_string(),
             allowed,
@@ -130,7 +130,7 @@ impl SecurityAuditEvent {
     /// Builder for prompt injection detection events
     pub fn prompt_validation(pattern: &str, blocked: bool) -> Self {
         Self {
-            timestamp: chrono::Utc::now().to_rfc3339(),
+            timestamp: crate::clock::UtcTime::now().to_rfc3339(),
             event_type: SecurityEventType::PromptValidation,
             severity: if blocked { "error" } else { "info" }.to_string(),
             allowed: !blocked,
@@ -152,7 +152,7 @@ impl SecurityAuditEvent {
     /// Builder for rate limit events
     pub fn rate_limit_exceeded(operation: &str, limit: usize) -> Self {
         Self {
-            timestamp: chrono::Utc::now().to_rfc3339(),
+            timestamp: crate::clock::UtcTime::now().to_rfc3339(),
             event_type: SecurityEventType::RateLimitExceeded,
             severity: "warn".to_string(),
             allowed: false,

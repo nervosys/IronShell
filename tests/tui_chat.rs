@@ -2,7 +2,7 @@
 
 #[cfg(test)]
 mod tui_chat_tests {
-    use chrono::Utc;
+    use iron_shell::clock::UtcTime;
     use iron_shell::tui::agents::MultiModalAgent;
     use iron_shell::tui::app::{AgentInfo, AgentStatus, ChatMessage, MessageRole};
     use iron_shell::tui::chat::{
@@ -18,7 +18,7 @@ mod tui_chat_tests {
         assert_eq!(session.title, "Test Session");
         assert!(session.messages.is_empty());
         assert!(session.participants.is_empty());
-        assert!(session.created_at <= Utc::now());
+        assert!(session.created_at <= UtcTime::now());
 
         // Allow for small timing difference between created_at and updated_at
         let time_diff = (session.updated_at - session.created_at)
@@ -83,7 +83,7 @@ mod tui_chat_tests {
 
         let message = ChatMessage {
             id: Uuid::new_v4(),
-            timestamp: Utc::now(),
+            timestamp: UtcTime::now(),
             role: MessageRole::User,
             content: "Hello, world!".to_string(),
             media_attachments: vec![],
@@ -149,7 +149,7 @@ mod tui_chat_tests {
         for (content, role) in messages {
             let message = ChatMessage {
                 id: Uuid::new_v4(),
-                timestamp: Utc::now(),
+                timestamp: UtcTime::now(),
                 role,
                 content: content.to_string(),
                 media_attachments: vec![],
@@ -179,7 +179,7 @@ mod tui_chat_tests {
 
         let message = ChatMessage {
             id: Uuid::new_v4(),
-            timestamp: Utc::now(),
+            timestamp: UtcTime::now(),
             role: MessageRole::User,
             content: "Analyze this image".to_string(),
             media_attachments: vec![media_file],
@@ -217,7 +217,7 @@ mod tui_chat_tests {
         // Add messages
         let user_message = ChatMessage {
             id: Uuid::new_v4(),
-            timestamp: Utc::now(),
+            timestamp: UtcTime::now(),
             role: MessageRole::User,
             content: "Hello!".to_string(),
             media_attachments: vec![],
@@ -226,7 +226,7 @@ mod tui_chat_tests {
 
         let assistant_message = ChatMessage {
             id: Uuid::new_v4(),
-            timestamp: Utc::now(),
+            timestamp: UtcTime::now(),
             role: MessageRole::Assistant,
             content: "Hi there!".to_string(),
             media_attachments: vec![],
@@ -295,8 +295,8 @@ mod tui_chat_tests {
             status: AgentStatus::Idle,
             current_task: None,
             tools: vec!["print".to_string()],
-            created_at: Utc::now(),
-            last_activity: Utc::now(),
+            created_at: UtcTime::now(),
+            last_activity: UtcTime::now(),
         };
 
         let agent = MultiModalAgent::new(base_agent);
@@ -325,8 +325,8 @@ mod tui_chat_tests {
             status: AgentStatus::Idle,
             current_task: None,
             tools: vec![],
-            created_at: Utc::now(),
-            last_activity: Utc::now(),
+            created_at: UtcTime::now(),
+            last_activity: UtcTime::now(),
         };
 
         let agent_id = base_agent.id;
@@ -364,7 +364,7 @@ mod tui_chat_tests {
         for i in 0..5 {
             let message = ChatMessage {
                 id: Uuid::new_v4(),
-                timestamp: Utc::now(),
+                timestamp: UtcTime::now(),
                 role: if i % 2 == 0 {
                     MessageRole::User
                 } else {

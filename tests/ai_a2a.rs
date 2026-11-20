@@ -472,7 +472,7 @@ fn test_message_has_timestamp() {
         },
     );
 
-    let now = chrono::Utc::now();
+    let now = iron_shell::clock::UtcTime::now();
     let diff = (now - msg.timestamp).num_seconds().abs();
     assert!(diff < 2); // Within 2 seconds
 }

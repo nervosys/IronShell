@@ -800,7 +800,7 @@ async fn validate_provider(
         "valid": has_credentials,
         "provider_id": provider_id,
         "status": test_result,
-        "checked_at": chrono::Utc::now().to_rfc3339()
+        "checked_at": crate::clock::UtcTime::now().to_rfc3339()
     })))
 }
 
@@ -892,7 +892,7 @@ async fn cleanup_storage(
                 "freed_bytes": freed_bytes,
                 "freed_human": freed_human,
                 "cleanup_age_days": cleanup_days,
-                "timestamp": chrono::Utc::now().to_rfc3339()
+                "timestamp": crate::clock::UtcTime::now().to_rfc3339()
             })))
         }
         Err(e) => Ok(Json(serde_json::json!({
@@ -907,7 +907,7 @@ async fn cleanup_storage(
 async fn health_check() -> Json<serde_json::Value> {
     Json(serde_json::json!({
         "status": "healthy",
-        "timestamp": chrono::Utc::now().to_rfc3339()
+        "timestamp": crate::clock::UtcTime::now().to_rfc3339()
     }))
 }
 
@@ -931,7 +931,7 @@ async fn server_status(State(state): State<AppState>) -> Json<serde_json::Value>
         },
         "uptime": uptime_str,
         "uptime_seconds": uptime.as_secs(),
-        "timestamp": chrono::Utc::now().to_rfc3339()
+        "timestamp": crate::clock::UtcTime::now().to_rfc3339()
     }))
 }
 

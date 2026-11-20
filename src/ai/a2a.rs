@@ -54,7 +54,7 @@ pub enum A2AMessageType {
 pub struct A2AMessage {
     pub id: Uuid,
     pub from: String,
-    pub timestamp: chrono::DateTime<chrono::Utc>,
+    pub timestamp: crate::clock::UtcTime,
     pub msg_type: A2AMessageType,
 }
 
@@ -63,7 +63,7 @@ impl A2AMessage {
         Self {
             id: Uuid::new_v4(),
             from,
-            timestamp: chrono::Utc::now(),
+            timestamp: crate::clock::UtcTime::now(),
             msg_type,
         }
     }

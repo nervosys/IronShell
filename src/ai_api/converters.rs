@@ -396,7 +396,7 @@ impl ModelConverter {
             tokenizer_path: None,
             size_bytes: file_size,
             sha256: self.calculate_checksum(file_path)?,
-            downloaded_at: chrono::Utc::now(),
+            downloaded_at: crate::clock::UtcTime::now(),
             last_used: None,
             usage_count: 0,
             capabilities: ModelCapabilities {

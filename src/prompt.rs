@@ -143,7 +143,7 @@ impl PromptContext {
             git,
             user: current_user(),
             host: short_hostname(),
-            time: chrono::Local::now().format("%H:%M").to_string(),
+            time: crate::clock::LocalTime::now().format("%H:%M").to_string(),
             columns: terminal_columns(),
             colors: crate::config::get_config().colors.enabled,
             cwd,

@@ -34,7 +34,7 @@ pub enum InputMode {
 #[derive(Debug, Clone)]
 pub struct ChatMessage {
     pub id: Uuid,
-    pub timestamp: chrono::DateTime<chrono::Utc>,
+    pub timestamp: crate::clock::UtcTime,
     pub role: MessageRole,
     pub content: String,
     pub media_attachments: Vec<MediaFile>,
@@ -56,8 +56,8 @@ pub struct AgentInfo {
     pub status: AgentStatus,
     pub current_task: Option<String>,
     pub tools: Vec<String>,
-    pub created_at: chrono::DateTime<chrono::Utc>,
-    pub last_activity: chrono::DateTime<chrono::Utc>,
+    pub created_at: crate::clock::UtcTime,
+    pub last_activity: crate::clock::UtcTime,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -74,7 +74,7 @@ pub struct A2UINotification {
     pub id: Uuid,
     pub message: String,
     pub level: NotificationLevel,
-    pub timestamp: chrono::DateTime<chrono::Utc>,
+    pub timestamp: crate::clock::UtcTime,
     pub duration_ms: Option<u64>,
 }
 
@@ -272,7 +272,7 @@ impl App {
     pub fn add_message(&mut self, role: MessageRole, content: String) {
         let message = ChatMessage {
             id: Uuid::new_v4(),
-            timestamp: chrono::Utc::now(),
+            timestamp: crate::clock::UtcTime::now(),
             role,
             content,
             media_attachments: self.get_selected_media_files(),
@@ -341,8 +341,8 @@ impl App {
             status: AgentStatus::Idle,
             current_task: None,
             tools,
-            created_at: chrono::Utc::now(),
-            last_activity: chrono::Utc::now(),
+            created_at: crate::clock::UtcTime::now(),
+            last_activity: crate::clock::UtcTime::now(),
         };
 
         self.agents.push(agent);
@@ -396,7 +396,7 @@ impl App {
                 let agent_name = agent.name.clone();
                 agent.status = AgentStatus::Working;
                 agent.current_task = Some(task.clone());
-                agent.last_activity = chrono::Utc::now();
+                agent.last_activity = crate::clock::UtcTime::now();
 
                 // Add system message
                 self.add_message(
@@ -561,7 +561,7 @@ impl App {
         output.push_str("# IronShell Conversation Export\n\n");
         output.push_str(&format!(
             "**Exported:** {}\n",
-            chrono::Utc::now().format("%Y-%m-%d %H:%M:%S UTC")
+            crate::clock::UtcTime::now().format("%Y-%m-%d %H:%M:%S UTC")
         ));
         output.push_str(&format!("**Model:** {}\n", self.current_model));
         output.push_str(&format!("**Total Messages:** {}\n\n", self.messages.len()));
@@ -621,7 +621,7 @@ impl App {
         }
 
         let export = ExportData {
-            exported_at: chrono::Utc::now().to_rfc3339(),
+            exported_at: crate::clock::UtcTime::now().to_rfc3339(),
             model: self.current_model.clone(),
             total_messages: self.messages.len(),
             messages: self
@@ -769,10 +769,10 @@ impl App {
         self.agents
             .iter()
             .map(|agent| {
-                let uptime = chrono::Utc::now()
+                let uptime = crate::clock::UtcTime::now()
                     .signed_duration_since(agent.created_at)
                     .num_seconds();
-                let idle_time = chrono::Utc::now()
+                let idle_time = crate::clock::UtcTime::now()
                     .signed_duration_since(agent.last_activity)
                     .num_seconds();
 
@@ -1025,7 +1025,7 @@ impl App {
                     if agent.name == agent_id || agent.id.to_string() == agent_id {
                         agent.status = AgentStatus::Working;
                         agent.current_task = task.clone();
-                        agent.last_activity = chrono::Utc::now();
+                        agent.last_activity = crate::clock::UtcTime::now();
                         break;
                     }
                 }
@@ -1044,7 +1044,7 @@ impl App {
                             AgentStatus::Error(result.clone().unwrap_or_default())
                         };
                         agent.current_task = None;
-                        agent.last_activity = chrono::Utc::now();
+                        agent.last_activity = crate::clock::UtcTime::now();
                         break;
                     }
                 }
@@ -1075,7 +1075,7 @@ impl App {
 
     /// Remove expired toast notifications
     fn cleanup_expired_notifications(&mut self) {
-        let now = chrono::Utc::now();
+        let now = crate::clock::UtcTime::now();
         self.notifications.retain(|n| {
             if let Some(duration_ms) = n.duration_ms {
                 let elapsed = (now - n.timestamp).num_milliseconds() as u64;

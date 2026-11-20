@@ -6091,7 +6091,7 @@ fn build_entry(
     detail: Json,
 ) -> Result<(u64, String, String), String> {
     let seq = state.seq + 1;
-    let ts = chrono::Utc::now().to_rfc3339();
+    let ts = crate::clock::UtcTime::now().to_rfc3339();
     let principal = std::env::var("USER")
         .or_else(|_| std::env::var("USERNAME"))
         .ok();

@@ -399,7 +399,7 @@ fn draw_footer(f: &mut Frame, app: &App, area: Rect) {
 }
 
 fn format_message_content(msg: &super::app::ChatMessage) -> Text<'_> {
-    let timestamp = if msg.timestamp.date_naive() == chrono::Utc::now().date_naive() {
+    let timestamp = if msg.timestamp.date_naive() == crate::clock::UtcTime::now().date_naive() {
         msg.timestamp.format("%H:%M:%S").to_string()
     } else {
         msg.timestamp.format("%m/%d %H:%M").to_string()
