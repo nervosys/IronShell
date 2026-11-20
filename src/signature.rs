@@ -3109,8 +3109,8 @@ pub static SIGNATURES: &[Signature] = &[
         returns: "Array",
         doc: "List a directory as records with name, path, size and modified. A file lists as itself, as one record; a glob lists its matches.",
         examples: &[
-            (r#"(ls("src") | len) > 0"#, "true"),
-            (r#"(ls() | len) > 0"#, "true"),
+            (r#"let d = fs_tempdir("ae_ex"); let f = d + "/a.txt"; file_write(f, "hello"); let r = (ls(d) | len) > 0; rmdir(d, true); r"#, "true"),
+            (r#"typeof(ls())"#, "Array"),
         ],
     },
     Signature {
@@ -3369,7 +3369,7 @@ pub static SIGNATURES: &[Signature] = &[
         params: &[req("pattern", Ty::Str, "a basic regular expression: ^ and $ anchor, . is any character; + ? | ( ) { } are literal unless backslashed (\\+ \\? \\| \\( \\) \\{ \\}); so TODO|FIXME matches nothing; write TODO\\|FIXME, or pass {extended: true}"), opt("path", Ty::Str, "file or glob to search; omit to search the piped text"), opt("options", Ty::Record, "{line_numbers: true} returns {file, line, text} records instead of lines; line counts from 1 in each file, and file is null for piped text; {extended: true} reads the pattern as an extended regex (grep -E: bare | + ? ( ) { })")],
         returns: "Array",
         doc: "Lines matching a basic regular expression (BRE, as grep without -E: `|` is literal, so `grep(\"TODO|FIXME\", f)` matches nothing; write `\\|` or pass {extended: true}). There is no recursive option; grep a glob (`src/**/*.rs`) or use search.grep. A back-reference such as \\1 is refused, and a pattern that does not compile says why. With {line_numbers: true} each match is a record {file, line, text} instead, the line numbered from 1 within its file (null for piped text). Under the workspace jail (agent mode, or a workspace set) a file more than 50 directories below the workspace root is not read: E_BUDGET_EXCEEDED naming the limit, though glob still lists it.",
-        examples: &[(r#"grep("fn main", "src/main.rs") | len"#, "1"), (r#"(grep("fn", "src/main.rs") | len) > 0"#, "true"), (r#"grep("^version", "Cargo.toml") | len"#, "1"), (r#"grep("^version", "Cargo.toml", {line_numbers: true}) | first | fn(r) => r.file"#, r#""Cargo.toml""#), (r#""a\nb\na" | grep("a", {line_numbers: true}) | last | fn(r) => r.line"#, "3"), (r#""TODO x\nok\nFIXME y" | grep("TODO\\|FIXME") | len"#, "2"), (r#""TODO x\nok\nFIXME y" | grep("TODO|FIXME", {extended: true}) | len"#, "2"), (r#""TODO|FIXME\nTODO" | grep("TODO|FIXME") | len"#, "1")],
+        examples: &[(r#"let d = fs_tempdir("ae_ex"); let f = d + "/main.rs"; file_write(f, ["fn main() {}", "fn helper() {}"]); let r = grep("fn main", f) | len; rmdir(d, true); r"#, "1"), (r#"let d = fs_tempdir("ae_ex"); let f = d + "/main.rs"; file_write(f, ["fn main() {}", "fn helper() {}"]); let r = (grep("fn", f) | len) > 0; rmdir(d, true); r"#, "true"), (r#"let d = fs_tempdir("ae_ex"); let f = d + "/demo.toml"; file_write(f, ["[package]", "name = 'demo'", "version = '1.0'"]); let r = grep("^version", f) | len; rmdir(d, true); r"#, "1"), (r#"let d = fs_tempdir("ae_ex"); let f = d + "/demo.toml"; file_write(f, ["[package]", "name = 'demo'", "version = '1.0'"]); let r = grep("^version", f, {line_numbers: true}) | first | fn(m) => m.line; rmdir(d, true); r"#, "3"), (r#""a\nb\na" | grep("a", {line_numbers: true}) | last | fn(r) => r.line"#, "3"), (r#""TODO x\nok\nFIXME y" | grep("TODO\\|FIXME") | len"#, "2"), (r#""TODO x\nok\nFIXME y" | grep("TODO|FIXME", {extended: true}) | len"#, "2"), (r#""TODO|FIXME\nTODO" | grep("TODO|FIXME") | len"#, "1")],
     },
     Signature {
         name: "find",
@@ -3380,7 +3380,7 @@ pub static SIGNATURES: &[Signature] = &[
         params: &[req("path", Ty::Str, "directory to search"), opt("pattern", Ty::Str, "glob such as *.rs; omit for every file")],
         returns: "Array",
         doc: "Files (not directories) under a directory, optionally matching a glob on the file name. Paths are written as glob writes them: the directory as given, then `/` and the path below it. At most 1,000,000 entries; more is E_BUDGET_EXCEEDED.",
-        examples: &[(r#"(find("src", "*.rs") | len) > 0"#, "true"), (r#"(find("src") | len) > 0"#, "true")],
+        examples: &[(r#"let d = fs_tempdir("ae_ex"); let f = d + "/a.rs"; file_write(f, "hello"); let r = (find(d, "*.rs") | len) > 0; rmdir(d, true); r"#, "true"), (r#"let d = fs_tempdir("ae_ex"); let f = d + "/a.rs"; file_write(f, "hello"); let r = (find(d) | len) > 0; rmdir(d, true); r"#, "true")],
     },
     Signature {
         // The design document names this a core verb, and the hybrid arm of E1
@@ -3558,8 +3558,8 @@ pub static SIGNATURES: &[Signature] = &[
         returns: "Any",
         doc: "Read a file and parse it by extension (JSON, JSON lines, TOML, YAML, CSV, TSV), or return its text. A .tsv file is read like a .csv one with a tab delimiter: a header row, columns typed by the same inference, and no quoting (a quote character is data). A file that does not parse is E_BAD_VALUE, not retryable, and its hint gives the line and column.",
         examples: &[
-            (r#"open("Cargo.toml").package.name"#, r#""iron-shell""#),
-            (r#"typeof(open("README.md"))"#, "String"),
+            (r#"let d = fs_tempdir("ae_ex"); let f = d + "/demo.toml"; file_write(f, ["[package]", "name = 'demo'", "version = '1.0'"]); let r = open(f).package.name; rmdir(d, true); r"#, r#""demo""#),
+            (r#"let d = fs_tempdir("ae_ex"); let f = d + "/notes.txt"; file_write(f, "hello"); let r = typeof(open(f)); rmdir(d, true); r"#, "String"),
         ],
     },
     Signature {
@@ -3650,7 +3650,7 @@ pub static SIGNATURES: &[Signature] = &[
         returns: "String",
         doc: "Read a file as text, or pass piped text through unchanged.",
         examples: &[
-            (r#"(cat("Cargo.toml") | len) > 0"#, "true"),
+            (r#"let d = fs_tempdir("ae_ex"); let f = d + "/a.txt"; file_write(f, "hello"); let r = (cat(f) | len) > 0; rmdir(d, true); r"#, "true"),
             (r#""passthrough" | cat"#, r#""passthrough""#),
         ],
     },
@@ -5027,7 +5027,7 @@ pub static SIGNATURES: &[Signature] = &[
         name: "test_watch", category: None, subject_required: false, aliases: &[], subject: None,
         params: &[req("command", Ty::Array, "Nonempty argv Array of String: program then arguments, run directly without a shell"), req("paths", Ty::Array, "Nonempty Array of String paths, each of which must exist; directories are scanned recursively"), opt("options", Ty::Record, "Optional Record whose Int fields are max_runs, poll_ms, idle_ms, timeout_ms and total_ms; unknown keys reject")], returns: "Record",
         doc: "Run the program named by command once in the current directory, then run it again whenever the watched paths change, and return Record {runs, stopped, passed}. The command is an argv array run directly with no shell, stdin null and stdout and stderr captured, and it is executed on every run, so the builtin is classified Exec and is gated like other process-running builtins. Each run is {trigger: initial or change, changed: sorted Array<String> of the paths added, removed or modified since the previous snapshot (at most 32 listed), changed_count: Int, exit_code: Int, or Null when the run timed out or the process ended by signal, timed_out: Bool, duration_ms: Int, stdout: String, stderr: String}; stdout and stderr each keep only the last 65536 bytes, decoded lossily as UTF-8. A nonzero exit is reported in the run, not raised as an error. Change detection polls rather than using OS notifications: every poll_ms the paths are rescanned, directories recursively, skipping entries named target, .git and node_modules, following no symlinks, and each file is compared by relative path, length and modified time, so a change that keeps both length and modified time can be missed. stopped is max_runs when the run count is reached, idle when no change has been seen for idle_ms after the last run finished, or deadline when total_ms elapses; a run still going at the deadline is killed. passed is true only when the last run exited 0 and did not time out. Options: max_runs 1..=20 (default 2), poll_ms 50..=5000 (default 200), idle_ms 100..=600000 (default 30000), timeout_ms 100..=1800000 per run (default 300000), total_ms 100..=3600000 overall (default 900000). A run that exceeds timeout_ms, or is still going at the deadline, has its whole process tree killed (on Unix the process group the run was started in; on Windows taskkill /T) and is then reaped, so no child or grandchild is left running. Output is read on separate threads; after the child exits, at most 2 seconds are waited for those readers to reach end of output, so output held open by a process that survives returns only what arrived by then. Limits: command at most 64 elements of 4096 bytes each, no NUL; paths at most 64 entries; at most 10000 files scanned across all paths. Refused with E_BAD_ARG: pipeline input, a malformed or empty command or paths, a nonexistent path, unknown or out-of-range options; a program that cannot be started is an error (E_TOOL_MISSING). Direct-only.",
-        examples: &[(r#"test_watch(["rustc", "--version"], ["Cargo.toml"], {max_runs: 1}).passed"#, "true"), (r#"test_watch(["rustc", "--version"], ["Cargo.toml"]).passed"#, "true")],
+        examples: &[(r#"let d = fs_tempdir("ae_ex"); let f = d + "/a.txt"; file_write(f, "hello"); let r = test_watch(["rustc", "--version"], [f], {max_runs: 1}).passed; rmdir(d, true); r"#, "true"), (r#"let d = fs_tempdir("ae_ex"); let f = d + "/a.txt"; file_write(f, "hello"); let r = test_watch(["rustc", "--version"], [f]).passed; rmdir(d, true); r"#, "true")],
     },
     Signature {
         name: "pkg_install", category: None, subject_required: false, aliases: &[], subject: None,
@@ -9751,8 +9751,8 @@ pub static SIGNATURES: &[Signature] = &[
         returns: "String",
         doc: "Hex digest of a file's contents.",
         examples: &[
-            (r#"crypto_hash_file("Cargo.toml") | len"#, r#"64"#),
-            (r#"crypto_hash_file("Cargo.toml", "md5") | len"#, r#"32"#),
+            (r#"let d = fs_tempdir("ae_ex"); let f = d + "/a.txt"; file_write(f, "hello"); let r = crypto_hash_file(f) | len; rmdir(d, true); r"#, r#"64"#),
+            (r#"let d = fs_tempdir("ae_ex"); let f = d + "/a.txt"; file_write(f, "hello"); let r = crypto_hash_file(f, "md5") | len; rmdir(d, true); r"#, r#"32"#),
         ],
     },
     Signature {
@@ -9765,8 +9765,8 @@ pub static SIGNATURES: &[Signature] = &[
         returns: "String",
         doc: "Hex digest of a file's contents; the same as crypto_hash_file.",
         examples: &[
-            (r#"crypto_checksum("Cargo.toml") | len"#, r#"64"#),
-            (r#"crypto_checksum("Cargo.toml", "sha512") | len"#, r#"128"#),
+            (r#"let d = fs_tempdir("ae_ex"); let f = d + "/a.txt"; file_write(f, "hello"); let r = crypto_checksum(f) | len; rmdir(d, true); r"#, r#"64"#),
+            (r#"let d = fs_tempdir("ae_ex"); let f = d + "/a.txt"; file_write(f, "hello"); let r = crypto_checksum(f, "sha512") | len; rmdir(d, true); r"#, r#"128"#),
         ],
     },
     Signature {
@@ -9807,8 +9807,8 @@ pub static SIGNATURES: &[Signature] = &[
         returns: "Record",
         doc: "A Record {exists, is_dir, is_file, path}, not a Bool (write file_exists(p).exists in a condition): whether a path exists, and whether it is a file or a directory. A path that cannot be checked is an error, not absent.",
         examples: &[
-            (r#"file_exists("Cargo.toml").exists"#, r#"true"#),
-            (r#"(file_exists("Cargo.toml")).is_file"#, r#"true"#),
+            (r#"let d = fs_tempdir("ae_ex"); let f = d + "/a.txt"; file_write(f, "hello"); let r = file_exists(f).exists; rmdir(d, true); r"#, r#"true"#),
+            (r#"let d = fs_tempdir("ae_ex"); let f = d + "/a.txt"; file_write(f, "hello"); let r = (file_exists(f)).is_file; rmdir(d, true); r"#, r#"true"#),
         ],
     },
     Signature {
@@ -9834,7 +9834,7 @@ pub static SIGNATURES: &[Signature] = &[
         returns: "Record",
         doc: "Size and kind of a path, without following a symlink. Null if the path does not exist; any other failure is an error.",
         examples: &[
-            (r#"typeof(fs_lstat("Cargo.toml"))"#, r#"Record"#),
+            (r#"let d = fs_tempdir("ae_ex"); let f = d + "/a.txt"; file_write(f, "hello"); let r = typeof(fs_lstat(f)); rmdir(d, true); r"#, r#"Record"#),
         ],
     },
     Signature {
@@ -9847,7 +9847,7 @@ pub static SIGNATURES: &[Signature] = &[
         returns: "String",
         doc: "The canonical absolute path, with symlinks resolved. Null if the path does not exist; any other failure is an error.",
         examples: &[
-            (r#"ends_with(fs_realpath("Cargo.toml"), "Cargo.toml")"#, r#"true"#),
+            (r#"let d = fs_tempdir("ae_ex"); let f = d + "/a.txt"; file_write(f, "hello"); let r = ends_with(fs_realpath(f), "a.txt"); rmdir(d, true); r"#, r#"true"#),
         ],
     },
     Signature {
@@ -9860,11 +9860,11 @@ pub static SIGNATURES: &[Signature] = &[
         returns: "Array",
         doc: "Paths matching a glob, sorted; ** matches any depth of directories, `{a,b}` matches either alternative (`**/*.{rs,py}`; nested groups work, and a path matched twice appears once; a group with one alternative, `{rs}`, is that alternative; a brace that is never closed, or a } with no {, is E_BAD_ARG), and a directory in the pattern that does not exist is E_NOT_FOUND. `**` does not enter dot-directories, as in a shell: name them (`.github/**/*.yml`). At most 1,000,000 entries; more is E_BUDGET_EXCEEDED.",
         examples: &[
-            (r#"(glob("src/*.rs") | len) > 10"#, r#"true"#),
-            (r#"(glob("src/**/*.rs") | len) > (glob("src/*.rs") | len)"#, r#"true"#),
-            (r#"glob("Cargo.tom?")"#, r#"["Cargo.toml"]"#),
-            (r#"glob("Cargo.{toml,lock}")"#, r#"["Cargo.lock", "Cargo.toml"]"#),
-            (r#"glob("Cargo.{toml}")"#, r#"["Cargo.toml"]"#),
+            (r#"let d = fs_tempdir("ae_ex"); file_write(d + "/a.toml", "x"); file_write(d + "/b.lock", "x"); mkdir(d + "/sub"); file_write(d + "/sub/c.toml", "x"); let r = (glob(d + "/*.toml") | len); rmdir(d, true); r"#, r#"1"#),
+            (r#"let d = fs_tempdir("ae_ex"); file_write(d + "/a.toml", "x"); file_write(d + "/b.lock", "x"); mkdir(d + "/sub"); file_write(d + "/sub/c.toml", "x"); let r = (glob(d + "/**/*.toml") | len) > (glob(d + "/*.toml") | len); rmdir(d, true); r"#, r#"true"#),
+            (r#"let d = fs_tempdir("ae_ex"); file_write(d + "/a.toml", "x"); file_write(d + "/b.lock", "x"); mkdir(d + "/sub"); file_write(d + "/sub/c.toml", "x"); let r = glob(d + "/a.tom?") | map(path_basename); rmdir(d, true); r"#, r#"["a.toml"]"#),
+            (r#"let d = fs_tempdir("ae_ex"); file_write(d + "/a.toml", "x"); file_write(d + "/b.lock", "x"); mkdir(d + "/sub"); file_write(d + "/sub/c.toml", "x"); let r = glob(d + "/{a.toml,b.lock}") | map(path_basename); rmdir(d, true); r"#, r#"["a.toml", "b.lock"]"#),
+            (r#"let d = fs_tempdir("ae_ex"); file_write(d + "/a.toml", "x"); file_write(d + "/b.lock", "x"); mkdir(d + "/sub"); file_write(d + "/sub/c.toml", "x"); let r = glob(d + "/a.{toml}") | map(path_basename); rmdir(d, true); r"#, r#"["a.toml"]"#),
             (r#"(try { glob("**/{*.rs,*.py") } catch e { e.error.code })"#, "E_BAD_ARG"),
         ],
     },
@@ -9878,7 +9878,7 @@ pub static SIGNATURES: &[Signature] = &[
         returns: "Record | Null",
         doc: "File metadata: size, times, and on Unix mode, inode and ownership. Null if the path does not exist; any other failure is an error.",
         examples: &[
-            (r#"typeof(fs_stat("Cargo.toml"))"#, r#"Record"#),
+            (r#"let d = fs_tempdir("ae_ex"); let f = d + "/a.txt"; file_write(f, "hello"); let r = typeof(fs_stat(f)); rmdir(d, true); r"#, r#"Record"#),
         ],
     },
     Signature {
@@ -9891,7 +9891,7 @@ pub static SIGNATURES: &[Signature] = &[
         returns: "String",
         doc: "A text file's contents, subject to the read denylist and size limit.",
         examples: &[
-            (r#"(read_text("Cargo.toml") | len) > 0"#, r#"true"#),
+            (r#"let d = fs_tempdir("ae_ex"); let f = d + "/a.txt"; file_write(f, "hello"); let r = (read_text(f) | len) > 0; rmdir(d, true); r"#, r#"true"#),
         ],
     },
     Signature {
@@ -9905,7 +9905,7 @@ pub static SIGNATURES: &[Signature] = &[
         doc: "Total size of a directory tree, in bytes and larger units.",
         examples: &[
             (r#"typeof(du())"#, r#"Record"#),
-            (r#"typeof(du("src"))"#, r#"Record"#),
+            (r#"let d = fs_tempdir("ae_ex"); let f = d + "/a.txt"; file_write(f, "hello"); let r = typeof(du(d)); rmdir(d, true); r"#, r#"Record"#),
         ],
     },
     // 1b: environment and process lookups, the search family, tree, CSV.
@@ -9959,7 +9959,7 @@ pub static SIGNATURES: &[Signature] = &[
         returns: "Array",
         doc: "Files beneath the current directory whose name matches a glob; build and dependency directories are skipped.",
         examples: &[
-            (r#"search_files("Cargo.toml")"#, r#"["./Cargo.toml"]"#),
+            (r#"search_files("*.no_such_ext")"#, r#"[]"#),
         ],
     },
     Signature {
@@ -9972,7 +9972,7 @@ pub static SIGNATURES: &[Signature] = &[
         returns: "Array",
         doc: "Files beneath the current directory with an extension.",
         examples: &[
-            (r#"search_by_type("toml")"#, r#"["./Cargo.toml", ...]"#),
+            (r#"search_by_type("no_such_ext")"#, r#"[]"#),
         ],
     },
     Signature {
@@ -10000,7 +10000,7 @@ pub static SIGNATURES: &[Signature] = &[
         doc: "A directory tree as indented text. At most 1,000,000 entries; more is E_BUDGET_EXCEEDED.",
         examples: &[
             (r#"typeof(tree())"#, r#"String"#),
-            (r#"typeof(tree("src", 1))"#, r#"String"#),
+            (r#"let d = fs_tempdir("ae_ex"); let f = d + "/a.txt"; file_write(f, "hello"); let r = typeof(tree(d, 1)); rmdir(d, true); r"#, r#"String"#),
         ],
     },
     Signature {
@@ -10515,7 +10515,7 @@ pub static SIGNATURES: &[Signature] = &[
         returns: "String",
         doc: "A path's permissions: octal mode bits on Unix, readonly or readwrite on Windows.",
         examples: &[
-            (r#"typeof(perm_get("Cargo.toml"))"#, r#"String"#),
+            (r#"let d = fs_tempdir("ae_ex"); let f = d + "/a.txt"; file_write(f, "hello"); let r = typeof(perm_get(f)); rmdir(d, true); r"#, r#"String"#),
         ],
     },
     Signature {
@@ -10950,7 +10950,7 @@ pub static SIGNATURES: &[Signature] = &[
         doc: "Size, free and used space of the disk holding a path, with its mount point.",
         examples: &[
             (r#"platform_disk_usage().total_bytes > 0"#, r#"true"#),
-            (r#"platform_disk_usage("src").total_bytes > 0"#, r#"true"#),
+            (r#"let d = fs_tempdir("ae_ex"); let f = d + "/a.txt"; file_write(f, "hello"); let r = platform_disk_usage(d).total_bytes > 0; rmdir(d, true); r"#, r#"true"#),
         ],
     },
     Signature {
@@ -11380,7 +11380,7 @@ pub static SIGNATURES: &[Signature] = &[
         doc: "Direct less(text,options?) or text | less(options?); pager is an alias. Return text of at most 40 lines unchanged, including its line endings, or a record with the first 40 lines joined with LF, total_lines, page_size 40, pages and a head/tail hint for longer input. File mode resolves paths against the workspace, guards the actual target and bounds regular UTF-8 reads to 64 MiB. Reject invalid or unknown options, non-Bool file and conflicting direct/piped input. Consume owned text, retain only first-page line references and count remaining lines without collecting them.",
         examples: &[
             (r#"less("a")"#, r#"a"#),
-            (r#"typeof(less("Cargo.toml", {file: true}))"#, r#"Record"#),
+            (r#"let d = fs_tempdir("ae_ex"); let f = d + "/a.txt"; file_write(f, arr.range(50) | map(fn(i) => "line")); let r = typeof(less(f, {file: true})); rmdir(d, true); r"#, r#"Record"#),
             (r#""a" | pager({file: false})"#, r#""a""#),
         ],
     },
@@ -12519,7 +12519,7 @@ pub static SIGNATURES: &[Signature] = &[
         returns: "Array",
         doc: "A Rust file's `use` lines, sorted. It reads the file and does not change it.",
         examples: &[
-            (r#"(refactor_organize_imports("src/lib.rs") | len) >= 0"#, r#"true"#),
+            (r#"let d = fs_tempdir("ae_ex"); let f = d + "/lib.rs"; file_write(f, ["use std::io;", "use std::fs;", "fn main() {}"]); let r = refactor_organize_imports(f) | len; rmdir(d, true); r"#, r#"2"#),
         ],
     },
     Signature {
