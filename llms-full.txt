@@ -288,7 +288,7 @@ ai("What's in this image?", {images: ["photo.jpg"]})
 
 ## 7. Agent API Server
 
-Start with `ish agent serve` (default port 3002). The Agent API provides structured JSON endpoints for AI agents to interact with IronShell without generating code.
+Start with `ish agent serve` (default port 3002). The Agent API provides structured JSON endpoints for AI agents to interact with IronShell without generating code. Every route except `/health` needs `Authorization: Bearer <token>`: the server prints a generated token at startup, or you set `IRONSHELL_API_TOKEN` before starting it. A call without it fails with `E_UNAUTHORIZED`.
 
 ### 7.1 Endpoints
 

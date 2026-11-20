@@ -39,6 +39,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Agents can no longer set the plugin and module paths of GUI and media toolkits (`GIO_*`, `GTK_*`, `QT_*`, `GST_PLUGIN*`), `CGO_*`, `DBUS_*`, `JULIA_*`, `HELM_*`, `COMPOSER_*`, `VAGRANT_*`, `MALLOC_CONF`, `INPUTRC`, `LOCPATH`, `TCLLIBPATH`, `TCL_LIBRARY`, `TK_LIBRARY`, `AR`, or bash's exported functions (`BASH_FUNC_name%%`, which defines `name` in every child bash); a round 57 probe of 125 steering names found these 15 still settable.
 ### Changed
 
+- `tool_search` treats folder/directory, delete/remove and compress/zip/tar/archive as related words, so "compress a folder" lists `zip_create` and `tar_create` first; it drops external tools that match fewer than half of the query's words; and a builtin's `run` text says "needs approval in agent mode" when its declared effect is gated there.
+- AGENTS.md, llms.txt and llms-full.txt say that the Agent API needs `Authorization: Bearer <token>` (printed at startup, or set with `IRONSHELL_API_TOKEN`); the AGENTS.md curl examples send it.
 - Dropped the unmaintained `chrono` dependency (RUSTSEC-2026-0543) for `jiff`; dates, times and their formats are unchanged.
 - `ish --zsh` refuses `setopt extendedglob` (in every spelling) by name; it was accepted and then ignored, so `^a.txt` globbed literally.
 - `ish -b` refuses brace expansion (`{a,b}`, `{1..3}`) by name instead of printing it literally; `{}`, `{a}`, `${x}` and `find -exec {} \;` are unaffected.
@@ -81,6 +83,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `port_scan`, `check_port` and similar names suggest `net_scan`; `python`, `pip`, `git_init` and `git_clone` suggest `sh`; `net_scan`'s help says a refused loopback connect takes about 2 s on Windows, so a short `timeout_ms` reads a closed port as filtered.
 ### Added
 
+- `format_bytes(n, binary?)` writes a byte count as text with one decimal place (`1536` is `1.5 KiB`, `format_bytes(1500, false)` is `1.5 kB`, `0` is `0 B`); `human_size`, `format_size`, `filesize`, `humanize` and `human_bytes` now suggest it.
 - `coalesce(value, fallback)` returns fallback when value is null and value otherwise; only null is replaced, so 0, "" and false are kept. It pipes: `.amount | coalesce(0)`.
 - `from_csv(text, {delimiter: ";"})` reads a CSV with another field separator: one ASCII character other than a quote or a line break, else E_BAD_ARG. Quote checking and the field-count error follow the delimiter. `open` reads by extension and takes no options, so use `from_csv(cat(path), {delimiter: ";"})`.
 - `ish -b` decodes ANSI-C quoting (`$'a\tb'`), and `cd -` prints the directory it changes to, as bash does.

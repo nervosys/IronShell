@@ -67,10 +67,11 @@ ish script.sh                 # Auto-detect shell by extension
 
 ## For AI Agents
 
-AI agents should use the structured Agent API instead of generating shell code:
+AI agents should use the structured Agent API instead of generating shell code. Every route except /health needs a bearer token: `ish agent serve` prints one at startup, or set IRONSHELL_API_TOKEN first.
 
 ```
 POST http://localhost:3002/api/v1/execute
+Authorization: Bearer <token>
 Content-Type: application/json
 
 {"action": "call", "builtin": "ls", "args": {"path": "."}}

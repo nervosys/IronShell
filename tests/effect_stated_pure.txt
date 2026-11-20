@@ -109,6 +109,7 @@ float
 floor
 foreach
 foreach-object
+format_bytes
 format_number
 from-csv
 from-yaml

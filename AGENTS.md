@@ -41,16 +41,19 @@ file.replace("config.rs", "DEBUG = false", "DEBUG = true")
 
 ### Option 2: Call the Agent API (HTTP)
 
-Start: `ish agent serve` (port 3002)
+Start: `ish agent serve` (port 3002). Every route except `/health` needs a bearer token. The server prints a generated token at startup (`Auth token (generated): ...`); to choose your own, set `IRONSHELL_API_TOKEN` before starting it. Without the header a call fails with `E_UNAUTHORIZED`.
 
 ```bash
+export TOKEN=...   # the token printed at startup, or your IRONSHELL_API_TOKEN
+
 # Call a builtin
 curl -X POST http://localhost:3002/api/v1/execute \
+  -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
   -d '{"action": "call", "builtin": "ls", "args": {"path": "."}}'
 
 # Get schema for your AI provider
-curl http://localhost:3002/api/v1/schema/openai
+curl -H "Authorization: Bearer $TOKEN" http://localhost:3002/api/v1/schema/openai
 ```
 
 The body of `POST /api/v1/call/:builtin` is the arguments object itself (e.g. `{"path": "."}`), not `{"args": ...}`: that wrapper is the `/execute` request shape (a lone `args` key is unwrapped for you). `/builtins/:name` and `/call/:builtin` also take a module-qualified name (`file.read`).
@@ -222,6 +225,7 @@ date_add("2024-01-31", 1, "months")    # "2024-02-29": weeks, months and years c
 journal().entries                      # the journal rows (journal() is a Record {entries, steps, reversible, irreversible, enabled}: steps is a count, each row in entries carries id and step)
 undo({id: 3})                          # undo one journal step out of order (needs the journal: agent mode, or IRONSHELL_JOURNAL=on); refused if a later step changed the same file
 format_number(1234567.891, 2, ",")    # "1,234,567.89": exactly `decimals` digits, optional thousands separator
+format_bytes(1536)                     # "1.5 KiB"; format_bytes(1500, false) is "1.5 kB" (1000s); 0 is "0 B"; sizes of ls() rows: ls(".") | map(fn(f) => format_bytes(f.size))
 path_join("src", "main.rs")            # "src/main.rs"; path_basename, path_dirname, path_extension, path_stem, path_normalize: text only, always "/"
 
 # String interpolation

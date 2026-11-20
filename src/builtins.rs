@@ -817,6 +817,8 @@ lazy_static::lazy_static! {
         map.insert("diff_values", 1218);
         // The first value that is not null (1219)
         map.insert("coalesce", 1219);
+        // A byte count as text such as "1.5 KiB" (1220)
+        map.insert("format_bytes", 1220);
         // 500-519: Database
         map.insert("db_sqlite_open", 500);
         map.insert("db_sqlite_query", 1217);
@@ -3922,6 +3924,8 @@ static BUILTIN_DISPATCH: &[fn(Vec<Value>, Option<Value>, &mut Env) -> Result<Val
     |args, input, _| bi_diff_values(args, input), // 1218
     // The value, or a fallback when it is null
     |args, input, _| bi_coalesce(args, input), // 1219
+    // A byte count as human-readable text
+    |args, input, _| bi_format_bytes(args, input), // 1220
 ];
 
 /// The dispatch row that serves `name`, if the fast table has one.
@@ -4066,6 +4070,11 @@ fn mapped_spelling(name: &str) -> Vec<String> {
         "diff" => vec!["diff_values".to_string(), "file.diff".to_string()],
         "json_diff" | "deep_diff" | "record_diff" | "diff_json" | "diff_records" => {
             vec!["diff_values".to_string()]
+        }
+        // A byte count as "1.5 KiB" is format_bytes.
+        "human_size" | "format_size" | "filesize" | "humanize" | "human_bytes"
+        | "bytes_to_human" | "human_readable" | "file_size_human" | "pretty_bytes" => {
+            vec!["format_bytes".to_string()]
         }
         "to_float" | "parse_float" | "as_float" => vec!["float".to_string()],
         "number" | "to_number" | "parse_number" => {
@@ -19685,6 +19694,88 @@ fn bi_format_number(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
     Ok(Value::Str(out))
 }
 
+/// format_bytes(n, binary?) - A byte count as text such as "1.5 KiB".
+/// Args:
+///   - n: Int or Float, 0 or more (or the piped number)
+///   - binary: Bool (optional, default true) - true counts in 1024s (KiB, MiB),
+///     false in 1000s (kB, MB)
+/// Returns: String
+///
+/// One decimal place above one byte ("0 B", "512 B", "1.5 KiB").
+///
+/// Example:
+///   format_bytes(1536)           # "1.5 KiB"
+///   format_bytes(1500, false)    # "1.5 kB"
+fn bi_format_bytes(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
+    const B: &str = "format_bytes";
+    let (number, rest) = match input {
+        Some(number) => (number, args.as_slice()),
+        None => match args.split_first() {
+            Some((number, rest)) => (number.clone(), rest),
+            None => return Err(arity_error(B, "a byte count and an optional Bool", 0)),
+        },
+    };
+    let binary = match rest {
+        [] => true,
+        [Value::Bool(b)] => *b,
+        [other] => {
+            return Err(crate::safety::bad_arg_in(
+                B,
+                format!("{B}: binary is {}, not a Bool", other.type_name()),
+                "pass true for KiB/MiB (1024) or false for kB/MB (1000)",
+            ))
+        }
+        _ => {
+            return Err(arity_error(
+                B,
+                "a byte count and an optional Bool",
+                rest.len(),
+            ))
+        }
+    };
+    let value = match number {
+        Value::Int(i) if i >= 0 => i as f64,
+        Value::Float(f) if f.is_finite() && f >= 0.0 => f,
+        Value::Int(_) | Value::Float(_) => {
+            return Err(crate::safety::bad_arg_in(
+                B,
+                format!("{B}: a byte count cannot be negative or non-finite"),
+                "pass 0 or more",
+            ))
+        }
+        other => {
+            return Err(crate::safety::bad_arg_in(
+                B,
+                format!(
+                    "{B}: the count is {}, not an Int or Float",
+                    other.type_name()
+                ),
+                "format_bytes takes a number of bytes, such as 1536",
+            ))
+        }
+    };
+    let (base, units): (f64, &[&str]) = if binary {
+        (1024.0, &["B", "KiB", "MiB", "GiB", "TiB", "PiB", "EiB"])
+    } else {
+        (1000.0, &["B", "kB", "MB", "GB", "TB", "PB", "EB"])
+    };
+    let mut scaled = value;
+    let mut unit = 0;
+    while unit + 1 < units.len() && scaled >= base {
+        scaled /= base;
+        unit += 1;
+    }
+    // 1023.99 KiB writes as 1024.0, so it moves up a unit instead.
+    if unit > 0 && unit + 1 < units.len() && (scaled * 10.0).round() / 10.0 >= base {
+        scaled /= base;
+        unit += 1;
+    }
+    if unit == 0 {
+        return Ok(Value::Str(format!("{} B", scaled.round() as i64)));
+    }
+    Ok(Value::Str(format!("{:.1} {}", scaled, units[unit])))
+}
+
 /// Insert `sep` between each group of three digits, counted from the right.
 fn group_thousands(digits: &str, sep: &str) -> String {
     let n = digits.len();
@@ -24269,6 +24360,81 @@ fn bi_tool_exec(args: Vec<Value>, _input: Option<Value>) -> Result<Value> {
     Ok(Value::Record(rec))
 }
 
+/// The words of a tool_search query (already lower case) without the filler.
+fn tool_search_words(query: &str) -> Vec<&str> {
+    const STOP: &[&str] = &[
+        "a", "an", "the", "in", "on", "of", "to", "for", "from", "with", "and", "or", "into", "by",
+        "at", "is", "it", "my", "me", "i", "need", "want", "how", "do", "can", "all", "some",
+    ];
+    query
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|w| !w.is_empty() && !STOP.contains(w))
+        .collect()
+}
+
+/// Whether a word of a name or description is a query word, or shares a stem
+/// of 4+ letters with it.
+fn tool_search_stem_match(part: &str, word: &str) -> bool {
+    part == word
+        || (part.len() >= 4
+            && word.len() >= 4
+            && (part.starts_with(word) || word.starts_with(part)))
+}
+
+/// Words that mean the same as a query word in the names of builtins, so a
+/// query worded as "compress a folder" reaches `zip_create`. A synonym match
+/// scores below a direct one.
+fn tool_search_synonyms(word: &str) -> &'static [&'static str] {
+    match word {
+        "folder" | "folders" => &["directory", "dir"],
+        "directory" | "directories" => &["folder", "dir"],
+        "delete" | "erase" => &["remove"],
+        "remove" => &["delete"],
+        "compress" | "compression" => &["zip", "tar", "archive"],
+        "decompress" | "unzip" | "uncompress" => &["extract"],
+        _ => &[],
+    }
+}
+
+/// Whether an external tool is relevant to a query: more than half of the
+/// query's words (a synonym counts) are in the tool's name or description.
+fn tool_search_external_relevant(query: &str, name: &str, description: &str) -> bool {
+    let words = tool_search_words(query);
+    if words.is_empty() {
+        return true;
+    }
+    let text = format!("{} {}", name, description).to_lowercase();
+    let parts: Vec<&str> = text
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|w| !w.is_empty())
+        .collect();
+    let matched = words
+        .iter()
+        .filter(|w| {
+            std::iter::once(**w)
+                .chain(tool_search_synonyms(w).iter().copied())
+                .any(|alt| parts.iter().any(|p| tool_search_stem_match(p, alt)))
+        })
+        .count();
+    matched * 2 > words.len()
+}
+
+/// What a tool_search row says about running a builtin: a call, plus the
+/// approval it needs in agent mode, from the builtin's declared effect.
+fn tool_search_run_text(name: &str) -> String {
+    let base = format!("call it directly: {}(...)", name);
+    match crate::safety::effective_decision(
+        crate::safety::effect_of(name),
+        crate::safety::Mode::Agent,
+    ) {
+        crate::safety::Decision::Allow => base,
+        crate::safety::Decision::Approve => {
+            format!("{base}; needs approval in agent mode (E_NEEDS_APPROVAL)")
+        }
+        crate::safety::Decision::Deny => format!("{base}; refused in agent mode (E_POLICY_DENY)"),
+    }
+}
+
 /// Builtins that match a tool_search query, best first, at most 10. A word
 /// scores 3 when it is a part of the builtin's name or one of its aliases (or
 /// shares a stem of 4+ letters with one) or is in the first sentence of its
@@ -24277,24 +24443,12 @@ fn bi_tool_exec(args: Vec<Value>, _input: Option<Value>) -> Result<Value> {
 /// "delete a file". A builtin must match at least half of the query's words,
 /// and one that matches all of them ranks above one that matches some.
 fn tool_search_builtins(query: &str) -> Vec<Value> {
-    const STOP: &[&str] = &[
-        "a", "an", "the", "in", "on", "of", "to", "for", "from", "with", "and", "or", "into", "by",
-        "at", "is", "it", "my", "me", "i", "need", "want", "how", "do", "can", "all", "some",
-    ];
     let query = query.to_lowercase();
-    let words: Vec<&str> = query
-        .split(|c: char| !c.is_alphanumeric())
-        .filter(|w| !w.is_empty() && !STOP.contains(w))
-        .collect();
+    let words = tool_search_words(&query);
     if words.is_empty() {
         return Vec::new();
     }
-    let stem_match = |part: &str, word: &str| {
-        part == word
-            || (part.len() >= 4
-                && word.len() >= 4
-                && (part.starts_with(word) || word.starts_with(part)))
-    };
+    let stem_match = tool_search_stem_match;
     let mut hits: Vec<(bool, usize, &crate::signature::Signature)> = Vec::new();
     for sig in crate::signature::SIGNATURES {
         let doc = sig.doc.to_lowercase();
@@ -24327,6 +24481,21 @@ fn tool_search_builtins(query: &str) -> Vec<Value> {
             } else if doc_words.iter().any(|d| stem_match(d, w)) {
                 matched += 1;
                 score += 2;
+            } else {
+                let alts = tool_search_synonyms(w);
+                if alts
+                    .iter()
+                    .any(|a| name_parts.iter().any(|p| stem_match(p, a)))
+                {
+                    matched += 1;
+                    score += 2;
+                } else if alts
+                    .iter()
+                    .any(|a| doc_words.iter().any(|d| stem_match(d, a)))
+                {
+                    matched += 1;
+                    score += 1;
+                }
             }
         }
         let unmatched_parts = own_parts
@@ -24344,6 +24513,7 @@ fn tool_search_builtins(query: &str) -> Vec<Value> {
     hits.sort_by(|a, b| {
         b.0.cmp(&a.0)
             .then(b.1.cmp(&a.1))
+            .then(a.2.name.len().cmp(&b.2.name.len()))
             .then(a.2.name.cmp(b.2.name))
     });
     hits.into_iter()
@@ -24364,7 +24534,7 @@ fn tool_search_builtins(query: &str) -> Vec<Value> {
             );
             rec.insert(
                 "run".to_string(),
-                Value::Str(format!("call it directly: {}(...)", sig.name)),
+                Value::Str(tool_search_run_text(sig.name)),
             );
             Value::Record(rec)
         })
@@ -24400,6 +24570,7 @@ fn bi_tool_search(args: Vec<Value>, _input: Option<Value>) -> Result<Value> {
 
     let tool_values: Vec<Value> = tools
         .iter()
+        .filter(|t| tool_search_external_relevant(&query.to_lowercase(), &t.name, &t.description))
         .map(|t| {
             let mut rec = BTreeMap::new();
             rec.insert("kind".to_string(), Value::Str("external".to_string()));
