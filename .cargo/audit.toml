@@ -16,4 +16,10 @@ ignore = [
     "RUSTSEC-2026-0369",
     # Sizes a symlink-target buffer in extract(); same reasoning, same two copies.
     "RUSTSEC-2026-0429",
+    # AES entries returned without checking their authentication code: neither copy
+    # is built with the aes-crypto feature (no aes/hmac/pbkdf2 among its resolved deps).
+    "RUSTSEC-2026-0545",
+    # ZipStreamReader extracts under local-header names: neither user reads a stream;
+    # utoipa-swagger-ui build.rs and candle-core npy.rs open a ZipArchive.
+    "RUSTSEC-2026-0548",
 ]
