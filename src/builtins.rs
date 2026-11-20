@@ -10224,7 +10224,7 @@ fn bi_grep(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
         }
     };
 
-    let case_insensitive = args
+    let flag_case_insensitive = args
         .iter()
         .any(|arg| matches!(arg, Value::Str(s) if s == "-i" || s == "--ignore-case"));
     let invert = args
@@ -10232,7 +10232,8 @@ fn bi_grep(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
         .any(|arg| matches!(arg, Value::Str(s) if s == "-v" || s == "--invert-match"));
 
     // The options Record, when there is one, is read before the source is.
-    let (line_numbers, extended) = grep_options(&args)?;
+    let (line_numbers, extended, option_ignore_case) = grep_options(&args)?;
+    let case_insensitive = flag_case_insensitive || option_ignore_case;
 
     // Each source is its file's name (None for piped text) and its text. A
     // glob searches each file on its own, so a match can name the file.
@@ -10345,19 +10346,22 @@ fn bi_grep(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
 }
 
 /// The options Record of `grep`, when one is given after the pattern: its keys
-/// are `line_numbers` and `extended`, both Bools (`extended` reads the pattern
-/// as an extended regular expression, as `grep -E` does). Any other key or
-/// value is a bad argument. Returns `(line_numbers, extended)`.
-fn grep_options(args: &[Value]) -> Result<(bool, bool)> {
+/// are `line_numbers`, `extended` and `ignore_case`, all Bools (`extended` reads
+/// the pattern as an extended regular expression, as `grep -E` does;
+/// `ignore_case` is `grep -i`). Any other key or value is a bad argument.
+/// Returns `(line_numbers, extended, ignore_case)`.
+fn grep_options(args: &[Value]) -> Result<(bool, bool, bool)> {
     let mut line_numbers = false;
     let mut extended = false;
+    let mut ignore_case = false;
     for arg in args.iter().skip(1) {
         if let Value::Record(options) = arg {
             for (key, value) in options {
                 match (key.as_str(), value) {
                     ("line_numbers", Value::Bool(on)) => line_numbers = *on,
                     ("extended", Value::Bool(on)) => extended = *on,
-                    ("line_numbers" | "extended", other) => {
+                    ("ignore_case", Value::Bool(on)) => ignore_case = *on,
+                    ("line_numbers" | "extended" | "ignore_case", other) => {
                         return Err(crate::safety::bad_arg_in(
                             "grep",
                             format!("grep: {key} must be a Bool, got {}", other.type_name()),
@@ -10375,16 +10379,16 @@ fn grep_options(args: &[Value]) -> Result<(bool, bool)> {
                         return Err(crate::safety::bad_arg_in(
                             "grep",
                             format!(
-                                "grep: unknown option {key}; grep takes line_numbers and extended"
+                                "grep: unknown option {key}; grep takes line_numbers, extended and ignore_case"
                             ),
-                            "the options Record takes line_numbers and extended: {line_numbers: true, extended: true}",
+                            "the options Record takes line_numbers, extended and ignore_case: {line_numbers: true, extended: true, ignore_case: true}; for a case-insensitive search write {ignore_case: true}",
                         ))
                     }
                 }
             }
         }
     }
-    Ok((line_numbers, extended))
+    Ok((line_numbers, extended, ignore_case))
 }
 
 /// The files `grep(pattern, path)` searches, each with its text. The path is
@@ -24161,7 +24165,110 @@ fn bi_tool_exec(args: Vec<Value>, _input: Option<Value>) -> Result<Value> {
     Ok(Value::Record(rec))
 }
 
-/// Search for tools by keyword or description
+/// Builtins that match a tool_search query, best first, at most 10. A word
+/// scores 3 when it is a part of the builtin's name or one of its aliases (or
+/// shares a stem of 4+ letters with one) or is in the first sentence of its
+/// signature doc, and 2 when it is later in the doc; each part of the name
+/// that no word matches costs 1, so `rm` ranks above `file_delete_lines` for
+/// "delete a file". A builtin must match at least half of the query's words,
+/// and one that matches all of them ranks above one that matches some.
+fn tool_search_builtins(query: &str) -> Vec<Value> {
+    const STOP: &[&str] = &[
+        "a", "an", "the", "in", "on", "of", "to", "for", "from", "with", "and", "or", "into", "by",
+        "at", "is", "it", "my", "me", "i", "need", "want", "how", "do", "can", "all", "some",
+    ];
+    let query = query.to_lowercase();
+    let words: Vec<&str> = query
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|w| !w.is_empty() && !STOP.contains(w))
+        .collect();
+    if words.is_empty() {
+        return Vec::new();
+    }
+    let stem_match = |part: &str, word: &str| {
+        part == word
+            || (part.len() >= 4
+                && word.len() >= 4
+                && (part.starts_with(word) || word.starts_with(part)))
+    };
+    let mut hits: Vec<(bool, usize, &crate::signature::Signature)> = Vec::new();
+    for sig in crate::signature::SIGNATURES {
+        let doc = sig.doc.to_lowercase();
+        let split_words = |t: &str| -> Vec<String> {
+            t.split(|c: char| !c.is_alphanumeric())
+                .filter(|w| !w.is_empty())
+                .map(str::to_string)
+                .collect()
+        };
+        let doc_words = split_words(&doc);
+        let lead_words = split_words(doc.split(". ").next().unwrap_or(""));
+        let own_parts = split_words(sig.name);
+        let name_parts: Vec<String> = std::iter::once(sig.name)
+            .chain(sig.aliases.iter().copied())
+            .flat_map(|n| {
+                n.to_lowercase()
+                    .split(|c: char| !c.is_alphanumeric())
+                    .map(str::to_string)
+                    .collect::<Vec<_>>()
+            })
+            .collect();
+        let (mut matched, mut score) = (0usize, 0usize);
+        for w in &words {
+            if name_parts.iter().any(|p| stem_match(p, w)) {
+                matched += 1;
+                score += 3;
+            } else if lead_words.iter().any(|d| stem_match(d, w)) {
+                matched += 1;
+                score += 3;
+            } else if doc_words.iter().any(|d| stem_match(d, w)) {
+                matched += 1;
+                score += 2;
+            }
+        }
+        let unmatched_parts = own_parts
+            .iter()
+            .filter(|p| !words.iter().any(|w| stem_match(p, w)))
+            .count();
+        if matched * 2 >= words.len() && matched > 0 {
+            hits.push((
+                matched == words.len(),
+                (score * 2).saturating_sub(unmatched_parts),
+                sig,
+            ));
+        }
+    }
+    hits.sort_by(|a, b| {
+        b.0.cmp(&a.0)
+            .then(b.1.cmp(&a.1))
+            .then(a.2.name.cmp(b.2.name))
+    });
+    hits.into_iter()
+        .take(10)
+        .map(|(_, _, sig)| {
+            let mut rec = BTreeMap::new();
+            rec.insert("kind".to_string(), Value::Str("builtin".to_string()));
+            rec.insert("name".to_string(), Value::Str(sig.name.to_string()));
+            let first = sig.doc.split(". ").next().unwrap_or(sig.doc);
+            rec.insert(
+                "description".to_string(),
+                Value::Str(first.trim_end_matches('.').to_string()),
+            );
+            rec.insert("signature".to_string(), Value::Str(sig.render()));
+            rec.insert(
+                "category".to_string(),
+                Value::Str(sig.category.unwrap_or("Builtin").to_string()),
+            );
+            rec.insert(
+                "run".to_string(),
+                Value::Str(format!("call it directly: {}(...)", sig.name)),
+            );
+            Value::Record(rec)
+        })
+        .collect()
+}
+
+/// Search for tools by keyword or description. Builtins are listed first
+/// (rows with `kind: "builtin"`), then external OS tools (`kind: "external"`).
 /// Usage: tool_search("network") | tool_search("file copy")
 fn bi_tool_search(args: Vec<Value>, _input: Option<Value>) -> Result<Value> {
     let query = args
@@ -24191,6 +24298,7 @@ fn bi_tool_search(args: Vec<Value>, _input: Option<Value>) -> Result<Value> {
         .iter()
         .map(|t| {
             let mut rec = BTreeMap::new();
+            rec.insert("kind".to_string(), Value::Str("external".to_string()));
             rec.insert("name".to_string(), Value::Str(t.name.clone()));
             rec.insert("description".to_string(), Value::Str(t.description.clone()));
             rec.insert("command".to_string(), Value::Str(t.command.clone()));
@@ -24221,7 +24329,9 @@ fn bi_tool_search(args: Vec<Value>, _input: Option<Value>) -> Result<Value> {
         })
         .collect();
 
-    Ok(Value::Array(tool_values))
+    let mut rows = tool_search_builtins(&query);
+    rows.extend(tool_values);
+    Ok(Value::Array(rows))
 }
 
 // ===========================================================================
@@ -35356,7 +35466,9 @@ fn bi_fs_tree(args: Vec<Value>, _input: Option<Value>) -> Result<Value> {
         max: usize,
         lines: &mut Vec<String>,
     ) -> Result<()> {
-        if depth > max_depth {
+        // `depth` counts the levels below the root that this call lists, so
+        // max_depth levels are shown: 0 shows the root alone, 1 its children.
+        if depth >= max_depth {
             return Ok(());
         }
         let entries: Vec<_> = std::fs::read_dir(dir)
@@ -35373,7 +35485,7 @@ fn bi_fs_tree(args: Vec<Value>, _input: Option<Value>) -> Result<Value> {
             lines.push(format!("{}{}{}", prefix, connector, name));
 
             let path = entry.path();
-            if depth < max_depth && entry_is_walkable_dir("fs_tree", &entry)? {
+            if depth + 1 < max_depth && entry_is_walkable_dir("fs_tree", &entry)? {
                 let new_prefix = format!("{}{}", prefix, if is_last { "    " } else { "│   " });
                 tree_recursive(&path, &new_prefix, depth + 1, max_depth, max, lines)?;
             }
@@ -58546,7 +58658,12 @@ fn bi_file_move(args: Vec<Value>, _input: Option<Value>) -> Result<Value> {
     // which removes the source and can overwrite the destination. Both ends
     // are caller-supplied, and neither was jailed.
     let (written_source, written_dest) = (source.clone(), dest.clone());
-    let (source, dest) = guard_local_move("file_move", &source, &dest)?;
+    // Every refusal below is a call that can never succeed, so each is made before
+    // the approval gate: no token is handed out for a move that must then fail.
+    let (source, dest) = (
+        crate::safety::resolve_path_str(&source),
+        crate::safety::resolve_path_str(&dest),
+    );
     // A directory moved into its own tree has no place to go: the OS refused it
     // as "denied". Refused here, by name, as file_copy refuses an overlap.
     if fs::metadata(&source).is_ok_and(|m| m.is_dir()) {
@@ -58599,6 +58716,7 @@ fn bi_file_move(args: Vec<Value>, _input: Option<Value>) -> Result<Value> {
         }
     }
 
+    let (source, dest) = guard_local_move("file_move", &written_source, &written_dest)?;
     let metadata =
         fs::metadata(&source).map_err(|e| crate::safety::fs_error("file_move", &source, &e))?;
     let bytes = metadata.len();
@@ -70994,6 +71112,23 @@ pub fn bi_rm(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
         );
         return Err(crate::safety::not_found("rm", "file", &path));
     }
+    // A directory is not a file: remove_file on one answered E_OS_DENIED with a
+    // permissions hint. Refused before the approval gate, since no approval can
+    // make the call succeed, and before the OS call. Only for a path the jail
+    // allows, so a path outside the workspace is still answered by the jail.
+    // A symlink is not followed here, so a link still removes itself.
+    if !crate::safety::names_a_remote_share(&path)
+        && (!matches!(crate::safety::current_mode(), crate::safety::Mode::Agent)
+            || crate::safety::within_workspace(&path))
+        && std::fs::symlink_metadata(&path).is_ok_and(|m| m.is_dir())
+    {
+        return Err(crate::safety::bad_arg_with_hint(
+            "rm",
+            "a file path",
+            "a directory",
+            &format!("'{written}' is a directory; remove it with rmdir(\"{written}\", true)"),
+        ));
+    }
     // Reversible exactly when the journal keeps this file's bytes for undo: the
     // journal is on (agent mode) and the file is one it can capture.
     crate::safety::guard(crate::safety::GuardCtx {
@@ -71005,19 +71140,6 @@ pub fn bi_rm(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
         reversible: crate::journal::would_capture(&path),
         fs_paths: true,
     })?;
-    // A directory is not a file: remove_file on one answered E_OS_DENIED with a
-    // permissions hint. Refused after the gate, which is unchanged, and before
-    // the OS call. A symlink is not followed here, so a link still removes itself.
-    if !crate::safety::names_a_remote_share(&path)
-        && std::fs::symlink_metadata(&path).is_ok_and(|m| m.is_dir())
-    {
-        return Err(crate::safety::bad_arg_with_hint(
-            "rm",
-            "a file path",
-            "a directory",
-            &format!("'{written}' is a directory; remove it with rmdir(\"{written}\", true)"),
-        ));
-    }
     // A link is removed itself and never followed. A transaction snapshot would
     // read what it points at (a whole folder tree for a junction), and cannot
     // restore a link, so a link is not removed inside one.

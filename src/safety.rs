@@ -2463,7 +2463,7 @@ pub fn parent_missing(builtin: &str, path: &str, parent: &str) -> anyhow::Error 
         ),
         builtin: builtin.to_string(),
         hint: format!(
-            "mkdir creates the folder and mkdirp also creates missing parents; then run the call again for '{path}'"
+            "mkdir creates the folder and any missing parents; then run the call again for '{path}'"
         ),
         approval: None,
         did_you_mean: Vec::new(),

@@ -106,6 +106,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `ish -b`: `grep -m N` (`--max-count`) stops after N selected lines per file and then prints the last one's trailing context, and `-b` (`--byte-offset`) prefixes the byte offset of each line, or of each match under `-o`; `$((...))` takes `base#digits` literals (bases 2 to 64) and reads a bare `0x` as 0.
 ### Fixed
 
+- `tool_search` also searches the builtins (their names and signature docs) and lists them first, each row with `kind: "builtin"`; the external OS tool rows follow, now with `kind: "external"`.
+- `rm` of a directory fails with E_BAD_ARG before the approval gate, as does `file_move` onto a directory, into a folder that does not exist, or into itself, so no approval token is handed out for a call that cannot succeed.
+- The hint on a write into a missing folder no longer says `mkdirp` differs from `mkdir`; both create missing parents.
+- `grep` takes `{ignore_case: true}` (grep -i); its help says an inline flag such as `(?i)` is literal in the default basic syntax and needs `{extended: true}`.
+- `tree(path, depth)` shows `depth` levels below the path (0 shows the path alone; the default 3 shows three levels); it showed one more.
+- `--explain -b` lists each `rm` operand once instead of also listing the bare `rm`.
 - `sum` and `math.sum` raise on Int overflow instead of wrapping silently (`sum([9223372036854775807, 1])` was a large negative number).
 - `sort` and `sort_by` order an Int against a Float exactly, as `>` does; above 2^53 they could disagree.
 - `to_csv` quotes a field holding a bare CR, so it round-trips; `from_csv` names the line of an unterminated quoted field instead of reporting a short row.
