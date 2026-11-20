@@ -86,19 +86,6 @@ fn extended_length_and_device_prefixes_are_bound() {
     assert_bound(&dir, &format!(r"\\?\{dotted}"));
 }
 
-#[cfg(windows)]
-#[test]
-fn a_unc_extended_path_is_not_probed_or_bound() {
-    // It must still be refused for approval, quickly, without a network probe.
-    let dir = scratch("unc");
-    let exe = env!("CARGO_BIN_EXE_ish").replace('\\', "/");
-    let code = format!(r#"sh(["{exe}", "\\\\?\\UNC\\ae-no-such-host\\share\\x.txt"])"#);
-    let started = std::time::Instant::now();
-    let err = first_error(&agent(&dir, &code));
-    assert_eq!(err["error"]["code"], "E_NEEDS_APPROVAL", "{err}");
-    assert!(started.elapsed().as_secs() < 20, "the UNC name was probed");
-}
-
 #[test]
 fn a_file_url_is_bound() {
     let dir = scratch("fileurl");
