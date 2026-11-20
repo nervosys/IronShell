@@ -1132,7 +1132,11 @@ pub fn explain_posix(src: &str) -> Result<Value> {
                 writes.push((head.clone(), f, Effect::WriteLocal));
             }
         }
-        for f in rm_files.unwrap_or_default() {
+        let rm_files = rm_files.unwrap_or_default();
+        // Each operand is listed as its own destructive call below, so the
+        // command's bare entry would list the same removal a second time.
+        let rm_operands_listed = !rm_files.is_empty();
+        for f in rm_files {
             writes.push((head.clone(), f, Effect::Destructive));
         }
         for (op, target, effect) in writes {
@@ -1179,6 +1183,9 @@ pub fn explain_posix(src: &str) -> Result<Value> {
             calls.push(Value::Record(r));
         }
         let Some(head) = cmd.head else { continue };
+        if rm_in_subset && rm_operands_listed {
+            continue;
+        }
         let mut r = BTreeMap::new();
         r.insert("call".to_string(), Value::Str(head.clone()));
         if head.is_empty() {
