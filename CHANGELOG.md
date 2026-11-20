@@ -33,7 +33,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - On Windows, environment names that differ only in case are one variable in what an approval binds, and `unset` of an inherited variable in `ish -b` removes it from children and from the token.
 - Agents can no longer set SHELLOPTS, BASHOPTS, PS0-PS4, GLOBIGNORE, CDPATH, JAVA_HOME, the PowerShell policy and module-cache names, or `NODE_*`, `MSBUILD*`, `NUGET_*` and `PWSH_*`; a variable name with surrounding whitespace, `=` or NUL is E_BAD_ARG.
 - `ish -b` ends with status 69 when `--timeout` kills any stage of a pipeline.
-
+- An exec approval binds a workspace file named with an extended-length or device prefix (`\\?\C:\...`, `//?/C:/...`, `\\.\C:\...`) or as a `file:` URL, and one named in a response file (`@x.txt`), a glued option (`-Ox.txt`, `/F:x.txt`) or a `+` join; a `\\?\UNC\` name or a `file://host/` URL is never turned into a local path or probed.
+- Agents can no longer set the Go, Rust, JVM, C toolchain, cloud (`AWS_*`, `AZURE_*`, `CLOUDSDK_*`, `TF_*`), package-manager and interpreter variables that redirect what a child program loads (`GOENV`, `GOPROXY`, `RUSTC_WRAPPER`, `AWS_CONFIG_FILE`, `MAVEN_OPTS`, `CFLAGS`, `LESSOPEN`, `HISTFILE`, `VIRTUAL_ENV` and others), and `unset` of a steering variable under `ish -b --agent` is E_POLICY_DENY, as `export` is.
+- E_NEEDS_APPROVAL shows the environment changes the token binds (`env`: with FOO=1; without HTTPS_PROXY; values cut at 60 characters, secrets redacted), so the approver sees them; the token is unchanged.
 ### Changed
 
 - `ish --zsh` refuses `setopt extendedglob` (in every spelling) by name; it was accepted and then ignored, so `^a.txt` globbed literally.
@@ -70,7 +72,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `file.patch` errors number patches from 1 and say how many there are; `undo` rows carry the journal `id`; journal paths use `/`.
 - In agent mode, `ish -b` allows a plain assignment, `for` variable or `read` target named like a steering variable (`tmp=x`); `export` and a prefix assignment on a command, which reach a child, are still refused.
 - fs_walk results and ls paths use `/` on Windows.
-
+- `help()` opens with IronShell's name (it still said Æther) and says `wc` returns `{lines, words, chars}`; the REPL and assist banners say IronShell.
+- `help(name)` of a builtin that takes a lambda (`each`, `map`, `where`, ...) carries `effect_note`: the effect shown is the builtin's own, and each call the lambda makes is judged by its own effect.
+- `tool_search` rows carry `run` (the `tool_exec` form; these are external programs) and, where one exists, `builtin`, the builtin that does the same work in-process (`sha256sum` gives `crypto_hash_file`).
+- `zip_create` and `tar_create` with a directory as the first argument say the archive comes first and show the call, instead of "already exists" or "no file at".
+- `port_scan`, `check_port` and similar names suggest `net_scan`; `python`, `pip`, `git_init` and `git_clone` suggest `sh`; `net_scan`'s help says a refused loopback connect takes about 2 s on Windows, so a short `timeout_ms` reads a closed port as filtered.
 ### Added
 
 - `ish -b` decodes ANSI-C quoting (`$'a\tb'`), and `cd -` prints the directory it changes to, as bash does.
@@ -95,7 +101,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `ish -b` runs `$((...))` arithmetic: 64-bit integers, bash's operators including `**`, `?:`, assignments and `++`/`--`, and bash's messages for division by 0 and syntax errors.
 - The in-process grep takes `-A`, `-B`, `-C`, `-NUM` and the long context options, with GNU's `--` group separators.
 - diff_values(a, b) lists the added, removed and changed paths between two values; diff, json_diff and deep_diff suggest it.
-
+- `ish -b`: `grep -m N` (`--max-count`) stops after N selected lines per file and then prints the last one's trailing context, and `-b` (`--byte-offset`) prefixes the byte offset of each line, or of each match under `-o`; `$((...))` takes `base#digits` literals (bases 2 to 64) and reads a bare `0x` as 0.
 ### Fixed
 
 - `sum` and `math.sum` raise on Int overflow instead of wrapping silently (`sum([9223372036854775807, 1])` was a large negative number).
@@ -134,6 +140,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - The redaction note counts a `key=value` secret whose value is also a bare key once; date_format names an ISO week written without a weekday.
 - help("db") describes sqlite_exec and sqlite_query, and the sqlite_exec approval hint names db.csv_to_sqlite and db.json_to_sqlite; help and unknown-name errors find a bare module member (`csv_to_sqlite`); ontology_search suggests ontology_manifest and ontology_describe.
 - Refusal hints for `find -newer`/`-o`, brace expansion, `trap`, functions and `source` say what to write instead.
+- `ish -b`: an arithmetic error fails its command and discards the rest of its line, as bash does, instead of ending the script; nesting past 1024 levels is an arithmetic error, not a stack overflow; `grep -A0`/`-B0`/`-C0` and `grep -o` with context print the `--` group separator as GNU grep does.
+- `cargo audit` and `cargo deny check` pass again: RUSTSEC-2026-0545 and RUSTSEC-2026-0548 (zip 0.6.6 and 1.1.4, reached only through utoipa-swagger-ui's build script and candle-core's .npz reader, neither built with AES nor reading a stream) and RUSTSEC-2026-0543 (chrono unmaintained, no successor release) are recorded as accepted, with the reasons, in `.cargo/audit.toml` and `deny.toml`.
 
 ## [14.0.5] - 2026-11-16
 
