@@ -4011,6 +4011,12 @@ fn word_forms(word: &str, out: &mut Vec<String>) {
         word.char_indices()
             .filter(|(_, c)| matches!(c, ':' | '='))
             .take(WORD_SEPARATOR_LIMIT)
+            // `file://host/share/x` is a URL with a host, a network share:
+            // what follows its scheme's `:` is the authority, not a path, and
+            // the whole URL is judged by `file_url_path` instead.
+            .filter(|&(i, c)| {
+                !(c == ':' && word[i + 1..].starts_with("//") && is_url_scheme(&word[..i]))
+            })
             .map(|(i, _)| &word[i + 1..]),
     );
     if word.starts_with(['-', '/']) {
@@ -4037,6 +4043,17 @@ fn word_forms(word: &str, out: &mut Vec<String>) {
             }
         }
     }
+}
+
+/// Whether `prefix` ends in a URL scheme (`file`, `--in=https`): a letter, then
+/// letters, digits, `+`, `-` or `.`, two characters at least, so a drive letter
+/// (`C`) is not one.
+fn is_url_scheme(prefix: &str) -> bool {
+    let start = prefix
+        .rfind(|c: char| !(c.is_ascii_alphanumeric() || matches!(c, '+' | '-' | '.')))
+        .map_or(0, |i| i + 1);
+    let scheme = &prefix[start..];
+    scheme.len() >= 2 && scheme.as_bytes()[0].is_ascii_alphabetic()
 }
 
 /// The path `s` names without its extended-length or device prefix (`\\?\`,
