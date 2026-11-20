@@ -1,6 +1,6 @@
 # IronShell Productization Plan
 
-> Historical: superseded by PLAN.md and ROADMAP.md as of 2026-11-20; the open items are carried over there.
+> Historical: superseded by [ROADMAP.md](../ROADMAP.md) as of 2026-11-20; the open items are carried over there.
 
 A comprehensive strategy for taking IronShell from development project to market-ready product.
 

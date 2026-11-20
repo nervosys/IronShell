@@ -1,6 +1,6 @@
 # IronShell completion plan
 
-> Historical: superseded by PLAN.md and ROADMAP.md as of 2026-11-20; the open items are carried over there.
+> Historical: superseded by [ROADMAP.md](../ROADMAP.md) as of 2026-11-20; the open items are carried over there.
 
 Updated 2026-10-02. Target: **14.0.0**, selected for the stricter builtin contracts.
 
