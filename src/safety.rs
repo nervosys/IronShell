@@ -3740,6 +3740,88 @@ pub struct ApprovalDescriptor {
     pub blast_radius: Json,
     pub reversible: bool,
     pub token: String,
+    /// The environment changes the token binds, for a person to read: `with
+    /// FOO=1, BAR=2; without HTTPS_PROXY`. Absent when there are none. Shown,
+    /// not bound: the values it summarises are already in the token.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub env: Option<String>,
+}
+
+/// The longest environment value shown in an approval's `env` summary.
+const ENV_SUMMARY_VALUE_CHARS: usize = 60;
+
+/// `with FOO=1, BAR=2; without HTTPS_PROXY` for the environment a command's
+/// approval binds (`child_env`, `child_env_removed` and `env_changes` of its
+/// blast radius), or `None` when it binds none. A value is cut at
+/// [`ENV_SUMMARY_VALUE_CHARS`] characters and a secret is redacted.
+fn env_summary(radius: &Json) -> Option<String> {
+    let mut with: std::collections::BTreeMap<String, String> = std::collections::BTreeMap::new();
+    let mut without: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    let pairs = |key: &str| -> Vec<(String, Option<String>)> {
+        radius
+            .get(key)
+            .and_then(Json::as_array)
+            .map(|rows| {
+                rows.iter()
+                    .filter_map(|row| {
+                        let name = row.get(0)?.as_str()?.to_string();
+                        Some((name, row.get(1).and_then(Json::as_str).map(str::to_string)))
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
+    for (name, value) in pairs("child_env").into_iter().chain(pairs("env_changes")) {
+        match value {
+            Some(v) => {
+                without.remove(&name);
+                with.insert(name, v);
+            }
+            None => {
+                with.remove(&name);
+                without.insert(name);
+            }
+        }
+    }
+    if let Some(names) = radius.get("child_env_removed").and_then(Json::as_array) {
+        for name in names.iter().filter_map(Json::as_str) {
+            with.remove(name);
+            without.insert(name.to_string());
+        }
+    }
+    if with.is_empty() && without.is_empty() {
+        return None;
+    }
+    let show = |name: &str, value: &str| -> String {
+        // Redacted whole, then cut, so a secret is not cut into an unrecognised
+        // piece first.
+        let redacted = if redaction_enabled() {
+            if is_secret_name(name) {
+                REDACTION_MARKER.to_string()
+            } else {
+                redact_str_counted(value).0
+            }
+        } else {
+            value.to_string()
+        };
+        let shown = if redacted.chars().count() > ENV_SUMMARY_VALUE_CHARS {
+            let head: String = redacted.chars().take(ENV_SUMMARY_VALUE_CHARS).collect();
+            format!("{head}...")
+        } else {
+            redacted
+        };
+        format!("{name}={shown}")
+    };
+    let mut parts: Vec<String> = Vec::new();
+    if !with.is_empty() {
+        let list: Vec<String> = with.iter().map(|(k, v)| show(k, v)).collect();
+        parts.push(format!("with {}", list.join(", ")));
+    }
+    if !without.is_empty() {
+        let list: Vec<&str> = without.iter().map(String::as_str).collect();
+        parts.push(format!("without {}", list.join(", ")));
+    }
+    Some(parts.join("; "))
 }
 
 impl ApprovalDescriptor {
@@ -3779,6 +3861,7 @@ impl ApprovalDescriptor {
             blast_radius,
             reversible,
             token,
+            env: None,
         })
     }
 }
@@ -3882,22 +3965,24 @@ fn quoted_substrings(s: &str, depth: u8, out: &mut Vec<String>) {
 /// split on whitespace, quotes, `;`, `&`, `|`, `(`, `)` and `,`, with the part
 /// after a `:` or `=` of a word as well. A name that is no existing file is
 /// dropped later, so over-collecting here costs nothing.
-fn operand_candidates(arg: &str, out: &mut Vec<String>) {
+fn operand_words(arg: &str, out: &mut Vec<String>) {
     push_name_variants(arg, out);
-    let after_flag = |s: &str| -> Option<String> {
-        let rest = s.strip_prefix('-')?;
-        let i = rest.find([':', '='])?;
-        let v = rest[i + 1..].trim_matches(['\x27', '"']);
-        (!v.is_empty()).then(|| v.to_string())
-    };
-    if let Some(v) = after_flag(arg) {
-        out.push(v);
-    }
     if arg.chars().count() > OPERAND_SPLIT_MAX_CHARS {
+        // Too long to take apart: only the part after the first `:` or `=` of
+        // a flag, as before.
+        if let Some(rest) = arg.strip_prefix('-') {
+            if let Some(i) = rest.find([':', '=']) {
+                let v = rest[i + 1..].trim_matches(['\x27', '"']);
+                if !v.is_empty() {
+                    out.push(v.to_string());
+                }
+            }
+        }
         return;
     }
+    word_forms(arg, out);
     let splits = |c: char| {
-        c.is_whitespace() || matches!(c, '\x27' | '"' | ';' | '&' | '|' | '(' | ')' | ',')
+        c.is_whitespace() || matches!(c, '\x27' | '"' | ';' | '&' | '|' | '(' | ')' | ',' | '+')
     };
     if !arg.contains(splits) {
         return;
@@ -3907,17 +3992,170 @@ fn operand_candidates(arg: &str, out: &mut Vec<String>) {
     quoted_substrings(arg, 3, out);
     for word in arg.split(splits).filter(|w| !w.is_empty()) {
         out.push(word.to_string());
-        if let Some(v) = after_flag(word) {
-            out.push(v);
+        word_forms(word, out);
+    }
+}
+
+/// The most `:` or `=` separators of one word that are tried as the start of a
+/// name.
+const WORD_SEPARATOR_LIMIT: usize = 64;
+
+/// Push the names a single word may hold besides itself: the part after each
+/// `:` or `=` (`--opt=a:x.txt`, `/F:x.txt`); for a word that starts with `-` or
+/// `/`, what follows its first one and two characters (`-Ox.txt`, `/Fx.txt`);
+/// and each of those without a leading `-@`, `@` or `!` (a response file
+/// `@x.txt`, an alias `alias.x=!x.sh`).
+fn word_forms(word: &str, out: &mut Vec<String>) {
+    let mut pieces: Vec<&str> = vec![word];
+    pieces.extend(
+        word.char_indices()
+            .filter(|(_, c)| matches!(c, ':' | '='))
+            .take(WORD_SEPARATOR_LIMIT)
+            // `file://host/share/x` is a URL with a host, a network share:
+            // what follows its scheme's `:` is the authority, not a path, and
+            // the whole URL is judged by `file_url_path` instead.
+            .filter(|&(i, c)| {
+                !(c == ':' && word[i + 1..].starts_with("//") && is_url_scheme(&word[..i]))
+            })
+            .map(|(i, _)| &word[i + 1..]),
+    );
+    if word.starts_with(['-', '/']) {
+        let mut chars = word.char_indices().skip(1);
+        for _ in 0..2 {
+            if let Some((i, _)) = chars.next() {
+                pieces.push(&word[i..]);
+            }
         }
-        if !word.starts_with('-') {
-            if let Some(i) = word.find('=') {
-                let v = &word[i + 1..];
-                if !v.is_empty() {
-                    out.push(v.to_string());
+    }
+    for (n, piece) in pieces.into_iter().enumerate() {
+        let piece = piece.trim_matches(['\x27', '"']);
+        if piece.is_empty() {
+            continue;
+        }
+        if n > 0 || piece != word {
+            out.push(piece.to_string());
+        }
+        for prefix in ["-@", "@", "!"] {
+            if let Some(rest) = piece.strip_prefix(prefix) {
+                if !rest.is_empty() {
+                    out.push(rest.to_string());
                 }
             }
         }
+    }
+}
+
+/// Whether `prefix` ends in a URL scheme (`file`, `--in=https`): a letter, then
+/// letters, digits, `+`, `-` or `.`, two characters at least, so a drive letter
+/// (`C`) is not one.
+fn is_url_scheme(prefix: &str) -> bool {
+    let start = prefix
+        .rfind(|c: char| !(c.is_ascii_alphanumeric() || matches!(c, '+' | '-' | '.')))
+        .map_or(0, |i| i + 1);
+    let scheme = &prefix[start..];
+    scheme.len() >= 2 && scheme.as_bytes()[0].is_ascii_alphabetic()
+}
+
+/// The path `s` names without its extended-length or device prefix (`\\?\`,
+/// `//?/`, `\\.\`, `//./`, in any mix of separators), or `None` when it has none.
+/// `\\?\UNC\host\share` is a network path, not a local one: it gives `None`, so
+/// it is never turned into a name that could be probed.
+fn strip_device_prefix(s: &str) -> Option<&str> {
+    let b = s.as_bytes();
+    if b.len() < 4
+        || !matches!(b[0], b'/' | b'\\')
+        || !matches!(b[1], b'/' | b'\\')
+        || !matches!(b[2], b'?' | b'.')
+        || !matches!(b[3], b'/' | b'\\')
+    {
+        return None;
+    }
+    let rest = &s[4..];
+    let head = rest.get(..3).unwrap_or(rest);
+    if head.eq_ignore_ascii_case("unc")
+        && (rest.len() == 3 || matches!(rest.as_bytes()[3], b'/' | b'\\'))
+    {
+        return None;
+    }
+    Some(rest)
+}
+
+/// Decode the `%XX` escapes of `s`; a malformed escape stays as written.
+fn percent_decode(s: &str) -> String {
+    let b = s.as_bytes();
+    let mut out: Vec<u8> = Vec::with_capacity(b.len());
+    let mut i = 0;
+    while i < b.len() {
+        if b[i] == b'%' && i + 2 < b.len() {
+            let hex = |c: u8| (c as char).to_digit(16);
+            if let (Some(h), Some(l)) = (hex(b[i + 1]), hex(b[i + 2])) {
+                out.push((h * 16 + l) as u8);
+                i += 3;
+                continue;
+            }
+        }
+        out.push(b[i]);
+        i += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+/// The local path a `file:` URL names (`file:///C:/a%20b.txt` is `C:/a b.txt`,
+/// `file:///home/x` is `/home/x`), or `None` for anything else, including a URL
+/// with a host other than `localhost` (a network share).
+fn file_url_path(s: &str) -> Option<String> {
+    let t = s.trim();
+    let scheme = t.get(..5)?;
+    if !scheme.eq_ignore_ascii_case("file:") {
+        return None;
+    }
+    let rest = &t[5..];
+    let path = match rest.strip_prefix("//") {
+        Some(after) => {
+            let slash = after.find('/')?;
+            let (authority, path) = after.split_at(slash);
+            if !(authority.is_empty() || authority.eq_ignore_ascii_case("localhost")) {
+                return None;
+            }
+            path
+        }
+        None => rest,
+    };
+    let decoded = percent_decode(path);
+    let b = decoded.as_bytes();
+    // `/C:/x` is the drive path `C:/x`.
+    if b.len() >= 3 && b[0] == b'/' && b[1].is_ascii_alphabetic() && b[2] == b':' {
+        return Some(decoded[1..].to_string());
+    }
+    Some(decoded)
+}
+
+/// Push `name`, and the local paths it may name under another spelling: without
+/// an extended-length or device prefix (see [`strip_device_prefix`]), and as the
+/// path of a `file:` URL. Applied repeatedly, so a prefix on a prefix is peeled.
+fn push_path_spellings(name: String, out: &mut Vec<String>) {
+    let mut cur = name.trim().to_string();
+    out.push(name);
+    for _ in 0..4 {
+        let next = if let Some(rest) = strip_device_prefix(&cur) {
+            rest.to_string()
+        } else if let Some(path) = file_url_path(&cur) {
+            path
+        } else {
+            return;
+        };
+        out.push(next.clone());
+        cur = next;
+    }
+}
+
+/// [`operand_words`], and every name found under its other spellings (see
+/// [`push_path_spellings`]).
+fn operand_candidates(arg: &str, out: &mut Vec<String>) {
+    let mut words = Vec::new();
+    operand_words(arg, &mut words);
+    for word in words {
+        push_path_spellings(word, out);
     }
 }
 
@@ -5351,6 +5589,7 @@ pub fn plan_needs_approval(
             // as irreversible.
             reversible: false,
             token: token.to_string(),
+            env: None,
         }),
         did_you_mean: Vec::new(),
         expected: String::new(),
@@ -9065,7 +9304,7 @@ pub fn guard(ctx: GuardCtx) -> Result<(), SafetyError> {
             if ctx.effect == Effect::Exec {
                 bind_exec_context(ctx.builtin, &mut blast_radius)?;
             }
-            let descriptor = ApprovalDescriptor::new(
+            let mut descriptor = ApprovalDescriptor::new(
                 ctx.what,
                 ctx.builtin,
                 ctx.targets.clone(),
@@ -9073,6 +9312,7 @@ pub fn guard(ctx: GuardCtx) -> Result<(), SafetyError> {
                 ctx.reversible,
             )
             .map_err(|e| ic_refusal(ctx.builtin, e))?;
+            descriptor.env = env_summary(&descriptor.blast_radius);
             if is_token_approved(&descriptor.token) {
                 let _ = audit(
                     ctx.builtin,
@@ -9096,6 +9336,9 @@ pub fn guard(ctx: GuardCtx) -> Result<(), SafetyError> {
                     hint.push_str(
                         "; the token also binds the contents of workspace files the command names and the environment set_env changed, so editing a script or changing the environment needs a new approval",
                     );
+                }
+                if let Some(env) = &descriptor.env {
+                    hint.push_str(&format!("; environment the token binds: {env}"));
                 }
                 if matches!(ctx.builtin, "db_sqlite_exec" | "sqlite_exec") {
                     hint.push_str(
@@ -9794,6 +10037,67 @@ pub(crate) fn env_name_steers_children(name: &str) -> bool {
         "PSHOME",
         "PSLOCKDOWNPOLICY",
         "__PSLOCKDOWNPOLICY",
+        // Go, Rust, JVM and C toolchain names: `GOENV` redirects `go env`, the
+        // others pick the proxy, the compiler, its wrapper or its flags.
+        "GOENV",
+        "GOFLAGS",
+        "GOPROXY",
+        "GOROOT",
+        "GOPATH",
+        "GOTOOLCHAIN",
+        "GONOSUMDB",
+        "GOPRIVATE",
+        "GOINSECURE",
+        "GONOSUMCHECK",
+        "GOSUMDB",
+        "GONOPROXY",
+        "GOVCS",
+        "GOMODCACHE",
+        "GOCACHE",
+        "GOWORK",
+        "RUSTC",
+        "RUSTC_WRAPPER",
+        "RUSTDOC",
+        "RUSTDOCFLAGS",
+        "GOOGLE_APPLICATION_CREDENTIALS",
+        "MAVEN_OPTS",
+        "GRADLE_OPTS",
+        "JAVA_OPTS",
+        "GRADLE_USER_HOME",
+        "M2_HOME",
+        "MAVEN_HOME",
+        "CFLAGS",
+        "CXXFLAGS",
+        "CPPFLAGS",
+        "LDFLAGS",
+        "INCLUDE",
+        "LIB",
+        "LIBPATH",
+        "SSLKEYLOGFILE",
+        // Names a pager, editor, interpreter or resolver reads to run a program
+        // or to find its configuration.
+        "LESSOPEN",
+        "LESSCLOSE",
+        "LESS",
+        "MAKEFILES",
+        "LUA_INIT",
+        "LUA_PATH",
+        "LUA_CPATH",
+        "R_PROFILE",
+        "R_PROFILE_USER",
+        "PHPRC",
+        "PHP_INI_SCAN_DIR",
+        "GCONV_PATH",
+        "HOSTALIASES",
+        "RES_OPTIONS",
+        "LOCALDOMAIN",
+        "NLSPATH",
+        "TERMINFO",
+        "TERMCAP",
+        "HISTFILE",
+        "VIRTUAL_ENV",
+        "WSLENV",
+        "DISPLAY",
     ];
     const PREFIXES: &[&str] = &[
         "IRONSHELL_",
@@ -9818,6 +10122,26 @@ pub(crate) fn env_name_steers_children(name: &str) -> bool {
         "MSBUILD",
         "NUGET_",
         "PWSH_",
+        // Cloud, infrastructure, package-manager and build families.
+        "RUSTUP_",
+        "AWS_",
+        "AZURE_",
+        "CLOUDSDK_",
+        "TF_",
+        "ANSIBLE_",
+        "YARN_",
+        "COREPACK_",
+        "CMAKE_",
+        "PKG_CONFIG",
+        "OPENSSL_",
+        "R_LIBS",
+        "CONDA_",
+        "POETRY_",
+        "DENO_",
+        "BUN_",
+        "PNPM_",
+        "VOLTA_",
+        "SSH_",
     ];
     const SUFFIXES: &[&str] = &[
         "_PROXY",
@@ -11912,9 +12236,168 @@ mod operand_candidate_tests {
     }
 
     #[test]
+    fn extended_length_and_device_prefixes_are_peeled() {
+        let has = |arg: &str, want: &str| {
+            let found = names(arg);
+            assert!(found.contains(&want.to_string()), "{arg}: {found:?}");
+        };
+        has(r"\\?\C:\ws\f.txt", r"C:\ws\f.txt");
+        has("//?/C:/ws/f.txt", "C:/ws/f.txt");
+        has(r"\\.\C:\ws\f.txt", r"C:\ws\f.txt");
+        has("//./C:/ws/f.txt", "C:/ws/f.txt");
+        has(r"\\?\C:\ws\..\ws\f.txt", r"C:\ws\..\ws\f.txt");
+        has(r"-File:\\?\C:\ws\x.ps1", r"C:\ws\x.ps1");
+    }
+
+    #[test]
+    fn a_unc_extended_path_is_never_turned_into_a_name() {
+        for arg in [
+            r"\\?\UNC\host\share\f.txt",
+            "//?/UNC/host/share/f.txt",
+            r"\\.\unc\host\share",
+        ] {
+            let found = names(arg);
+            assert!(
+                !found
+                    .iter()
+                    .any(|n| n.to_ascii_lowercase().starts_with("unc")),
+                "{arg}: {found:?}"
+            );
+            assert!(
+                !found.iter().any(|n| n.starts_with("host")),
+                "{arg}: {found:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_file_url_is_a_local_path() {
+        let has = |arg: &str, want: &str| {
+            let found = names(arg);
+            assert!(found.contains(&want.to_string()), "{arg}: {found:?}");
+        };
+        has("file:///C:/ws/f.txt", "C:/ws/f.txt");
+        has("file:///C:/ws/a%20b.txt", "C:/ws/a b.txt");
+        has("file:///home/u/f.txt", "/home/u/f.txt");
+        has("FILE://localhost/home/u/f.txt", "/home/u/f.txt");
+        has("file:/home/u/f.txt", "/home/u/f.txt");
+        // A URL with a host names a network share: no local name comes of it.
+        let found = names("file://host/share/f.txt");
+        assert!(!found
+            .iter()
+            .any(|n| n.contains("/share/f.txt") && !n.starts_with("file:")));
+    }
+
+    #[test]
+    fn more_argument_shapes_name_a_file() {
+        for (arg, want) in [
+            ("@t1.txt", "t1.txt"),
+            ("-@t1.txt", "t1.txt"),
+            ("-Ot1.txt", "t1.txt"),
+            ("/Ft1.txt", "t1.txt"),
+            ("/F:t1.txt", "t1.txt"),
+            ("--opt=a:t1.txt", "t1.txt"),
+            ("alias.x=!x.sh", "x.sh"),
+            ("n1.txt+t1.txt", "t1.txt"),
+            ("n1.txt+t1.txt", "n1.txt"),
+            ("a.txt,b.txt", "b.txt"),
+            ("copy n1.txt+t1.txt out.txt", "t1.txt"),
+        ] {
+            let found = names(arg);
+            assert!(found.contains(&want.to_string()), "{arg}: {found:?}");
+        }
+    }
+
+    #[test]
     fn a_huge_argument_is_not_split() {
         let long = format!("a {}", "b ".repeat(5000));
         let found = names(&long);
         assert_eq!(found.len(), 1, "a {}-char argument was split", long.len());
+    }
+}
+
+#[cfg(test)]
+mod steering_name_tests {
+    use super::env_name_steers_children;
+
+    #[test]
+    fn toolchain_cloud_and_loader_names_steer() {
+        for name in [
+            "GOENV",
+            "GOPROXY",
+            "goflags",
+            "GOTOOLCHAIN",
+            "RUSTC",
+            "RUSTC_WRAPPER",
+            "RUSTDOCFLAGS",
+            "RUSTUP_HOME",
+            "AWS_CONFIG_FILE",
+            "AWS_PROFILE",
+            "AZURE_CONFIG_DIR",
+            "GOOGLE_APPLICATION_CREDENTIALS",
+            "CLOUDSDK_CONFIG",
+            "TF_CLI_CONFIG_FILE",
+            "ANSIBLE_CONFIG",
+            "YARN_RC_FILENAME",
+            "COREPACK_HOME",
+            "MAVEN_OPTS",
+            "GRADLE_OPTS",
+            "JAVA_OPTS",
+            "GRADLE_USER_HOME",
+            "CMAKE_TOOLCHAIN_FILE",
+            "PKG_CONFIG_PATH",
+            "CFLAGS",
+            "LDFLAGS",
+            "INCLUDE",
+            "LIB",
+            "LIBPATH",
+            "OPENSSL_CONF",
+            "SSLKEYLOGFILE",
+            "LESSOPEN",
+            "MAKEFILES",
+            "LUA_INIT",
+            "R_PROFILE_USER",
+            "R_LIBS_USER",
+            "PHPRC",
+            "PERL5OPT",
+            "GCONV_PATH",
+            "HOSTALIASES",
+            "TERMINFO",
+            "HISTFILE",
+            "VIRTUAL_ENV",
+            "CONDA_PREFIX",
+            "POETRY_HOME",
+            "DENO_DIR",
+            "BUN_INSTALL",
+            "PNPM_HOME",
+            "VOLTA_HOME",
+            "WSLENV",
+            "DISPLAY",
+            "SSH_ASKPASS",
+            "SSH_CONFIG",
+        ] {
+            assert!(env_name_steers_children(name), "{name} is not refused");
+        }
+    }
+
+    #[test]
+    fn harmless_names_stay_allowed() {
+        for name in [
+            "LANG",
+            "LC_ALL",
+            "TZ",
+            "TERM",
+            "NO_COLOR",
+            "FORCE_COLOR",
+            "CI",
+            "DEBUG",
+            "RUST_LOG",
+            "RUST_BACKTRACE",
+            "USERNAME",
+            "PROMPT",
+            "MY_SETTING",
+        ] {
+            assert!(!env_name_steers_children(name), "{name} is refused");
+        }
     }
 }
