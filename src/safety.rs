@@ -10098,6 +10098,16 @@ pub(crate) fn env_name_steers_children(name: &str) -> bool {
         "VIRTUAL_ENV",
         "WSLENV",
         "DISPLAY",
+        // A loader, allocator or line editor reads these to find code or
+        // configuration (round 57: each was still settable).
+        "AR",
+        "INPUTRC",
+        "LOCPATH",
+        "MALLOC_CONF",
+        "_RJEM_MALLOC_CONF",
+        "TCLLIBPATH",
+        "TCL_LIBRARY",
+        "TK_LIBRARY",
     ];
     const PREFIXES: &[&str] = &[
         "IRONSHELL_",
@@ -10142,6 +10152,20 @@ pub(crate) fn env_name_steers_children(name: &str) -> bool {
         "PNPM_",
         "VOLTA_",
         "SSH_",
+        // Plugin and module paths of GUI and media toolkits, Go's cgo flags,
+        // the session bus, more package managers, and bash's exported
+        // functions (`BASH_FUNC_name%%` defines `name` in every child bash).
+        "CGO_",
+        "GIO_",
+        "GTK_",
+        "QT_",
+        "GST_PLUGIN",
+        "DBUS_",
+        "JULIA_",
+        "HELM_",
+        "COMPOSER_",
+        "VAGRANT_",
+        "BASH_FUNC_",
     ];
     const SUFFIXES: &[&str] = &[
         "_PROXY",
@@ -12375,6 +12399,23 @@ mod steering_name_tests {
             "DISPLAY",
             "SSH_ASKPASS",
             "SSH_CONFIG",
+            // Round 57: still settable after round 56.
+            "CGO_CFLAGS",
+            "AR",
+            "TCLLIBPATH",
+            "JULIA_DEPOT_PATH",
+            "INPUTRC",
+            "LOCPATH",
+            "MALLOC_CONF",
+            "GIO_EXTRA_MODULES",
+            "GTK_PATH",
+            "QT_PLUGIN_PATH",
+            "GST_PLUGIN_PATH",
+            "DBUS_SESSION_BUS_ADDRESS",
+            "COMPOSER_HOME",
+            "HELM_CONFIG_HOME",
+            "VAGRANT_CWD",
+            "BASH_FUNC_ls%%",
         ] {
             assert!(env_name_steers_children(name), "{name} is not refused");
         }

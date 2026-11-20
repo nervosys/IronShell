@@ -36,6 +36,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - An exec approval binds a workspace file named with an extended-length or device prefix (`\\?\C:\...`, `//?/C:/...`, `\\.\C:\...`) or as a `file:` URL, and one named in a response file (`@x.txt`), a glued option (`-Ox.txt`, `/F:x.txt`) or a `+` join; a `\\?\UNC\` name or a `file://host/` URL is never turned into a local path or probed.
 - Agents can no longer set the Go, Rust, JVM, C toolchain, cloud (`AWS_*`, `AZURE_*`, `CLOUDSDK_*`, `TF_*`), package-manager and interpreter variables that redirect what a child program loads (`GOENV`, `GOPROXY`, `RUSTC_WRAPPER`, `AWS_CONFIG_FILE`, `MAVEN_OPTS`, `CFLAGS`, `LESSOPEN`, `HISTFILE`, `VIRTUAL_ENV` and others), and `unset` of a steering variable under `ish -b --agent` is E_POLICY_DENY, as `export` is.
 - E_NEEDS_APPROVAL shows the environment changes the token binds (`env`: with FOO=1; without HTTPS_PROXY; values cut at 60 characters, secrets redacted), so the approver sees them; the token is unchanged.
+- Agents can no longer set the plugin and module paths of GUI and media toolkits (`GIO_*`, `GTK_*`, `QT_*`, `GST_PLUGIN*`), `CGO_*`, `DBUS_*`, `JULIA_*`, `HELM_*`, `COMPOSER_*`, `VAGRANT_*`, `MALLOC_CONF`, `INPUTRC`, `LOCPATH`, `TCLLIBPATH`, `TCL_LIBRARY`, `TK_LIBRARY`, `AR`, or bash's exported functions (`BASH_FUNC_name%%`, which defines `name` in every child bash); a round 57 probe of 125 steering names found these 15 still settable.
 ### Changed
 
 - `ish --zsh` refuses `setopt extendedglob` (in every spelling) by name; it was accepted and then ignored, so `^a.txt` globbed literally.
@@ -142,6 +143,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Refusal hints for `find -newer`/`-o`, brace expansion, `trap`, functions and `source` say what to write instead.
 - `ish -b`: an arithmetic error fails its command and discards the rest of its line, as bash does, instead of ending the script; nesting past 1024 levels is an arithmetic error, not a stack overflow; `grep -A0`/`-B0`/`-C0` and `grep -o` with context print the `--` group separator as GNU grep does.
 - `cargo audit` and `cargo deny check` pass again: RUSTSEC-2026-0545 and RUSTSEC-2026-0548 (zip 0.6.6 and 1.1.4, reached only through utoipa-swagger-ui's build script and candle-core's .npz reader, neither built with AES nor reading a stream) and RUSTSEC-2026-0543 (chrono unmaintained, no successor release) are recorded as accepted, with the reasons, in `.cargo/audit.toml` and `deny.toml`.
+- `ish -b`: under `grep -o`, a context line prints its matches, as GNU grep does, so `grep -o -v -A1 c` prints the `c` after each selected line, and a line selected by `-o -v` prints nothing; before, `-o -v` printed whole selected lines.
 
 ## [14.0.5] - 2026-11-16
 

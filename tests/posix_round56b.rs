@@ -137,3 +137,33 @@ fn an_arithmetic_error_discards_its_line_and_the_script_goes_on() {
     assert_eq!((out.as_str(), code), ("survived\n", 0), "{err}");
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn only_matching_prints_the_matches_of_every_line_it_would_print() {
+    let dir = scratch("ov");
+    // Under -o -v a selected line holds no match and prints nothing; a context
+    // line is a matching line, and prints its match after `-`.
+    check(
+        &dir,
+        &[
+            ("grep -o -v c", "", 0),
+            ("grep -o -v -n -b c", "", 0),
+            ("grep -o -v -m2 c", "", 0),
+            ("grep -ovc c", "6\n", 0),
+            ("grep -o -v -n -A1 c", "3-c\n", 0),
+            ("grep -o -v -C1 -e c -e f", "c\nf\n", 0),
+            ("grep -o -v -n -b -B1 -e c -e g", "3-4-c\n", 0),
+            ("grep -o -v .", "", 1),
+        ],
+    );
+    let (out, err, code) = ish_bash(
+        r"printf 'c1\nzz\nc2c3\nzz\nzz\nzz\nc4\n' | grep -o -n -C1 c.",
+        &dir,
+    );
+    assert_eq!(
+        (out.as_str(), code),
+        ("1:c1\n3:c2\n3:c3\n--\n7:c4\n", 0),
+        "{err}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}

@@ -6896,11 +6896,30 @@ fn grep(args: &[String], stdin: &mut Input, sink: &mut Sink) -> Util {
             s
         };
         let (before, after) = context.lines();
-        // `-o -v` prints whole lines here, as it always has; every other `-o`
-        // prints the matches and keeps the context bookkeeping (the `--`
-        // between groups) without printing the context lines.
-        let only_matching = f('o') && !f('v');
-        let with_context = context.requested() && !(f('o') && f('v'));
+        // Under `-o` each line grep would print, selected or context, prints
+        // its matches instead, one per line, as GNU grep does. A selected
+        // line under `-o -v` and a context line without `-v` hold no match,
+        // so they print nothing, but the `--` between groups still does and
+        // the lines still count for `-c` and the exit status.
+        let only_matching = f('o');
+        let with_context = context.requested();
+        let emit = |out: &mut Vec<u8>, n: usize, line: &[u8], sep: u8| {
+            if only_matching {
+                // `-b` gives each match's own offset, as GNU does under `-o`.
+                for m in re.find_iter(line) {
+                    if m.as_bytes().is_empty() {
+                        continue;
+                    }
+                    out.extend_from_slice(&lead_of(n, sep, m.start()));
+                    out.extend_from_slice(m.as_bytes());
+                    out.push(b'\n');
+                }
+            } else {
+                out.extend_from_slice(&lead_of(n, sep, 0));
+                out.extend_from_slice(line);
+                out.push(b'\n');
+            }
+        };
         let silent = f('q') || f('l') || f('L') || f('c') || binary;
         let mut last_printed: Option<usize> = None;
         let mut after_left = 0usize;
@@ -6916,11 +6935,7 @@ fn grep(args: &[String], stdin: &mut Input, sink: &mut Sink) -> Util {
             if !hit {
                 if with_context && after_left > 0 && !silent {
                     after_left -= 1;
-                    if !only_matching {
-                        out.extend_from_slice(&lead_of(n, b'-', 0));
-                        out.extend_from_slice(line);
-                        out.push(b'\n');
-                    }
+                    emit(&mut out, n, line, b'-');
                     last_printed = Some(n);
                 }
                 continue;
@@ -6929,7 +6944,6 @@ fn grep(args: &[String], stdin: &mut Input, sink: &mut Sink) -> Util {
             if silent {
                 continue;
             }
-            let lead = lead_of(n, b':', 0);
             if with_context {
                 let first = n
                     .saturating_sub(before)
@@ -6942,29 +6956,11 @@ fn grep(args: &[String], stdin: &mut Input, sink: &mut Sink) -> Util {
                     out.extend_from_slice(context.separator.as_deref().unwrap_or("--").as_bytes());
                     out.push(b'\n');
                 }
-                if !only_matching {
-                    for (k, before_line) in all_lines.iter().enumerate().take(n).skip(first) {
-                        out.extend_from_slice(&lead_of(k, b'-', 0));
-                        out.extend_from_slice(before_line);
-                        out.push(b'\n');
-                    }
+                for (k, before_line) in all_lines.iter().enumerate().take(n).skip(first) {
+                    emit(&mut out, k, before_line, b'-');
                 }
             }
-            if only_matching {
-                // `-b` gives each match's own offset, as GNU does under `-o`.
-                for m in re.find_iter(line) {
-                    if m.as_bytes().is_empty() {
-                        continue;
-                    }
-                    out.extend_from_slice(&lead_of(n, b':', m.start()));
-                    out.extend_from_slice(m.as_bytes());
-                    out.push(b'\n');
-                }
-            } else {
-                out.extend_from_slice(&lead);
-                out.extend_from_slice(line);
-                out.push(b'\n');
-            }
+            emit(&mut out, n, line, b':');
             if with_context {
                 last_printed = Some(n);
                 after_left = after;
