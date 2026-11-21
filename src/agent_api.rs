@@ -1237,12 +1237,16 @@ fn describe_builtin(name: &str) -> AgentResponse {
                 ),
             }
         } else {
-            let did_you_mean =
-                crate::builtins::nearest_names(name, builtins.iter().map(|b| b.name.as_str()));
+            // The same suggestion function the CLI's unknown-name error uses, so
+            // `file_read` gets `read_text` and `file.read` here as it does there.
+            let did_you_mean = crate::builtins::did_you_mean(name);
+            let search =
+                "search by keyword with POST /api/v1/call/suggest and the body [\"<words>\"], \
+                          or list every builtin with GET /api/v1/builtins";
             let hint = if did_you_mean.is_empty() {
-                "search by keyword with suggest(\"<words>\"), or list a category with ontology_manifest()".to_string()
+                search.to_string()
             } else {
-                format!("did you mean {}?", did_you_mean.join(", "))
+                format!("did you mean {}? ({search})", did_you_mean.join(", "))
             };
             AgentResponse {
                 code: Some("E_UNKNOWN_BUILTIN".to_string()),
@@ -6172,6 +6176,18 @@ pub mod server {
             );
         }
 
+        // Bind before anything is printed: a port that is taken must not leave a
+        // banner and a token on screen that read as a running server.
+        let listener = tokio::net::TcpListener::bind(addr).await.map_err(|e| {
+            if e.kind() == std::io::ErrorKind::AddrInUse {
+                anyhow::anyhow!(
+                    "port {} is already in use; pass --port N to choose another",
+                    addr.port()
+                )
+            } else {
+                anyhow::anyhow!("cannot listen on {addr}: {e}")
+            }
+        })?;
         println!("🤖 IronShell Agent API starting on http://{}", addr);
         if config.auth_token.is_none() {
             println!("   Auth token (generated): {}", token);
@@ -6219,7 +6235,6 @@ pub mod server {
         println!("  GET  /api/v1/builtins/:name   - Describe a builtin");
         println!("  GET  /api/v1/types            - Get type information");
 
-        let listener = tokio::net::TcpListener::bind(addr).await?;
         crate::serve::serve_until(
             listener,
             app,

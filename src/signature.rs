@@ -3416,7 +3416,7 @@ pub static SIGNATURES: &[Signature] = &[
             req(
                 "source_or_query",
                 Ty::Str,
-                "with rows piped in, the query (they are table `t`); alone, the query over an empty database; otherwise a source: a .json/.jsonl/.csv/.tsv file (a table named after the file, also `t`; an empty CSV or TSV cell is NULL in a numeric column and '' in a text column), a SQLite file, or \":memory:\"",
+                "with rows piped in, the query (they are table `t`; comparing a text column with a number follows SQLite's type ordering, where text sorts above numbers, so `where p > 5` matches text: cast first); alone, the query over an empty database; otherwise a source: a .json/.jsonl/.csv/.tsv file (a table named after the file, also `t`; an empty CSV or TSV cell is NULL in a numeric column and '' in a text column), a SQLite file, or \":memory:\"",
             ),
             opt(
                 "query",
@@ -7181,7 +7181,7 @@ pub static SIGNATURES: &[Signature] = &[
         subject: None,
         params: &[opt("count_or_options", Ty::Any, "how many commits (Int from 1 to 10000, newest first; default 10), or {n: Int, files: Bool}"), opt("options", Ty::Record, "{n: Int, files: Bool}: with a Record the rows are typed, and files: true adds each commit's changed paths")],
         returns: "Array",
-        doc: "The commit history (log) of the current repository: the most recent count commits as an Array of `<short hash> <subject>` lines, newest first. With an options Record (`git_log({n: 20, files: true})` or `git_log(20, {files: true})`) it returns records {hash, author, date, subject} instead, and files: true adds `files`, the paths each commit changed (a way to count the most changed files). Read-only. Outside a repository E_BAD_STATE; a repository with no commits, or a failed git, E_TOOL_FAILED. Refuses pipeline input.",
+        doc: "The commit history (log) of the current repository: the most recent count commits as an Array of `<short hash> <subject>` lines, newest first. With an options Record (`git_log({n: 20, files: true})` or `git_log(20, {files: true})`; `count` is an alias of `n`, any other key is E_BAD_ARG) it returns records {hash, author, date, subject} instead, and files: true adds `files`, the paths each commit changed (a way to count the most changed files). Read-only. Outside a repository E_BAD_STATE; a repository with no commits, or a failed git, E_TOOL_FAILED. Refuses pipeline input.",
         examples: &[
             (r#"(try { git_log(0) } catch e { e.error.code })"#, "E_BAD_ARG"),
             (r#"(try { git_log("3") } catch e { e.error.code })"#, "E_BAD_ARG"),

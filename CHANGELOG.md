@@ -134,6 +134,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - The in-process grep takes `-A`, `-B`, `-C`, `-NUM` and the long context options, with GNU's `--` group separators.
 - diff_values(a, b) lists the added, removed and changed paths between two values; diff, json_diff and deep_diff suggest it.
 - `ish -b`: `grep -m N` (`--max-count`) stops after N selected lines per file and then prints the last one's trailing context, and `-b` (`--byte-offset`) prefixes the byte offset of each line, or of each match under `-o`; `$((...))` takes `base#digits` literals (bases 2 to 64) and reads a bare `0x` as 0.
+- `open()` and `from_csv` of a semicolon- or tab-separated file read as comma-separated: when the header is one field holding `;` (or a tab) and no comma and the first row splits the same way, the E_BAD_ARG hint says so and gives `from_csv(cat("f.csv"), {delimiter: ";"})`; a two-column file that opens as one column prints a one-line note on stderr. The delimiter is not switched for you and stdout is unchanged.
+- Parse errors for `map(x => x*2)`, `map(fn(x) { x*2 })`, `a += 1` and `import os` carry a hint naming the right spelling.
+- `rmdir(d, true)` of a directory this process's `fs_tempdir` created under `<workspace>/.ironshell/tmp/` in agent mode needs no approval, so the `examples:` that clean up a temp directory run in agent mode. The temp root, any other directory and a directory another process made still need approval.
+- `ish agent serve` binds its port before it prints the banner and the token; a port in use exits non-zero with `port N is already in use; pass --port N to choose another`.
+- The Agent API's `E_UNKNOWN_BUILTIN` uses the CLI's suggestion function (`file_read` suggests `read_text`, `file.read`), and its hint names `POST /api/v1/call/suggest` with a positional array.
+- AGENTS.md and the `git_log` and `sql` docs state that `git_log`'s `count` is an alias of `n`, that `"5" * 3` is `"555"`, and that comparing a text column with a number in `sql` uses SQLite's type ordering.
+
 ### Fixed
 
 - `session_redo()` no longer overwrites a file that was edited, or removed, after the undo: it is E_BAD_STATE naming the file (as `undo()` refuses a file changed after its step), the step stays on the redo stack, and `{force: true}` re-applies it anyway. A later step of a multi-step redo that was changed is listed as skipped and ends the redo. The state each undo wrote is kept with the redo step on disk. A redo of several steps in a later process (`ish -c` per call) also takes them in the right order: the redo stack was reloaded oldest id first, so two steps of one file ended on the older content.
