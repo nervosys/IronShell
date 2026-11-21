@@ -969,6 +969,9 @@ impl<'a> Lexer<'a> {
                         return unterminated("unterminated ${", dollar_at, "a `}`");
                     }
                     None => return unterminated("unterminated ${", dollar_at, "a `}`"),
+                    Some('[') if name == "PIPESTATUS" => {
+                        return unsupported_at("`PIPESTATUS` array", dollar_at)
+                    }
                     _ => {
                         let named = param_operator(op.starts_with(':'), &self.s[self.i..]);
                         return unsupported_at(&format!("${{...}} operator `{named}`"), dollar_at);
@@ -1041,7 +1044,19 @@ impl<'a> Lexer<'a> {
                         // The operand runs to the closing brace, blanks
                         // included (`${1:?usage: f COLUMN}`), as in bash; its
                         // words are kept apart by the blanks between them.
-                        w = sub.word().map_err(|e| relocate(e, start, dollar_at))?;
+                        // A leading blank is part of it (`${v%% *}` trims from
+                        // the first space).
+                        let lead: String = inner
+                            .iter()
+                            .take_while(|c| matches!(c, ' ' | '\t'))
+                            .collect();
+                        if !lead.is_empty() {
+                            sub.i += lead.chars().count();
+                            w.push(Part::Lit(lead, false));
+                        }
+                        if sub.i < inner.len() {
+                            w.extend(sub.word().map_err(|e| relocate(e, start, dollar_at))?);
+                        }
                         while sub.i < inner.len() {
                             let blanks: String = inner[sub.i..]
                                 .iter()
@@ -1209,6 +1224,29 @@ fn keyword_what(k: &str) -> String {
 fn plain(w: &Word) -> Option<&str> {
     match w.as_slice() {
         [Part::Lit(s, false)] => Some(s),
+        _ => None,
+    }
+}
+
+/// The `< word` of a list that is nothing but one redirection from a file
+/// (the body of `$(< file)`).
+fn bare_input_redirect(list: &List) -> Option<&Redir> {
+    let [ao] = list.as_slice() else {
+        return None;
+    };
+    if !ao.rest.is_empty() || ao.first.negate {
+        return None;
+    }
+    let [Cmd::Simple {
+        assigns,
+        words,
+        redirs,
+    }] = ao.first.cmds.as_slice()
+    else {
+        return None;
+    };
+    match redirs.as_slice() {
+        [r @ Redir::In(_)] if assigns.is_empty() && words.is_empty() => Some(r),
         _ => None,
     }
 }
@@ -2316,6 +2354,9 @@ struct Shell {
 
 const SHELL_NAME: &str = "ish";
 
+/// When this shell started, for `$SECONDS`.
+static SHELL_START: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
+
 /// The status of a command a policy refused (`E_POLICY_DENY`), as the other
 /// refusals of the shell exit.
 const POLICY_DENY_STATUS: i32 = 77;
@@ -2358,6 +2399,13 @@ impl Shell {
             .unset_env
             .iter()
             .any(|n| crate::safety::fold_env_name(n) == folded);
+        // The PWD this process inherited is trusted only while it names the
+        // directory it is in, as bash checks it at start-up: a parent that
+        // `cd`ed first and a stale PWD in the environment gave `$PWD/bin` the
+        // wrong place.
+        if name == "PWD" && !was_unset {
+            return Some(logical_pwd());
+        }
         match std::env::var(name).ok().filter(|_| !was_unset) {
             Some(v) => Some(v),
             // Windows has no HOME; the platform's home directory stands in for it
@@ -2394,6 +2442,23 @@ impl Shell {
             None if name == "BASH_VERSION" => Some("5.2.0(1)-ish".to_string()),
             None if name == "HOSTNAME" => sysinfo::System::host_name(),
             None if name == "HOSTTYPE" => Some(std::env::consts::ARCH.to_string()),
+            // The machine type bash was built for, written as its OSTYPE is.
+            None if name == "MACHTYPE" => Some(if cfg!(windows) {
+                format!("{}-pc-msys", std::env::consts::ARCH)
+            } else if cfg!(target_os = "macos") {
+                format!("{}-apple-darwin", std::env::consts::ARCH)
+            } else {
+                format!("{}-pc-linux-gnu", std::env::consts::ARCH)
+            }),
+            None if name == "BASHPID" => Some(std::process::id().to_string()),
+            // Whole seconds since this shell started.
+            None if name == "SECONDS" => Some(
+                SHELL_START
+                    .get_or_init(std::time::Instant::now)
+                    .elapsed()
+                    .as_secs()
+                    .to_string(),
+            ),
             // Set in every bash: the default field separators, and OPTIND 1.
             None if name == "IFS" => Some(" \t\n".to_string()),
             None if name == "OPTIND" => Some("1".to_string()),
@@ -2416,6 +2481,16 @@ impl Shell {
         // check is made where a value reaches a child: `export`, a prefix
         // assignment on a command (see `run_simple` and `refuse_steering`).
         self.vars.insert(name.to_string(), value);
+        // PATH comes from the environment, so a plain assignment changes what
+        // programs inherit (bash's variables of that kind stay exported). Not
+        // in agent mode, where it steers programs and is refused if exported.
+        if name == "PATH"
+            && crate::safety::current_mode() != crate::safety::Mode::Agent
+            && std::env::var_os("PATH").is_some()
+            && !self.exported.iter().any(|n| n == "PATH")
+        {
+            self.mark_exported("PATH".to_string());
+        }
     }
 
     /// Under `set -u`, an unset parameter is noted for the command whose
@@ -2954,6 +3029,36 @@ impl Shell {
         out
     }
 
+    /// `$(< word)`: the file the word names, less trailing newlines. A missing
+    /// or refused file is bash's message on standard error, status 1 and no
+    /// text.
+    fn substitute_file(&mut self, w: &Word) -> String {
+        let mut input = Input::buf(Vec::new());
+        let fields = self.expand(w, &mut input);
+        let fail = |this: &mut Self, msg: String| {
+            let _ = writeln!(std::io::stderr(), "{msg}");
+            this.last = 1;
+            String::new()
+        };
+        let [path] = fields.as_slice() else {
+            return fail(self, format!("{SHELL_NAME}: ambiguous redirect"));
+        };
+        if let Some(refusal) = jail_refusal(SHELL_NAME, path) {
+            return fail(self, refusal);
+        }
+        match read_file(path) {
+            Ok(d) => {
+                self.last = 0;
+                let mut s = String::from_utf8_lossy(&d).into_owned();
+                while s.ends_with('\n') {
+                    s.pop();
+                }
+                s
+            }
+            Err(e) => fail(self, format!("{SHELL_NAME}: {path}: {}", io_reason(&e))),
+        }
+    }
+
     /// `$(…)`: run the body and take its stdout, less trailing newlines.
     fn substitute(&mut self, body: &str) -> String {
         let list = match parse(body) {
@@ -2967,6 +3072,11 @@ impl Shell {
                 return String::new();
             }
         };
+        // `$(< file)`: a body that is only a redirection from a file is the
+        // file's contents, as bash reads it without running anything.
+        if let Some(Redir::In(w)) = bare_input_redirect(&list) {
+            return self.substitute_file(&w.clone());
+        }
         let mut sink = Sink::new(ErrMode::Real);
         let mut input = Input::buf(Vec::new());
         // Bash does not pass `set -e` into a command substitution (it clears
@@ -3191,13 +3301,35 @@ impl Shell {
         if p.negate {
             self.errexit_off += 1;
         }
+        // A source that never ends (`yes`, `/dev/zero`, `/dev/urandom`) gives
+        // a prefix; see `endless_plan`. The flags are the caller's again when
+        // this pipeline is done.
+        let plan = endless_plan(p);
+        let saved_flags = (
+            ENDLESS_BYTES.with(|b| b.replace(ENDLESS_FIRST)),
+            ENDLESS_USED.with(|f| f.replace(false)),
+            ENDLESS_ARMED.with(|f| f.replace(plan.is_some())),
+            LIMIT_HIT.with(|f| f.replace(false)),
+        );
+        let (out_mark, err_mark) = (sink.out.len(), sink.err.len());
+        let mut cap = ENDLESS_FIRST;
         let flow = if p.cmds.len() == 1 {
-            self.run_cmd(&p.cmds[0], stdin, sink)
+            loop {
+                let f = self.run_cmd(&p.cmds[0], stdin, sink);
+                if plan.is_some() && endless_retry(&mut cap) {
+                    sink.out.truncate(out_mark);
+                    sink.err.truncate(err_mark);
+                    continue;
+                }
+                break f;
+            }
         } else {
             let mut data: Option<Vec<u8>> = None;
-            let mut status = 0;
+            let mut statuses: Vec<i32> = Vec::new();
             let n = p.cmds.len();
-            for (k, cmd) in p.cmds.iter().enumerate() {
+            let mut k = 0;
+            while k < n {
+                let cmd = &p.cmds[k];
                 let mut local_in = match data.take() {
                     Some(d) => Input::buf(d),
                     None => Input::buf(Vec::new()),
@@ -3219,6 +3351,7 @@ impl Shell {
                 if k + 1 < n && matches!(cmd, Cmd::Simple { .. }) {
                     STREAM_LIMIT.with(|l| l.set(head_limit(&p.cmds[k + 1])));
                 }
+                EXTERNAL_PROGRAMS.with(|p| p.borrow_mut().clear());
                 let c = match self.run_cmd(cmd, input, &mut stage) {
                     Flow::Next(c) | Flow::Exit(c) => c,
                     _ => 0,
@@ -3234,21 +3367,59 @@ impl Shell {
                     }
                     break;
                 }
-                // Under `pipefail` the status is the last failing stage's, or 0.
-                if !self.pipefail || c != 0 {
-                    status = c;
-                }
+                statuses.push(c);
                 if stage.err_mode == ErrMode::Capture {
                     sink.err.extend_from_slice(&stage.err);
+                }
+                // The reader that stops an endless source got too little of
+                // it: go again from the start with more.
+                if plan == Some(k) && endless_retry(&mut cap) {
+                    sink.err.truncate(err_mark);
+                    statuses.clear();
+                    data = None;
+                    k = 0;
+                    continue;
                 }
                 if k + 1 == n {
                     sink.out.extend_from_slice(&stage.out);
                 } else {
-                    data = Some(stage.out);
+                    data = Some(pipe_text(stage.out));
+                }
+                k += 1;
+            }
+            // The stages before the reader that stopped an endless source
+            // were still writing: SIGPIPE ends them, status 141.
+            if let Some(limiter) = plan {
+                if ENDLESS_USED.with(|f| f.get()) && LIMIT_HIT.with(|f| f.get()) {
+                    for c in statuses.iter_mut().take(limiter) {
+                        *c = 141;
+                    }
+                }
+            }
+            // Under `pipefail` the status is the last failing stage's, or 0.
+            let mut status = 0;
+            for c in &statuses {
+                if !self.pipefail || *c != 0 {
+                    status = *c;
                 }
             }
             Flow::Next(status)
         };
+        // An endless source nothing stopped is not run to the end: a pipeline
+        // that does not end is refused, with no output.
+        let flow =
+            if ENDLESS_USED.with(|f| f.get()) && (plan.is_none() || !LIMIT_HIT.with(|f| f.get())) {
+                sink.out.truncate(out_mark);
+                sink.err.truncate(err_mark);
+                endless_refusal(sink);
+                Flow::Next(1)
+            } else {
+                flow
+            };
+        ENDLESS_BYTES.with(|b| b.set(saved_flags.0));
+        ENDLESS_USED.with(|f| f.set(saved_flags.1));
+        ENDLESS_ARMED.with(|f| f.set(saved_flags.2));
+        LIMIT_HIT.with(|f| f.set(saved_flags.3));
         if p.negate {
             self.errexit_off -= 1;
         }
@@ -3578,16 +3749,20 @@ impl Shell {
                     self.set_var(var, v);
                     match self.run_list(body, stdin, sink) {
                         Flow::Next(c) => status = c,
+                        // `break` and `continue` are commands that succeed, and
+                        // the loop's status is that of the last command it ran.
                         Flow::Break(n) => {
                             if n > 1 {
                                 return Flow::Break(n - 1);
                             }
+                            status = 0;
                             break;
                         }
                         Flow::Continue(n) => {
                             if n > 1 {
                                 return Flow::Continue(n - 1);
                             }
+                            status = 0;
                         }
                         Flow::Exit(c) => return Flow::Exit(c),
                     }
@@ -3618,16 +3793,20 @@ impl Shell {
                     }
                     match self.run_list(body, stdin, sink) {
                         Flow::Next(c) => status = c,
+                        // `break` and `continue` are commands that succeed, and
+                        // the loop's status is that of the last command it ran.
                         Flow::Break(n) => {
                             if n > 1 {
                                 return Flow::Break(n - 1);
                             }
+                            status = 0;
                             break;
                         }
                         Flow::Continue(n) => {
                             if n > 1 {
                                 return Flow::Continue(n - 1);
                             }
+                            status = 0;
                         }
                         Flow::Exit(c) => return Flow::Exit(c),
                     }
@@ -3974,7 +4153,13 @@ impl Shell {
                 return Flow::Next(self.printf_options(args, env, stdin, sink));
             }
             "command" if env.is_empty() && args.first().map(String::as_str) == Some("-v") => {
-                return Flow::Next(command_v(&args[1..], sink));
+                let path = self.command_path(env);
+                return Flow::Next(command_v(&args[1..], path.as_deref(), sink));
+            }
+            "timeout" => {
+                if let Some(flow) = self.timeout_builtin(args, env, stdin, sink) {
+                    return flow;
+                }
             }
             "mktemp" if env.is_empty() => {
                 if let Util::Done(c) = mktemp(args, self.var("TMPDIR"), sink) {
@@ -4015,7 +4200,122 @@ impl Shell {
         if let Some((script, script_args)) = shell_script_command(argv) {
             return Flow::Next(self.run_script_child(script, script_args, env, stdin, sink));
         }
-        Flow::Next(self.external(argv, env, stdin, sink, why.as_deref()))
+        // A bare name is looked up on the shell's PATH, the lookup that
+        // `command -v` uses. Names the subset runs itself (and falls back to
+        // GNU programs for) keep their own lookup.
+        if !name.contains(['/', '\\']) && !SUBSET_NAMES.contains(&name) {
+            let found = self.command_path(env).and_then(|path| find_in(name, &path));
+            match found {
+                Some(path) => {
+                    let text = path.to_string_lossy().into_owned();
+                    if cfg!(windows) && path.extension().is_none() && has_shell_shebang(&text) {
+                        return Flow::Next(self.run_script_child(
+                            &text,
+                            &argv[1..],
+                            env,
+                            stdin,
+                            sink,
+                        ));
+                    }
+                    // Only a PATH the script set changes which program runs; with
+                    // the system's own PATH the usual resolution keeps the
+                    // program's name as its argv[0] (the GNU tools of Git for
+                    // Windows print it in their messages).
+                    if self.path_was_set(env) {
+                        RESOLVED_PROGRAM.with(|r| *r.borrow_mut() = Some(text));
+                    }
+                }
+                None if self.path_was_set(env) => {
+                    sink.eline(&format!("{SHELL_NAME}: {name}: command not found"));
+                    return Flow::Next(127);
+                }
+                None => {}
+            }
+        }
+        let flow = Flow::Next(self.external(argv, env, stdin, sink, why.as_deref()));
+        RESOLVED_PROGRAM.with(|r| *r.borrow_mut() = None);
+        flow
+    }
+
+    /// `timeout [OPTION] DURATION COMMAND [ARG]...`: run the command and end it
+    /// when the time is up, with status 124 (GNU's). Only a program is ended:
+    /// an in-process tool runs to its end. `-k`, `-s` and `-v` are taken and
+    /// have no effect; `--preserve-status` gives 143 for a command that was
+    /// ended. `None` when an option is another one, which runs the program.
+    fn timeout_builtin(
+        &mut self,
+        args: &[String],
+        env: &[(String, String)],
+        stdin: &mut Input,
+        sink: &mut Sink,
+    ) -> Option<Flow> {
+        let mut i = 0;
+        let mut preserve = false;
+        while let Some(a) = args.get(i) {
+            match a.as_str() {
+                "--" => {
+                    i += 1;
+                    break;
+                }
+                "--foreground" | "-v" | "--verbose" => i += 1,
+                "--preserve-status" => {
+                    preserve = true;
+                    i += 1;
+                }
+                "-k" | "-s" => i += 2,
+                o if o.starts_with("--kill-after=") || o.starts_with("--signal=") => i += 1,
+                o if (o.starts_with("-k") || o.starts_with("-s")) && o.len() > 2 => i += 1,
+                o if o.len() > 1 && o.starts_with('-') => return None,
+                _ => break,
+            }
+        }
+        let usage = "Try 'timeout --help' for more information.";
+        let Some(duration) = args.get(i) else {
+            sink.eline(&format!("timeout: missing operand\n{usage}"));
+            return Some(Flow::Next(125));
+        };
+        let (num, unit) = match duration.chars().last() {
+            Some(c @ ('s' | 'm' | 'h' | 'd')) => (&duration[..duration.len() - 1], c),
+            _ => (duration.as_str(), 's'),
+        };
+        let seconds = match num.parse::<f64>() {
+            Ok(n) if n >= 0.0 && n.is_finite() && !num.starts_with('+') => {
+                n * match unit {
+                    'm' => 60.0,
+                    'h' => 3600.0,
+                    'd' => 86400.0,
+                    _ => 1.0,
+                }
+            }
+            _ => {
+                sink.eline(&format!(
+                    "timeout: invalid time interval '{duration}'\n{usage}"
+                ));
+                return Some(Flow::Next(125));
+            }
+        };
+        let command = &args[i + 1..];
+        if command.is_empty() {
+            sink.eline(&format!("timeout: missing operand\n{usage}"));
+            return Some(Flow::Next(125));
+        }
+        let outer = LOCAL_DEADLINE.with(|d| d.get());
+        let mine = (seconds > 0.0).then(|| {
+            std::time::Instant::now() + std::time::Duration::from_secs_f64(seconds.min(1e7))
+        });
+        let deadline = match (outer, mine) {
+            (Some(a), Some(b)) => Some(a.min(b)),
+            (a, b) => a.or(b),
+        };
+        LOCAL_DEADLINE.with(|d| d.set(deadline));
+        let timed_before = LOCAL_TIMED_OUT.with(|f| f.replace(false));
+        let flow = self.dispatch(command, env, stdin, sink);
+        let fired = LOCAL_TIMED_OUT.with(|f| f.replace(timed_before));
+        LOCAL_DEADLINE.with(|d| d.set(outer));
+        Some(match flow {
+            Flow::Next(_) if fired && preserve => Flow::Next(143),
+            other => other,
+        })
     }
 
     /// `printf` with options: `-v VAR` (or `-vVAR`) puts the output in VAR
@@ -4360,8 +4660,38 @@ impl Shell {
             cmd.env_remove(n);
         }
         for (n, v) in pairs {
-            cmd.env(n, v);
+            if cfg!(windows) && n.eq_ignore_ascii_case("PATH") {
+                cmd.env(n, split_path_var(v).join(";"));
+            } else {
+                cmd.env(n, v);
+            }
         }
+    }
+
+    /// The PATH a command is looked up on: the shell's own variable (an
+    /// export or a plain assignment, or a prefix on this command), as bash
+    /// does. In agent mode PATH steers the programs that run and is not the
+    /// script's to change, so the process's own is used.
+    fn command_path(&self, env: &[(String, String)]) -> Option<String> {
+        if crate::safety::current_mode() == crate::safety::Mode::Agent {
+            return std::env::var("PATH").ok();
+        }
+        if let Some((_, v)) = env
+            .iter()
+            .rev()
+            .find(|(k, _)| k.eq_ignore_ascii_case("PATH"))
+        {
+            return Some(v.clone());
+        }
+        self.var("PATH")
+    }
+
+    /// Whether a script set PATH itself (so a name not found on it is not
+    /// found, where otherwise the system's own lookup may still find it).
+    fn path_was_set(&self, env: &[(String, String)]) -> bool {
+        crate::safety::current_mode() != crate::safety::Mode::Agent
+            && (self.vars.contains_key("PATH")
+                || env.iter().any(|(k, _)| k.eq_ignore_ascii_case("PATH")))
     }
 
     /// Run a program that is not implemented here: directly, with no shell in
@@ -4401,12 +4731,16 @@ impl Shell {
             sink.eline(&refusal);
             return POLICY_DENY_STATUS;
         }
-        let program = match resolve_program(argv, env, why) {
-            Ok(p) => p,
-            Err((code, message)) => {
-                sink.eline(&message);
-                return code;
-            }
+        let found = RESOLVED_PROGRAM.with(|r| r.borrow_mut().take());
+        let program = match found {
+            Some(p) => p,
+            None => match resolve_program(argv, env, why) {
+                Ok(p) => p,
+                Err((code, message)) => {
+                    sink.eline(&message);
+                    return code;
+                }
+            },
         };
         let mut cmd = crate::safety::child_command(&program);
         add_program_args(&mut cmd, &program, &argv[1..]);
@@ -4559,8 +4893,10 @@ impl Shell {
         });
         // With a run deadline (`--timeout`) the child leads its own process
         // group (unix), so the whole tree can be killed when the deadline passes.
-        let bounded = crate::safety::remaining_deadline().is_some();
+        let local_deadline = LOCAL_DEADLINE.with(|d| d.get());
+        let bounded = crate::safety::remaining_deadline().is_some() || local_deadline.is_some();
         let limit = STREAM_LIMIT.with(|l| l.take());
+        let program_name = cmd.get_program().to_string_lossy().into_owned();
         EXTERNAL_RAN.with(|f| f.set(true));
         #[cfg(unix)]
         if bounded {
@@ -4593,6 +4929,7 @@ impl Shell {
                 return 126;
             }
         };
+        EXTERNAL_PROGRAMS.with(|p| p.borrow_mut().push(program_name));
         let writer = if feed {
             let data = stdin.read_all();
             child.stdin.take().map(|mut w| {
@@ -4605,8 +4942,16 @@ impl Shell {
         };
         let out = if bounded {
             let guard = crate::builtins::TreeGuard::new(&child);
-            match wait_output_bounded(child, &guard) {
+            match wait_output_bounded(child, &guard, local_deadline) {
                 Ok(Some(o)) => o,
+                // `timeout` ended it: its status, with nothing said.
+                Ok(None)
+                    if !crate::safety::deadline_passed()
+                        && local_deadline.is_some_and(|t| std::time::Instant::now() >= t) =>
+                {
+                    LOCAL_TIMED_OUT.with(|f| f.set(true));
+                    return 124;
+                }
                 Ok(None) => {
                     let refusal = crate::safety::run_deadline_error("posix", name);
                     sink.eline(&refusal.to_string());
@@ -4736,6 +5081,241 @@ thread_local! {
     static STREAM_LIMIT: std::cell::Cell<Option<(bool, usize)>> = const { std::cell::Cell::new(None) };
 }
 
+thread_local! {
+    /// The time by which the program `timeout` runs must end, if one does.
+    static LOCAL_DEADLINE: std::cell::Cell<Option<std::time::Instant>> = const { std::cell::Cell::new(None) };
+    /// Set when `LOCAL_DEADLINE` killed a program.
+    static LOCAL_TIMED_OUT: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// The programs run since the pipeline stage began, to know whether its
+    /// output came from a native Windows program (see `pipe_text`).
+    static EXTERNAL_PROGRAMS: std::cell::RefCell<Vec<String>> = const { std::cell::RefCell::new(Vec::new()) };
+    /// The path a command was found at on the shell's PATH, for `external`.
+    static RESOLVED_PROGRAM: std::cell::RefCell<Option<String>> = const { std::cell::RefCell::new(None) };
+}
+
+/// Whether the program at `p` is a native Windows one (not built on MSYS).
+fn is_native_program(p: &str) -> bool {
+    #[cfg(windows)]
+    {
+        !is_msys_program(p)
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = p;
+        false
+    }
+}
+
+/// The text a pipeline stage hands to the next one. A native Windows program
+/// (`jq`, `cmd`, `git`) ends its lines with CRLF, which a script written for
+/// Linux does not expect in `jq -r .a | while read n` or `... | grep -x x`;
+/// the CR is dropped when the stage ran such a program. The output of a
+/// program on the MSYS runtime and of the in-process tools is left as it is,
+/// and so is output that goes to a file or the terminal.
+fn pipe_text(out: Vec<u8>) -> Vec<u8> {
+    let programs = EXTERNAL_PROGRAMS.with(|p| std::mem::take(&mut *p.borrow_mut()));
+    if !cfg!(windows) || programs.is_empty() || !out.windows(2).any(|w| w == b"\r\n") {
+        return out;
+    }
+    if !programs.iter().any(|p| is_native_program(p)) {
+        return out;
+    }
+    let mut v = Vec::with_capacity(out.len());
+    let mut i = 0;
+    while i < out.len() {
+        if out[i] == b'\r' && out.get(i + 1) == Some(&b'\n') {
+            i += 1;
+            continue;
+        }
+        v.push(out[i]);
+        i += 1;
+    }
+    v
+}
+
+thread_local! {
+    /// How many bytes an endless source (`yes`, `/dev/zero`, `/dev/urandom`,
+    /// a `seq` past its cap) gives the pipeline now running; see
+    /// [`endless_plan`].
+    static ENDLESS_BYTES: std::cell::Cell<usize> = const { std::cell::Cell::new(ENDLESS_FIRST) };
+    /// Set when a source gave only a prefix of an endless stream.
+    static ENDLESS_USED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// Set when the pipeline running has a reader that stops (see
+    /// [`endless_plan`]), so `seq` may give a prefix too.
+    static ENDLESS_ARMED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// Set when `head`, `sed q` or `grep -m` has what it wanted.
+    static LIMIT_HIT: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// The first prefix of an endless stream a pipeline reads, in bytes. When the
+/// reader that stops it is not satisfied the run is repeated with 16 times as
+/// much, up to [`ENDLESS_LAST`].
+const ENDLESS_FIRST: usize = 64 * 1024;
+/// The most an endless stream is read for: past it the pipeline fails.
+const ENDLESS_LAST: usize = 16 * 1024 * 1024;
+
+fn note_limit() {
+    LIMIT_HIT.with(|f| f.set(true));
+}
+
+/// A device that never ends: `Some(true)` for the random ones, `Some(false)`
+/// for `/dev/zero`.
+fn endless_device(path: &str) -> Option<bool> {
+    match path {
+        "/dev/urandom" | "/dev/random" => Some(true),
+        "/dev/zero" => Some(false),
+        _ => None,
+    }
+}
+
+/// The prefix of an endless device the pipeline now running reads.
+fn endless_bytes(random: bool) -> Vec<u8> {
+    use rand::RngCore;
+    ENDLESS_USED.with(|f| f.set(true));
+    let mut v = vec![0u8; ENDLESS_BYTES.with(|b| b.get())];
+    if random {
+        rand::thread_rng().fill_bytes(&mut v);
+    }
+    v
+}
+
+/// After a pass over an endless source: whether to go again with a longer
+/// prefix, because no reader of it has stopped yet.
+fn endless_retry(cap: &mut usize) -> bool {
+    if ENDLESS_USED.with(|f| f.get()) && !LIMIT_HIT.with(|f| f.get()) && *cap < ENDLESS_LAST {
+        *cap = (*cap * 16).min(ENDLESS_LAST);
+        ENDLESS_BYTES.with(|b| b.set(*cap));
+        ENDLESS_USED.with(|f| f.set(false));
+        true
+    } else {
+        false
+    }
+}
+
+/// The literal text of a word, when it is all literal.
+fn lit_text(w: &Word) -> Option<String> {
+    let mut s = String::new();
+    for part in w {
+        match part {
+            Part::Lit(t, _) => s.push_str(t),
+            _ => return None,
+        }
+    }
+    Some(s)
+}
+
+/// The words of a plain command, as literal text where they have it.
+fn simple_words(cmd: &Cmd) -> Option<Vec<Option<String>>> {
+    match cmd {
+        Cmd::Simple { assigns, words, .. } if assigns.is_empty() => {
+            Some(words.iter().map(lit_text).collect())
+        }
+        _ => None,
+    }
+}
+
+fn all_digits(s: &str) -> bool {
+    !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit())
+}
+
+/// Whether `a` is a `sed` script that ends by `q`: `5q`, `q`, `/re/q`, `2q3`.
+fn sed_quit_script(a: &str) -> bool {
+    let rest = if let Some(tail) = a.strip_prefix('/') {
+        tail.find('/').map(|i| &tail[i + 1..])
+    } else {
+        Some(a.trim_start_matches(|c: char| c.is_ascii_digit()))
+    };
+    rest.is_some_and(|r| {
+        r.strip_prefix('q')
+            .is_some_and(|d| d.is_empty() || all_digits(d))
+    })
+}
+
+/// Whether `cmd` ends its reading by itself once it has its share: `head -n N`
+/// or `-c N` (or `-N`), `sed Nq` and `grep -m N`.
+fn is_limiter(cmd: &Cmd) -> bool {
+    let Some(w) = simple_words(cmd) else {
+        return false;
+    };
+    let args: Vec<&str> = w.iter().skip(1).filter_map(|a| a.as_deref()).collect();
+    match w.first().and_then(|n| n.as_deref()) {
+        Some("head") => args.iter().enumerate().any(|(i, a)| {
+            ((*a == "-n" || *a == "-c") && args.get(i + 1).is_some_and(|n| all_digits(n)))
+                || a.strip_prefix("-n")
+                    .or_else(|| a.strip_prefix("-c"))
+                    .is_some_and(all_digits)
+                || a.strip_prefix('-').is_some_and(all_digits)
+        }),
+        Some("sed") => args
+            .iter()
+            .any(|a| !a.starts_with('-') && sed_quit_script(a)),
+        Some("grep") => {
+            !args.iter().any(|a| {
+                a.starts_with('-') && !a.starts_with("--") && a[1..].contains(['c', 'l', 'L'])
+            }) && args.iter().enumerate().any(|(i, a)| {
+                (*a == "-m" && args.get(i + 1).is_some_and(|n| all_digits(n)))
+                    || a.strip_prefix("-m").is_some_and(all_digits)
+                    || a.starts_with("--max-count=")
+            })
+        }
+        _ => false,
+    }
+}
+
+/// Whether a stage before a limiter passes on a prefix of what it reads as a
+/// prefix of what it writes, so a longer input could only add to its output.
+fn is_streaming_stage(cmd: &Cmd) -> bool {
+    let Some(w) = simple_words(cmd) else {
+        return false;
+    };
+    let args: Vec<&str> = w.iter().skip(1).filter_map(|a| a.as_deref()).collect();
+    match w.first().and_then(|n| n.as_deref()) {
+        Some("yes" | "seq" | "cat" | "tr" | "cut") => true,
+        Some("grep") => !args.iter().any(|a| {
+            a.starts_with('-') && !a.starts_with("--") && a[1..].contains(['c', 'l', 'L', 'q'])
+        }),
+        Some("sed") => !args
+            .iter()
+            .any(|a| *a == "-i" || *a == "-s" || *a == "-z" || a.contains('$')),
+        _ => false,
+    }
+}
+
+/// For a pipeline that starts on an endless source, the index of the first
+/// stage that stops reading, when every stage before it is a streaming one.
+/// Such a pipeline is run on a prefix of the source and, when that was too
+/// short for the reader, again on a longer one (the stages up to that reader
+/// have no effects to repeat). `None` for any other pipeline.
+fn endless_plan(p: &Pipeline) -> Option<usize> {
+    let Cmd::Simple { words, redirs, .. } = p.cmds.first()? else {
+        return None;
+    };
+    simple_words(&p.cmds[0])?;
+    let name = words.first().and_then(lit_text);
+    let device = |w: &Word| lit_text(w).is_some_and(|t| endless_device(&t).is_some());
+    let mention = matches!(name.as_deref(), Some("yes" | "seq"))
+        || words.iter().skip(1).any(device)
+        || redirs
+            .iter()
+            .any(|r| matches!(r, Redir::In(w) if device(w)));
+    if !mention {
+        return None;
+    }
+    let limiter = p.cmds.iter().position(is_limiter)?;
+    p.cmds[..limiter]
+        .iter()
+        .all(is_streaming_stage)
+        .then_some(limiter)
+}
+
+/// The refusal for an endless source with no reader that stops it.
+fn endless_refusal(sink: &mut Sink) {
+    sink.eline(&format!(
+        "{SHELL_NAME}: an endless input (yes, /dev/zero, /dev/urandom, a huge seq) has no reader that stops it, or none that stops it within {} MiB; end it with head, sed Nq or grep -m, or put only cat, tr, cut, grep and sed in between",
+        ENDLESS_LAST >> 20
+    ));
+}
+
 /// What `head` reads of its standard input, if `cmd` is a plain `head -n N`,
 /// `head -N`, `head -nN` or `head -c N` with no file operand and nothing
 /// that needs the expansion of a word: `Some((true, N))` for lines and
@@ -4795,6 +5375,7 @@ fn head_limit(cmd: &Cmd) -> Option<(bool, usize)> {
 fn wait_output_bounded(
     mut child: std::process::Child,
     guard: &crate::builtins::TreeGuard,
+    local: Option<std::time::Instant>,
 ) -> std::io::Result<Option<std::process::Output>> {
     use std::io::Read;
     fn drain<R: Read + Send + 'static>(pipe: Option<R>) -> std::sync::mpsc::Receiver<Vec<u8>> {
@@ -4819,7 +5400,8 @@ fn wait_output_bounded(
                 return Err(e);
             }
         }
-        if crate::safety::deadline_passed() {
+        if crate::safety::deadline_passed() || local.is_some_and(|t| std::time::Instant::now() >= t)
+        {
             guard.kill(&mut child);
             return Ok(None);
         }
@@ -6002,6 +6584,11 @@ fn read_file(path: &str) -> std::io::Result<Vec<u8>> {
     if path == "/dev/null" {
         return Ok(Vec::new());
     }
+    // `/dev/zero` and `/dev/urandom` have no end (and no such path on
+    // Windows): a prefix is read, as long as the pipeline now running asks for.
+    if let Some(random) = endless_device(path) {
+        return Ok(endless_bytes(random));
+    }
     std::fs::read(path)
 }
 
@@ -6009,7 +6596,10 @@ fn jail_refusal(tool: &str, path: &str) -> Option<String> {
     // `/dev/null` is no file of the workspace's or anyone's: it holds nothing.
     // Nor is `/dev/stdin`: it is this command's own input, which `read_inputs`
     // takes from the stream and never opens.
-    if matches!(path, "/dev/null" | "/dev/stdin" | "/dev/fd/0") {
+    if matches!(
+        path,
+        "/dev/null" | "/dev/stdin" | "/dev/fd/0" | "/dev/zero" | "/dev/urandom" | "/dev/random"
+    ) {
         return None;
     }
     // Under the jail, a name Windows would not keep as written is refused as
@@ -6343,6 +6933,26 @@ fn utility(name: &str, args: &[String], stdin: &mut Input, sink: &mut Sink) -> U
         "date" => date(args, sink),
         "basename" => name_tool(true, args, sink),
         "dirname" => name_tool(false, args, sink),
+        "yes" => {
+            // The line to repeat; an option is `yes`'s own (`--help`).
+            if args
+                .first()
+                .is_some_and(|a| a.len() > 1 && a.starts_with('-'))
+            {
+                return Util::Decline;
+            }
+            let mut line = if args.is_empty() {
+                "y".to_string()
+            } else {
+                args.join(" ")
+            };
+            line.push('\n');
+            let want = ENDLESS_BYTES.with(|b| b.get());
+            sink.out
+                .extend_from_slice(line.repeat((want / line.len()).max(1)).as_bytes());
+            ENDLESS_USED.with(|f| f.set(true));
+            Util::Done(0)
+        }
         "seq" => {
             let nums: Option<Vec<i64>> = args.iter().map(|a| a.parse().ok()).collect();
             let (first, step, last) = match nums.as_deref() {
@@ -6359,6 +6969,21 @@ fn utility(name: &str, args: &[String], stdin: &mut Input, sink: &mut Sink) -> U
             } else {
                 (last as i128 - first as i128) / step as i128 + 1
             };
+            // A pipeline whose reader stops (`seq 1 1000000000 | head -1`) gets
+            // a prefix of the numbers, as many as its first try holds.
+            if count > SEQ_MAX as i128 && ENDLESS_ARMED.with(|f| f.get()) {
+                let want = ENDLESS_BYTES.with(|b| b.get());
+                ENDLESS_USED.with(|f| f.set(true));
+                let mut i = first;
+                while sink.out.len() < want {
+                    sink.out.extend_from_slice(format!("{i}\n").as_bytes());
+                    match i.checked_add(step) {
+                        Some(n) => i = n,
+                        None => break,
+                    }
+                }
+                return Util::Done(0);
+            }
             if count > SEQ_MAX as i128 {
                 sink.eline(&format!(
                     "seq: {count} numbers is more than {SEQ_MAX}; nothing was printed"
@@ -7734,6 +8359,21 @@ fn test_binary_op(op: &str) -> bool {
 fn test(args: &[String], sink: &mut Sink, shell: Option<&Shell>) -> i32 {
     fn unary(op: &str, a: &str, shell: Option<&Shell>) -> Option<bool> {
         let md = std::fs::metadata(a);
+        // The devices bash always has, which Windows lacks: they exist, can
+        // be read and written, and `/dev/null` and the others are character
+        // devices; none holds data or is a regular file.
+        if md.is_err()
+            && matches!(
+                a,
+                "/dev/null" | "/dev/zero" | "/dev/urandom" | "/dev/random"
+            )
+        {
+            match op {
+                "-e" | "-a" | "-c" | "-r" | "-w" => return Some(true),
+                "-f" | "-d" | "-s" | "-b" | "-p" | "-S" | "-x" => return Some(false),
+                _ => {}
+            }
+        }
         Some(match op {
             "-e" | "-a" => md.is_ok(),
             "-f" => md.map(|m| m.is_file()).unwrap_or(false),
@@ -8482,7 +9122,7 @@ fn mktemp(args: &[String], tmpdir: Option<String>, sink: &mut Sink) -> Util {
 /// runs the same here), else the path of the program on PATH, written with `/`.
 /// A name that is none of these prints nothing. The status is 0 when any name
 /// was found (or none was given) and 1 otherwise, as in bash.
-fn command_v(args: &[String], sink: &mut Sink) -> i32 {
+fn command_v(args: &[String], path: Option<&str>, sink: &mut Sink) -> i32 {
     let mut names = args;
     if names.first().map(String::as_str) == Some("--") {
         names = &names[1..];
@@ -8498,7 +9138,7 @@ fn command_v(args: &[String], sink: &mut Sink) -> i32 {
     const BUILTINS: &[&str] = &[
         "echo", "printf", "test", "[", "cd", "pwd", "read", "export", "unset", "shift", "exit",
         "break", "continue", "true", "false", ":", "set", "if", "then", "else", "elif", "fi",
-        "for", "while", "until", "do", "done", "in", "{", "}", "!", "mktemp",
+        "for", "while", "until", "do", "done", "in", "{", "}", "!", "mktemp", "timeout", "yes",
     ];
     let mut found = false;
     for name in names {
@@ -8508,7 +9148,7 @@ fn command_v(args: &[String], sink: &mut Sink) -> i32 {
         {
             Some(name.clone())
         } else {
-            find_on_path(name)
+            find_on_path(name, path)
         };
         if let Some(s) = shown {
             sink.out.extend_from_slice(s.as_bytes());
@@ -8522,43 +9162,138 @@ fn command_v(args: &[String], sink: &mut Sink) -> i32 {
 /// The program `name` names, as `command -v` shows it: a name with a `/` must
 /// itself be an executable file; otherwise each `PATH` directory is searched
 /// (on Windows also for the `.exe`, `.cmd`, `.bat` and `.com` of the name).
-fn find_on_path(name: &str) -> Option<String> {
+fn find_on_path(name: &str, path: Option<&str>) -> Option<String> {
     if name.is_empty() {
         return None;
     }
-    let exts: &[&str] = if cfg!(windows) {
-        &["", ".exe", ".cmd", ".bat", ".com"]
-    } else {
-        &[""]
-    };
-    let runs = |p: &Path| {
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            p.is_file()
-                && p.metadata()
-                    .is_ok_and(|m| m.permissions().mode() & 0o111 != 0)
-        }
-        #[cfg(not(unix))]
-        {
-            p.is_file()
-        }
-    };
     if name.contains('/') || (cfg!(windows) && name.contains('\\')) {
+        let exts: &[&str] = if cfg!(windows) {
+            &["", ".exe", ".cmd", ".bat", ".com"]
+        } else {
+            &[""]
+        };
         return exts.iter().find_map(|e| {
             let candidate = format!("{name}{e}");
-            runs(Path::new(&candidate)).then(|| posix_path(&candidate))
+            runs_file(Path::new(&candidate)).then(|| posix_path(&candidate))
         });
     }
-    let path = std::env::var_os("PATH")?;
-    for dir in std::env::split_paths(&path) {
-        if dir.as_os_str().is_empty() {
+    let path = match path {
+        Some(p) => p.to_string(),
+        None => std::env::var("PATH").ok()?,
+    };
+    find_in(name, &path).map(|p| posix_path(&p.to_string_lossy()))
+}
+
+/// Whether `p` is a file a shell may run: on Unix one with an execute bit.
+fn runs_file(p: &Path) -> bool {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        p.is_file()
+            && p.metadata()
+                .is_ok_and(|m| m.permissions().mode() & 0o111 != 0)
+    }
+    #[cfg(not(unix))]
+    {
+        p.is_file()
+    }
+}
+
+/// The directories of a PATH value. On Unix it is split at `:`. On Windows an
+/// entry is split at `;`, and a script that builds one with the colons of a
+/// bash (`export PATH="$PWD/bin:$PATH"`) is read too: a `:` right after a
+/// single letter that starts an entry and before a slash is a drive, any other
+/// `:` separates, and an MSYS `/c/dir` entry is `C:/dir`.
+fn split_path_var(path: &str) -> Vec<String> {
+    if !cfg!(windows) {
+        return path.split(':').map(String::from).collect();
+    }
+    let mut out = Vec::new();
+    for piece in path.split(';') {
+        let chars: Vec<char> = piece.chars().collect();
+        let mut cur = String::new();
+        for (i, &c) in chars.iter().enumerate() {
+            if c == ':' {
+                let drive = cur.len() == 1
+                    && cur.chars().all(|x| x.is_ascii_alphabetic())
+                    && matches!(chars.get(i + 1), Some('/') | Some('\\'));
+                if !drive {
+                    out.push(std::mem::take(&mut cur));
+                    continue;
+                }
+            }
+            cur.push(c);
+        }
+        out.push(cur);
+    }
+    out.into_iter()
+        .filter(|d| !d.is_empty())
+        .map(|d| {
+            let b = d.as_bytes();
+            if b.len() >= 2
+                && b[0] == b'/'
+                && b[1].is_ascii_alphabetic()
+                && (b.len() == 2 || b[2] == b'/')
+            {
+                format!(
+                    "{}:/{}",
+                    (b[1] as char).to_ascii_uppercase(),
+                    &d[(3).min(d.len())..]
+                )
+            } else {
+                d
+            }
+        })
+        .collect()
+}
+
+/// The names a program may be given on Windows after its name, in PATHEXT
+/// order (lower case, with the dot).
+fn path_exts() -> Vec<String> {
+    let text = std::env::var("PATHEXT").unwrap_or_else(|_| ".COM;.EXE;.BAT;.CMD".into());
+    text.split(';')
+        .filter(|e| e.starts_with('.') && e.len() > 1)
+        .map(|e| e.to_ascii_lowercase())
+        .collect()
+}
+
+/// The program `name` runs, searching the directories of `path` in order: one
+/// lookup for `command -v` and for running a command, so they cannot disagree.
+/// Only absolute entries count, so a relative one such as `.` never runs a
+/// program from the working folder. On Windows a name takes the PATHEXT
+/// extensions (`.exe`, `.cmd`, `.bat`) in order, and a file with none is
+/// taken last (a script with a shebang).
+fn find_in(name: &str, path: &str) -> Option<std::path::PathBuf> {
+    if name.is_empty() {
+        return None;
+    }
+    let exts = if cfg!(windows) {
+        path_exts()
+    } else {
+        Vec::new()
+    };
+    let lower = name.to_ascii_lowercase();
+    let has_ext = exts.iter().any(|e| lower.ends_with(e.as_str()));
+    for dir in split_path_var(path) {
+        let dir = Path::new(&dir);
+        if !dir.is_absolute() {
             continue;
         }
-        for e in exts {
-            let candidate = dir.join(format!("{name}{e}"));
-            if runs(&candidate) {
-                return Some(posix_path(&candidate.to_string_lossy()));
+        let mut names: Vec<String> = Vec::new();
+        if cfg!(windows) {
+            if has_ext {
+                names.push(name.to_string());
+            } else {
+                names.extend(exts.iter().map(|e| format!("{name}{e}")));
+                names.push(name.to_string());
+            }
+        } else {
+            names.push(name.to_string());
+        }
+        for n in names {
+            let candidate = dir.join(n);
+            if runs_file(&candidate) {
+                return Some(candidate);
             }
         }
     }
@@ -8962,11 +9697,17 @@ fn tr(args: &[String], stdin: &mut Input, sink: &mut Sink) -> Util {
         sink.eline(&msg);
         return Util::Done(1);
     }
-    let Some((flags, sets)) = short_flags(args, "ds") else {
+    let Some((flags, sets)) = short_flags(args, "dsc") else {
         return Util::Decline;
     };
     let delete = flags.contains(&'d');
     let squeeze = flags.contains(&'s');
+    // `tr -dc SET` deletes every character that is not in SET (the filter of
+    // `tr -dc a-z </dev/urandom`); the other uses of -c go to a real tr.
+    let complement = flags.contains(&'c');
+    if complement && !(delete && !squeeze) {
+        return Util::Decline;
+    }
     if sets.is_empty() {
         sink.eline("tr: missing operand\nTry 'tr --help' for more information.");
         return Util::Done(1);
@@ -9009,7 +9750,7 @@ fn tr(args: &[String], stdin: &mut Input, sink: &mut Sink) -> Util {
     let mut out = String::with_capacity(text.len());
     let mut prev: Option<char> = None;
     for c in text.chars() {
-        if delete && set1.contains(&c) {
+        if delete && set1.contains(&c) != complement {
             continue;
         }
         let c = if translate {
@@ -9127,6 +9868,17 @@ fn head_tail(head: bool, args: &[String], stdin: &mut Input, sink: &mut Sink) ->
             sink.out
                 .extend_from_slice(format!("==> {shown} <==\n").as_bytes());
         }
+        if head && count >= 0 {
+            // `head` has what it wanted: a producer that never ends is done.
+            let have = if bytes {
+                data.len()
+            } else {
+                lines_of(data).len()
+            };
+            if have >= count as usize {
+                note_limit();
+            }
+        }
         if bytes {
             let n = data.len();
             let slice = if head {
@@ -9188,8 +9940,8 @@ fn wc(args: &[String], stdin: &mut Input, sink: &mut Sink) -> Util {
     }
     let mut status = 0;
     let from_stdin = files.is_empty();
-    let stdin_file = from_stdin && stdin.file;
-    let inputs = read_inputs_dirs("wc", &files, stdin, sink, &mut status);
+    // Standard input is a regular file (`< f`), also when `-` names it.
+    let stdin_file = stdin.file && (from_stdin || files == ["-"]);
     let count = |d: &[u8]| -> [usize; 4] {
         let text = String::from_utf8_lossy(d);
         [
@@ -9199,10 +9951,47 @@ fn wc(args: &[String], stdin: &mut Input, sink: &mut Sink) -> Util {
             d.len(),
         ]
     };
-    let rows: Vec<(String, [usize; 4])> =
-        inputs.iter().map(|(n, d)| (n.clone(), count(d))).collect();
+    // What is printed, in operand order: a row of counts, or a message. A
+    // directory has a row of zeros and then the message, as GNU prints them.
+    enum Item {
+        Row(Option<String>, [usize; 4]),
+        Msg(String),
+    }
+    let mut items: Vec<Item> = Vec::new();
+    if from_stdin {
+        items.push(Item::Row(None, count(&stdin.read_all())));
+    } else {
+        for f in &files {
+            if f == "-" {
+                items.push(Item::Row(Some("-".into()), count(&stdin.read_all())));
+                continue;
+            }
+            if jail_refusal("wc", f).is_none() && Path::new(f).is_dir() {
+                items.push(Item::Row(Some(f.clone()), [0; 4]));
+                items.push(Item::Msg(format!("wc: {f}: Is a directory")));
+                status = 1;
+                continue;
+            }
+            let mut tmp = Sink::new(ErrMode::Capture);
+            let got = read_inputs("wc", std::slice::from_ref(f), stdin, &mut tmp, &mut status);
+            for (_, d) in &got {
+                items.push(Item::Row(Some(f.clone()), count(d)));
+            }
+            if !tmp.err.is_empty() {
+                let text = String::from_utf8_lossy(&tmp.err).into_owned();
+                items.push(Item::Msg(text.trim_end_matches('\n').to_string()));
+            }
+        }
+    }
+    let rows: Vec<[usize; 4]> = items
+        .iter()
+        .filter_map(|i| match i {
+            Item::Row(_, r) => Some(*r),
+            Item::Msg(_) => None,
+        })
+        .collect();
     let mut total = [0usize; 4];
-    for (_, r) in &rows {
+    for r in &rows {
         for (t, v) in total.iter_mut().zip(r) {
             *t += v;
         }
@@ -9230,7 +10019,7 @@ fn wc(args: &[String], stdin: &mut Input, sink: &mut Sink) -> Util {
     let width = if ncols == 1 && files.len() <= 1 {
         0
     } else if stdin_file {
-        rows.first().map_or(1, |(_, r)| r[3].to_string().len())
+        rows.first().map_or(1, |r| r[3].to_string().len())
     } else if from_stdin
         || files.iter().any(|f| {
             f == "-" || f == "/dev/null" || std::fs::metadata(f).is_ok_and(|m| !m.is_file())
@@ -9246,7 +10035,7 @@ fn wc(args: &[String], stdin: &mut Input, sink: &mut Sink) -> Util {
             .sum();
         sizes.to_string().len().max(1)
     };
-    let mut emit = |vals: Vec<usize>, name: Option<&str>| {
+    let line = |vals: Vec<usize>, name: Option<&str>| -> Vec<u8> {
         let s: Vec<String> = vals.iter().map(|v| format!("{v:>width$}")).collect();
         let mut line = s.join(" ");
         if let Some(n) = name {
@@ -9254,41 +10043,21 @@ fn wc(args: &[String], stdin: &mut Input, sink: &mut Sink) -> Util {
             line.push_str(n);
         }
         line.push('\n');
-        sink.out.extend_from_slice(line.as_bytes());
+        line.into_bytes()
     };
-    // The rows are the operands that could be read, in order: name each
-    // by its operand, which is `-` for standard input.
-    let mut next_operand = 0;
-    for (name, r) in &rows {
-        let shown = if name == "(standard input)" {
-            files[next_operand..]
-                .iter()
-                .position(|f| f == "-")
-                .map(|k| {
-                    next_operand += k + 1;
-                    "-".to_string()
-                })
-        } else {
-            files[next_operand..]
-                .iter()
-                .position(|f| f == name)
-                .map(|k| {
-                    next_operand += k + 1;
-                    name.clone()
-                })
-        };
-        emit(
-            selected(r),
-            if from_stdin {
-                None
-            } else {
-                Some(shown.as_deref().unwrap_or(name.as_str()))
-            },
-        );
+    for item in &items {
+        match item {
+            Item::Row(name, r) => {
+                let text = line(selected(r), name.as_deref());
+                sink.out.extend_from_slice(&text);
+            }
+            Item::Msg(m) => sink.eline(m),
+        }
     }
     // GNU prints the total whenever there is more than one operand, readable or not.
     if files.len() > 1 {
-        emit(selected(&total), Some("total"));
+        let text = line(selected(&total), Some("total"));
+        sink.out.extend_from_slice(&text);
     }
     Util::Done(status)
 }
@@ -9310,6 +10079,8 @@ pub(crate) fn bre_translate(p: &str, keep_backrefs: bool) -> Option<String> {
     let mut out = String::new();
     let mut it = p.chars().peekable();
     let mut first = true;
+    // The piece just before was the `^` anchor.
+    let mut prev_caret = false;
     // Inside a bracket expression `^` and `$` are the bracket's own, and the
     // position that matters for `]` and a leading `^` is tracked here.
     let mut in_bracket = false;
@@ -9353,13 +10124,14 @@ pub(crate) fn bre_translate(p: &str, keep_backrefs: bool) -> Option<String> {
         }
         // Whether a `*` right after this piece is an ordinary character.
         let mut star_literal = false;
+        let was_caret = std::mem::replace(&mut prev_caret, false);
         match c {
             '[' => {
                 in_bracket = true;
                 bracket_start = true;
                 out.push('[');
             }
-            '^' if !first => out.push_str("\\^"),
+            '^' if !first || was_caret => out.push_str("\\^"),
             '$' => {
                 let mut ahead = it.clone();
                 let anchor = match ahead.next() {
@@ -9396,6 +10168,7 @@ pub(crate) fn bre_translate(p: &str, keep_backrefs: bool) -> Option<String> {
             '^' if first => {
                 out.push('^');
                 star_literal = true;
+                prev_caret = true;
             }
             _ => out.push(c),
         }
@@ -9421,6 +10194,13 @@ fn ere_to_regex(p: &str) -> Option<String> {
             Some('<') | Some('>') => out.push_str("\\b"),
             Some('`') => out.push_str("\\A"),
             Some('\'') => out.push_str("\\z"),
+            Some(o @ ('w' | 'W' | 's' | 'S' | 'b' | 'B')) => {
+                out.push('\\');
+                out.push(o);
+            }
+            // GNU grep reads `\d` as a plain `d` (newer versions warn about the
+            // stray backslash); Rust's regex would match a digit.
+            Some(o) if o.is_ascii_alphanumeric() => out.push(o),
             Some(o) => {
                 out.push('\\');
                 out.push(o);
@@ -10041,6 +10821,9 @@ fn grep(args: &[String], stdin: &mut Input, sink: &mut Sink) -> Util {
             // selected line is left to print, whatever those lines are.
             // GNU 3.11 prints those lines as context even when they match.
             let stopped = context.max.is_some_and(|m| count >= m);
+            if stopped {
+                note_limit();
+            }
             if stopped && (silent || !with_context || after_left == 0) {
                 break;
             }
@@ -11974,6 +12757,7 @@ fn sed_run(
                         }
                         put(out, &mut missing, b"");
                     }
+                    note_limit();
                     return SedEnd {
                         quit: true,
                         failed: None,
@@ -12478,6 +13262,7 @@ static RUN_TIMEOUT_STATUS: std::sync::atomic::AtomicI32 = std::sync::atomic::Ato
 
 fn run_named(src: &str, script_name: &str, args: &[String]) -> Option<i32> {
     let list = parse(src).ok()?;
+    SHELL_START.get_or_init(std::time::Instant::now);
     RUN_TIMEOUT_STATUS.store(0, std::sync::atomic::Ordering::SeqCst);
     let mut sh = Shell {
         vars: HashMap::new(),
@@ -12556,9 +13341,9 @@ pub fn in_process_reads(name: &str) -> Option<bool> {
     match name {
         "cat" | "head" | "tail" | "wc" | "grep" | "sort" | "uniq" | "cut" | "sed" | "ls"
         | "find" | "test" | "[" => Some(true),
-        "echo" | "printf" | "date" | "basename" | "dirname" | "seq" | "tr" | "mktemp" | "true"
-        | ":" | "false" | "exit" | "break" | "continue" | "export" | "unset" | "shift" | "cd"
-        | "read" | "pwd" => Some(false),
+        "echo" | "printf" | "date" | "basename" | "dirname" | "seq" | "tr" | "mktemp" | "yes"
+        | "true" | ":" | "false" | "exit" | "break" | "continue" | "export" | "unset" | "shift"
+        | "cd" | "read" | "pwd" => Some(false),
         _ => None,
     }
 }
@@ -12612,7 +13397,15 @@ pub fn refusal_hint(construct: &str) -> String {
             "case is outside the subset: rewrite it as if/elif with [ \"$x\" = a ] tests, one elif per pattern".into()
         }
         "for without in" => "a loop over the arguments needs its list spelled out: write for x in \"$@\"; do ...; done".into(),
-        "subshell" => "drop the parentheses, or group the commands with { ...; } when they need not run isolated".into(),
+        "subshell" => "a subshell ( ... ) is outside the subset: write (cd d && cmd) as `cd d && cmd; cd -`, or as `{ cd d && cmd; }`, which keeps the directory change afterwards; drop the parentheses when the commands need not run isolated".into(),
+        "select loop" => "select is an interactive menu and is outside the subset: loop over the choices with `for x in a b; do ...; done`, or read one with `read -r x`".into(),
+        "`umask` builtin" => "umask is outside the subset: drop it, and set a mode on what a script creates with chmod afterwards".into(),
+        "`read -t`" => "read -t (a time limit) is outside the subset: run the producer under `timeout N cmd | { read -r x; ...; }`, or read with `read -r x` and no limit".into(),
+        c if c.starts_with("`read -n`") || c.starts_with("`read -d`") => "read -n N and read -d DELIM run in the subset only together with -r, which also stops a backslash from being special: write `read -r -n 1 x`".into(),
+        "`export -n`" => "export -n NAME (stop exporting) is outside the subset: use `unset NAME` to drop it, or pass a value to one command with `NAME=value cmd`".into(),
+        c if c.starts_with("`export -") => "export takes only NAME and NAME=value here: `export NAME=value`".into(),
+        ">&word" => "a redirection to a file name is `> FILE 2>&1` (both outputs) or `2> FILE`; `>&N` with a descriptor number 1 or 2 is supported".into(),
+        "`PIPESTATUS` array" => "PIPESTATUS is an array, which the subset lacks: `set -o pipefail` makes a pipeline fail when any stage fails (its status is the last failing stage's); to learn which stage failed, run the stages one at a time, each into a file".into(),
         "arithmetic command ((...))" => "arithmetic commands are outside the subset: write a counter as i=$((i+1)) and a comparison as [ \"$a\" -lt \"$b\" ]".into(),
         "`command` builtin" => "only `command -v NAME` is in the subset (it prints what NAME runs and fails if there is none); to run a program just name it, `command` adds nothing here".into(),
         "`type` builtin" | "`hash` builtin" => "use `command -v NAME` to test whether a command exists and where it is".into(),
@@ -12621,7 +13414,7 @@ pub fn refusal_hint(construct: &str) -> String {
         "`let` builtin" => "let is outside the subset: write arithmetic as i=$((i+1))".into(),
         "`getopts` builtin" => "getopts is outside the subset: loop over the arguments with `while [ $# -gt 0 ]; do ...; shift; done`, testing [ \"$1\" = -v ] in if/elif".into(),
         "`eval` builtin" => "eval is outside the subset: write the command out, or write it to a script file and run it with ish -b".into(),
-        "`exec` builtin" => "exec is outside the subset: run the command on its own, then exit with its status".into(),
+        "`exec` builtin" => "exec is outside the subset: `exec cmd` is `cmd` followed by exit; `exec >f` and `exec 2>&1` redirect the rest of the script, so put the redirection on each command or on a group: `{ cmd1; cmd2; } >f 2>&1`".into(),
         "`shopt` builtin" => "shopt is outside the subset, and so are nullglob and the other options it sets: test a glob with ls or [ -e ]".into(),
         "`alias` builtin" | "`unalias` builtin" => "aliases are outside the subset: write the command out".into(),
         "`wait` builtin" | "`jobs` builtin" | "`fg` builtin" | "`bg` builtin" | "`disown` builtin" => "background jobs are outside the subset, so there is nothing to wait for: run each command in the foreground".into(),
@@ -12941,6 +13734,30 @@ fn walk_list(list: &List, out: &mut Vec<ExplainCommand>) {
     }
 }
 
+/// The command `timeout [OPTION]... DURATION COMMAND [ARG]...` runs (its words,
+/// the command first), or `None` when there is none or an option is not one the
+/// in-process `timeout` takes.
+fn timeout_inner(args: &[String]) -> Option<&[String]> {
+    let mut i = 0;
+    while let Some(a) = args.get(i) {
+        match a.as_str() {
+            "--" => {
+                i += 1;
+                break;
+            }
+            "--foreground" | "-v" | "--verbose" | "--preserve-status" => i += 1,
+            "-k" | "-s" => i += 2,
+            o if o.starts_with("--kill-after=") || o.starts_with("--signal=") => i += 1,
+            o if (o.starts_with("-k") || o.starts_with("-s")) && o.len() > 2 => i += 1,
+            o if o.len() > 1 && o.starts_with('-') => return None,
+            _ => break,
+        }
+    }
+    args.get(i)?;
+    let rest = &args[i + 1..];
+    (!rest.is_empty()).then_some(rest)
+}
+
 fn walk_pipeline(p: &Pipeline, out: &mut Vec<ExplainCommand>) {
     let no_words: &[Word] = &[];
     for cmd in &p.cmds {
@@ -12960,10 +13777,19 @@ fn walk_pipeline(p: &Pipeline, out: &mut Vec<ExplainCommand>) {
                 _ => None,
             })
             .collect();
+        let mut args: Vec<String> = words.iter().skip(1).map(literal_text).collect();
+        let mut head = head;
+        // `timeout N cmd ...` runs `cmd`: it is that command that is judged.
+        if head.as_deref() == Some("timeout") {
+            if let Some(inner) = timeout_inner(&args) {
+                head = Some(inner[0].clone());
+                args = inner[1..].to_vec();
+            }
+        }
         if head.is_some() || !writes.is_empty() || !reads.is_empty() {
             out.push(ExplainCommand {
                 head,
-                args: words.iter().skip(1).map(literal_text).collect(),
+                args,
                 writes,
                 reads,
             });

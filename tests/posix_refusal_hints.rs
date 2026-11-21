@@ -74,12 +74,12 @@ fn a_here_document_is_told_to_use_printf_or_a_file() {
 }
 
 #[test]
-fn a_subshell_is_told_to_drop_the_parentheses() {
+fn a_subshell_is_told_what_to_write_instead() {
     refused_with(
         "subshell",
         "(echo hi)\n",
         "subshell at line 1, column 1",
-        "drop the parentheses, or group the commands with { ...; }",
+        "a subshell ( ... ) is outside the subset: write (cd d && cmd) as `cd d && cmd; cd -`, or as `{ cd d && cmd; }`",
     );
 }
 
