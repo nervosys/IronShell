@@ -889,6 +889,15 @@ impl<'a> Lexer<'a> {
             }
             Some('{') => {
                 self.i += 1;
+                // `${#@}` and `${#*}` are `$#`.
+                if self.peek() == Some('#')
+                    && matches!(self.peek_at(1), Some('@' | '*'))
+                    && self.peek_at(2) == Some('}')
+                {
+                    self.i += 3;
+                    parts.push(Part::Var("#".to_string(), None, quoted));
+                    return Ok(());
+                }
                 if self.peek() == Some('#')
                     && self
                         .peek_at(1)
@@ -926,6 +935,12 @@ impl<'a> Lexer<'a> {
                         digits
                     }
                     Some(c @ ('?' | '$' | '#')) => {
+                        self.i += 1;
+                        c.to_string()
+                    }
+                    // `${@}` and `${*}` are `$@` and `$*`; with anything
+                    // before the brace (`${@:2}`) they are outside the subset.
+                    Some(c @ ('@' | '*')) if self.peek_at(1) == Some('}') => {
                         self.i += 1;
                         c.to_string()
                     }
@@ -2264,6 +2279,11 @@ struct Sink {
     out: Vec<u8>,
     err_mode: ErrMode,
     err: Vec<u8>,
+    /// Set on the sink of a redirected simple command: its own expansion
+    /// errors happen before its redirections apply, so they belong to the
+    /// standard error the command had before (`parent_err`), not to `2>&1`.
+    before_redirs: bool,
+    parent_err: Vec<u8>,
 }
 
 impl Sink {
@@ -2272,6 +2292,17 @@ impl Sink {
             out: Vec::new(),
             err_mode,
             err: Vec::new(),
+            before_redirs: false,
+            parent_err: Vec::new(),
+        }
+    }
+    /// A line for the standard error the command's expansion would write to.
+    fn expansion_eline(&mut self, s: &str) {
+        if self.before_redirs {
+            self.parent_err
+                .extend_from_slice(format!("{s}\n").as_bytes());
+        } else {
+            self.eline(s);
         }
     }
     fn ewrite(&mut self, b: &[u8]) {
@@ -2518,7 +2549,7 @@ impl Shell {
     /// the message goes to stderr, and the script ends with status 1 (127 in a `-c` string).
     fn unbound_refusal(&mut self, sink: &mut Sink) -> Option<Flow> {
         let msg = self.unbound.take()?;
-        sink.eline(&msg);
+        sink.expansion_eline(&msg);
         // bash 5.2 ends a `-c` string with 127 for a failed `${x:?}` or an
         // unbound variable, and a script file (or stdin) with 1; a failed
         // arithmetic expansion is 1 in both.
@@ -3083,6 +3114,9 @@ impl Shell {
         // it unless `inherit_errexit` is set), so a failing command in one does
         // not end the script. `set -u` is inherited. An unbound parameter the
         // substitution's own commands meet is theirs; the caller's is kept.
+        // A command substitution is a subshell: what it assigns, exports,
+        // unsets, `cd`s into or `shift`s is gone when it ends.
+        let saved = self.subshell_state();
         let errexit = std::mem::replace(&mut self.errexit, false);
         let unbound = self.unbound.take();
         let arith_failed = std::mem::take(&mut self.arith_failed);
@@ -3095,6 +3129,7 @@ impl Shell {
         let ran_external = EXTERNAL_RAN.with(|f| f.replace(outer_external));
         EXTERNAL_RAN.with(|f| f.set(outer_external || ran_external));
         self.subst_depth -= 1;
+        self.restore_subshell(saved);
         self.errexit = errexit;
         self.unbound = unbound;
         self.arith_failed = arith_failed;
@@ -3311,6 +3346,8 @@ impl Shell {
             ENDLESS_ARMED.with(|f| f.replace(plan.is_some())),
             LIMIT_HIT.with(|f| f.replace(false)),
         );
+        let saved_written = ENDLESS_WRITTEN.with(|w| std::mem::take(&mut *w.borrow_mut()));
+        let outer_refused = SOURCE_REFUSED.with(|f| f.replace(false));
         let (out_mark, err_mark) = (sink.out.len(), sink.err.len());
         let mut cap = ENDLESS_FIRST;
         let flow = if p.cmds.len() == 1 {
@@ -3407,15 +3444,24 @@ impl Shell {
         };
         // An endless source nothing stopped is not run to the end: a pipeline
         // that does not end is refused, with no output.
-        let flow =
+        let mine = ENDLESS_WRITTEN.with(|w| std::mem::take(&mut *w.borrow_mut()));
+        ENDLESS_WRITTEN.with(|w| *w.borrow_mut() = saved_written);
+        let mut flow =
             if ENDLESS_USED.with(|f| f.get()) && (plan.is_none() || !LIMIT_HIT.with(|f| f.get())) {
                 sink.out.truncate(out_mark);
                 sink.err.truncate(err_mark);
+                undo_endless_writes(mine);
                 endless_refusal(sink);
                 Flow::Next(1)
             } else {
                 flow
             };
+        // A source that refused (`seq` past its cap) fails the pipeline, and
+        // its reader's count of nothing is not shown.
+        if SOURCE_REFUSED.with(|f| f.replace(outer_refused)) && p.cmds.len() > 1 {
+            sink.out.truncate(out_mark);
+            flow = Flow::Next(1);
+        }
         ENDLESS_BYTES.with(|b| b.set(saved_flags.0));
         ENDLESS_USED.with(|f| f.set(saved_flags.1));
         ENDLESS_ARMED.with(|f| f.set(saved_flags.2));
@@ -3623,10 +3669,15 @@ impl Shell {
             ErrMode::Capture
         };
         let mut local = Sink::new(err_mode);
+        local.before_redirs = matches!(cmd, Cmd::Simple { .. });
         let flow = match local_in.as_mut() {
             Some(i) => self.run_cmd_inner(cmd, i, &mut local),
             None => self.run_cmd_inner(cmd, stdin, &mut local),
         };
+        if !local.parent_err.is_empty() {
+            let early = std::mem::take(&mut local.parent_err);
+            sink.ewrite(&early);
+        }
         if err_mode == ErrMode::Capture {
             let err = std::mem::take(&mut local.err);
             if let Err(msg) = d2.write(&err, sink) {
@@ -4089,6 +4140,46 @@ impl Shell {
                 } else {
                     target
                 };
+                // CDPATH: a relative name that does not start with `./` or
+                // `../` is looked for under each directory of it, in order (an
+                // empty entry is the current directory); when none holds it,
+                // the name itself is tried. The new directory is printed when
+                // it was found under a named entry. In agent mode CDPATH
+                // steers the shell and is not read.
+                let mut cdpath_print = false;
+                let target = match (rest.first(), self.var("CDPATH")) {
+                    (Some(t), Some(cdpath))
+                        if t != "-"
+                            && !t.is_empty()
+                            && !cdpath.is_empty()
+                            && crate::safety::current_mode() != crate::safety::Mode::Agent
+                            && !matches!(t.as_str(), "." | "..")
+                            && !t.starts_with(['/', '\\'])
+                            && !t.starts_with("./")
+                            && !t.starts_with("../")
+                            && !(cfg!(windows) && t.as_bytes().get(1) == Some(&b':')) =>
+                    {
+                        let entries = split_path_entries(&cdpath, true);
+                        let mut found = None;
+                        for entry in entries {
+                            let base = if entry.is_empty() {
+                                "."
+                            } else {
+                                entry.as_str()
+                            };
+                            let cand = format!("{}/{}", base.trim_end_matches('/'), t);
+                            if !crate::safety::names_a_remote_share(&cand)
+                                && std::path::Path::new(&cand).is_dir()
+                            {
+                                cdpath_print = !entry.is_empty();
+                                found = Some(cand);
+                                break;
+                            }
+                        }
+                        found.unwrap_or(target)
+                    }
+                    _ => target,
+                };
                 // With --workspace set, a cd may not leave the workspace. Otherwise
                 // pwd reports the outside folder while a relative write still
                 // lands inside the jail, and the two disagree. The check is only
@@ -4116,7 +4207,7 @@ impl Shell {
                             self.set_var("PWD", posix_path(&d.to_string_lossy()));
                         }
                         // `cd -` says where it went, as bash does.
-                        if rest.first().map(|t| t == "-").unwrap_or(false) {
+                        if cdpath_print || rest.first().map(|t| t == "-").unwrap_or(false) {
                             sink.out.extend_from_slice(logical_pwd().as_bytes());
                             sink.out.push(b'\n');
                         }
@@ -4209,6 +4300,16 @@ impl Shell {
                 Some(path) => {
                     let text = path.to_string_lossy().into_owned();
                     if cfg!(windows) && path.extension().is_none() && has_shell_shebang(&text) {
+                        // A script found on PATH is a program, not the user's
+                        // script. One outside the subset (Git's `gunzip` and
+                        // `zcat` use `case`) runs with the real `sh` through the
+                        // effect gate, as any other program does; with no `sh`
+                        // on PATH it is refused, naming the script.
+                        if let Some(flow) =
+                            self.path_script_outside_subset(&text, argv, env, stdin, sink)
+                        {
+                            return flow;
+                        }
                         return Flow::Next(self.run_script_child(
                             &text,
                             &argv[1..],
@@ -4221,7 +4322,13 @@ impl Shell {
                     // the system's own PATH the usual resolution keeps the
                     // program's name as its argv[0] (the GNU tools of Git for
                     // Windows print it in their messages).
-                    if self.path_was_set(env) {
+                    // A program that is not an `.exe` (`more.com`) is run by
+                    // its path, as the system's own lookup would not find it.
+                    let not_exe = cfg!(windows)
+                        && path
+                            .extension()
+                            .is_some_and(|e| !e.eq_ignore_ascii_case("exe"));
+                    if self.path_was_set(env) || not_exe {
                         RESOLVED_PROGRAM.with(|r| *r.borrow_mut() = Some(text));
                     }
                 }
@@ -4235,6 +4342,43 @@ impl Shell {
         let flow = Flow::Next(self.external(argv, env, stdin, sink, why.as_deref()));
         RESOLVED_PROGRAM.with(|r| *r.borrow_mut() = None);
         flow
+    }
+
+    /// A shell script found on PATH whose text the subset does not run: `Some`
+    /// with the result of running it with the real `sh` (through the effect
+    /// gate, with the script named in the approval), or of refusing it when
+    /// there is no `sh`. `None` for a script the subset runs, or whose text
+    /// cannot be read here.
+    fn path_script_outside_subset(
+        &mut self,
+        script: &str,
+        argv: &[String],
+        env: &[(String, String)],
+        stdin: &mut Input,
+        sink: &mut Sink,
+    ) -> Option<Flow> {
+        if jail_refusal("sh", script).is_some() {
+            return None;
+        }
+        let bytes = std::fs::read(script).ok().filter(|b| b.len() <= 4 << 20)?;
+        let src = String::from_utf8_lossy(&bytes);
+        let why = refusal(&src).filter(|r| !r.syntax)?;
+        let sh = self
+            .command_path(env)
+            .and_then(|path| find_in("sh", &path))
+            .map(|p| p.to_string_lossy().into_owned());
+        let Some(sh) = sh else {
+            sink.eline(&format!(
+                "{SHELL_NAME}: {script}: this shell script, found on PATH, uses {} at line {}, which is outside the in-process POSIX subset, and no `sh` was found on PATH to run it",
+                why.construct, why.line
+            ));
+            return Some(Flow::Next(POLICY_DENY_STATUS));
+        };
+        let mut sh_argv = vec![sh, script.to_string()];
+        sh_argv.extend(argv[1..].iter().cloned());
+        let status = self.external(&sh_argv, env, stdin, sink, None);
+        RESOLVED_PROGRAM.with(|r| *r.borrow_mut() = None);
+        Some(Flow::Next(status))
     }
 
     /// `timeout [OPTION] DURATION COMMAND [ARG]...`: run the command and end it
@@ -4251,6 +4395,10 @@ impl Shell {
     ) -> Option<Flow> {
         let mut i = 0;
         let mut preserve = false;
+        // `-s KILL`: the command is ended by SIGKILL, and GNU timeout then
+        // exits 128+9, not 124 (even with `--preserve-status`).
+        let mut sigkill = false;
+        let is_kill = |s: &str| matches!(s, "KILL" | "SIGKILL" | "9" | "kill" | "sigkill");
         while let Some(a) = args.get(i) {
             match a.as_str() {
                 "--" => {
@@ -4262,9 +4410,21 @@ impl Shell {
                     preserve = true;
                     i += 1;
                 }
-                "-k" | "-s" => i += 2,
-                o if o.starts_with("--kill-after=") || o.starts_with("--signal=") => i += 1,
-                o if (o.starts_with("-k") || o.starts_with("-s")) && o.len() > 2 => i += 1,
+                "-s" => {
+                    sigkill = args.get(i + 1).is_some_and(|s| is_kill(s));
+                    i += 2;
+                }
+                "-k" => i += 2,
+                o if o.starts_with("--signal=") => {
+                    sigkill = is_kill(&o["--signal=".len()..]);
+                    i += 1;
+                }
+                o if o.starts_with("-s") && o.len() > 2 => {
+                    sigkill = is_kill(&o[2..]);
+                    i += 1;
+                }
+                o if o.starts_with("--kill-after=") => i += 1,
+                o if o.starts_with("-k") && o.len() > 2 => i += 1,
                 o if o.len() > 1 && o.starts_with('-') => return None,
                 _ => break,
             }
@@ -4313,6 +4473,7 @@ impl Shell {
         let fired = LOCAL_TIMED_OUT.with(|f| f.replace(timed_before));
         LOCAL_DEADLINE.with(|d| d.set(outer));
         Some(match flow {
+            Flow::Next(_) if fired && sigkill => Flow::Next(137),
             Flow::Next(_) if fired && preserve => Flow::Next(143),
             other => other,
         })
@@ -4747,6 +4908,16 @@ impl Shell {
         self.apply_child_env(&mut cmd, &pairs);
         crate::safety::strip_ironshell_env(&mut cmd);
         if cfg!(windows) {
+            // Windows looks a bare name up in its own system directories
+            // before PATH, so `expand` or `bash` would run System32's. The
+            // child's PATH is searched first when the command has one of its
+            // own, so it is given this process's: the program that runs is the
+            // one `command -v` names.
+            if !pairs.iter().any(|(k, _)| k.eq_ignore_ascii_case("PATH")) {
+                if let Some(path) = std::env::var_os("PATH") {
+                    cmd.env("PATH", path);
+                }
+            }
             // A program built on the MSYS or Cygwin runtime (the GNU tools of
             // Git for Windows) re-reads its command line and expands globs and
             // braces in it, which mangles a script such as sed's `2{p;b};p`.
@@ -4929,12 +5100,36 @@ impl Shell {
                 return 126;
             }
         };
-        EXTERNAL_PROGRAMS.with(|p| p.borrow_mut().push(program_name));
+        EXTERNAL_PROGRAMS.with(|p| p.borrow_mut().push(program_name.clone()));
+        // When the input is a prefix of an endless stream, the program that
+        // reads it is watched: if it exits while its input is still open (or
+        // stops reading and the pipe breaks), it stopped by itself, as `awk
+        // 'NR==3{exit}'` does, and the prefix was enough (see `endless_plan`).
+        let watch = ENDLESS_USED.with(|f| f.get());
+        let reader_done = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         let writer = if feed {
             let data = stdin.read_all();
+            let grace = std::time::Duration::from_millis(match data.len() {
+                0..=0x10400 => 1000,
+                0x10401..=0x100400 => 2000,
+                _ => 4000,
+            });
+            let done = std::sync::Arc::clone(&reader_done);
             child.stdin.take().map(|mut w| {
-                std::thread::spawn(move || {
-                    let _ = w.write_all(&data);
+                std::thread::spawn(move || -> bool {
+                    if w.write_all(&data).is_err() {
+                        return true;
+                    }
+                    if watch {
+                        let t = std::time::Instant::now();
+                        while t.elapsed() < grace {
+                            if done.load(std::sync::atomic::Ordering::SeqCst) {
+                                return true;
+                            }
+                            std::thread::sleep(std::time::Duration::from_millis(5));
+                        }
+                    }
+                    false
                 })
             })
         } else {
@@ -5013,10 +5208,12 @@ impl Shell {
                     return 1;
                 }
             };
+            reader_done.store(true, std::sync::atomic::Ordering::SeqCst);
             if let Some(w) = writer {
                 let _ = w.join();
             }
-            sink.out.extend_from_slice(&stdout);
+            sink.out
+                .extend_from_slice(&native_text(&program_name, stdout));
             if let Some(t) = err_thread {
                 let err = t.join().unwrap_or_default();
                 if !err.is_empty() {
@@ -5040,10 +5237,14 @@ impl Shell {
                 }
             }
         };
+        reader_done.store(true, std::sync::atomic::Ordering::SeqCst);
         if let Some(w) = writer {
-            let _ = w.join();
+            if w.join().unwrap_or(false) && watch {
+                LIMIT_HIT.with(|f| f.set(true));
+            }
         }
-        sink.out.extend_from_slice(&out.stdout);
+        sink.out
+            .extend_from_slice(&native_text(&program_name, out.stdout));
         if !out.stderr.is_empty() {
             sink.ewrite(&out.stderr);
         }
@@ -5106,6 +5307,70 @@ fn is_native_program(p: &str) -> bool {
     }
 }
 
+/// The output of a native Windows program (a PE executable that is neither on
+/// the MSYS runtime nor this shell) with its CRLF line ends read as LF, when
+/// the output is text: it holds no NUL, and every LF has a CR before it. `jq
+/// -r .version p.json` then prints `1.2.3\n` to the script's stdout and into a
+/// file, as it does on Linux. Binary output, a mixed text, the output of a
+/// program on the MSYS runtime and the output of the in-process tools are
+/// returned as they are.
+fn native_text(program: &str, out: Vec<u8>) -> Vec<u8> {
+    if !cfg!(windows) || !out.contains(&b'\n') || out.contains(&0) {
+        return out;
+    }
+    let lf = out.iter().filter(|b| **b == b'\n').count();
+    let crlf = out.windows(2).filter(|w| w == b"\r\n").count();
+    if lf != crlf || !is_native_pe(program) {
+        return out;
+    }
+    let mut v = Vec::with_capacity(out.len());
+    for (i, &b) in out.iter().enumerate() {
+        if b == b'\r' && out.get(i + 1) == Some(&b'\n') {
+            continue;
+        }
+        v.push(b);
+    }
+    v
+}
+
+/// Whether `program` (a path, or a name on PATH) is a native Windows PE
+/// executable: not on the MSYS runtime, not a script, not this shell.
+#[cfg(windows)]
+fn is_native_pe(program: &str) -> bool {
+    let path = if program.contains(['/', '\\']) {
+        let p = std::path::PathBuf::from(program);
+        if p.is_file() {
+            p
+        } else {
+            p.with_extension("exe")
+        }
+    } else {
+        // The system's own folders count here (`cmd`, `ipconfig`), unlike for
+        // a GNU tool's lookup.
+        match std::env::var("PATH")
+            .ok()
+            .and_then(|path| find_in(program, &path))
+        {
+            Some(p) => p,
+            None => return false,
+        }
+    };
+    if std::env::current_exe().is_ok_and(|me| me == path) {
+        return false;
+    }
+    let mut head = [0u8; 2];
+    let is_pe = std::fs::File::open(&path)
+        .and_then(|mut f| std::io::Read::read_exact(&mut f, &mut head))
+        .is_ok()
+        && &head == b"MZ";
+    is_pe && !is_msys_program(program)
+}
+
+#[cfg(not(windows))]
+fn is_native_pe(_program: &str) -> bool {
+    false
+}
+
 /// The text a pipeline stage hands to the next one. A native Windows program
 /// (`jq`, `cmd`, `git`) ends its lines with CRLF, which a script written for
 /// Linux does not expect in `jq -r .a | while read n` or `... | grep -x x`;
@@ -5131,6 +5396,56 @@ fn pipe_text(out: Vec<u8>) -> Vec<u8> {
         i += 1;
     }
     v
+}
+
+thread_local! {
+    /// Set when a source of a pipeline refused to run (`seq` past its cap):
+    /// the pipeline fails and its reader's output is not shown.
+    static SOURCE_REFUSED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// The files an endless run wrote, with their length before: `None` when
+    /// the run created them. A refused run takes them back (see
+    /// `undo_endless_writes`).
+    static ENDLESS_WRITTEN: std::cell::RefCell<Vec<(String, Option<u64>, bool)>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// A run of an endless source that nothing stopped is refused, and the files
+/// it wrote are not left half-written (a prefix of 64 KiB to 16 MiB of `y`):
+/// a file the run created is removed, and one it appended to is cut back to its
+/// earlier length. A file that `>` truncated stays empty, as `>` left it.
+fn undo_endless_writes(files: Vec<(String, Option<u64>, bool)>) {
+    for (path, before, append) in files {
+        match before {
+            None => {
+                let _ = std::fs::remove_file(&path);
+            }
+            Some(len) if append => {
+                if let Ok(f) = std::fs::OpenOptions::new().write(true).open(&path) {
+                    let _ = f.set_len(len);
+                }
+            }
+            Some(_) => {
+                if let Ok(f) = std::fs::OpenOptions::new().write(true).open(&path) {
+                    let _ = f.set_len(0);
+                }
+            }
+        }
+    }
+}
+
+/// Note that `path` is about to be written while an endless source's prefix
+/// is in play (see `undo_endless_writes`).
+fn note_endless_write(path: &str, append: bool) {
+    if !ENDLESS_USED.with(|f| f.get()) {
+        return;
+    }
+    ENDLESS_WRITTEN.with(|w| {
+        let mut w = w.borrow_mut();
+        if !w.iter().any(|(p, _, _)| p == path) {
+            let before = std::fs::metadata(path).ok().map(|m| m.len());
+            w.push((path.to_string(), before, append));
+        }
+    });
 }
 
 thread_local! {
@@ -5258,8 +5573,40 @@ fn is_limiter(cmd: &Cmd) -> bool {
                     || a.starts_with("--max-count=")
             })
         }
-        _ => false,
+        // A program run as one (`awk 'NR==3{exit}'`) may stop reading: it is
+        // given a prefix, and when it exits before it has read to the end of
+        // it, it stopped (see `Shell::run_piped`).
+        Some(name) => is_external_name(name),
+        None => false,
     }
+}
+
+/// Whether a command name is run as a program: not a builtin of the shell and
+/// not a tool the subset runs itself.
+fn is_external_name(name: &str) -> bool {
+    !name.contains(['/', '\\'])
+        && !SUBSET_NAMES.contains(&name)
+        && !matches!(
+            name,
+            "true"
+                | ":"
+                | "false"
+                | "exit"
+                | "break"
+                | "continue"
+                | "export"
+                | "unset"
+                | "set"
+                | "shift"
+                | "cd"
+                | "read"
+                | "command"
+                | "timeout"
+                | "mktemp"
+                | "pwd"
+                | "yes"
+                | "seq"
+        )
 }
 
 /// Whether a stage before a limiter passes on a prefix of what it reads as a
@@ -5271,6 +5618,7 @@ fn is_streaming_stage(cmd: &Cmd) -> bool {
     let args: Vec<&str> = w.iter().skip(1).filter_map(|a| a.as_deref()).collect();
     match w.first().and_then(|n| n.as_deref()) {
         Some("yes" | "seq" | "cat" | "tr" | "cut") => true,
+        Some("timeout") => args.iter().any(|a| matches!(*a, "yes" | "seq")),
         Some("grep") => !args.iter().any(|a| {
             a.starts_with('-') && !a.starts_with("--") && a[1..].contains(['c', 'l', 'L', 'q'])
         }),
@@ -5293,7 +5641,15 @@ fn endless_plan(p: &Pipeline) -> Option<usize> {
     simple_words(&p.cmds[0])?;
     let name = words.first().and_then(lit_text);
     let device = |w: &Word| lit_text(w).is_some_and(|t| endless_device(&t).is_some());
+    // `timeout 1 yes | head -1`: the program the timeout runs is the source.
+    let timed = name.as_deref() == Some("timeout")
+        && words
+            .iter()
+            .skip(1)
+            .filter_map(lit_text)
+            .any(|w| matches!(w.as_str(), "yes" | "seq"));
     let mention = matches!(name.as_deref(), Some("yes" | "seq"))
+        || timed
         || words.iter().skip(1).any(device)
         || redirs
             .iter()
@@ -5895,6 +6251,7 @@ fn write_file(path: &str, data: &[u8], append: bool) -> Result<(), String> {
         crate::safety::Effect::WriteLocal,
         vec![path.to_string()],
     );
+    note_endless_write(path, append);
     let res = write_file_unrecorded(path, data, append);
     crate::journal::settle(mark, res.is_ok());
     res
@@ -6988,6 +7345,7 @@ fn utility(name: &str, args: &[String], stdin: &mut Input, sink: &mut Sink) -> U
                 sink.eline(&format!(
                     "seq: {count} numbers is more than {SEQ_MAX}; nothing was printed"
                 ));
+                SOURCE_REFUSED.with(|f| f.set(true));
                 return Util::Done(1);
             }
             let mut i = first;
@@ -9205,6 +9563,12 @@ fn runs_file(p: &Path) -> bool {
 /// single letter that starts an entry and before a slash is a drive, any other
 /// `:` separates, and an MSYS `/c/dir` entry is `C:/dir`.
 fn split_path_var(path: &str) -> Vec<String> {
+    split_path_entries(path, false)
+}
+
+/// [`split_path_var`], keeping the empty entries when `keep_empty` (CDPATH:
+/// an empty entry is the current directory).
+fn split_path_entries(path: &str, keep_empty: bool) -> Vec<String> {
     if !cfg!(windows) {
         return path.split(':').map(String::from).collect();
     }
@@ -9227,7 +9591,7 @@ fn split_path_var(path: &str) -> Vec<String> {
         out.push(cur);
     }
     out.into_iter()
-        .filter(|d| !d.is_empty())
+        .filter(|d| keep_empty || !d.is_empty())
         .map(|d| {
             let b = d.as_bytes();
             if b.len() >= 2
@@ -14315,7 +14679,15 @@ impl ArithEval<'_> {
 
     fn unary(&mut self) -> ArithResult {
         self.ws();
-        if self.starts("++") || self.starts("--") {
+        // `++` and `--` before a name step it; before anything else (`--3`)
+        // they are two signs.
+        let names_next = self
+            .s
+            .iter()
+            .skip(self.i + 2)
+            .find(|c| !c.is_whitespace())
+            .is_some_and(|c| c.is_alphabetic() || *c == '_');
+        if (self.starts("++") || self.starts("--")) && names_next {
             let delta = if self.starts("++") { 1 } else { -1 };
             self.i += 2;
             let Some(name) = self.ident() else {

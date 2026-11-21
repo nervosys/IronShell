@@ -301,10 +301,11 @@ fn an_endless_producer_nothing_stops_is_refused_not_hung() {
         assert!(err.contains("head, sed Nq or grep -m"), "{script}: {err}");
         let _ = std::fs::remove_dir_all(&dir);
     }
-    // The old cap still names itself for a seq nothing reads in part.
+    // The old cap still names itself for a seq nothing reads in part; the
+    // pipeline fails and its reader's count is not shown (round 65c).
     let dir = scratch("seqcap");
     let (out, err, _) = ish_raw("seq 1 100000000 | wc -l", &dir);
-    assert_eq!(String::from_utf8_lossy(&out), "0\n");
+    assert_eq!(String::from_utf8_lossy(&out), "");
     assert!(err.contains("seq: 100000000 numbers is more than"), "{err}");
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -504,8 +505,8 @@ fn agent_mode_keeps_the_path_refusal() {
 }
 
 /// The CR of a native Windows program's line ends is dropped when its output
-/// feeds a pipeline stage, as it is in `$( )`; output to a file or a terminal
-/// keeps it. The in-process tools are not touched.
+/// feeds a pipeline stage, as it is in `$( )`. The in-process tools are not
+/// touched. (Round 65c drops it on the script's stdout and in a file too.)
 #[test]
 fn crlf_of_a_native_program_in_a_pipe() {
     // The in-process tools write what they are given, on every platform.
@@ -530,7 +531,8 @@ fn crlf_of_a_native_program_in_a_pipe() {
             ),
             (r#"cmd /c echo x | grep -x x | wc -l"#, b"1\n", 0),
             (r#"cmd /c echo x | cat | wc -c"#, b"2\n", 0),
-            (r#"cmd /c echo x > out.txt; wc -c < out.txt"#, b"3\n", 0),
+            // (Since round 65c the CR is dropped in a file too.)
+            (r#"cmd /c echo x > out.txt; wc -c < out.txt"#, b"2\n", 0),
             (r#"x=$(cmd /c echo hi); echo "${#x}""#, b"2\n", 0),
         ],
     );
