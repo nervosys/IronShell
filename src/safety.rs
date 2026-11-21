@@ -6895,13 +6895,16 @@ pub fn guard_exec(builtin: &str, command: impl Into<String>) -> Result<(), Safet
 /// exports. They are bound into the approval, sorted by name, so a change of
 /// name or value gives a new token. With no pairs the descriptor, and so the
 /// token, is exactly [`guard_exec`]'s. `removed` names inherited variables the
-/// child does not get, and is bound the same way.
+/// child does not get, and is bound the same way. `redirs` are the redirections
+/// around the command (`>path`, `>>path`, `<path`, `2>path`, `&>path`, as
+/// resolved paths), bound in order.
 pub fn guard_exec_env(
     builtin: &str,
     command: impl Into<String>,
     argv: &[String],
     env: &[(String, String)],
     removed: &[String],
+    redirs: &[String],
 ) -> Result<(), SafetyError> {
     let command = command.into();
     // Names that are one variable to the system are one entry, the later
@@ -6927,6 +6930,14 @@ pub fn guard_exec_env(
         let pairs: Vec<Json> = sorted.iter().map(|(k, v)| json!([k, v])).collect();
         if let Some(map) = radius.as_object_mut() {
             map.insert("child_env".to_string(), Json::Array(pairs));
+        }
+    }
+    // The files the command's redirections write and read (`>/abs/f`,
+    // `>>/abs/f`, `</abs/f`): `env printf x` and `env printf x > f` are two
+    // actions. With none, the descriptor is unchanged.
+    if !redirs.is_empty() {
+        if let Some(map) = radius.as_object_mut() {
+            map.insert("redirections".to_string(), json!(redirs));
         }
     }
     // Inherited variables the command's child does not get (`unset NAME`).
@@ -10250,7 +10261,9 @@ lazy_static! {
         // `is_secret_name`, the rule record keys use, so the text and record
         // forms cannot drift apart. Group 1 is the name and separator, group 2
         // the name, group 3 the value.
-        r#"(?i)(([\p{L}\p{N}_.\-]+)["']?\s*[:=]\s*["']?)((?:[^\s"',}\\]|\\[^nrtbfu"\\/\s]){4,})"#
+        // Round 65: `=>` and `:=` also separate; a YAML tag (`!!str`) and a
+        // string prefix (`f"..."`, `b'...'`) may stand before the value.
+        r#"(?i)(([\p{L}\p{N}_.\-]+)["']?\s*(?:=>|:=|[:=])\s*(?:![A-Za-z0-9!:/._-]*[ \t]+)?(?:[rbfu]{1,2}["']|["']?))((?:[^\s"',}\\]|\\[^nrtbfu"\\/\s]){4,})"#
     ).unwrap();
 
     /// A JSON object whose `name` (or `key`, `variable`, `var`, `env`) member
@@ -10296,13 +10309,42 @@ lazy_static! {
 
     /// The start of a value that is code, not a literal: `os.environ[...]`,
     /// `getenv(...)`, `input(...)`, `ENV[...]`.
+    /// A bare call has no digit in its name (`hunter2(` is a password); a dotted
+    /// one may (`base64.b64decode(`).
     static ref CODE_CALL_RE: regex::Regex = regex::Regex::new(
-        r#"^[A-Za-z_$][A-Za-z0-9_$.]*[(\[]"#
+        r#"^(?:[A-Za-z_$][A-Za-z_$]*|[A-Za-z_$][A-Za-z0-9_$]*(?:\.[A-Za-z_$][A-Za-z0-9_$]*)+)[(\[]"#
     ).unwrap();
 
     /// A dotted identifier path (`os.environ`, `process.env.API_KEY;`).
     static ref DOTTED_PATH_RE: regex::Regex = regex::Regex::new(
-        r#"^[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)+[;,)]*$"#
+        r#"^([A-Za-z_][A-Za-z0-9_]*)((?:\.[A-Za-z_][A-Za-z0-9_]*)+)[;,)]*$"#
+    ).unwrap();
+
+    /// A quoted string inside a statement: group 1 is a double-quoted body,
+    /// group 2 a single-quoted one.
+    static ref QUOTED_LITERAL_RE: regex::Regex = regex::Regex::new(
+        r#""([^"\\\r\n]{1,200})"|'([^'\\\r\n]{1,200})'"#
+    ).unwrap();
+
+    /// `curl -u user:password` and `--user user:password`. Group 1 is kept.
+    static ref CURL_USER_RE: regex::Regex = regex::Regex::new(
+        r#"(?m)(\bcurl\b[^\r\n]*?[ \t](?:-u|--user)(?:=|[ \t]+)["']?[^\s:"']+:)([^\s"']+)"#
+    ).unwrap();
+
+    /// `docker login -p x` and `podman login -p x`. Group 1 is kept.
+    static ref DOCKER_LOGIN_RE: regex::Regex = regex::Regex::new(
+        r#"(?m)(\b(?:docker|podman)[ \t]+login\b[^\r\n]*?[ \t]-p[ \t]+["']?)([^\s"']+)"#
+    ).unwrap();
+
+    /// `mysql -pSECRET`, with no space, as mysql reads it. Group 1 is kept.
+    static ref MYSQL_P_RE: regex::Regex = regex::Regex::new(
+        r#"(?m)(\bmysql(?:dump|admin|import|check|show)?\b[^\r\n]*?[ \t]-p)([^\s"'-][^\s"']*)"#
+    ).unwrap();
+
+    /// PowerShell `Set-Item env:NAME value`. Group 1 is kept through the
+    /// opening quote, group 2 is the name, group 3 the value.
+    static ref SET_ITEM_ENV_RE: regex::Regex = regex::Regex::new(
+        r#"(?i)(\b(?:Set-Item|si)[ \t]+(?:-Path[ \t]+)?env:([A-Za-z_][A-Za-z0-9_]*)[ \t]+(?:-Value[ \t]+)?["']?)([^\s"']+)"#
     ).unwrap();
 
     /// `Digest username="u", realm="r", response="..."` with no header name in
@@ -11191,7 +11233,14 @@ fn redact_str_counted(s: &str) -> (String, usize) {
         cur = text;
         count += replaced;
     }
-    if cur.contains("--") || cur.contains("$env:") || cur.contains("ENV") || cur.contains("env") {
+    if cur.contains("--")
+        || cur.contains("$env:")
+        || cur.contains("ENV")
+        || cur.contains("env")
+        || cur.contains("curl")
+        || cur.contains("login")
+        || cur.contains("mysql")
+    {
         let (text, replaced) = redact_env_and_flags(&cur);
         cur = text;
         count += replaced;
@@ -11352,7 +11401,109 @@ fn assignment_value_hides(name: &str, value: &str) -> bool {
 /// none of those (`abc123def456`, `hunter2`, `sk-...`) is a literal, as a `.env`
 /// file writes it.
 fn value_is_code(value: &str) -> bool {
-    value.starts_with('$') || CODE_CALL_RE.is_match(value) || DOTTED_PATH_RE.is_match(value)
+    if value.starts_with('$') {
+        return true;
+    }
+    if CODE_CALL_RE.is_match(value) {
+        // A call ends its first bracket and goes on as code (`)`, `;`, `.m()`).
+        // `pa(ss)wordLEAK` has a word right after the bracket: a literal.
+        let after = value
+            .find([')', ']'])
+            .and_then(|i| value[i + 1..].chars().next());
+        return !after.is_some_and(|c| c.is_alphanumeric() || c == '_');
+    }
+    // A dotted path is code when it starts at a name code reads values from
+    // (`os.environ`, `process.env.K`, `config.db.password`); a password that
+    // is dotted words (`abcd.efgh.ijkl`) is not.
+    if let Some(c) = DOTTED_PATH_RE.captures(value) {
+        const ROOTS: &[&str] = &[
+            "os",
+            "process",
+            "env",
+            "self",
+            "this",
+            "config",
+            "settings",
+            "request",
+            "req",
+            "std",
+            "system",
+            "environment",
+            "secrets",
+            "credentials",
+            "creds",
+            "cfg",
+            "conf",
+            "options",
+            "opts",
+            "args",
+            "params",
+            "context",
+            "ctx",
+            "state",
+            "props",
+            "vault",
+            "rails",
+            "app",
+            "window",
+            "global",
+            "globalthis",
+            "sys",
+            "data",
+            "row",
+            "user",
+            "form",
+        ];
+        return ROOTS.contains(&c[1].to_ascii_lowercase().as_str());
+    }
+    false
+}
+
+/// Whether a quoted string in code is a secret literal: 8 or more characters,
+/// no white space, a mix of letters and digits or of upper and lower case, and
+/// no environment variable name (`API_KEY`), path or word list (`Content-Type`).
+fn literal_looks_secret(lit: &str) -> bool {
+    if lit.chars().count() < 8
+        || lit.contains(char::is_whitespace)
+        || lit == REDACTION_MARKER
+        || looks_like_a_path(lit)
+        || is_capability_token(lit)
+    {
+        return false;
+    }
+    // `API_KEY`, `DATABASE_URL2`: an environment variable name. Capitals and
+    // digits with no underscore (`AKIAIOSFODNN7LEAK3X`) read as a key.
+    if lit
+        .chars()
+        .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_')
+        && (lit.contains('_') || !lit.chars().any(|c| c.is_ascii_digit()))
+    {
+        return false;
+    }
+    let letters_only_words = lit
+        .split(['-', '_', '.', ':'])
+        .all(|w| !w.is_empty() && w.chars().all(|c| c.is_ascii_alphabetic()));
+    if letters_only_words && lit.contains(['-', '_', '.', ':']) {
+        return false;
+    }
+    let digit = lit.chars().any(|c| c.is_ascii_digit());
+    let lower = lit.chars().any(|c| c.is_lowercase());
+    // A capital after the first character: `Authorization` is one word, and
+    // `ZkAbQw` is not.
+    let inner_upper = lit.chars().skip(1).any(|c| c.is_uppercase());
+    let upper = lit.chars().any(|c| c.is_uppercase());
+    (digit && (upper || lower)) || (inner_upper && lower)
+}
+
+/// The quoted literals of `rest` (the part of a line after a code value) that
+/// look like secrets, as byte ranges of their bodies.
+fn secret_literals_in(rest: &str) -> Vec<std::ops::Range<usize>> {
+    QUOTED_LITERAL_RE
+        .captures_iter(rest)
+        .filter_map(|c| c.get(1).or_else(|| c.get(2)))
+        .filter(|m| literal_looks_secret(m.as_str()))
+        .map(|m| m.range())
+        .collect()
 }
 
 /// Redact the secret values of `name=value` and `name: value` forms in text.
@@ -11382,7 +11533,31 @@ fn redact_assignments(text: &str) -> (String, usize) {
         // (`os.environ['K']`, `input(...)`, `$VAR`, `process.env.K`) holds no
         // secret.
         let quoted = caps[1].ends_with(['"', '\'']);
-        if (quoted || !value_is_code(value)) && assignment_value_hides(&caps[2], value) {
+        let is_code = !quoted && value_is_code(value);
+        // The value is code under a secret name: a string literal later in the
+        // statement (`os.getenv("S", "Zk3p...")`, `get() or "..."`) may still be
+        // the secret, and is redacted when it looks like one.
+        if is_code && is_secret_name(&caps[2]) {
+            let line_end = text[val.end()..]
+                .find(['\n', '\r'])
+                .map_or(text.len(), |i| val.end() + i);
+            let spans = secret_literals_in(&text[val.end()..line_end]);
+            if !spans.is_empty() {
+                out.push_str(&text[last..val.end()]);
+                let mut at = val.end();
+                for r in &spans {
+                    out.push_str(&text[at..val.end() + r.start]);
+                    out.push_str(REDACTION_MARKER);
+                    at = val.end() + r.end;
+                }
+                out.push_str(&text[at..line_end]);
+                last = line_end;
+                pos = line_end;
+                replaced += spans.len();
+                continue;
+            }
+        }
+        if (quoted || !is_code) && assignment_value_hides(&caps[2], value) {
             let word_len = value.trim_end_matches(')').len();
             out.push_str(&text[last..val.start()]);
             out.push_str(REDACTION_MARKER);
@@ -11527,6 +11702,16 @@ fn redact_env_and_flags(text: &str) -> (String, usize) {
             })
             .into_owned();
     }
+    if cur.contains("curl")
+        || cur.contains("login")
+        || cur.contains("mysql")
+        || cur.contains("-Item")
+        || cur.contains("si ")
+    {
+        let (text, n) = redact_cli_passwords(&cur);
+        cur = text;
+        count += n;
+    }
     if SECRET_FLAG_RE.is_match(&cur) {
         cur = SECRET_FLAG_RE
             .replace_all(&cur, |caps: &regex::Captures| {
@@ -11543,6 +11728,40 @@ fn redact_env_and_flags(text: &str) -> (String, usize) {
                 let whole = &caps[0];
                 let keep = whole.len() - value.len();
                 format!("{}{}", &whole[..keep], REDACTION_MARKER)
+            })
+            .into_owned();
+    }
+    (cur, count)
+}
+
+/// Redact the password of the command lines whose option is not `--password`:
+/// `curl -u user:pass`, `docker login -p x`, `mysql -pX` and PowerShell
+/// `Set-Item env:NAME x`.
+fn redact_cli_passwords(text: &str) -> (String, usize) {
+    let mut count = 0usize;
+    let mut cur = text.to_string();
+    for re in [&*CURL_USER_RE, &*DOCKER_LOGIN_RE, &*MYSQL_P_RE] {
+        if !re.is_match(&cur) {
+            continue;
+        }
+        cur = re
+            .replace_all(&cur, |caps: &regex::Captures| {
+                if setting_value_is_no_secret(&caps[2]) {
+                    return caps[0].to_string();
+                }
+                count += 1;
+                format!("{}{}", &caps[1], REDACTION_MARKER)
+            })
+            .into_owned();
+    }
+    if SET_ITEM_ENV_RE.is_match(&cur) {
+        cur = SET_ITEM_ENV_RE
+            .replace_all(&cur, |caps: &regex::Captures| {
+                if !is_secret_name(&caps[2]) || setting_value_is_no_secret(&caps[3]) {
+                    return caps[0].to_string();
+                }
+                count += 1;
+                format!("{}{}", &caps[1], REDACTION_MARKER)
             })
             .into_owned();
     }

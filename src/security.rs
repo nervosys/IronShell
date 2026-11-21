@@ -1142,7 +1142,7 @@ fn key_marker_at(buf: &[u8], at: usize, file_start: bool, at_end: bool) -> Optio
     // and then the first characters of the body. Source that mentions the marker
     // inside a string (a quote follows it) is not a key.
     let body = &after_words[5.min(after_words.len())..];
-    if body.len() < 12 && !at_end {
+    if body.len() < 40 && !at_end {
         return None;
     }
     let mut saw_break = false;
@@ -1158,13 +1158,59 @@ fn key_marker_at(buf: &[u8], at: usize, file_start: bool, at_end: bool) -> Optio
             break;
         }
     }
+    // A marker with no line break after it is a key only as one element of a
+    // list of lines: its own string closes right after it (`-----",`).
+    if !saw_break && !b.first().is_some_and(|c| matches!(*c, b'"' | b'\'')) {
+        return Some(false);
+    }
+    // The body may sit in the next element of a list of lines: a JSON or TOML
+    // array (`\n","` between the lines), a YAML sequence (newline, indent, `- `,
+    // an optional quote), a `.env` with one quoted line per variable
+    // (`NAME="`), or a string joined with `+`. Skip a short run of those
+    // delimiters (16 bytes at most) before counting body characters. A `-`
+    // counts only before a space, so the dashes of an END line are not skipped.
+    // A marker inside a string literal followed by code (`")`, `;`) has nothing
+    // to skip to and is not a key.
+    let mut skipped = 0usize;
+    let mut named = false;
+    loop {
+        while skipped < 16 && !b.is_empty() {
+            let step = if b.starts_with(b"\n") || b.starts_with(b"\r") || b.starts_with(b"\t") {
+                2
+            } else if b[0] == b'-' && b.get(1) == Some(&b' ') {
+                2
+            } else if matches!(
+                b[0],
+                b'"' | b'\'' | b',' | b' ' | b'\t' | b'\n' | b'\r' | b'+'
+            ) {
+                1
+            } else {
+                break;
+            };
+            b = &b[step..];
+            skipped += step;
+        }
+        // `NAME=` of a `.env` line (no space around the `=`, as dotenv writes it).
+        let name = b
+            .iter()
+            .take_while(|c| c.is_ascii_alphanumeric() || **c == b'_')
+            .count();
+        if !named && (1..=32).contains(&name) && b.get(name) == Some(&b'=') {
+            b = &b[name + 1..];
+            named = true;
+            continue;
+        }
+        break;
+    }
+    // Eight base64 characters in a row that end the element, as a key body
+    // does (`Something here` is prose, not a body).
+    let run = b
+        .iter()
+        .take_while(|c| c.is_ascii_alphanumeric() || matches!(**c, b'+' | b'/' | b'='))
+        .count();
     Some(
-        saw_break
-            && b.iter()
-                .take(8)
-                .filter(|c| c.is_ascii_alphanumeric())
-                .count()
-                >= 8,
+        run >= 8
+            && (run == b.len() || matches!(b[run], b'"' | b'\'' | b'\\' | b'\r' | b'\n' | b',')),
     )
 }
 
@@ -1220,6 +1266,21 @@ pub fn file_holds_private_key(path: &str) -> bool {
             file_start = false;
         }
     }
+}
+
+/// Whether text held in memory (a decompressed file, say) holds a private key,
+/// by the rule [`file_holds_private_key`] applies to a file's bytes: a marker at
+/// the start of a line, or mid-line before a line break and the key's body.
+pub fn bytes_hold_private_key(buf: &[u8]) -> bool {
+    [
+        b"-----BEGIN ".as_slice(),
+        b"PuTTY-User-Key-File-".as_slice(),
+    ]
+    .iter()
+    .any(|marker| {
+        memchr::memmem::find_iter(buf, marker)
+            .any(|at| key_marker_at(buf, at, true, true) == Some(true))
+    })
 }
 
 /// The refusal of a read of a private key's text, in agent mode: `E_POLICY_DENY`,

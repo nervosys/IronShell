@@ -220,7 +220,13 @@ fn gzip_read_keeps_the_read_jail_and_the_key_refusal() {
         r#"open("../outside.gz")"#,
     );
     assert!(err.contains("E_OUTSIDE_WORKSPACE"), "{err}");
-    let key = "-----BEGIN PRIVATE KEY-----\nMIIEvQIBADANBgkqhkiG9w0BAQEFAASC\n-----END PRIVATE KEY-----\n";
+    // The fixture is built from parts, so no key-looking text is committed.
+    let (begin, end) = (
+        format!("-----BEGIN {}-----", "PRIVATE KEY"),
+        format!("-----END {}-----", "PRIVATE KEY"),
+    );
+    let key = format!("{begin}\nMIIEvQIBADANBgkqhkiG9w0BAQEFAASC\n{end}\n");
+    let key = key.as_str();
     put(&root, "k.gz", &members(&["note\n", key]));
     put(&root, "k.txt.gz", &members(&[key]));
     let (_, err) = run(
@@ -233,6 +239,24 @@ fn gzip_read_keeps_the_read_jail_and_the_key_refusal() {
         &root,
         &["--agent", "--workspace", &ws],
         r#"open("k.txt.gz")"#,
+    );
+    assert!(err.contains("E_POLICY_DENY"), "{err}");
+    // A key in the middle of a line, as in a service-account JSON file, is
+    // found in the decompressed text as the file check finds it.
+    let sa = format!(
+        r#"{{"type": "service_account", "private_key": "{begin}\nMIIEvQIBADANBgkqhkiG9w0BAQEFAASC\n{end}\n"}}"#
+    );
+    put(&root, "sa.json.gz", &gz(sa.as_bytes()));
+    let (_, err) = run(
+        &root,
+        &["--agent", "--workspace", &ws],
+        r#"open("sa.json.gz")"#,
+    );
+    assert!(err.contains("E_POLICY_DENY"), "{err}");
+    let (_, err) = run(
+        &root,
+        &["--agent", "--workspace", &ws],
+        r#"gzip_read("sa.json.gz")"#,
     );
     assert!(err.contains("E_POLICY_DENY"), "{err}");
     // Not in agent mode.

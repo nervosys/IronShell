@@ -2337,6 +2337,20 @@ enum Util {
     DeclineFor(String),
 }
 
+thread_local! {
+    /// The redirections (`>path`, `>>path`, `<path`, as resolved paths) around
+    /// the command being run, for the approval of an external command.
+    static EXEC_REDIRS: std::cell::RefCell<Vec<String>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// A redirection target as an absolute path, for an approval token.
+fn resolved_for_binding(path: &str) -> String {
+    std::path::absolute(path)
+        .map(|p| p.to_string_lossy().replace("\\", "/"))
+        .unwrap_or_else(|_| path.to_string())
+}
+
 struct Shell {
     vars: HashMap<String, String>,
     /// The names exported to children, in the order they were last exported.
@@ -3518,6 +3532,9 @@ impl Shell {
         // the shell applies them: each descriptor points at a destination, and
         // `2>&1` copies where descriptor 1 points at that moment.
         let mut local_in: Option<Input> = None;
+        // The files this command's redirections read and write, as resolved
+        // paths: an external command inside binds them into its approval.
+        let mut bound: Vec<String> = Vec::new();
         let mut d1 = Dest::Out;
         let mut d2 = Dest::Err;
         for r in redirs {
@@ -3548,6 +3565,7 @@ impl Shell {
                         self.last = 1;
                         return Flow::Next(1);
                     }
+                    bound.push(format!("<{}", resolved_for_binding(&path)));
                     match read_file(&path) {
                         Ok(d) => {
                             let regular = std::fs::metadata(&path).is_ok_and(|m| m.is_file());
@@ -3588,6 +3606,11 @@ impl Shell {
                             Err(flow) => return flow,
                         }
                     };
+                    if let Dest::File(p, _) = &dest {
+                        let fd = if *fd == 2 { "2" } else { "" };
+                        let op = if *append { ">>" } else { ">" };
+                        bound.push(format!("{fd}{op}{}", resolved_for_binding(p)));
+                    }
                     if *fd == 2 {
                         if let Err(msg) = open_replaced(&d2, &[&d1, &dest]) {
                             sink.eline(&msg);
@@ -3622,6 +3645,9 @@ impl Shell {
                             Err(flow) => return flow,
                         }
                     };
+                    if let Dest::File(p, _) = &dest {
+                        bound.push(format!("&>{}", resolved_for_binding(p)));
+                    }
                     let opened = open_replaced(&d1, &[&d2, &dest])
                         .and_then(|()| open_replaced(&d2, &[&d1, &dest]));
                     if let Err(msg) = opened {
@@ -3670,10 +3696,17 @@ impl Shell {
         };
         let mut local = Sink::new(err_mode);
         local.before_redirs = matches!(cmd, Cmd::Simple { .. });
+        let mark = EXEC_REDIRS.with(|r| {
+            let mut r = r.borrow_mut();
+            let mark = r.len();
+            r.extend(bound);
+            mark
+        });
         let flow = match local_in.as_mut() {
             Some(i) => self.run_cmd_inner(cmd, i, &mut local),
             None => self.run_cmd_inner(cmd, stdin, &mut local),
         };
+        EXEC_REDIRS.with(|r| r.borrow_mut().truncate(mark));
         if !local.parent_err.is_empty() {
             let early = std::mem::take(&mut local.parent_err);
             sink.ewrite(&early);
@@ -4882,9 +4915,15 @@ impl Shell {
         }
         let child_env: Vec<(String, String)> = deduped.into_iter().collect();
         let removed = self.removed_env(&child_env);
-        if let Err(e) =
-            crate::safety::guard_exec_env("posix", argv.join(" "), argv, &child_env, &removed)
-        {
+        let redirs = EXEC_REDIRS.with(|r| r.borrow().clone());
+        if let Err(e) = crate::safety::guard_exec_env(
+            "posix",
+            argv.join(" "),
+            argv,
+            &child_env,
+            &removed,
+            &redirs,
+        ) {
             sink.eline(&e.to_string());
             return e.code.exit_code();
         }

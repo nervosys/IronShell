@@ -44530,12 +44530,7 @@ fn refuse_private_key_text(builtin: &str, label: &str, text: &str) -> Result<()>
     {
         return Ok(());
     }
-    let holds_key = text.lines().any(|line| {
-        let l = line.trim_start_matches('\u{feff}').trim();
-        (l.starts_with("-----BEGIN ") && l.contains("PRIVATE KEY"))
-            || l.starts_with("PuTTY-User-Key-File-")
-    });
-    if holds_key {
+    if crate::security::bytes_hold_private_key(text.as_bytes()) {
         return Err(crate::safety::policy_deny(
             builtin,
             &format!("access denied: {label} holds a private key once decompressed (judged by its content, not its name)"),
