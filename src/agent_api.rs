@@ -1039,6 +1039,17 @@ fn response_from_value(value: Value, code: &str) -> AgentResponse {
 /// first 200 characters and its length. A caller that sent a large program
 /// does not get it back in full.
 fn echo_code(code: &str) -> String {
+    // The agent's own code may hold a secret it was given (`password = "..."`),
+    // and the response is judged like any other output (round 63).
+    let redacted;
+    let code = if crate::safety::current_mode() == crate::safety::Mode::Agent
+        && crate::safety::redaction_enabled()
+    {
+        redacted = crate::safety::redact_str(code).0;
+        redacted.as_str()
+    } else {
+        code
+    };
     let chars = code.chars().count();
     if chars < 1000 {
         code.to_string()

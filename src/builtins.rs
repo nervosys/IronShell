@@ -20089,7 +20089,9 @@ fn env_value(builtin: &str, value: &Value) -> Result<String> {
 /// Refuse, in agent mode, a value of `TZ` or `TERM` that names a file: a `TZ`
 /// that starts with `:` or `/`, or holds `..` or a backslash, makes the C library
 /// read that file as the zone, and a `TERM` with a path separator or `..` makes
-/// a terminal library look for its description there. A zone name such as
+/// a terminal library look for its description there. `LANG`, `LANGUAGE` and
+/// `LC_*` are refused a value with a separator or `..` too: the C library loads
+/// locale data from a path value (`LC_ALL=/tmp/x`). A zone name such as
 /// `America/New_York` is fine. Other variables are judged by name only.
 fn refuse_env_value(builtin: &str, name: &str, value: &str) -> Result<()> {
     if !matches!(crate::safety::current_mode(), crate::safety::Mode::Agent) {
@@ -20104,6 +20106,9 @@ fn refuse_env_value(builtin: &str, name: &str, value: &str) -> Result<()> {
                 || value.chars().nth(1) == Some(':')
         }
         "TERM" => value.contains(['/', '\u{5c}']) || value.contains(".."),
+        n if n == "LANG" || n == "LANGUAGE" || n.starts_with("LC_") => {
+            value.contains(['/', '\u{5c}']) || value.contains("..")
+        }
         _ => false,
     };
     if path_like {
@@ -27683,7 +27688,7 @@ pub fn redact_value(v: &Value) -> Value {
             let (r, _) = crate::safety::redact_str(s);
             Value::Uri(r)
         }
-        Value::Array(items) => Value::Array(items.iter().map(redact_value).collect()),
+        Value::Array(items) => redact_array(items),
         Value::Record(m) => Value::Record(redact_field_map(m)),
         Value::Table(t) => Value::Table(crate::value::Table {
             rows: t.rows.iter().map(redact_field_map).collect(),
@@ -27693,14 +27698,108 @@ pub fn redact_value(v: &Value) -> Value {
     }
 }
 
+/// Redact an Array. Each element is redacted alone; an Array of Strings that
+/// are the lines of one text (`cat(f) | lines`) is also redacted as that text,
+/// so what a rule needs from a neighbouring line is seen: a private key block
+/// that opens in one element and ends in another, and the header line of a CSV
+/// whose later lines hold the secret cells.
+fn redact_array(items: &[Value]) -> Value {
+    let mut out: Vec<Value> = Vec::with_capacity(items.len());
+    // A private key block across elements: its BEGIN element and everything
+    // after it, to its END element (or to the last element when it has none).
+    let mut in_key_block = false;
+    for it in items {
+        if let Value::Str(s) = it {
+            let t = s.trim_start();
+            let opens = t.starts_with("-----BEGIN ") && t.contains("PRIVATE KEY-----");
+            if in_key_block || opens {
+                crate::safety::add_redactions(usize::from(opens));
+                let closes = s.contains("-----END ") && s.contains("PRIVATE KEY-----");
+                in_key_block = !closes;
+                out.push(Value::Str(crate::safety::REDACTION_MARKER.to_string()));
+                continue;
+            }
+        }
+        out.push(redact_value(it));
+    }
+    let total: usize = out
+        .iter()
+        .map(|v| if let Value::Str(s) = v { s.len() } else { 0 })
+        .sum();
+    let lines_of_a_text = out.len() >= 2
+        && total <= 8 * 1024 * 1024
+        && out
+            .iter()
+            .all(|v| matches!(v, Value::Str(s) if !s.contains('\n')));
+    if lines_of_a_text {
+        let joined = out
+            .iter()
+            .filter_map(|v| {
+                if let Value::Str(s) = v {
+                    Some(s.as_str())
+                } else {
+                    None
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        let (redacted, changed) = crate::safety::redact_str(&joined);
+        // Only when every element maps back to one line of the result.
+        if changed && redacted.split('\n').count() == out.len() {
+            return Value::Array(
+                redacted
+                    .split('\n')
+                    .map(|l| Value::Str(l.to_string()))
+                    .collect(),
+            );
+        }
+    }
+    Value::Array(out)
+}
+
+/// The names that, in a record, say which environment variable or setting the
+/// `value` field belongs to: `{name: "DB_PASSWORD", value: "..."}`, as Kubernetes,
+/// ECS and GitHub list them.
+const PAIR_NAME_FIELDS: &[&str] = &["name", "key", "variable", "var", "env"];
+/// The fields that hold the value of a name/value pair.
+const PAIR_VALUE_FIELDS: &[&str] = &["value", "val", "secret", "data"];
+
+/// Whether a record is a name/value pair whose name is a secret name.
+fn pair_names_a_secret(m: &std::collections::BTreeMap<String, Value>) -> bool {
+    m.iter().any(|(k, v)| {
+        PAIR_NAME_FIELDS.contains(&k.to_ascii_lowercase().as_str())
+            && matches!(v, Value::Str(s) if crate::safety::is_secret_name(s)
+                && crate::safety::secret_name_hides_number(s))
+    })
+}
+
 /// Redact a record/row field map: secret-named fields become the marker;
-/// every other field is recursively redacted.
+/// every other field is recursively redacted. In a name/value pair whose name
+/// is a secret name, the value field is redacted too.
 fn redact_field_map(
     m: &std::collections::BTreeMap<String, Value>,
 ) -> std::collections::BTreeMap<String, Value> {
     let mut out = std::collections::BTreeMap::new();
+    let pair_secret = pair_names_a_secret(m);
     for (k, val) in m {
-        if crate::safety::is_secret_name(k) && redactable_by_name(k, val) {
+        if pair_secret
+            && PAIR_VALUE_FIELDS.contains(&k.to_ascii_lowercase().as_str())
+            && match val {
+                Value::Str(s) | Value::Uri(s) => {
+                    !s.is_empty()
+                        && !crate::safety::is_capability_token(s)
+                        && s != crate::safety::REDACTION_MARKER
+                }
+                Value::Int(_) | Value::Float(_) => true,
+                _ => false,
+            }
+        {
+            note_redacted(true);
+            out.insert(
+                k.clone(),
+                Value::Str(crate::safety::REDACTION_MARKER.to_string()),
+            );
+        } else if crate::safety::is_secret_name(k) && redactable_by_name(k, val) {
             note_redacted(true);
             out.insert(
                 k.clone(),
@@ -35164,6 +35263,9 @@ static OWN_TEMPDIRS: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::
 /// created in agent mode. Exact match only: not the temp root, not a path
 /// inside one of these directories, not any other path.
 fn is_own_tempdir(path: &str) -> bool {
+    // `d/` names the same directory as `d`; a trailing separator is not a
+    // different path (round 63). `.` and `..` components are not normalised.
+    let path = path.trim_end_matches(['/', '\u{5c}']);
     OWN_TEMPDIRS
         .lock()
         .map(|set| set.iter().any(|p| p == path))
@@ -81618,6 +81720,12 @@ fn fd_ext_check(builtin: &str, what: &str, value: &str) -> Result<String> {
 /// the size limit is refused rather than read in part.
 fn search_read_text(builtin: &str, path: &std::path::Path, shown: &str) -> Result<Option<String>> {
     use std::io::Read;
+    // A file that holds a private key is skipped in agent mode, as a binary file
+    // is, so one key in the tree does not stop the search and no line of it is
+    // returned (redaction would hide only its BEGIN line).
+    if crate::security::refuse_private_key_read(builtin, &path.to_string_lossy()).is_err() {
+        return Ok(None);
+    }
     let mut file =
         std::fs::File::open(path).map_err(|e| crate::safety::fs_error(builtin, shown, &e))?;
     let mut bytes = Vec::new();

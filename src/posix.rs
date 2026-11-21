@@ -5554,9 +5554,14 @@ fn jail_refusal(tool: &str, path: &str) -> Option<String> {
         return Some(crate::safety::outside_workspace(tool, path).to_string());
     }
     // Off unless the operator set IRONSHELL_REFUSE_LINKED_READS=1.
-    crate::safety::refuse_hard_linked_read(tool, path)
+    if let Some(e) = crate::safety::refuse_hard_linked_read(tool, path)
         .err()
         .map(|e| e.to_string())
+    {
+        return Some(e);
+    }
+    // In agent mode, a file that holds a private key is not read.
+    crate::security::private_key_refusal_for_tool(tool, path)
 }
 
 fn read_inputs(
@@ -9020,6 +9025,15 @@ fn grep(args: &[String], stdin: &mut Input, sink: &mut Sink) -> Util {
     // later group is then separated from by `--`.
     let mut printed_group = false;
     for (name, path) in &targets {
+        // A file found by walking a directory is not an operand the jail judged:
+        // in agent mode one that holds a private key is skipped, as it is when
+        // named (see `jail_refusal`).
+        if path
+            .as_ref()
+            .is_some_and(|p| crate::security::private_key_refusal_for_tool("grep", p).is_some())
+        {
+            continue;
+        }
         let data = match path {
             Some(p) => match read_file(p) {
                 Ok(d) => d,

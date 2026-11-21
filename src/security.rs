@@ -214,6 +214,15 @@ impl Default for PathSecurityConfig {
                 "*.pem".to_string(),
                 "*.p12".to_string(),
                 "*.pfx".to_string(),
+                "*.p8".to_string(),
+                "*.ppk".to_string(),
+                // Private keys named as ssh-keygen names them, with no extension.
+                // A key under any other name is caught by its content
+                // (`refuse_private_key_read`).
+                "id_rsa".to_string(),
+                "id_dsa".to_string(),
+                "id_ecdsa".to_string(),
+                "id_ed25519".to_string(),
             ],
         }
     }
@@ -1018,7 +1027,111 @@ pub fn check_read_jail(builtin: &str, path: &str) -> Result<()> {
         ));
     }
     crate::safety::refuse_hard_linked_read(builtin, path)?;
+    if !reads_no_content(builtin) && reads_text(builtin) {
+        refuse_private_key_read(builtin, path)?;
+    }
     Ok(())
+}
+
+/// Builtins and in-process tools that read a file's metadata, size, digest or
+/// count, or that only list names, and so disclose none of its text. A private
+/// key may be listed, sized, hashed and counted.
+fn reads_no_content(builtin: &str) -> bool {
+    builtin.is_empty()
+        || builtin.starts_with("fs_")
+        || builtin.starts_with("perm_")
+        || builtin.starts_with("acl_")
+        || builtin.starts_with("path_")
+        || matches!(
+            builtin,
+            "ls" | "find"
+                | "test"
+                | "sh"
+                | "wc"
+                | "stat"
+                | "du"
+                | "tree"
+                | "glob"
+                | "exists"
+                | "file_exists"
+                | "crypto_hash_file"
+                | "archive_info"
+                | "archive_list"
+                | "zip_list"
+                | "tar_list"
+        )
+}
+
+/// Whether a builtin only reads: one that writes, deletes or runs a program is
+/// judged by the write jail and the approval gate, not by what the file holds.
+fn reads_text(builtin: &str) -> bool {
+    matches!(
+        crate::safety::effect_of(builtin),
+        crate::safety::Effect::ReadLocal
+    )
+}
+
+/// Whether the first 8 KiB of the file at `path` is a private key: a line that
+/// opens a PEM, OpenSSH or PGP private key block, or a PuTTY key file. Judged by
+/// content, so a key named `key.txt`, `deploy` or `id_rsa.bak` is found. Only a
+/// line that *begins* with the marker counts, so source code that mentions the
+/// marker in a string or a pattern is not a key. `false` for a path that is not
+/// a readable regular file.
+pub fn file_holds_private_key(path: &str) -> bool {
+    use std::io::Read;
+    let Ok(meta) = fs::metadata(path) else {
+        return false;
+    };
+    if !meta.is_file() {
+        return false;
+    }
+    let Ok(file) = fs::File::open(path) else {
+        return false;
+    };
+    let mut head = Vec::with_capacity(8192);
+    if file.take(8192).read_to_end(&mut head).is_err() {
+        return false;
+    }
+    let text = String::from_utf8_lossy(&head);
+    text.lines().any(|line| {
+        let l = line.trim_start_matches('\u{feff}').trim();
+        (l.starts_with("-----BEGIN ") && l.contains("PRIVATE KEY"))
+            || l.starts_with("PuTTY-User-Key-File-")
+    })
+}
+
+/// The refusal of a read of a private key's text, in agent mode: `E_POLICY_DENY`,
+/// as the `*.pem` name block refuses. Redaction hides a key's BEGIN line, but a
+/// key split into lines (`| lines`, `sed -n 2,3p`, `grep`) shows its body, so the
+/// file is not read at all. `IRONSHELL_SECRETS=allow` or the permissive policy
+/// lifts it, as for the clipboard.
+pub fn refuse_private_key_read(builtin: &str, path: &str) -> Result<()> {
+    if crate::safety::current_mode() != crate::safety::Mode::Agent
+        || crate::safety::secrets_permitted()
+        || std::env::var("IRONSHELL_POLICY")
+            .is_ok_and(|v| v.trim().eq_ignore_ascii_case("permissive"))
+    {
+        return Ok(());
+    }
+    if file_holds_private_key(path) {
+        return Err(crate::safety::policy_deny(
+            builtin,
+            "access denied: the file holds a private key (judged by its content, not its name)",
+            "this is a security policy, not a malformed call; no other spelling of the same path will pass",
+        ));
+    }
+    Ok(())
+}
+
+/// [`refuse_private_key_read`] for an in-process `ish -b` tool, as the JSON
+/// error text the tool prints. `None` when the read may go on.
+pub fn private_key_refusal_for_tool(tool: &str, path: &str) -> Option<String> {
+    if reads_no_content(tool) {
+        return None;
+    }
+    refuse_private_key_read(tool, path)
+        .err()
+        .map(|e| e.to_string())
 }
 
 /// Where a path that may not exist would land, in the same canonical namespace

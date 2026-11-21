@@ -10240,6 +10240,21 @@ lazy_static! {
         r#"(?i)(([\p{L}\p{N}_.\-]+)["']?\s*[:=]\s*["']?)((?:[^\s"',}\\]|\\[^nrtbfu"\\/\s]){4,})"#
     ).unwrap();
 
+    /// A JSON object whose `name` (or `key`, `variable`, `var`, `env`) member
+    /// is followed by its `value` (or `val`, `secret`, `data`) member, as an
+    /// environment list is written. Group 1 is kept through the opening quote of
+    /// the value, group 2 is the name, group 3 the value, group 4 the rest.
+    static ref JSON_PAIR_RE: regex::Regex = regex::Regex::new(
+        r#"(?i)("(?:name|key|variable|var|env)"\s*:\s*"([^"\\]{1,64})"\s*,\s*"(?:value|val|secret|data)"\s*:\s*")((?:[^"\\]|\\.)+)(")"#
+    ).unwrap();
+
+    /// [`JSON_PAIR_RE`] with the `value` member first. Group 1 is kept through
+    /// the opening quote of the value, group 2 is the value, group 3 the rest
+    /// up to the name, group 4 the name.
+    static ref JSON_PAIR_REV_RE: regex::Regex = regex::Regex::new(
+        r#"(?i)("(?:value|val|secret|data)"\s*:\s*")((?:[^"\\]|\\.)+)("\s*,\s*"(?:name|key|variable|var|env)"\s*:\s*"([^"\\]{1,64})")"#
+    ).unwrap();
+
     /// `Digest username="u", realm="r", response="..."` with no header name in
     /// front of it. Group 1 is the scheme, group 2 the parameters, of which
     /// `response` and `cnonce` are redacted.
@@ -10838,6 +10853,18 @@ pub(crate) fn env_name_steers_children(name: &str) -> bool {
         "PROGRAMW6432",
         "COMMONPROGRAMFILES",
         "ALLUSERSPROFILE",
+        // Round 63: a trace file, a compose file, an API endpoint, a hook home,
+        // an editor and a plugin path that a tool reads on start.
+        "GCM_TRACE",
+        "COMPOSE_FILE",
+        "GITHUB_API_URL",
+        "GITHUB_SERVER_URL",
+        "GITHUB_GRAPHQL_URL",
+        "PRE_COMMIT_HOME",
+        "TRIVY_CACHE_DIR",
+        "PACKER_PLUGIN_PATH",
+        "FCEDIT",
+        "MOZ_PLUGIN_PATH",
     ];
     const PREFIXES: &[&str] = &[
         "IRONSHELL_",
@@ -10928,6 +10955,13 @@ pub(crate) fn env_name_steers_children(name: &str) -> bool {
         "SCCACHE_",
         "HOMEBREW_",
         "JUST_",
+        // Round 63: Docker Compose, Git Credential Manager, pre-commit, Packer
+        // and Trivy read files, hooks, plugins and endpoints from these.
+        "COMPOSE_",
+        "GCM_",
+        "PRE_COMMIT_",
+        "PACKER_",
+        "TRIVY_",
     ];
     const SUFFIXES: &[&str] = &[
         "_PROXY",
@@ -10949,6 +10983,10 @@ pub(crate) fn env_name_steers_children(name: &str) -> bool {
         "_CONF",
         "_OPTS",
         "_ADDOPTS",
+        // Round 63: a plugin path loads code, and an API URL is an endpoint.
+        "_PLUGIN_PATH",
+        "_PLUGIN_DIR",
+        "_API_URL",
     ];
     let upper = name.trim().to_ascii_uppercase();
     // Names the generic rules and prefixes would block that only select a mode
@@ -11071,40 +11109,13 @@ fn redact_str_counted(s: &str) -> (String, usize) {
         count += hits;
     }
     if SECRET_ASSIGN_RE.is_match(&cur) {
-        let mut replaced = 0usize;
-        cur = SECRET_ASSIGN_RE
-            .replace_all(&cur, |caps: &regex::Captures| {
-                let value = &caps[3];
-                let word = value.trim_end_matches(')');
-                // A value an earlier pass already replaced is one secret, not two.
-                if word == REDACTION_MARKER {
-                    return caps[0].to_string();
-                }
-                if !text_assignment_hides(&caps[2], word) {
-                    return caps[0].to_string();
-                }
-                // `token: String) -> Record` is a signature, which describes a
-                // secret without holding one. The shape cannot tell the two
-                // apart, so a value that is a signature type name is left.
-                if crate::signature::Ty::is_type_name(word) {
-                    return caps[0].to_string();
-                }
-                // An approval handle must be echoed back, and is no secret
-                // (see `is_capability_token`); hiding it made the approval
-                // `ish -b` prints unusable.
-                if is_capability_token(word) {
-                    return caps[0].to_string();
-                }
-                // `DEPLOY_TOKEN: DEPLOY_TOKEN must be set` names a variable
-                // that holds a secret; the name itself is not one.
-                if names_secret_variable(word) {
-                    return caps[0].to_string();
-                }
-                replaced += 1;
-                // The pattern swallows a closing paren after the value; put it back.
-                format!("{}[REDACTED]{}", &caps[1], &value[word.len()..])
-            })
-            .into_owned();
+        let (text, replaced) = redact_assignments(&cur);
+        cur = text;
+        count += replaced;
+    }
+    if JSON_PAIR_RE.is_match(&cur) || JSON_PAIR_REV_RE.is_match(&cur) {
+        let (text, replaced) = redact_json_pairs(&cur);
+        cur = text;
         count += replaced;
     }
     if AUTH_HEADER_RE.is_match(&cur) {
@@ -11208,6 +11219,128 @@ fn redact_str_counted(s: &str) -> (String, usize) {
     (cur, count)
 }
 
+/// Whether `s` is written as a path: absolute, home-relative, `./`, `../`, or
+/// with a drive letter (`C:\x`, `C:/x`).
+fn looks_like_a_path(s: &str) -> bool {
+    // An error message quotes a path in backticks, and shortens one to `[...]/x`.
+    let s = s.trim_start_matches('`');
+    let b = s.as_bytes();
+    s.starts_with("[...]/")
+        || s.starts_with(['/', '~'])
+        || s.starts_with("./")
+        || s.starts_with("../")
+        || (b.len() >= 3
+            && b[0].is_ascii_alphabetic()
+            && b[1] == b':'
+            && (b[2] == b'/' || b[2] == b'\\'))
+}
+
+/// Whether the assignment `name` `:`/`=` `value` is one whose value is a secret.
+fn assignment_value_hides(name: &str, value: &str) -> bool {
+    let word = value.trim_end_matches(')');
+    // A value an earlier pass already replaced is one secret, not two.
+    if word == REDACTION_MARKER {
+        return false;
+    }
+    // `pwd=/home/me` is the working directory (`PWD`, `OLDPWD`), not a password:
+    // under those names a value that is a path stays. `pwd=hunter2` does not.
+    if matches!(name.to_ascii_lowercase().as_str(), "pwd" | "oldpwd") && looks_like_a_path(word) {
+        return false;
+    }
+    if !text_assignment_hides(name, word) {
+        return false;
+    }
+    // `token: String) -> Record` is a signature, which describes a
+    // secret without holding one. The shape cannot tell the two
+    // apart, so a value that is a signature type name is left.
+    if crate::signature::Ty::is_type_name(word) {
+        return false;
+    }
+    // An approval handle must be echoed back, and is no secret
+    // (see `is_capability_token`); hiding it made the approval
+    // `ish -b` prints unusable.
+    if is_capability_token(word) {
+        return false;
+    }
+    // `DEPLOY_TOKEN: DEPLOY_TOKEN must be set` names a variable
+    // that holds a secret; the name itself is not one.
+    !names_secret_variable(word)
+}
+
+/// Redact the secret values of `name=value` and `name: value` forms in text.
+///
+/// A match whose name is no secret is searched again from the start of its
+/// value, because the value may itself begin with a secret assignment after a
+/// separator: `./.env:2:DB_PASSWORD=x` (the shape `search_code` and `grep -n`
+/// return) first matches the name `.env` with the value `2:DB_PASSWORD=x`, and a
+/// scan that moved past that match never saw `DB_PASSWORD`. The re-search is
+/// bounded (4 MB of matched text per call), so a long run of separators cannot
+/// make it quadratic.
+fn redact_assignments(text: &str) -> (String, usize) {
+    let mut out = String::with_capacity(text.len());
+    let mut last = 0usize;
+    let mut pos = 0usize;
+    let mut replaced = 0usize;
+    let mut budget = 4_000_000usize;
+    while pos <= text.len() {
+        let Some(caps) = SECRET_ASSIGN_RE.captures_at(text, pos) else {
+            break;
+        };
+        let (Some(whole), Some(val)) = (caps.get(0), caps.get(3)) else {
+            break;
+        };
+        let value = val.as_str();
+        if assignment_value_hides(&caps[2], value) {
+            let word_len = value.trim_end_matches(')').len();
+            out.push_str(&text[last..val.start()]);
+            out.push_str(REDACTION_MARKER);
+            // The pattern swallows a closing paren after the value; put it back.
+            out.push_str(&value[word_len..]);
+            last = whole.end();
+            pos = whole.end();
+            replaced += 1;
+        } else if budget > whole.len() && value.contains([':', '=']) {
+            budget -= whole.len();
+            pos = val.start();
+        } else {
+            pos = whole.end();
+        }
+    }
+    out.push_str(&text[last..]);
+    (out, replaced)
+}
+
+/// Redact the value of a JSON `{"name":"DB_PASSWORD","value":"..."}` pair: an
+/// environment list in the shape Kubernetes, ECS and GitHub return. Both orders
+/// of the two members are covered, inside one object.
+fn redact_json_pairs(text: &str) -> (String, usize) {
+    let mut count = 0usize;
+    let mut cur = text.to_string();
+    for (re, name_group) in [(&*JSON_PAIR_RE, 2usize), (&*JSON_PAIR_REV_RE, 4usize)] {
+        let value_group = if name_group == 2 { 3 } else { 2 };
+        cur = re
+            .replace_all(&cur, |caps: &regex::Captures| {
+                let name = &caps[name_group];
+                let value = &caps[value_group];
+                if value == REDACTION_MARKER
+                    || is_capability_token(value)
+                    || !is_secret_name(name)
+                    || !secret_name_hides_number(name)
+                {
+                    return caps[0].to_string();
+                }
+                count += 1;
+                if name_group == 2 {
+                    format!("{}{}{}", &caps[1], REDACTION_MARKER, &caps[4])
+                } else {
+                    format!("{}{}{}", &caps[1], REDACTION_MARKER, &caps[3])
+                }
+            })
+            .into_owned();
+    }
+    (cur, count)
+}
+
 /// Whether the value `word` after `name` and a `:` or `=` in text is a secret.
 /// The name decides, by [`is_secret_name`] (the rule record keys use), with the
 /// same qualifier exemptions. On top of that: a name whose last word is
@@ -11240,12 +11373,64 @@ fn text_assignment_hides(name: &str, word: &str) -> bool {
     if word.chars().all(|c| c.is_ascii_digit() || c == '.') && !secret_name_hides_number(name) {
         return false;
     }
-    let prose_word = segs.iter().any(|s| s == "auth" || s == "session");
+    // `session: active` is a state, not an id. Under `session` any other
+    // value of six characters or more is redacted (round 63), whatever its
+    // letters; a short word the text uses for a state is left.
+    if segs.iter().any(|s| s == "session") && !substring_secret_name(name) {
+        // `session_export: C:/work/x is outside the workspace` is a builtin's
+        // name and a path, not a session id.
+        if looks_like_a_path(word) {
+            return false;
+        }
+        return !SESSION_STATE_WORDS.contains(&word.to_ascii_lowercase().as_str());
+    }
+    let prose_word = segs.iter().any(|s| s == "auth");
     !(prose_word
         && !substring_secret_name(name)
         && word.len() < 12
         && !word.chars().any(|c| c.is_ascii_digit()))
 }
+
+/// Words a `session` field holds as a state, not as an id.
+const SESSION_STATE_WORDS: &[&str] = &[
+    "active",
+    "expired",
+    "closed",
+    "opened",
+    "started",
+    "stopped",
+    "ended",
+    "idle",
+    "pending",
+    "valid",
+    "invalid",
+    "missing",
+    "created",
+    "deleted",
+    "running",
+    "unknown",
+    "default",
+    "current",
+    "enabled",
+    "disabled",
+    "required",
+    "restored",
+    "saved",
+    "timeout",
+    "timed",
+    "ongoing",
+    "finished",
+    "resumed",
+    "paused",
+    "stateless",
+    "anonymous",
+    "none",
+    "null",
+    "true",
+    "false",
+    "open",
+    "new",
+];
 
 /// One field of a delimited text: its byte range, and whether it was quoted.
 struct DelimCell {
