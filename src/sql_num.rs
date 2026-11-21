@@ -136,9 +136,9 @@ fn read_arg(kind: Kind, ctx: &Context<'_>) -> Result<Option<Num>> {
             match parse_clean(&text) {
                 Some(n) => Ok(Some(n)),
                 None => Err(user_error(format!(
-                    "{}() was given the text '{}', which {MARKER}",
+                    "{}() was given {}, which {MARKER}",
                     kind.name(),
-                    text
+                    describe_text(&text)
                 ))),
             }
         }
@@ -147,6 +147,32 @@ fn read_arg(kind: Kind, ctx: &Context<'_>) -> Result<Option<Num>> {
             kind.name()
         ))),
     }
+}
+
+/// How an error names the text a strict aggregate refused. A person at a
+/// terminal sees the text, cut to 40 characters. In agent mode with redaction
+/// on it is not shown: the cell is often a password or token, a bare value has
+/// no shape or field name for the redactor to recognise, and the text would
+/// reach the agent through the error. The length and the first character's
+/// kind say enough to find the cell.
+fn describe_text(text: &str) -> String {
+    let hide = crate::safety::current_mode() == crate::safety::Mode::Agent
+        && crate::safety::redaction_enabled();
+    if !hide {
+        let shown: String = text.chars().take(40).collect();
+        let cut = if text.chars().count() > 40 { "..." } else { "" };
+        return format!("the text '{shown}{cut}'");
+    }
+    let kind = match text.trim().chars().next() {
+        None => "empty",
+        Some(c) if c.is_alphabetic() => "starting with a letter",
+        Some(c) if c.is_ascii_digit() => "starting with a digit",
+        Some(_) => "starting with a symbol",
+    };
+    format!(
+        "a text of {} characters ({kind}; the value is not shown in agent mode)",
+        text.chars().count()
+    )
 }
 
 struct Strict(Kind);

@@ -1503,6 +1503,59 @@ pub fn refuse_remote_bind(builtin: &str, ip: std::net::IpAddr) -> anyhow::Result
     ))
 }
 
+/// Whether `ip` is a link-local or cloud-metadata address: `169.254.0.0/16`
+/// (which holds `169.254.169.254`, the metadata service of AWS, Azure and GCP),
+/// `fe80::/10`, and AWS's `fd00:ec2::254`, also when written as an IPv4-mapped
+/// IPv6 address.
+pub fn is_metadata_address(ip: std::net::IpAddr) -> bool {
+    use std::net::IpAddr;
+    match ip {
+        IpAddr::V4(v4) => v4.is_link_local(),
+        IpAddr::V6(v6) => {
+            if let Some(v4) = v6.to_ipv4_mapped() {
+                return v4.is_link_local();
+            }
+            let s = v6.segments();
+            (s[0] & 0xffc0) == 0xfe80
+                || (s[0] == 0xfd00 && s[1] == 0x0ec2 && v6.octets()[15] == 0x54)
+        }
+    }
+}
+
+/// Refuse, in agent mode, a host that is a link-local or cloud-metadata address
+/// written out (`169.254.169.254`, `[fe80::1]`, `fd00:ec2::254`) or one of the
+/// metadata service names. No approval and no `IRONSHELL_NET_ALLOW` entry lifts
+/// it: the metadata service hands out the host's cloud credentials, and no
+/// raw-socket or scp use of the shell has a reason to reach it. A host name that
+/// resolves to such an address is not seen here. Loopback and private addresses
+/// are not refused: a local listener and its client (`net_listen` and
+/// `net_connect` on `127.0.0.1`) are a documented use, and they still need an
+/// approval.
+pub fn refuse_metadata_host(builtin: &str, host: &str) -> anyhow::Result<()> {
+    if current_mode() != Mode::Agent {
+        return Ok(());
+    }
+    let bare = host.trim().trim_start_matches('[').trim_end_matches(']');
+    let bare = bare.split('%').next().unwrap_or(bare);
+    let named = matches!(
+        bare.to_ascii_lowercase().trim_end_matches('.'),
+        "metadata.google.internal" | "metadata.goog" | "instance-data" | "metadata.azure.internal"
+    );
+    let literal = bare
+        .parse::<std::net::IpAddr>()
+        .is_ok_and(is_metadata_address);
+    if named || literal {
+        return Err(policy_deny(
+            builtin,
+            format!(
+                "{builtin}: {host} is a link-local or cloud-metadata address, which agent mode never reaches"
+            ),
+            "this is a security policy, not a malformed call, and no approval or IRONSHELL_NET_ALLOW setting lifts it",
+        ));
+    }
+    Ok(())
+}
+
 /// The active execution mode, derived from the environment.
 /// `IRONSHELL_MODE=agent` matching is case-insensitive and ignores surrounding
 /// whitespace, as is `IRONSHELL_AGENT` (see [`truthy_env`]).
@@ -2549,7 +2602,42 @@ pub(crate) fn strip_ironshell_env(cmd: &mut std::process::Command) {
     }
     if agent {
         cmd.env("IRONSHELL_MODE", "agent");
+        // A variable the agent set with `set_env` reaches a child only when the
+        // call passed an exec or network approval, which binds it into the
+        // token. A tool the shell runs with no approval (`rg_search`,
+        // `docker.ps`, ...) reads its configuration from the environment, and a
+        // name that is on no list (round 61: `RIPGREP_CONFIG_PATH`) would steer
+        // it unseen, so the agent's changes are removed from that child.
+        let bound = ENV_BOUND.with(|c| c.get());
+        let changed: Vec<String> = {
+            let changes = ENV_CHANGES.lock().unwrap_or_else(|e| e.into_inner());
+            changes
+                .iter()
+                .filter(|(_, v)| v.is_some())
+                .map(|(k, _)| k.clone())
+                .collect()
+        };
+        for name in agent_env_removals(&changed, bound) {
+            let named = explicit.iter().any(|e| e.eq_ignore_ascii_case(&name));
+            if !named {
+                cmd.env_remove(&name);
+            }
+        }
     }
+}
+
+/// The variables the agent set (`changed`) that a child must not get: all of
+/// them but the inert names (see [`env_name_is_inert`]), unless the call passed
+/// an exec or network approval (`bound`) that binds them into its token.
+fn agent_env_removals(changed: &[String], bound: bool) -> Vec<String> {
+    if bound {
+        return Vec::new();
+    }
+    changed
+        .iter()
+        .filter(|name| !env_name_is_inert(name))
+        .cloned()
+        .collect()
 }
 
 /// A `Command` for a program the shell starts, with the shell's own settings
@@ -5369,15 +5457,52 @@ pub fn within_root(path: &str, base: &Path) -> bool {
 /// human mode, where nothing is jailed, can be replayed by an agent-mode
 /// session in the same directory. Rewinding rewrites or deletes that file, so
 /// in a jailed context a path outside the workspace is left alone.
+///
+/// Round 61: a path that is, by file identity, a protected file (the audit log
+/// or a governance file, also under another name such as a hard link) or that
+/// has more than one hard link is left alone too, as a normal write to it is
+/// refused. A hard link made outside the shell let `session_redo({force: true})`
+/// overwrite the audit log under the name of an ordinary file.
 pub fn rewind_refused(path: &str) -> Option<String> {
-    if path.is_empty() || !jail_enforced(current_mode()) || within_workspace(path) {
+    if path.is_empty() || !jail_enforced(current_mode()) {
         return None;
     }
-    Some(
-        "outside the workspace jail, so left as it is; rewind it outside agent mode, \
-         or with IRONSHELL_WORKSPACE covering it"
-            .to_string(),
-    )
+    if !within_workspace(path) {
+        return Some(
+            "outside the workspace jail, so left as it is; rewind it outside agent mode, \
+             or with IRONSHELL_WORKSPACE covering it"
+                .to_string(),
+        );
+    }
+    if let Some(what) = protected_write_refusal(&resolve_path_str(path)) {
+        return Some(format!(
+            "is {what}, which a write may not change, so left as it is"
+        ));
+    }
+    let resolved = resolve_path_str(path);
+    let links = [path.to_string(), resolved]
+        .iter()
+        .find_map(|p| hard_link_count(Path::new(p)).filter(|n| *n > 1));
+    links.map(|n| {
+        format!(
+            "has {n} hard links, so rewriting it in place could change another file, and it is left as it is"
+        )
+    })
+}
+
+/// Whether `path` is the workspace root itself (`.`, `sub/..`, the root's own
+/// name), links resolved. A path that does not exist is not.
+pub fn names_workspace_root(path: &str) -> bool {
+    let Ok(target) = std::fs::canonicalize(resolve_path_str(path)) else {
+        return false;
+    };
+    let root = workspace_root();
+    let root = if root.is_absolute() {
+        root
+    } else {
+        std::env::current_dir().unwrap_or_default().join(root)
+    };
+    std::fs::canonicalize(root).is_ok_and(|root| root == target)
 }
 
 /// The most symbolic links one jail check follows (Linux `SYMLOOP_MAX`). A chain
@@ -9113,6 +9238,56 @@ fn windows_name_problem_ex(
 }
 
 pub fn guard(ctx: GuardCtx) -> Result<(), SafetyError> {
+    // An exec or network approval binds the environment changes (see
+    // `bind_env_changes`), so the operator saw them; a child started after one
+    // keeps them. Any other call is not shown them (see `strip_ironshell_env`).
+    let binds_env = matches!(ctx.effect, Effect::Exec | Effect::Network);
+    let result = guard_inner(ctx);
+    if binds_env && result.is_ok() {
+        ENV_BOUND.with(|c| c.set(true));
+    }
+    result
+}
+
+thread_local! {
+    /// Whether the builtin now running passed an exec or network gate whose
+    /// approval binds the environment the agent changed.
+    static ENV_BOUND: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Clear [`ENV_BOUND`] for a new builtin call, returning the earlier value so
+/// the caller can put it back when a nested call ends.
+pub(crate) fn begin_builtin_call() -> bool {
+    ENV_BOUND.with(|c| c.replace(false))
+}
+
+/// Put back the value [`begin_builtin_call`] returned.
+pub(crate) fn end_builtin_call(prev: bool) {
+    ENV_BOUND.with(|c| c.set(prev));
+}
+
+/// Variables an agent may set that a child started without an approval still
+/// gets: locale, terminal and logging names that change no behaviour.
+fn env_name_is_inert(name: &str) -> bool {
+    let u = name.to_ascii_uppercase();
+    u.starts_with("LC_")
+        || matches!(
+            u.as_str(),
+            "LANG"
+                | "LANGUAGE"
+                | "TZ"
+                | "TERM"
+                | "NO_COLOR"
+                | "FORCE_COLOR"
+                | "CLICOLOR"
+                | "CLICOLOR_FORCE"
+                | "CI"
+                | "RUST_BACKTRACE"
+                | "RUST_LOG"
+        )
+}
+
+fn guard_inner(ctx: GuardCtx) -> Result<(), SafetyError> {
     let mode = current_mode();
     let resource = ctx.targets.join(", ");
 
@@ -9757,6 +9932,66 @@ pub fn guard_dispatch(builtin: &str, args: &[crate::value::Value]) -> Result<(),
     if SELF_GUARDED.contains(&builtin) {
         return Ok(());
     }
+    // These four web builtins are gated here, by name, and do not call
+    // `guard_network` (which would charge them twice), so the literal internal
+    // address check that `guard_network` runs before the gate runs here for
+    // them: `web_get`, `web_robots_txt`, `web_sitemap` and `web_websocket` gave
+    // an approval token for `http://127.0.0.1/` that the SSRF check refused
+    // after approval. A `ws://` or `wss://` address is checked as the `http`
+    // or `https` one, as the builtin checks it.
+    if matches!(
+        builtin,
+        "web_get" | "web_robots_txt" | "web_sitemap" | "web_websocket"
+    ) {
+        if let Some(text) = args_as_strings.first() {
+            let as_http = if let Some(rest) = text.strip_prefix("wss://") {
+                format!("https://{rest}")
+            } else if let Some(rest) = text.strip_prefix("ws://") {
+                format!("http://{rest}")
+            } else {
+                text.clone()
+            };
+            if let Err(e) = crate::security::refuse_literal_internal_url(builtin, &as_http) {
+                return Err(match e.downcast::<SafetyError>() {
+                    Ok(se) => se,
+                    Err(other) => SafetyError {
+                        code: ErrorCode::PolicyDeny,
+                        message: other.to_string(),
+                        builtin: builtin.to_string(),
+                        hint: String::new(),
+                        approval: None,
+                        did_you_mean: Vec::new(),
+                        expected: String::new(),
+                        got: String::new(),
+                        extra: serde_json::Map::new(),
+                    },
+                });
+            }
+        }
+    }
+    // `scp_upload` is gated here too, so a link-local or metadata host in its
+    // remote operand is refused before the token is issued. (`scp_download` is
+    // self-guarded and checks in its body.)
+    if builtin == "scp_upload" {
+        if let Some(remote) = args_as_strings.get(1) {
+            refuse_metadata_host(builtin, crate::builtins::scp_remote_host(remote)).map_err(
+                |e| match e.downcast::<SafetyError>() {
+                    Ok(se) => se,
+                    Err(other) => SafetyError {
+                        code: ErrorCode::PolicyDeny,
+                        message: other.to_string(),
+                        builtin: builtin.to_string(),
+                        hint: String::new(),
+                        approval: None,
+                        did_you_mean: Vec::new(),
+                        expected: String::new(),
+                        got: String::new(),
+                        extra: serde_json::Map::new(),
+                    },
+                },
+            )?;
+        }
+    }
     if !centrally_enforced(effect) {
         // Containment is not the policy decision, and conflating the two left the
         // jail reaching 8 of the 119 `WriteLocal` builtins.
@@ -9894,7 +10129,33 @@ lazy_static! {
     /// Group 1 is the name and separator, group 2 the optional scheme and its
     /// space, group 3 the credential, which is redacted.
     static ref AUTH_HEADER_RE: regex::Regex = regex::Regex::new(
-        r#"(?i)(\bauthorization["']?\s*[:=]\s*["']?)((?:bearer|basic|digest|negotiate|token)\s+)?([^\s"',}\\]{6,})"#
+        r#"(?i)(\bauthorization["']?\s*[:=]\s*["']?)((?:bearer|basic|negotiate|token)\s+)?([^\s"',}\\]{6,})"#
+    ).unwrap();
+
+    /// `Authorization: Digest username="u", response="..."`: the parameters are
+    /// the rest of the line. Group 1 is the header and scheme, group 2 the
+    /// parameters, of which `response` and `cnonce` are redacted.
+    static ref DIGEST_HEADER_RE: regex::Regex = regex::Regex::new(
+        r#"(?i)(\b(?:proxy-)?authorization["']?\s*[:=]\s*["']?digest\s+)([^\r\n]*)"#
+    ).unwrap();
+    static ref DIGEST_FIELD_RE: regex::Regex = regex::Regex::new(
+        r#"(?i)\b(response|cnonce)(=["']?)([^\s"',}\\]{6,})"#
+    ).unwrap();
+
+    /// `Authorization: AWS4-HMAC-SHA256 Credential=..., SignedHeaders=..., Signature=...`:
+    /// the scheme name and the signed header names stay visible, `Credential`
+    /// (an access key id and scope) and `Signature` are redacted.
+    static ref SIGV4_HEADER_RE: regex::Regex = regex::Regex::new(
+        r#"(?i)(\b(?:proxy-)?authorization["']?\s*[:=]\s*["']?aws4-[a-z0-9-]+\s+)([^\r\n]*)"#
+    ).unwrap();
+    static ref SIGV4_FIELD_RE: regex::Regex = regex::Regex::new(
+        r#"(?i)\b(credential|signature)(=)([^\s,"'}\\]{6,})"#
+    ).unwrap();
+
+    /// A `Bearer` credential with no header name in front of it. The token must
+    /// be 16 or more token characters, so prose ("bearer of bad news") is left.
+    static ref BEARER_TEXT_RE: regex::Regex = regex::Regex::new(
+        r#"(?i)(\bbearer\s+)([A-Za-z0-9._~+/=-]{16,})"#
     ).unwrap();
 
     /// `Cookie: k=v; k2=v2` and `Set-Cookie: sid=abc; Path=/`. The value must
@@ -9927,7 +10188,7 @@ lazy_static! {
     /// before the name counts, so prose such as "the key=value syntax" is left
     /// alone. Group 1 (the name and `=`) is kept; the value is redacted.
     static ref URL_QUERY_SECRET_RE: regex::Regex = regex::Regex::new(
-        r#"(?i)([?&](?:api[_-]?key|apikey|access[_-]?token|access[_-]?key|token|key|secret|password|passwd|pwd)=)([^&\s#"'<>]{6,})"#
+        r#"(?i)([?&](?:api[_-]?key|apikey|access[_-]?token|access[_-]?key|token|key|secret|password|passwd|pwd|x-amz-signature|x-amz-security-token)=)([^&\s#"'<>]{6,})"#
     ).unwrap();
 
     /// URL credentials: `scheme://user:password@host` — redact only the password,
@@ -10004,6 +10265,17 @@ fn name_segments(name: &str) -> Vec<String> {
 /// substrings: HTTP credential headers and the short spellings of a password.
 /// `pass` matches `pass`, `db_pass` and `dbPass`, not `passage`, `compass` or
 /// `bypass_cache`.
+///
+/// Round 61 added the short and camel-case spellings: `pw`, `session`, `sid`,
+/// `csrf`, `xsrf`, `jwt`, `auth`, `otp` and `pin` as whole words, and the word
+/// pairs `access`+`key` (`accessKey`, `AccessKey`), `secret`+`key`,
+/// `session`+`id`, `api`+`key`, `private`+`key`, `auth`+`key` and `signing`+`key`.
+/// A word is a secret only as a whole segment, so `pinned`, `spin`, `authority`
+/// and `sessions_dir` are not flagged, and a segment after the word that says
+/// the field is about the secret and not the secret (`cookie_policy`,
+/// `session_count`, `auth_enabled`, `pin_required`, `jwt_name`) clears it. The
+/// substring rules (`password`, `token`, `secret`, `_key`, ...) are not
+/// cleared that way: `password_policy` is still hidden.
 fn segment_secret_name(name: &str) -> bool {
     const WORDS: &[&str] = &[
         "authorization",
@@ -10013,10 +10285,52 @@ fn segment_secret_name(name: &str) -> bool {
         "pass",
         "pwd",
         "apikey",
+        "pw",
+        "session",
+        "sessionid",
+        "sid",
+        "csrf",
+        "xsrf",
+        "jwt",
+        "auth",
+        "otp",
+        "pin",
+        "accesskey",
+        "secretkey",
     ];
-    name_segments(name)
-        .iter()
-        .any(|seg| WORDS.contains(&seg.as_str()))
+    const PAIRS: &[(&str, &str)] = &[
+        ("access", "key"),
+        ("secret", "key"),
+        ("api", "key"),
+        ("private", "key"),
+        ("session", "id"),
+        ("session", "key"),
+        ("auth", "key"),
+        ("signing", "key"),
+    ];
+    // A segment after the secret word that makes the field a description of
+    // the secret, a switch or a count.
+    const QUALIFIERS: &[&str] = &[
+        "policy", "name", "names", "count", "counts", "total", "len", "length", "size", "num",
+        "number", "max", "min", "enabled", "disabled", "required", "flag", "ttl", "timeout",
+        "status", "mode", "method", "type", "url", "uri", "host", "sock", "socket", "path", "dir",
+        "file",
+    ];
+    let segs = name_segments(name);
+    for (i, seg) in segs.iter().enumerate() {
+        let end = if WORDS.contains(&seg.as_str()) {
+            i + 1
+        } else if segs
+            .get(i + 1)
+            .is_some_and(|next| PAIRS.contains(&(seg.as_str(), next.as_str())))
+        {
+            i + 2
+        } else {
+            continue;
+        };
+        return !segs[end..].iter().any(|s| QUALIFIERS.contains(&s.as_str()));
+    }
+    false
 }
 
 /// Whether a field name is count-like (`cookie_count`, `pass_len`): a number
@@ -10268,6 +10582,41 @@ pub(crate) fn env_name_steers_children(name: &str) -> bool {
         "GREP_OPTIONS",
         "FZF_DEFAULT_COMMAND",
         "PROGRAMDATA",
+        // Round 61: `RIPGREP_CONFIG_PATH` names a file of flags for `rg`, and
+        // `--pre=PROGRAM` in it ran a program the agent wrote on every
+        // `rg_search`, with no approval. The others are the same kind: a
+        // config file, an option string, a pager or a socket a tool reads.
+        "RIPGREP_CONFIG_PATH",
+        "GNUMAKEFLAGS",
+        "MFLAGS",
+        "FZF_DEFAULT_OPTS",
+        "BAT_CONFIG_PATH",
+        "DELTA_PAGER",
+        "PERL_MM_OPT",
+        "PERL_MB_OPT",
+        "CONTAINER_HOST",
+        "KUBE_CONFIG_PATH",
+        "TERRAFORM_CONFIG",
+        "SOPS_AGE_KEY_FILE",
+        "PASSWORD_STORE_DIR",
+        "MYVIMRC",
+        "VIM",
+        "VIMRUNTIME",
+        "EMACSLOADPATH",
+        "ZSH_CUSTOM",
+        "TMUX",
+        "TMUX_TMPDIR",
+        "GEMRC",
+        "IRBRC",
+        "R_ENVIRON_USER",
+        "MYPYPATH",
+        "PIPX_HOME",
+        "WINEPREFIX",
+        "TEXINPUTS",
+        "GODEBUG",
+        "TERMINFO_DIRS",
+        "MORE",
+        "XAUTHORITY",
     ];
     const PREFIXES: &[&str] = &[
         "IRONSHELL_",
@@ -10339,6 +10688,19 @@ pub(crate) fn env_name_steers_children(name: &str) -> bool {
         "VIRTUALENV_",
         "PIPENV_",
         "PHP_",
+        // Round 61: tools that read their configuration, plugins or runtime
+        // from a family of variables.
+        "PYTEST_",
+        "PODMAN_",
+        "BUILDAH_",
+        "CONTAINERS_",
+        "GLAB_",
+        "STARSHIP_",
+        "ZELLIJ_",
+        "TOX_",
+        "SCCACHE_",
+        "HOMEBREW_",
+        "JUST_",
     ];
     const SUFFIXES: &[&str] = &[
         "_PROXY",
@@ -10347,11 +10709,42 @@ pub(crate) fn env_name_steers_children(name: &str) -> bool {
         "_BASE_URL",
         "_API_BASE",
         "_ENDPOINT",
+        // Round 61, generic rules: a program reads `<NAME>_CONFIG_PATH`,
+        // `<NAME>_CONFIG_FILE`, `<NAME>_CONFIG_DIR`, `<NAME>_CONFIG` or
+        // `<NAME>_CONF` for its settings, and `<NAME>_OPTS` or `<NAME>_ADDOPTS`
+        // for extra flags. Settings and flags can name a program to run, so an
+        // agent may not set any of them, whatever the tool is called.
+        "_CONFIG_PATH",
+        "_CONFIG_FILE",
+        "_CONFIG_DIR",
+        "_CONFIG_HOME",
+        "_CONFIG",
+        "_CONF",
+        "_OPTS",
+        "_ADDOPTS",
     ];
     let upper = name.trim().to_ascii_uppercase();
     EXACT.contains(&upper.as_str())
         || PREFIXES.iter().any(|p| upper.starts_with(p))
         || SUFFIXES.iter().any(|s| upper.ends_with(s))
+        || names_a_run_control_file(&upper)
+}
+
+/// Whether the upper-cased name is a program's run-control file (`GEMRC`,
+/// `NPMRC`, `WGETRC`, `MYVIMRC`, `FOO_RC`): a name ending in `RC`. `SRC`, `ARC`
+/// and `ORC` are common words and stay allowed, and a name must be at least five
+/// characters long unless it ends in `_RC`.
+fn names_a_run_control_file(upper: &str) -> bool {
+    if !upper.ends_with("RC") {
+        return false;
+    }
+    if upper.ends_with("_RC") {
+        return true;
+    }
+    upper.len() >= 5
+        && !upper.ends_with("SRC")
+        && !upper.ends_with("ARC")
+        && !upper.ends_with("ORC")
 }
 
 /// Whether this process must refuse to change the variable `name`: agent mode,
@@ -10480,6 +10873,11 @@ fn redact_str_counted(s: &str) -> (String, usize) {
                 {
                     return caps[0].to_string();
                 }
+                // `AWS4-HMAC-SHA256` is a scheme name; its Credential and
+                // Signature are redacted by `SIGV4_HEADER_RE`.
+                if scheme.is_empty() && value.to_ascii_lowercase().starts_with("aws4-") {
+                    return caps[0].to_string();
+                }
                 // With no scheme the value is prose ("authorization: required")
                 // unless it is long or holds a digit.
                 if scheme.is_empty()
@@ -10493,6 +10891,44 @@ fn redact_str_counted(s: &str) -> (String, usize) {
             })
             .into_owned();
         count += replaced;
+    }
+    for (header, field) in [
+        (&*DIGEST_HEADER_RE, &*DIGEST_FIELD_RE),
+        (&*SIGV4_HEADER_RE, &*SIGV4_FIELD_RE),
+    ] {
+        if !header.is_match(&cur) {
+            continue;
+        }
+        let mut replaced = 0usize;
+        cur = header
+            .replace_all(&cur, |caps: &regex::Captures| {
+                let params = field.replace_all(&caps[2], |f: &regex::Captures| {
+                    if &f[3] == REDACTION_MARKER {
+                        return f[0].to_string();
+                    }
+                    replaced += 1;
+                    format!("{}{}{}", &f[1], &f[2], REDACTION_MARKER)
+                });
+                format!("{}{}", &caps[1], params)
+            })
+            .into_owned();
+        count += replaced;
+    }
+    let hits = BEARER_TEXT_RE
+        .captures_iter(&cur)
+        .filter(|c| !is_capability_token(&c[2]))
+        .count();
+    if hits > 0 {
+        cur = BEARER_TEXT_RE
+            .replace_all(&cur, |caps: &regex::Captures| {
+                if is_capability_token(&caps[2]) {
+                    caps[0].to_string()
+                } else {
+                    format!("{}{}", &caps[1], REDACTION_MARKER)
+                }
+            })
+            .into_owned();
+        count += hits;
     }
     let hits = COOKIE_HEADER_RE
         .captures_iter(&cur)
@@ -11620,6 +12056,129 @@ mod tests {
         assert!(!secret_name_hides_number("cookie_count"));
         assert!(secret_name_hides_number("pwd"));
         assert!(secret_name_hides_number("api_key_count"));
+    }
+
+    #[test]
+    fn round61_secret_names_in_both_directions() {
+        for yes in [
+            "pw",
+            "session",
+            "sid",
+            "sessionId",
+            "session_id",
+            "csrf",
+            "xsrf",
+            "jwt",
+            "auth",
+            "otp",
+            "pin",
+            "accessKey",
+            "AccessKey",
+            "access_key",
+            "apiKey",
+            "secretKey",
+            "secret_key",
+            "x_csrf_token",
+            "user_pin",
+        ] {
+            assert!(is_secret_name(yes), "{yes} should be a secret name");
+        }
+        for no in [
+            "cookie_policy",
+            "session_count",
+            "session_name",
+            "auth_enabled",
+            "auth_method",
+            "pin_required",
+            "jwt_name",
+            "pinned",
+            "spin",
+            "pinch",
+            "authority",
+            "sessions_dir",
+            "sid_len",
+            "primaryKey",
+            "sortKey",
+            "SSH_AUTH_SOCK",
+            "auth_file",
+        ] {
+            assert!(!is_secret_name(no), "{no} must not be flagged");
+        }
+        // A number under a session count stays visible; a bare pin is hidden.
+        assert!(!secret_name_hides_number("session_count"));
+        assert!(secret_name_hides_number("pin"));
+    }
+
+    #[test]
+    fn round61_header_redaction() {
+        for (text, secrets, keeps) in [
+            (
+                "Authorization: Digest username=\"u\", realm=\"r\", nonce=\"n123456\", response=\"abcdef0123456789\", cnonce=\"c0ffee123456\"",
+                &["abcdef0123456789", "c0ffee123456"][..],
+                "Authorization: Digest username=",
+            ),
+            (
+                "Authorization: AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE0/20240101/us-east-1/s3/aws4_request, SignedHeaders=host;x-amz-date, Signature=abcdef0123456789abcdef",
+                &["AKIDEXAMPLE0", "abcdef0123456789abcdef"][..],
+                "Authorization: AWS4-HMAC-SHA256 Credential=[REDACTED]",
+            ),
+            (
+                "sent Bearer abcdefghijklmnop1234 to the server",
+                &["abcdefghijklmnop1234"][..],
+                "Bearer [REDACTED]",
+            ),
+        ] {
+            let (r, changed) = redact_str(text);
+            assert!(changed, "{text}");
+            for secret in secrets {
+                assert!(!r.contains(secret), "{text} -> {r}");
+            }
+            assert!(r.contains(keeps), "{text} -> {r}");
+        }
+        for prose in [
+            "a bearer of bad news",
+            "Bearer tokens are short-lived",
+            "the Bearer scheme",
+        ] {
+            let (r, changed) = redact_str(prose);
+            assert!(!changed && r == prose, "{prose} -> {r}");
+        }
+    }
+
+    #[test]
+    fn round61_agent_env_removals() {
+        let changed = vec![
+            "ZZ_UNLISTED".to_string(),
+            "LANG".to_string(),
+            "LC_ALL".to_string(),
+        ];
+        // No approval bound them: every one but the inert names is removed.
+        assert_eq!(agent_env_removals(&changed, false), vec!["ZZ_UNLISTED"]);
+        // An exec or network approval bound them into its token.
+        assert!(agent_env_removals(&changed, true).is_empty());
+    }
+
+    #[test]
+    fn metadata_addresses_are_recognised() {
+        for yes in [
+            "169.254.169.254",
+            "169.254.0.1",
+            "fe80::1",
+            "fd00:ec2::254",
+            "::ffff:169.254.169.254",
+        ] {
+            assert!(is_metadata_address(yes.parse().unwrap()), "{yes}");
+        }
+        for no in [
+            "127.0.0.1",
+            "10.0.0.1",
+            "8.8.8.8",
+            "::1",
+            "fd00:ec2::1",
+            "2001:db8::1",
+        ] {
+            assert!(!is_metadata_address(no.parse().unwrap()), "{no}");
+        }
     }
 
     #[test]
@@ -12758,6 +13317,35 @@ mod steering_name_tests {
             "PIPENV_VENV_IN_PROJECT",
             "ProgramData",
             // Round 60.
+            // Round 61.
+            "RIPGREP_CONFIG_PATH",
+            "GNUMAKEFLAGS",
+            "MFLAGS",
+            "PYTEST_ADDOPTS",
+            "PYTEST_PLUGINS",
+            "FZF_DEFAULT_OPTS",
+            "BAT_CONFIG_PATH",
+            "DELTA_PAGER",
+            "PERL_MM_OPT",
+            "PERL_MB_OPT",
+            "CONTAINERS_CONF",
+            "CONTAINER_HOST",
+            "KUBE_CONFIG_PATH",
+            "TERRAFORM_CONFIG",
+            "SOPS_AGE_KEY_FILE",
+            "MYVIMRC",
+            "VIMRUNTIME",
+            "GEMRC",
+            "NPMRC",
+            "FOO_RC",
+            "SOME_TOOL_CONFIG_PATH",
+            "some_tool_config_file",
+            "OTHER_CONFIG_DIR",
+            "NEWTOOL_OPTS",
+            "NEWTOOL_ADDOPTS",
+            "STARSHIP_CONFIG",
+            "HOMEBREW_NO_INSTALL_FROM_API",
+            "JUST_CHOOSER",
             "KUBECTL_EXTERNAL_DIFF",
             "kubectl_plugins_path",
             "KUBE_EDITOR",
@@ -12802,6 +13390,13 @@ mod steering_name_tests {
             "CPU_COUNT",
             "KUBERNETES_SERVICE_HOST",
             "LIBRARY",
+            "SRC",
+            "MY_SRC",
+            "ARC",
+            "FORCE",
+            "RESOURCE_COUNT",
+            "CONFIGURED",
+            "OPTIONS_SHOWN",
         ] {
             assert!(!env_name_steers_children(name), "{name} is refused");
         }

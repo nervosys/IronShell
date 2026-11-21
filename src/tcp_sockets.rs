@@ -143,6 +143,9 @@ pub(super) fn guard_and_open(
     if listen {
         safety::refuse_remote_bind(name, ip)?;
     }
+    if !listen {
+        safety::refuse_metadata_host(name, &ip.to_string())?;
+    }
     guard_network(name, &format!("tcp://{addr}"))?;
     // Check before opening and again during registration, including concurrent opens.
     if registry()

@@ -4397,8 +4397,10 @@ pub fn call_with_input(
     crate::signature::validate(name, &args, input.as_ref())
         .map_err(|e| crate::safety::ensure_structured(name, e))?;
 
-    call_with_input_inner(name, args, input, env)
-        .map_err(|e| crate::safety::ensure_structured(name, e))
+    let prev = crate::safety::begin_builtin_call();
+    let result = call_with_input_inner(name, args, input, env);
+    crate::safety::end_builtin_call(prev);
+    result.map_err(|e| crate::safety::ensure_structured(name, e))
 }
 
 lazy_static::lazy_static! {
@@ -71687,6 +71689,20 @@ pub fn bi_rmdir(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
     let recursive = fs_flag("rmdir", "recursive", args.get(1))?;
     // Jailed: relative paths are workspace-relative (resolve before the jail check).
     let path = crate::safety::resolve_path_str(&path);
+    // In agent mode the workspace root is never deleted, with or without an
+    // approval: `rmdir(".", true)` (or `sub/..`) would remove the whole
+    // workspace, the audit log's directory included, on a token that reads like
+    // any other delete.
+    if matches!(crate::safety::current_mode(), crate::safety::Mode::Agent)
+        && !crate::safety::names_a_remote_share(&path)
+        && crate::safety::names_workspace_root(&path)
+    {
+        return Err(crate::safety::policy_deny(
+            "rmdir",
+            format!("rmdir: `{path}` is the workspace root, which agent mode does not delete"),
+            "remove the directories inside it by name; an operator can delete the workspace outside agent mode",
+        ));
+    }
     // In agent mode, a directory that is not there, or a path that is a file,
     // is refused before the approval gate: no approval can make the call
     // succeed, and a token would approve a recursive delete of whatever is
@@ -73882,7 +73898,7 @@ fn scp_remote_arg(builtin: &str, remote: &str) -> Result<()> {
 /// The host of an scp remote that [`scp_remote_arg`] has accepted: the part
 /// between the user's `@` and the `:` that ends it (a bracketed address keeps its
 /// brackets).
-fn scp_remote_host(remote: &str) -> &str {
+pub(crate) fn scp_remote_host(remote: &str) -> &str {
     let rest = match remote.find('@') {
         Some(i) if !remote[..i].contains([':', '/']) => &remote[i + 1..],
         _ => remote,
@@ -74424,6 +74440,7 @@ fn bi_scp_upload(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
         _ => None,
     };
     scp_remote_arg("scp_upload", &remote)?;
+    crate::safety::refuse_metadata_host("scp_upload", scp_remote_host(&remote))?;
     let egress_host = crate::safety::ssh_egress_host("scp_upload", scp_remote_host(&remote))?;
     crate::safety::check_egress("scp_upload", &[egress_host])?;
     let local_path = crate::safety::resolve_path_str(&local_path);
@@ -74470,6 +74487,7 @@ fn bi_scp_download(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
         _ => None,
     };
     scp_remote_arg("scp_download", &remote)?;
+    crate::safety::refuse_metadata_host("scp_download", scp_remote_host(&remote))?;
     let egress_host = crate::safety::ssh_egress_host("scp_download", scp_remote_host(&remote))?;
     crate::safety::check_egress("scp_download", &[egress_host])?;
     refuse_option("scp_download", &local_path)?;

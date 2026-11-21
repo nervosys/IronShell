@@ -119,8 +119,9 @@ fn unrelated_names_that_contain_pass_or_cookie_are_not_redacted() {
         assert!(out(&o).contains("plain words here"), "{key}: {}", out(&o));
     }
     // A string under a cookie name is a cookie, and a number under a bare
-    // secret name is a secret.
-    let o = d.run(r#"{"cookie_count": "sid=abc123def"}"#);
+    // secret name is a secret. (Round 61: a trailing `count` or `policy` says
+    // the field describes the cookie, so `cookie_count` is no longer one.)
+    let o = d.run(r#"{"cookie": "sid=abc123def"}"#);
     assert!(!out(&o).contains("abc123def"), "{}", out(&o));
     let o = d.run(r#"{"pwd": 987654321}"#);
     assert!(!out(&o).contains("987654321"), "{}", out(&o));
