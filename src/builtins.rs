@@ -12136,6 +12136,9 @@ fn parse_delimited(
         .collect();
 
     check_csv_headers(builtin, &headers)?;
+    // A file with one header field that holds `;` (or a tab), read with a comma,
+    // is most likely separated by that character. It is read as asked, and a
+    // note on stderr (stdout is unchanged) says how to read it as separated.
     // Each row is a Record: one map node and one key String per cell, besides
     // the row's own StringRecord. Refuse before building them when the line
     // count says the rows would pass the memory budget, and look again while
@@ -12157,8 +12160,54 @@ fn parse_delimited(
         records.push(record.map_err(|e| csv_row_error(builtin, text, &e, delimiter as char))?);
     }
 
+    // Said after the rows were read, so a file that fails with the same advice
+    // in its error does not also print the note.
+    if headers.len() == 1 && delimiter == b',' {
+        if let Some(sep) = other_separator_in(text) {
+            eprintln!(
+                r#"ish: {builtin}: the header is one column named {:?} and the text looks {}-separated; read it with from_csv(cat("f.csv"), {{delimiter: {}}})"#,
+                headers[0],
+                sep_name(sep),
+                sep_literal(sep)
+            );
+        }
+    }
     let rows = csv_rows(&headers, &records);
     Ok(Value::Array(rows.into_iter().map(Value::Record).collect()))
+}
+
+/// The separator (`;` or a tab) that a CSV text read with commas seems to use:
+/// its header line holds no comma and no quote but holds that character, and
+/// the first data row holds it too.
+fn other_separator_in(text: &str) -> Option<char> {
+    let mut lines = text
+        .trim_start_matches('\u{feff}')
+        .lines()
+        .filter(|l| !l.is_empty());
+    let header = lines.next()?;
+    if header.contains(',') || header.contains('"') {
+        return None;
+    }
+    let first_row = lines.next()?;
+    [';', '\t']
+        .into_iter()
+        .find(|&c| header.contains(c) && first_row.contains(c))
+}
+
+fn sep_name(sep: char) -> &'static str {
+    if sep == ';' {
+        "semicolon"
+    } else {
+        "tab"
+    }
+}
+
+fn sep_literal(sep: char) -> &'static str {
+    if sep == ';' {
+        r#"";""#
+    } else {
+        r#""\t""#
+    }
 }
 
 /// The refusal for a header row that names a column twice. Each row is a record
@@ -12213,6 +12262,22 @@ fn csv_row_error(builtin: &str, text: &str, e: &csv::Error, delim: char) -> anyh
             .filter(|&&b| b == b'\n')
             .count()
             + 1;
+        if delim == ',' && *expected_len == 1 {
+            if let Some(sep) = other_separator_in(text) {
+                let hint = format!(
+                    r#"the text looks {}-separated, not comma-separated; read it with from_csv(cat("f.csv"), {{delimiter: {}}}) (open takes no options)"#,
+                    sep_name(sep),
+                    sep_literal(sep)
+                );
+                return crate::safety::bad_arg_in(
+                    builtin,
+                    format!(
+                        "{builtin}: CSV line {line}: found {len} fields where the header has {expected_len}"
+                    ),
+                    &hint,
+                );
+            }
+        }
         return crate::safety::bad_arg_in(
             builtin,
             format!(
@@ -35003,6 +35068,23 @@ fn bi_fs_tempfile(args: Vec<Value>, _input: Option<Value>) -> Result<Value> {
     Ok(Value::Str(path.to_string_lossy().to_string()))
 }
 
+/// The directories `fs_tempdir` created in this process in agent mode, under
+/// the shell's own temp root (`<workspace>/.ironshell/tmp/`). `rmdir(d, true)`
+/// of exactly one of them needs no approval: the shell made it for the script,
+/// so removing it is cleanup and not a delete of the user's data. The set is
+/// per process, so a directory another process made is not in it.
+static OWN_TEMPDIRS: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+
+/// Whether `path` (already resolved) is a directory this process's `fs_tempdir`
+/// created in agent mode. Exact match only: not the temp root, not a path
+/// inside one of these directories, not any other path.
+fn is_own_tempdir(path: &str) -> bool {
+    OWN_TEMPDIRS
+        .lock()
+        .map(|set| set.iter().any(|p| p == path))
+        .unwrap_or(false)
+}
+
 fn bi_fs_tempdir(args: Vec<Value>, _input: Option<Value>) -> Result<Value> {
     let prefix = args
         .first()
@@ -35022,7 +35104,13 @@ fn bi_fs_tempdir(args: Vec<Value>, _input: Option<Value>) -> Result<Value> {
 
     // A failure was null, which reads as "no directory" rather than "could not".
     std::fs::create_dir(&path).map_err(|e| crate::safety::fs_error("fs_tempdir", &path, &e))?;
-    Ok(Value::Str(path.to_string_lossy().to_string()))
+    let made = path.to_string_lossy().to_string();
+    if crate::safety::current_mode() == crate::safety::Mode::Agent {
+        if let Ok(mut set) = OWN_TEMPDIRS.lock() {
+            set.push(crate::safety::resolve_path_str(&made));
+        }
+    }
+    Ok(Value::Str(made))
 }
 
 #[path = "fs_watch.rs"]
@@ -71723,19 +71811,29 @@ pub fn bi_rmdir(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
             _ => {}
         }
     }
-    crate::safety::guard(crate::safety::GuardCtx {
-        builtin: "rmdir",
-        effect: crate::safety::Effect::Destructive,
-        what: "delete",
-        targets: vec![path.clone()],
-        blast_radius: if recursive {
-            crate::safety::tree_blast_radius(&path, serde_json::json!({ "recursive": recursive }))
-        } else {
-            serde_json::json!({ "recursive": recursive })
-        },
-        reversible: false,
-        fs_paths: true,
-    })?;
+    // A recursive delete of a directory this process's fs_tempdir made under the
+    // shell's own temp root is the cleanup the help examples end with, so it
+    // skips the approval gate. It applies to that exact path only, never to the
+    // temp root or any other directory, and the journal step below still runs.
+    let own_tempdir = recursive && is_own_tempdir(&path);
+    if !own_tempdir {
+        crate::safety::guard(crate::safety::GuardCtx {
+            builtin: "rmdir",
+            effect: crate::safety::Effect::Destructive,
+            what: "delete",
+            targets: vec![path.clone()],
+            blast_radius: if recursive {
+                crate::safety::tree_blast_radius(
+                    &path,
+                    serde_json::json!({ "recursive": recursive }),
+                )
+            } else {
+                serde_json::json!({ "recursive": recursive })
+            },
+            reversible: false,
+            fs_paths: true,
+        })?;
+    }
     // An empty directory is recorded as one that undo recreates. A directory
     // with anything in it is recorded as irreversible, so that undo reports it
     // as not reversed and never reaches past it to an earlier step. A failed

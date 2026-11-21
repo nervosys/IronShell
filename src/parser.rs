@@ -179,6 +179,20 @@ const FINALLY_HINT: &str = "there is no `finally`: put the cleanup in the catch 
 /// The hint for `.5`.
 const LEADING_POINT_HINT: &str = "a number needs a digit before the point: write 0.5";
 
+/// The hint for `map(x => x * 2)`: a lambda starts with `fn(...)`.
+const BARE_ARROW_HINT: &str =
+    "a lambda starts with `fn` and takes its parameters in parentheses: write fn(x) => x * 2";
+
+/// The hint for `fn(x) { x * 2 }`: the body follows `=>` and is one expression.
+const LAMBDA_BLOCK_HINT: &str =
+    "a lambda body is one expression after `=>`, not a braced block: write fn(x) => x * 2";
+
+/// The hint for `a += 1` and the other compound assignments.
+const COMPOUND_ASSIGN_HINT: &str = "IronShell has no `+=`, `-=`, `*=`, `/=` or `%=`: write a = a + 1 (a variable you reassign or whose fields you set is declared `let mut a = 0`)";
+
+/// The hint for `import os`, which IronShell does not have.
+const IMPORT_HINT: &str = "`import` loads another script by path (import \"lib.ish\"); there is no `import os`: the modules are built in and called by name, e.g. file.read(\"f.txt\") or sys.hostname()";
+
 /// The hint for `def f(...)`, which IronShell does not have.
 const FUNCTION_HINT: &str = "functions are values: f = fn(x) => x + 1";
 
@@ -2009,6 +2023,17 @@ impl Parser {
             self.need(Tok::From, "expected 'from' after import list")?;
         }
 
+        // `import os`: a module name where a script path was expected.
+        if self.check(Tok::Ident) && items.is_empty() {
+            let at = self.peek();
+            return Err(anyhow::Error::new(HintedSyntax {
+                msg: format!(
+                    "expected module path string at line {}, column {}",
+                    at.line, at.col
+                ),
+                hint: IMPORT_HINT.to_string(),
+            }));
+        }
         // Parse source path (string)
         let source = self.need_string("expected module path string")?;
 
@@ -2318,6 +2343,16 @@ impl Parser {
                     tok.line, tok.col
                 ),
                 hint: IN_OPERATOR_HINT.to_string(),
+            }));
+        }
+        if self.check(Tok::FatArrow) {
+            let tok = self.peek();
+            return Err(anyhow::Error::new(HintedSyntax {
+                msg: format!(
+                    "expected ')' after arguments at line {}, column {}",
+                    tok.line, tok.col
+                ),
+                hint: BARE_ARROW_HINT.to_string(),
             }));
         }
         if !self.check(Tok::RParen) && self.pipe_in_span(arg_start) {
@@ -3613,6 +3648,16 @@ impl Parser {
         // `fn(x) x.a` -- the arrow left out -- is what a model writes when its
         // prior is a language without one; the body that follows is
         // unambiguous, so accept it rather than fail the whole program.
+        if self.check(Tok::LBrace) && !self.at_record_literal() {
+            let at = self.peek();
+            return Err(anyhow::Error::new(HintedSyntax {
+                msg: format!(
+                    "expected '=>' after the lambda parameters at line {}, column {}",
+                    at.line, at.col
+                ),
+                hint: LAMBDA_BLOCK_HINT.to_string(),
+            }));
+        }
         self.match_tok(Tok::FatArrow);
         // Parse the lambda body - include pipes as part of the body expression.
         // Disable word-call sugar while parsing to avoid greedily consuming
@@ -4443,6 +4488,19 @@ impl Parser {
                 .is_some_and(|open| open.kind == Tok::LBrace)
         {
             return Some(ONE_EXPR_HINT);
+        }
+        // `a += 1`: the operator and the `=` are two tokens with no gap.
+        if matches!(cur, Tok::Equal) {
+            if let (Some(op), Some(eq)) = (prev, self.toks.get(self.i)) {
+                if matches!(
+                    op.kind,
+                    Tok::Plus | Tok::Minus | Tok::Star | Tok::Slash | Tok::Percent
+                ) && op.line == eq.line
+                    && op.col + 1 == eq.col
+                {
+                    return Some(COMPOUND_ASSIGN_HINT);
+                }
+            }
         }
         if matches!(cur, Tok::Equal)
             && self.i >= 2
