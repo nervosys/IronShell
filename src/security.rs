@@ -1703,6 +1703,53 @@ pub fn validate_http_url(builtin: &str, url_str: &str) -> Result<String> {
     check_http_url(builtin, url_str).map(|checked| checked.url)
 }
 
+/// The part of [`check_http_url`] that needs no name lookup: a URL whose host is
+/// this machine by name, or an internal address written out, is refused with
+/// E_POLICY_DENY. A caller runs it before the approval gate, so no token is
+/// issued for a request that the SSRF policy refuses after any approval. A URL
+/// that does not parse, or a host that needs a lookup, passes: the full check
+/// answers for those.
+pub fn refuse_literal_internal_url(builtin: &str, url_str: &str) -> Result<()> {
+    let Ok(parsed) = url::Url::parse(url_str) else {
+        return Ok(());
+    };
+    if parsed.scheme() != "http" && parsed.scheme() != "https" {
+        return Ok(());
+    }
+    let Some(host) = parsed.host_str() else {
+        return Ok(());
+    };
+    let exempt = loopback_allowed_for_tests();
+    let loopback_name = ["localhost", "127.0.0.1", "::1", "[::1]"]
+        .iter()
+        .any(|n| host.eq_ignore_ascii_case(n));
+    let names_this_machine = ["localhost", "127.0.0.1", "::1", "0.0.0.0", "[::]"]
+        .iter()
+        .any(|n| host.eq_ignore_ascii_case(n));
+    if names_this_machine && !(exempt && loopback_name) {
+        return Err(crate::safety::policy_deny(
+            builtin,
+            format!("access to {host} is blocked: it is this machine (SSRF protection)"),
+            "this is a security policy, not a malformed call, and no approval or IRONSHELL_NET_ALLOW setting lifts it; use a public host",
+        ));
+    }
+    let literal = match parsed.host() {
+        Some(url::Host::Ipv4(v4)) => Some(IpAddr::V4(v4)),
+        Some(url::Host::Ipv6(v6)) => Some(IpAddr::V6(v6)),
+        _ => None,
+    };
+    if let Some(ip) = literal {
+        if is_internal_ip(&ip) && !(exempt && is_loopback_ip(&ip)) {
+            return Err(crate::safety::policy_deny(
+                builtin,
+                format!("access to internal address {ip} is blocked (SSRF protection)"),
+                "this is a security policy, not a malformed call, and no approval or IRONSHELL_NET_ALLOW setting lifts it; use a public host",
+            ));
+        }
+    }
+    Ok(())
+}
+
 /// [`validate_http_url`], returning the addresses the check accepted so that the
 /// transfer can be pinned to it.
 pub fn check_http_url(builtin: &str, url_str: &str) -> Result<CheckedHttpUrl> {

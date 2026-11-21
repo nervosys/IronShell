@@ -9,6 +9,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 
+- In agent mode `print(...)` and `dbg(...)` redact secrets as the result printer does (also under `--deterministic`) and count them in the stderr note; before, `print(file.read(".env"))` wrote the raw values and `dbg` wrote them to stderr.
+- The extra Record of `error(msg, {...})` is redacted by field name in the error JSON (`{token: "abc"}`); a caught error still gives the script its fields.
+- Redaction by field name covers a secret-named field that holds an array, a record or a number (`{password: ["x"], token: 99999}`); bools, null and empty strings print as themselves, and a count under a name with `tokens` (`full_tokens`) is kept. The audit log's `redact_json` follows the same rules.
+- An approval token for a network builtin (`gh.pr()`) binds the process's `set_env` changes, as the token of `sh` does, so an approved call cannot be redirected by a later `set_env`.
+- Agents cannot set `GH_*`, `MISE_*`, `ASDF_*`, `DIRENV_*`, `VIRTUALENV_*`, `PIPENV_*`, `PHP_*`, `TAR_OPTIONS`, `RSYNC_RSH`, `ELECTRON_RUN_AS_NODE`, `R_HOME`, `MAVEN_ARGS`, `GREP_OPTIONS`, `FZF_DEFAULT_COMMAND` or `ProgramData` (E_POLICY_DENY).
+- In agent mode `http_get` of this machine by name or of an internal address written out (`localhost`, `127.0.0.1`, `[::1]`, `10.0.0.5`) is E_POLICY_DENY before the approval gate, so no token is issued; no approval and no `IRONSHELL_NET_ALLOW` setting lifts it.
+- `rmdir` of a path that does not exist (E_NOT_FOUND) or is a file (E_BAD_ARG) and `file_move` of a path onto itself (E_BAD_VALUE) fail before the approval gate; they issued a token for a call that could not succeed.
+- `file_move("d1", "d1/sub/d1")` says a directory cannot be moved into itself; the hint was "file_move takes String".
 - `tar_extract` refuses any link entry in a .tar.bz2/.xz/.zst archive (extracted by the system tar, whose link targets ish cannot check), and refuses outright when the tool's verbose listing fails; `--explain` agrees. A failed extraction removes what it created. Entry names with a component over 255 characters are refused up front.
 - `tar_create`, `zip_create` and `zip_add` skip the workspace's `.ironshell` state folder (journal and audit log) unless it is named as a member.
 - `rm` removes a symlink or junction that sits inside the workspace without following it; `rmdir(link, true)` stays refused; `rm` refuses a trailing separator; removing a dangling link or a link out of the workspace is recorded as irreversible, and the approval request says so.

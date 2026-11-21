@@ -5435,6 +5435,23 @@ fn bi_echo(args: &[Value], input: Option<Value>) -> Result<Value> {
     Ok(Value::Str(s))
 }
 
+/// A value about to be written to stdout or stderr by `print` or `dbg`, with
+/// secrets redacted as the result printer redacts them. Agent mode only, and
+/// off with `IRONSHELL_REDACT=off`. The count goes to the stderr note at once,
+/// because the result printer drops any count it did not make itself.
+fn redact_for_stream(v: &Value) -> Value {
+    if crate::safety::current_mode() == crate::safety::Mode::Agent
+        && crate::safety::redaction_enabled()
+    {
+        let _ = take_redacted_count();
+        let r = redact_value(v);
+        crate::safety::note_redactions_on_stderr();
+        r
+    } else {
+        v.clone()
+    }
+}
+
 fn bi_print(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
     // Determine the target Value (either piped input or first arg).
     let target = if let Some(v) = input {
@@ -5453,7 +5470,8 @@ fn bi_print(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
     // A String is written as its text. The pretty display quotes it, which is
     // right for showing a value and wrong for printing one: `print("x")` wrote
     // `"x"`, and a newline escape in the text was shown, not written.
-    let pretty = match &target {
+    let shown = redact_for_stream(&target);
+    let pretty = match &shown {
         Value::Str(s) => s.clone(),
         other => {
             crate::value::pretty::display_full(other, &crate::value::pretty::Theme::for_stdout())
@@ -5547,6 +5565,9 @@ fn bi_http_get(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
             ))
         }
     };
+    // A URL the SSRF policy refuses by its host text is refused before the
+    // approval gate, so no token is issued that approves nothing.
+    crate::security::refuse_literal_internal_url("http_get", &url)?;
     guard_network("http_get", &url)?;
     // Each hop is checked, and connected to at the address its check accepted,
     // so neither the first URL nor a redirect target is resolved twice.
@@ -7195,8 +7216,9 @@ fn bi_debug(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
     };
 
     let type_str = val.type_name();
+    let shown = redact_for_stream(&val);
     let pretty =
-        crate::value::pretty::display_inline(&val, &crate::value::pretty::Theme::for_stdout());
+        crate::value::pretty::display_inline(&shown, &crate::value::pretty::Theme::for_stdout());
     eprintln!("[DEBUG] {}: {}", type_str, pretty);
 
     // Return the value unchanged for pipeline chaining
@@ -27327,12 +27349,16 @@ fn redact_field_map(
 ) -> std::collections::BTreeMap<String, Value> {
     let mut out = std::collections::BTreeMap::new();
     for (k, val) in m {
-        if crate::safety::is_secret_name(k) && redactable_by_name(val) {
+        if crate::safety::is_secret_name(k) && redactable_by_name(k, val) {
             note_redacted(true);
             out.insert(
                 k.clone(),
                 Value::Str(crate::safety::REDACTION_MARKER.to_string()),
             );
+        } else if crate::safety::is_secret_name(k)
+            && matches!(val, Value::Array(_) | Value::Record(_) | Value::Table(_))
+        {
+            out.insert(k.clone(), redact_value(&redact_under_secret(k, val)));
         } else {
             out.insert(k.clone(), redact_value(val));
         }
@@ -27359,16 +27385,55 @@ fn redact_field_map(
 ///   for any caller reading the structured field.
 ///
 /// Found by driving the shell as an agent.
-fn redactable_by_name(v: &Value) -> bool {
+fn redactable_by_name(name: &str, v: &Value) -> bool {
     match v {
         // An empty string is no secret, and the marker would make an unset cell
         // look set.
         Value::Str(s) | Value::Uri(s) => !s.is_empty() && !crate::safety::is_capability_token(s),
-        // Containers are walked normally so genuine secrets inside are still
-        // caught by shape and by their own field names.
-        Value::Array(_) | Value::Record(_) | Value::Table(_) => false,
+        // A number under a secret name is a secret (`{token: 99999}`), unless
+        // the name is a count such as `full_tokens`. A bool or null prints as
+        // itself.
+        Value::Int(_) | Value::Float(_) => crate::safety::secret_name_hides_number(name),
+        // Containers are rebuilt by `redact_under_secret`.
         _ => false,
     }
+}
+
+/// A container held under a secret-named field, with every non-empty string
+/// in it (and every number directly in an array) replaced by the marker, at
+/// any depth. Bools, null and empty strings stay; a number in a nested record
+/// is judged by its own field name.
+fn redact_under_secret(name: &str, v: &Value) -> Value {
+    let marker = || Value::Str(crate::safety::REDACTION_MARKER.to_string());
+    match v {
+        Value::Str(s) | Value::Uri(s)
+            if !s.is_empty() && !crate::safety::is_capability_token(s) =>
+        {
+            note_redacted(true);
+            marker()
+        }
+        Value::Int(_) | Value::Float(_) if crate::safety::secret_name_hides_number(name) => {
+            note_redacted(true);
+            marker()
+        }
+        Value::Array(items) => {
+            Value::Array(items.iter().map(|i| redact_under_secret(name, i)).collect())
+        }
+        Value::Record(m) => Value::Record(redact_map_under_secret(m)),
+        Value::Table(t) => Value::Table(crate::value::Table {
+            rows: t.rows.iter().map(redact_map_under_secret).collect(),
+            schema: t.schema.clone(),
+        }),
+        other => other.clone(),
+    }
+}
+
+fn redact_map_under_secret(
+    m: &std::collections::BTreeMap<String, Value>,
+) -> std::collections::BTreeMap<String, Value> {
+    m.iter()
+        .map(|(k, val)| (k.clone(), redact_under_secret(k, val)))
+        .collect()
 }
 
 /// Render a result for **deterministic mode** (`--deterministic` / `IRONSHELL_DETERMINISTIC`):
@@ -58775,6 +58840,17 @@ fn bi_file_move(args: Vec<Value>, _input: Option<Value>) -> Result<Value> {
         crate::safety::resolve_path_str(&source),
         crate::safety::resolve_path_str(&dest),
     );
+    // A file moved onto itself changes nothing, and the call used to be offered
+    // an approval token.
+    if crate::journal::normalized_path(&source) == crate::journal::normalized_path(&dest) {
+        return Err(crate::safety::bad_value_in(
+            "file_move",
+            format!(
+                "file_move: the source and the destination are the same path, '{written_source}'"
+            ),
+            "give a destination different from the source",
+        ));
+    }
     // A directory moved into its own tree has no place to go: the OS refused it
     // as "denied". Refused here, by name, as file_copy refuses an overlap.
     if fs::metadata(&source).is_ok_and(|m| m.is_dir()) {
@@ -58782,8 +58858,10 @@ fn bi_file_move(args: Vec<Value>, _input: Option<Value>) -> Result<Value> {
         let dest_real = canonical_location(&crate::journal::normalized_path(&dest));
         if let Some(source_real) = source_real {
             if dest_real != source_real && dest_real.starts_with(&source_real) {
-                return Err(crate::safety::arg_err(
+                return Err(crate::safety::bad_value_in(
+                    "file_move",
                     "file_move: cannot move a directory into itself",
+                    "the destination is inside the source directory; choose a destination outside it",
                 ));
             }
         }
@@ -71302,6 +71380,31 @@ pub fn bi_rmdir(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
     let recursive = fs_flag("rmdir", "recursive", args.get(1))?;
     // Jailed: relative paths are workspace-relative (resolve before the jail check).
     let path = crate::safety::resolve_path_str(&path);
+    // In agent mode, a directory that is not there, or a path that is a file,
+    // is refused before the approval gate: no approval can make the call
+    // succeed, and a token would approve a recursive delete of whatever is
+    // later created at the path. Only inside the workspace (the jail answers for
+    // anything outside it). A link is not followed, so a link still removes
+    // itself.
+    if matches!(crate::safety::current_mode(), crate::safety::Mode::Agent)
+        && crate::safety::within_workspace(&path)
+        && !crate::safety::names_a_remote_share(&path)
+    {
+        match std::fs::symlink_metadata(&path) {
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                return Err(crate::safety::not_found("rmdir", "directory", &path));
+            }
+            Ok(m) if m.is_file() => {
+                return Err(crate::safety::bad_arg_with_hint(
+                    "rmdir",
+                    "a directory path",
+                    "a file",
+                    "that path is a file; remove it with rm(path)",
+                ));
+            }
+            _ => {}
+        }
+    }
     crate::safety::guard(crate::safety::GuardCtx {
         builtin: "rmdir",
         effect: crate::safety::Effect::Destructive,
