@@ -5027,6 +5027,14 @@ pub(crate) fn guard_network(builtin: &str, url: &str) -> Result<()> {
     // later inherits the check instead of having to remember it. No legitimate
     // URL begins with `-`.
     crate::safety::reject_option_like(builtin, &[url.to_string()])?;
+    // An http(s) address the SSRF policy refuses by its text (this machine, or
+    // an internal address written out) is refused here, after the caller's
+    // argument checks and before the gate, so no approval token is issued for
+    // a request that would be denied after approval. Opening a URL in the
+    // user's browser is not a request the shell makes, so it is not checked.
+    if !matches!(builtin, "web_open_url" | "web_browser_open") {
+        crate::security::refuse_literal_internal_url(builtin, url)?;
+    }
 
     crate::safety::guard(crate::safety::GuardCtx {
         builtin,
@@ -49618,9 +49626,8 @@ fn web_http_url(builtin: &str, text: &str) -> Result<String> {
             &format!("a {} URL", parsed.scheme()),
         ));
     }
-    // An address the SSRF policy refuses by its text is refused here, before
-    // the caller reaches the approval gate, so no token is issued for it.
-    crate::security::refuse_literal_internal_url(builtin, parsed.as_str())?;
+    // The literal internal-address check runs in `guard_network`, after the
+    // caller has checked its other arguments and just before the gate.
     Ok(parsed.to_string())
 }
 
@@ -79375,8 +79382,6 @@ fn bi_wget_download(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
             &format!("the scheme {}", parsed.scheme()),
         ));
     }
-    crate::security::refuse_literal_internal_url("wget_download", &url)?;
-    guard_network("wget_download", &url)?;
     let output = match args.get(1) {
         Some(Value::Str(s)) => s.clone(),
         Some(other) => {
@@ -79409,6 +79414,9 @@ fn bi_wget_download(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
             "wget_download: `{output}` already exists; remove it or choose another output path"
         )));
     }
+    // The gate comes after the argument checks, so a call that can never
+    // succeed is refused without an approval token.
+    guard_network("wget_download", &url)?;
     let max = WGET_FILE_MAX.to_string();
     let report = format!("{WEB_HOP_MARK}%{{response_code}} %{{redirect_url}}");
     // Redirects are followed here, hop by hop, for the reason `web_curl`

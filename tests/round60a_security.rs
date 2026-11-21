@@ -184,7 +184,8 @@ const WEB_CALLS: &[&str] = &[
     r#"http.download("{u}")"#,
     r#"web_headers("{u}")"#,
     r#"web_json_get("{u}")"#,
-    r#"wget_download("{u}")"#,
+    // An output path, because a URL that names no file is a bad argument first.
+    r#"wget_download("{u}", "out.bin")"#,
 ];
 
 #[test]
