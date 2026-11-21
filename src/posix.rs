@@ -3573,13 +3573,18 @@ impl Shell {
         if argv.first().map(String::as_str) != Some("tee") {
             return;
         }
-        if let Some((flags, files)) = short_flags(&argv[1..], "a") {
+        if let Some((_, files)) = short_flags(&argv[1..], "a") {
             for f in files {
                 if f.starts_with("/dev/") {
                     continue;
                 }
                 if let Ok(p) = check_write_in_place(&f) {
-                    let _ = open_target(&p, flags.contains(&'a'));
+                    // Only a missing file is made now: one that exists may be
+                    // what an earlier stage reads (`sort f | tee f`), and bash
+                    // leaves that to a race, which the data survives more often.
+                    if !Path::new(&p).exists() {
+                        let _ = open_target(&p, true);
+                    }
                 }
             }
         }
@@ -6262,7 +6267,9 @@ fn is_plain_script(path: &str) -> bool {
     let n = std::fs::File::open(path)
         .and_then(|mut f| f.read(&mut head))
         .unwrap_or(0);
-    &head[..n] != b"MZ" && &head[..n] != b"#!"
+    // An empty file is not executable in bash's eyes either (`touch x; ./x` is
+    // 126): nothing says it was meant to run.
+    n > 0 && &head[..n] != b"MZ" && &head[..n] != b"#!"
 }
 
 /// Whether `path` is a file whose first line is a shebang for `sh` or `bash`:

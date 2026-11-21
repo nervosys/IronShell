@@ -127,6 +127,12 @@ fn tee_opens_its_files_before_it_reads() {
             ("touch a; ls | tee t >/dev/null; wc -l < t", b"2\n", 0),
             ("echo old > t; printf '' | tee t; wc -c < t", b"0\n", 0),
             ("echo x | tee u v; cat u v", b"x\nx\nx\n", 0),
+            // A file that exists is not truncated before an earlier stage reads it.
+            (
+                "printf 'b\\na\\n' > f; sort f | tee f > /dev/null; wc -c < f",
+                b"4\n",
+                0,
+            ),
         ],
     );
 }
@@ -294,6 +300,7 @@ fn a_script_with_no_shebang_runs_as_a_shell_script() {
                 b"hi\nrc=0\n",
                 0,
             ),
+            ("touch x; ./x 2>/dev/null; echo rc=$?", b"rc=126\n", 0),
         ],
     );
 }
