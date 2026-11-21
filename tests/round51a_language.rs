@@ -150,7 +150,9 @@ fn a7_hints_say_what_is_wrong() {
     let se = refusal(r#"from_yaml("a: 1\na: 2\n")"#);
     assert!(se.hint.contains("repeats a key"), "{}", se.hint);
 
-    let se = refusal(r#"from_yaml("just text")"#);
+    // A bare line alone is a YAML plain scalar; next to `key: value` lines it
+    // is an error.
+    let se = refusal(r#"from_yaml("just text\nkey: 1\n")"#);
     assert!(!se.hint.starts_with("from_yaml takes"), "{}", se.hint);
 
     let se = refusal(r#"[{a: 1}] | sql("select 1; select 2")"#);

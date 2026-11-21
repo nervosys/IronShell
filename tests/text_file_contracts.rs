@@ -2101,6 +2101,7 @@ fn sed_file_mode_resolves_paths_and_rolls_back_atomic_edits() {
         result,
         Value::Record(std::collections::BTreeMap::from([
             ("file".into(), s("input")),
+            ("matches".into(), Value::Int(2)),
             ("status".into(), s("modified"))
         ]))
     );

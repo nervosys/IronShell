@@ -1225,7 +1225,13 @@ mod tests {
 
     #[test]
     fn rejects_a_line_that_is_not_a_mapping_entry() {
-        let err = parse("just a bare line\n").unwrap_err().to_string();
+        // A bare line alone is a plain scalar (a String), as in YAML; next to
+        // mapping entries it is an error.
+        assert_eq!(
+            parse("just a bare line\n").unwrap(),
+            Value::Str("just a bare line".into())
+        );
+        let err = parse("just a bare line\nkey: 1\n").unwrap_err().to_string();
         assert!(err.contains("expected `key: value`"), "got {err}");
     }
 
