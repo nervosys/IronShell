@@ -8179,14 +8179,14 @@ fn sed_parse(script: &str, ere: bool) -> Result<Vec<SedLine>, String> {
                     fl.push(f);
                     k += 1;
                 }
-                if !ends_here(&mut k) {
-                    return Err(format!("sed command `{}`", segment(at)));
-                }
                 let pat = unescape_delim(&pat, sep, ere);
                 let digits: String = fl.chars().take_while(char::is_ascii_digit).collect();
                 let tail = &fl[digits.len()..];
                 if let Some(f) = tail.chars().find(|f| !matches!(f, 'g' | 'p')) {
                     return Err(format!("the s command's flag `{f}`"));
+                }
+                if !ends_here(&mut k) {
+                    return Err(format!("sed command `{}`", segment(at)));
                 }
                 let nth = if digits.is_empty() {
                     1
