@@ -5007,6 +5007,13 @@ fn arg<'a>(builtin: &str, args: &'a [Value], idx: usize, expected: &str) -> Resu
         .ok_or_else(|| crate::safety::bad_arg(builtin, expected, "nothing"))
 }
 
+/// The network builtins whose request goes through `security::check_http_url`
+/// after the gate, so a literal internal address is refused before it.
+fn ssrf_checked_after_gate(builtin: &str) -> bool {
+    (builtin.starts_with("web_") && !matches!(builtin, "web_open_url" | "web_browser_open"))
+        || matches!(builtin, "http_get" | "wget_download" | "workflow_http")
+}
+
 /// Gate a network-egress builtin through the safety guard with the `Network`
 /// effect, so the resource governor (`IRONSHELL_MAX_NET`) bounds egress and the
 /// audit log records the request. `Network` is policy-`allow` in agent mode, so
@@ -5027,12 +5034,14 @@ pub(crate) fn guard_network(builtin: &str, url: &str) -> Result<()> {
     // later inherits the check instead of having to remember it. No legitimate
     // URL begins with `-`.
     crate::safety::reject_option_like(builtin, &[url.to_string()])?;
-    // An http(s) address the SSRF policy refuses by its text (this machine, or
-    // an internal address written out) is refused here, after the caller's
-    // argument checks and before the gate, so no approval token is issued for
-    // a request that would be denied after approval. Opening a URL in the
-    // user's browser is not a request the shell makes, so it is not checked.
-    if !matches!(builtin, "web_open_url" | "web_browser_open") {
+    // For the builtins whose request the SSRF policy checks after the gate,
+    // an http(s) address it refuses by its text (this machine, or an internal
+    // address written out) is refused here, after the caller's argument checks
+    // and before the gate, so no approval token is issued for a request that
+    // would be denied after approval. Others are not checked: opening a URL in
+    // the user's browser is not a request the shell makes, and `ai_backends`
+    // probes local model servers on localhost by design.
+    if ssrf_checked_after_gate(builtin) {
         crate::security::refuse_literal_internal_url(builtin, url)?;
     }
 
