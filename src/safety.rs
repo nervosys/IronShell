@@ -4284,6 +4284,32 @@ fn bind_exec_context(builtin: &str, radius: &mut Json) -> Result<(), SafetyError
     Ok(())
 }
 
+/// Add the environment changes this process made (`env_changes`, sorted) to an
+/// approval's blast radius. Nothing is added when there are none, so the token
+/// of a call that follows no `set_env` is as it was.
+fn bind_env_changes(radius: &mut Json) {
+    let env: Vec<Json> = ENV_CHANGES
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .iter()
+        .map(|(k, v)| json!([k, v]))
+        .collect();
+    if env.is_empty() {
+        return;
+    }
+    if !radius.is_object() {
+        let old = std::mem::take(radius);
+        *radius = if old.is_null() {
+            json!({})
+        } else {
+            json!({ "detail": old })
+        };
+    }
+    if let Some(map) = radius.as_object_mut() {
+        map.insert("env_changes".to_string(), Json::Array(env));
+    }
+}
+
 /// The refusal of an exec whose approval cannot bind everything the command
 /// names (see [`bind_exec_context`]).
 fn unbindable_refusal(builtin: &str, message: &str) -> SafetyError {
@@ -4395,9 +4421,15 @@ impl SafetyError {
                 if object.contains_key(key) {
                     continue;
                 }
-                let value = match value {
-                    Json::String(s) => Json::String(scrub(s)),
-                    other => other.clone(),
+                // Redacted by its field name too: `{token: "abc"}` is a secret
+                // whatever its text looks like. The field is judged inside an
+                // object of its own, as it is in a Record result.
+                let value = if redaction_enabled() {
+                    let mut one = json!({ key.as_str(): value });
+                    redact_json(&mut one);
+                    one[key.as_str()].take()
+                } else {
+                    value.clone()
                 };
                 object.insert(key.clone(), value);
             }
@@ -9316,6 +9348,11 @@ pub fn guard(ctx: GuardCtx) -> Result<(), SafetyError> {
             let mut blast_radius = ctx.blast_radius.clone();
             if ctx.effect == Effect::Exec {
                 bind_exec_context(ctx.builtin, &mut blast_radius)?;
+            } else if ctx.effect == Effect::Network {
+                // A network builtin may run a child program (`gh.pr()` runs
+                // `gh`), which reads the environment this process changed, so
+                // the approval binds the changes as an exec approval does.
+                bind_env_changes(&mut blast_radius);
             }
             let mut descriptor = ApprovalDescriptor::new(
                 ctx.what,
@@ -10125,6 +10162,18 @@ pub(crate) fn env_name_steers_children(name: &str) -> bool {
         "TCLLIBPATH",
         "TCL_LIBRARY",
         "TK_LIBRARY",
+        // Round 59: tar runs the program `--use-compress-program` names, rsync
+        // runs `RSYNC_RSH` as its remote shell, Electron runs as plain Node,
+        // R and Maven read a home or an argument file, and grep, fzf and
+        // Windows' shared data folder load options, a command or a config.
+        "TAR_OPTIONS",
+        "RSYNC_RSH",
+        "ELECTRON_RUN_AS_NODE",
+        "R_HOME",
+        "MAVEN_ARGS",
+        "GREP_OPTIONS",
+        "FZF_DEFAULT_COMMAND",
+        "PROGRAMDATA",
     ];
     const PREFIXES: &[&str] = &[
         "IRONSHELL_",
@@ -10183,6 +10232,16 @@ pub(crate) fn env_name_steers_children(name: &str) -> bool {
         "COMPOSER_",
         "VAGRANT_",
         "BASH_FUNC_",
+        // Round 59: `gh` takes its host, repository, config directory and
+        // token from `GH_*`; the version managers, direnv, virtualenv, pipenv
+        // and PHP read their configuration or plugin paths from these.
+        "GH_",
+        "MISE_",
+        "ASDF_",
+        "DIRENV_",
+        "VIRTUALENV_",
+        "PIPENV_",
+        "PHP_",
     ];
     const SUFFIXES: &[&str] = &[
         "_PROXY",
@@ -10353,6 +10412,51 @@ pub fn is_capability_token(s: &str) -> bool {
     s.starts_with("apv_") || s.starts_with("apl_")
 }
 
+/// Whether a number under the field name `name` is a secret: the name denotes
+/// one and is not a count. `TOKEN` matches `full_tokens`, `page_tokens` and
+/// `max_tokens`, which hold counts the token-economy surface must report, so a
+/// name with the plural `tokens` keeps its number. A string under such a name
+/// is still redacted.
+pub fn secret_name_hides_number(name: &str) -> bool {
+    is_secret_name(name) && !name.to_ascii_lowercase().contains("tokens")
+}
+
+/// Redact a value held under a secret-named key: each non-empty string (an
+/// approval or plan token stays) and each number directly in an array becomes
+/// the marker, at any depth of arrays and records. Bools and null stay.
+fn redact_json_under_secret(v: &mut Json, name: &str) {
+    match v {
+        Json::String(s) => {
+            if !s.is_empty() && !is_capability_token(s) {
+                *v = Json::String(REDACTION_MARKER.to_string());
+            }
+        }
+        Json::Number(_) => {
+            if secret_name_hides_number(name) {
+                *v = Json::String(REDACTION_MARKER.to_string());
+            }
+        }
+        Json::Array(items) => {
+            for it in items.iter_mut() {
+                redact_json_under_secret(it, name);
+            }
+        }
+        Json::Object(map) => {
+            for (k, val) in map.iter_mut() {
+                // A nested number is the nested name's to judge.
+                if matches!(val, Json::Number(_)) {
+                    if secret_name_hides_number(k) {
+                        *val = Json::String(REDACTION_MARKER.to_string());
+                    }
+                } else {
+                    redact_json_under_secret(val, k);
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
 pub fn redact_json(v: &mut Json) {
     match v {
         Json::String(s) => {
@@ -10371,9 +10475,12 @@ pub fn redact_json(v: &mut Json) {
                 // Only a *string* under a secret-sounding name can be a secret.
                 // `TOKEN` matches `full_tokens`/`page_tokens`, which are counts,
                 // and blanking a number destroys information for no gain.
-                let hide = is_secret_name(k)
-                    && matches!(val, Json::String(s) if !s.is_empty() && !is_capability_token(s));
-                if hide {
+                if is_secret_name(k)
+                    && matches!(val, Json::String(_) | Json::Array(_) | Json::Object(_))
+                {
+                    redact_json_under_secret(val, k);
+                    redact_json(val);
+                } else if secret_name_hides_number(k) && matches!(val, Json::Number(_)) {
                     *val = Json::String(REDACTION_MARKER.to_string());
                 } else {
                     redact_json(val);
@@ -12433,6 +12540,26 @@ mod steering_name_tests {
             "HELM_CONFIG_HOME",
             "VAGRANT_CWD",
             "BASH_FUNC_ls%%",
+            // Round 59.
+            "GH_HOST",
+            "gh_repo",
+            "GH_CONFIG_DIR",
+            "GH_TOKEN",
+            "GH_ENTERPRISE_TOKEN",
+            "TAR_OPTIONS",
+            "RSYNC_RSH",
+            "MISE_CONFIG_FILE",
+            "ASDF_DATA_DIR",
+            "DIRENV_CONFIG",
+            "VIRTUALENV_CONFIG_FILE",
+            "ELECTRON_RUN_AS_NODE",
+            "R_HOME",
+            "PHP_INI_SCAN_DIR",
+            "MAVEN_ARGS",
+            "GREP_OPTIONS",
+            "FZF_DEFAULT_COMMAND",
+            "PIPENV_VENV_IN_PROJECT",
+            "ProgramData",
         ] {
             assert!(env_name_steers_children(name), "{name} is not refused");
         }
