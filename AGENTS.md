@@ -219,6 +219,8 @@ let x: Int = 1                         # an annotation is one bare type name (In
 mut r = {a: 1}
 r.a = 2                                # set a field of a `mut` record; r.a.b = v needs r.a to exist already; other copies keep theirs
 rows | sql("select * from t where amount > ?", [100])   # a trailing Array binds the ? placeholders
+# sql: text columns are not converted to numbers. sum/total/avg over a TEXT value that is not a clean number ("12x", "1,234.50", "$5") is E_BAD_ARG naming the value (clean it: sum(cast(replace(p, ',', '') as real))); clean text such as "12" still sums. Arithmetic on text (p * 2) uses SQLite's leading-number rule and does not refuse.
+git_log({n: 20, files: true})          # typed rows {hash, author, date, subject, files}; git_log(5) stays "hash subject" strings. Most changed files: git_log({n: 200, files: true}) | map(.files) | flatten | count_by(fn(f) => f)
 to_csv(rows, ["id", "customer"])       # column order (Records sort their keys); csv_columns("orders.csv") is the header in file order
 from_csv("v\n1\n2.5\n")          # a CSV column's type is inferred from ALL its cells: any decimal makes the column Float in every row ([1.0, 2.5]), and a "1.0" written by to_csv reads back as the Float 1.0; a semicolon-separated file is one column unless you pass the delimiter: from_csv(cat("x.csv"), {delimiter: ";"}) (one ASCII character; `open` takes no options)
 date_add("2024-01-31", 1, "months")    # "2024-02-29": weeks, months and years clamp to the month's end

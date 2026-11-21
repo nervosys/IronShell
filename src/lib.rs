@@ -260,6 +260,7 @@ pub mod signature;
 /// In-process, read-only SQL over typed values (`sql`, `sql_value`).
 #[cfg(feature = "native")]
 pub mod sql;
+pub mod sql_num;
 /// Syntax knowledge base — command documentation and help system.
 #[cfg(feature = "native")]
 pub mod syntax_kb;

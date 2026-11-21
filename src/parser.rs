@@ -1602,6 +1602,16 @@ fn lex_marked(src: &str) -> Result<(Vec<Spanned>, std::collections::HashSet<usiz
                     "U+FEFF is a byte order mark (BOM); only one at the very start of a file is skipped, so delete this one",
                 )));
             }
+            other if other.is_alphabetic() => {
+                // A letter outside ASCII: names are ASCII letters, digits and
+                // `_`, and a field with any other name is read with a quoted key.
+                return Err(anyhow::Error::new(ParseError::with_hint(
+                    format!(
+                        "unknown character '{other}' at line {start_line}, column {start_col}"
+                    ),
+                    "names are ASCII letters, digits and _; to read a field named with other characters, quote it: r[\"name\"] (for example r[\"\u{65E5}\u{672C}\"]), or in a pipeline stage row[\"name\"]",
+                )));
+            }
             other => {
                 return Err(anyhow!(
                     "unknown character '{}' at line {}, column {}",

@@ -215,6 +215,10 @@ pub struct RedoEntry {
     pub after: Before,
     /// The group of the undone entry: see [`Entry::group`].
     pub group: Option<usize>,
+    /// The state the undo left the path in. A redo is refused when the path
+    /// holds something else now, as an undo is. None when it is not known
+    /// (a directory), and then nothing is checked.
+    pub written: Option<Fingerprint>,
 }
 
 #[derive(Default)]
@@ -481,7 +485,7 @@ fn redo_as_entry(r: &RedoEntry) -> Entry {
         effect: r.effect.clone(),
         path: r.path.clone(),
         before: r.after.clone(),
-        after: None,
+        after: r.written.clone(),
         group: r.group,
         meta: None,
     }
@@ -503,7 +507,13 @@ fn hydrate(s: &mut State) {
         s.journal = load_dir(&session_dir().unwrap_or_default());
     }
     if s.redo.is_empty() {
-        s.redo = load_dir(&redo_dir().unwrap_or_default())
+        // The stack's top is the step undone last, which is the one with the
+        // lowest id (an undo goes newest first), so the files, read oldest id
+        // first, are taken in reverse. In the other order a redo of several
+        // steps of one file ended on the wrong content.
+        let mut stored = load_dir(&redo_dir().unwrap_or_default());
+        stored.reverse();
+        s.redo = stored
             .into_iter()
             .filter_map(|e| match e.before {
                 Before::Irreversible(_) => None,
@@ -514,6 +524,7 @@ fn hydrate(s: &mut State) {
                     path: e.path,
                     after,
                     group: e.group,
+                    written: e.after,
                 }),
             })
             .collect();
@@ -1629,6 +1640,9 @@ fn push_redo(s: &mut State, undone: &Entry, after: Result<Before, String>) {
         path: undone.path.clone(),
         after,
         group: undone.group,
+        // What the undo has just written (or removed): the file is expected to
+        // hold exactly this when the redo comes.
+        written: Fingerprint::of_before(&undone.before),
     };
     persist_redo(&r);
     s.redo.push(r);
@@ -1642,7 +1656,14 @@ fn push_redo(s: &mut State, undone: &Entry, after: Result<Before, String>) {
 ///
 /// As with [`undo`], a step whose re-apply fails stays on the redo stack, and
 /// the redo stops there, so it can be retried.
-pub fn redo(n: usize) -> Vec<Outcome> {
+///
+/// A step whose path changed since its undo (the user edited the file, or it
+/// was removed) is refused unless `force` is set, as [`undo`] refuses: the
+/// re-apply would discard those changes. When the first step in line is refused
+/// nothing has been re-applied, and the path and whether it was removed since
+/// are returned as the error. A later step's refusal is an outcome and ends the
+/// redo.
+pub fn redo(n: usize, force: bool) -> Result<Vec<Outcome>, (String, bool)> {
     let mut s = state();
     let mut out = Vec::new();
     // As in undo: the entries of one group are one step.
@@ -1682,6 +1703,30 @@ pub fn redo(n: usize) -> Vec<Outcome> {
         // The file is not touched unless what it holds now is first kept. If
         // that cannot be kept, the file is left alone and the step stays on the
         // redo stack, so the redo stops here.
+        if let (false, Some(written)) = (force, &r.written) {
+            let now = Fingerprint::of_path(&r.path);
+            let removed = now == Some(Fingerprint::Absent) && *written != Fingerprint::Absent;
+            let changed = match &now {
+                Some(Fingerprint::Absent) => removed,
+                Some(now) => now != written,
+                None => false,
+            };
+            if changed {
+                if out.is_empty() {
+                    return Err((r.path.clone(), removed));
+                }
+                out.push(Outcome::Skipped {
+                    what,
+                    why: if removed {
+                        "removed after the undo; re-applying would recreate it".to_string()
+                    } else {
+                        "changed after the undo; re-applying would discard those changes"
+                            .to_string()
+                    },
+                });
+                break;
+            }
+        }
         let current = match capture_state(&r.path, used) {
             Ok(current) => current,
             Err(why) => {
@@ -1742,7 +1787,7 @@ pub fn redo(n: usize) -> Vec<Outcome> {
         }
         out.push(outcome);
     }
-    out
+    Ok(out)
 }
 
 /// Every recorded step, oldest first.

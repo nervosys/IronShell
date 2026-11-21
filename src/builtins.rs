@@ -24414,6 +24414,7 @@ fn tool_search_synonyms(word: &str) -> &'static [&'static str] {
         "remove" => &["delete"],
         "compress" | "compression" => &["zip", "tar", "archive"],
         "decompress" | "unzip" | "uncompress" => &["extract"],
+        "history" => &["log"],
         _ => &[],
     }
 }
@@ -24524,10 +24525,16 @@ fn tool_search_builtins(query: &str) -> Vec<Value> {
             .iter()
             .filter(|p| !words.iter().any(|w| stem_match(p, w)))
             .count();
+        // A doc that opens with the query's verb ("Read a file as text" for
+        // "read a file") is the builtin that does that, ahead of one that only
+        // mentions the words later in its first sentence: half a point.
+        let leads_with_query = doc_words
+            .first()
+            .is_some_and(|first| words.iter().any(|w| stem_match(first, w)));
         if matched * 2 >= words.len() && matched > 0 {
             hits.push((
                 matched == words.len(),
-                (score * 2).saturating_sub(unmatched_parts),
+                (score * 2 + usize::from(leads_with_query)).saturating_sub(unmatched_parts),
                 sig,
             ));
         }
@@ -24535,6 +24542,9 @@ fn tool_search_builtins(query: &str) -> Vec<Value> {
     hits.sort_by(|a, b| {
         b.0.cmp(&a.0)
             .then(b.1.cmp(&a.1))
+            // Among equals, a categorised builtin (the core file, text and
+            // system tools) comes before an uncategorised one.
+            .then(b.2.category.is_some().cmp(&a.2.category.is_some()))
             .then(a.2.name.len().cmp(&b.2.name.len()))
             .then(a.2.name.cmp(b.2.name))
     });
@@ -60061,10 +60071,58 @@ fn bi_git_diff_staged(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
 
 fn bi_git_log(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
     git_refuse_input("git_log", &input)?;
-    let count = match args.first() {
-        Some(v) => expect_int("git_log", v)?,
-        None => 10,
+    // `git_log(n)` keeps its `<short hash> <subject>` lines. A trailing Record
+    // asks for typed rows: `git_log({n: 20, files: true})` or `git_log(20, {files: true})`.
+    let mut args = args;
+    let mut typed = false;
+    let mut with_files = false;
+    let mut count_from_options = None;
+    if matches!(args.last(), Some(Value::Record(_))) {
+        let Some(Value::Record(options)) = args.pop() else {
+            unreachable!()
+        };
+        typed = true;
+        for (key, value) in &options {
+            match (key.as_str(), value) {
+                ("files", Value::Bool(b)) => with_files = *b,
+                ("files", other) => {
+                    return Err(crate::safety::bad_arg("git_log", "files: Bool", other.type_name()))
+                }
+                ("n" | "count", Value::Int(n)) => count_from_options = Some(*n),
+                ("n" | "count", other) => {
+                    return Err(crate::safety::bad_arg("git_log", "n: Int", other.type_name()))
+                }
+                _ => {
+                    return Err(crate::safety::bad_arg_with_hint(
+                        "git_log",
+                        "an option among n and files",
+                        key,
+                        "git_log({n: 20, files: true}) returns records {hash, author, date, subject, files}; files lists the paths each commit changed",
+                    ))
+                }
+            }
+        }
+    }
+    let count = match (args.first(), count_from_options) {
+        (Some(_), Some(_)) => {
+            return Err(crate::safety::bad_arg_with_hint(
+                "git_log",
+                "the count once",
+                "a count and an n option",
+                "pass the count as the Int argument or as {n: ...}, not both",
+            ))
+        }
+        (Some(v), None) => expect_int("git_log", v)?,
+        (None, Some(n)) => n,
+        (None, None) => 10,
     };
+    if args.len() > 1 {
+        return Err(crate::safety::bad_arg(
+            "git_log",
+            "at most a count and an options Record",
+            &format!("{} arguments", args.len()),
+        ));
+    }
     // The declaration bounds it to 1..=10000. It is interpolated into a
     // `-N` flag, so a negative count (`--5`) must never reach git.
     if !(1..=10_000).contains(&count) {
@@ -60075,6 +60133,42 @@ fn bi_git_log(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
         ));
     }
     let mut cmd = git_command();
+    if typed {
+        // Records are separated by 0x1e and fields by 0x1f, which a subject
+        // or an author name cannot hold. `--name-only` follows the header.
+        cmd.args(["-c", "core.quotepath=off", "log", &format!("-{}", count)]);
+        cmd.arg("--format=%x1e%H%x1f%an%x1f%aI%x1f%s");
+        if with_files {
+            cmd.arg("--name-only");
+        }
+        let output = bounded_cmd_output("git_log", "git", cmd, TOOL_DEADLINE_SECS)?;
+        git_succeeded("git_log", &output, ".")?;
+        let text = String::from_utf8_lossy(&output.stdout);
+        let rows: Vec<Value> = text
+            .split('\u{1e}')
+            .filter(|chunk| !chunk.trim().is_empty())
+            .map(|chunk| {
+                let mut lines = chunk.lines();
+                let header = lines.next().unwrap_or("");
+                let mut fields = header.splitn(4, '\u{1f}');
+                let mut take = || Value::Str(fields.next().unwrap_or("").to_string());
+                let mut m = BTreeMap::new();
+                m.insert("hash".to_string(), take());
+                m.insert("author".to_string(), take());
+                m.insert("date".to_string(), take());
+                m.insert("subject".to_string(), take());
+                if with_files {
+                    let files: Vec<Value> = lines
+                        .filter(|l| !l.is_empty())
+                        .map(|l| Value::Str(l.to_string()))
+                        .collect();
+                    m.insert("files".to_string(), Value::Array(files));
+                }
+                Value::Record(m)
+            })
+            .collect();
+        return Ok(Value::Array(rows));
+    }
     cmd.args(["log", &format!("-{}", count), "--oneline"]);
     let output = bounded_cmd_output("git_log", "git", cmd, TOOL_DEADLINE_SECS)?;
     git_succeeded("git_log", &output, ".")?;
@@ -62484,9 +62578,29 @@ fn bi_session_undo(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
 
 /// `session_redo(n = 1)` — re-apply the last `n` undone steps.
 fn bi_session_redo(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
-    let n = step_count_arg("session_redo", &args, &input)?;
+    let counts: Vec<Value> = args
+        .iter()
+        .filter(|v| !matches!(v, Value::Record(_)))
+        .cloned()
+        .collect();
+    let n = step_count_arg("session_redo", &counts, &input)?;
+    let force = undo_force("session_redo", &args)?;
     refuse_unless_recording("session_redo")?;
-    let outcomes: Vec<crate::journal::Rewound> = crate::journal::redo(n)
+    // A file that changed after its undo is refused, as undo refuses a file
+    // that changed after its step: re-applying would discard those changes.
+    let applied = crate::journal::redo(n, force).map_err(|(path, removed)| {
+        let message = if removed {
+            format!("{path} was removed after the undo; re-applying would recreate it")
+        } else {
+            format!("{path} changed after the undo; re-applying would discard those changes")
+        };
+        crate::safety::bad_state_with_hint(
+            "session_redo",
+            &message,
+            &format!("read {path}, or session_redo({{force: true}}) to re-apply the step anyway"),
+        )
+    })?;
+    let outcomes: Vec<crate::journal::Rewound> = applied
         .into_iter()
         .map(|outcome| crate::journal::Rewound { seq: None, outcome })
         .collect();
