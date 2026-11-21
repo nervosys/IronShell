@@ -808,6 +808,7 @@ fn classified_effect(name: &str) -> Option<Effect> {
         | "git_rebase"
         | "git_stash"
         | "git_stash_pop"
+        | "git_tag"
         | "go_build"
         | "go_run"
         | "go_test"
@@ -1598,7 +1599,7 @@ pub fn current_mode() -> Mode {
 /// Whether the policy has been globally relaxed to permissive (agent mode
 /// behaves like human mode). `IRONSHELL_POLICY=permissive`, matched
 /// case-insensitively and ignoring surrounding whitespace.
-fn policy_permissive() -> bool {
+pub(crate) fn policy_permissive() -> bool {
     std::env::var("IRONSHELL_POLICY").is_ok_and(|v| v.trim().eq_ignore_ascii_case("permissive"))
 }
 
@@ -8392,6 +8393,22 @@ pub fn egress_permitted(targets: &[String], allow: &str) -> Result<(), String> {
     if entries.iter().any(|e| e == "*") {
         return Ok(());
     }
+    // An entry may carry a port (`host:8080`, `[::1]:8080`): it then admits a
+    // URL only on that port. Without a URL there is no port to compare, and the
+    // entry admits its host.
+    let url_ports: Vec<u16> = targets
+        .iter()
+        .filter(|t| t.contains("://"))
+        .filter_map(|t| url::Url::parse(t).ok()?.port_or_known_default())
+        .collect();
+    let has_url = targets.iter().any(|t| t.contains("://"));
+    let entries: Vec<String> = entries
+        .into_iter()
+        .filter_map(|e| match entry_port(&e) {
+            Some((host, port)) => (!has_url || url_ports.contains(&port)).then_some(host),
+            None => Some(e),
+        })
+        .collect();
     // A URL states its destination outright, so when one is present the other
     // arguments are payload (an output file, a body) and are not read as hosts
     // -- `web_download(url, "out.json")` must not be refused for `out.json`.
@@ -8433,6 +8450,22 @@ pub fn egress_permitted(targets: &[String], allow: &str) -> Result<(), String> {
 // GIT_CONFIG_PARAMETERS, GIT_CONFIG_COUNT or GIT_DIR in the environment changes
 // what git reads, so those refuse as unknown.
 // ---------------------------------------------------------------------------
+
+/// The host and port of an allowlist entry written `host:port` or
+/// `[v6]:port`, or `None` for an entry with no port (an IPv6 address without
+/// brackets has several colons and is not a `host:port`).
+fn entry_port(entry: &str) -> Option<(String, u16)> {
+    if let Some(rest) = entry.strip_prefix('[') {
+        let (inner, tail) = rest.split_once(']')?;
+        let port = tail.strip_prefix(':')?.parse::<u16>().ok()?;
+        return Some((format!("[{inner}]"), port));
+    }
+    if entry.matches(':').count() != 1 {
+        return None;
+    }
+    let (host, port) = entry.split_once(':')?;
+    Some((host.to_string(), port.parse::<u16>().ok()?))
+}
 
 /// What one git remote URL contacts.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -9048,6 +9081,25 @@ pub fn guard_redirect(
                 ));
             }
         }
+    }
+    // A hop from a public host never lands on this machine or a private
+    // network, in any mode (human mode may request such a host itself, but a
+    // remote server does not get to send the request there).
+    if crate::security::reach_of_url(from) == crate::security::Reach::Public
+        && crate::security::reach_of_url(to) != crate::security::Reach::Public
+    {
+        let _ = audit(
+            builtin,
+            Effect::Network,
+            "deny_redirect_ssrf",
+            to,
+            json!({ "from": from, "detail": "public to internal" }),
+        );
+        return Err(policy_deny(
+            builtin,
+            format!("{builtin}: {from} redirected to {to}, which is this machine, a private network or a metadata address"),
+            "a public server may not redirect a request onto this machine or a private network",
+        ));
     }
     match crate::security::check_http_url(builtin, to) {
         Ok(checked) => Ok(checked),

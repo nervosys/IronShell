@@ -255,7 +255,9 @@ fn http_get_takes_a_piped_url_and_refuses_it_when_it_is_not_http() {
 
 #[test]
 fn http_get_refuses_loopback_and_private_targets_before_any_request() {
-    for url in ["http://127.0.0.1:1/", "http://localhost:1/"] {
+    // Loopback and private hosts are allowed in human mode (agent mode refuses
+    // them: tests/round66b_release.rs); link-local and metadata never.
+    for url in ["http://169.254.169.254/", "http://0.0.0.0:1/"] {
         let r = call("http_get", vec![text(url)]);
         assert_eq!(code_of(&r), "E_POLICY_DENY", "{url}");
     }

@@ -1999,12 +1999,200 @@ pub fn validate_http_url(builtin: &str, url_str: &str) -> Result<String> {
     check_http_url(builtin, url_str).map(|checked| checked.url)
 }
 
-/// The part of [`check_http_url`] that needs no name lookup: a URL whose host is
-/// this machine by name, or an internal address written out, is refused with
-/// E_POLICY_DENY. A caller runs it before the approval gate, so no token is
-/// issued for a request that the SSRF policy refuses after any approval. A URL
-/// that does not parse, or a host that needs a lookup, passes: the full check
-/// answers for those.
+/// How the SSRF policy sees a destination.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Reach {
+    /// A public address or name.
+    Public,
+    /// This machine (127.0.0.0/8, ::1, `localhost`) or a private network
+    /// (10/8, 172.16/12, 192.168/16, fc00::/7): allowed in human mode, and in
+    /// agent mode only when the operator lists that exact host.
+    Internal,
+    /// A link-local or cloud-metadata address or name (169.254.0.0/16,
+    /// fe80::/10, fd00:ec2::254, 100.100.100.200, metadata.google.internal):
+    /// refused in every mode, whatever `IRONSHELL_NET_ALLOW` lists.
+    Metadata,
+    /// An address no request should reach: unspecified, multicast, reserved,
+    /// documentation, benchmarking and carrier-grade NAT ranges. Refused in
+    /// every mode.
+    Reserved,
+}
+
+fn reach_of_v4(v4: &Ipv4Addr) -> Reach {
+    if crate::safety::is_metadata_address(IpAddr::V4(*v4)) {
+        Reach::Metadata
+    } else if v4.is_loopback() || v4.is_private() {
+        Reach::Internal
+    } else if is_internal_v4(v4) {
+        Reach::Reserved
+    } else {
+        Reach::Public
+    }
+}
+
+/// The reach of an address; an IPv6 address that embeds an IPv4 one (mapped,
+/// NAT64, 6to4) takes the reach of that address.
+pub fn reach_of_ip(ip: &IpAddr) -> Reach {
+    match ip {
+        IpAddr::V4(v4) => reach_of_v4(v4),
+        IpAddr::V6(v6) => {
+            if v6.is_loopback() {
+                return Reach::Internal;
+            }
+            if crate::safety::is_metadata_address(*ip) {
+                return Reach::Metadata;
+            }
+            if let Some(v4) = embedded_v4(v6) {
+                return reach_of_v4(&v4);
+            }
+            if (v6.segments()[0] & 0xfe00) == 0xfc00 {
+                return Reach::Internal;
+            }
+            if is_internal_ip(ip) {
+                Reach::Reserved
+            } else {
+                Reach::Public
+            }
+        }
+    }
+}
+
+/// The reach of a host as written in a URL: a literal address by its address,
+/// `localhost` and `*.localhost` (RFC 6761) as this machine, the cloud metadata
+/// names as metadata, any other name as public (its addresses are judged after
+/// resolution).
+fn reach_of_host(host: &str, literal: Option<IpAddr>) -> Reach {
+    if let Some(ip) = literal {
+        return reach_of_ip(&ip);
+    }
+    let bare = host
+        .trim()
+        .trim_start_matches('[')
+        .trim_end_matches(']')
+        .trim_end_matches('.')
+        .to_ascii_lowercase();
+    if matches!(
+        bare.as_str(),
+        "metadata.google.internal" | "metadata.goog" | "instance-data" | "metadata.azure.internal"
+    ) {
+        Reach::Metadata
+    } else if bare == "localhost" || bare.ends_with(".localhost") {
+        Reach::Internal
+    } else if matches!(bare.as_str(), "0.0.0.0" | "::") {
+        Reach::Reserved
+    } else {
+        Reach::Public
+    }
+}
+
+/// The reach of the host of `url`, from its text alone, or `Public` for a
+/// string that is not an http(s) URL. No name lookup is made.
+pub fn reach_of_url(url: &str) -> Reach {
+    let Ok(parsed) = url::Url::parse(url) else {
+        return Reach::Public;
+    };
+    let Some(host) = parsed.host_str() else {
+        return Reach::Public;
+    };
+    let literal = match parsed.host() {
+        Some(url::Host::Ipv4(v4)) => Some(IpAddr::V4(v4)),
+        Some(url::Host::Ipv6(v6)) => Some(IpAddr::V6(v6)),
+        _ => None,
+    };
+    reach_of_host(host, literal)
+}
+
+/// Whether `IRONSHELL_NET_ALLOW` lists this host exactly: an entry that is the
+/// host, or `host:port` with this port (an IPv6 address in brackets for the
+/// second form). A `*`, a leading `.` and a subdomain match do not count: an
+/// internal destination is named, never covered by a pattern.
+fn operator_lists_exact(host: &str, port: u16) -> bool {
+    let Some(list) = crate::safety::net_allowlist() else {
+        return false;
+    };
+    let norm = |h: &str| {
+        h.trim()
+            .trim_start_matches('[')
+            .trim_end_matches(']')
+            .trim_end_matches('.')
+            .to_ascii_lowercase()
+    };
+    let want = norm(host);
+    let want_ip = want.parse::<IpAddr>().ok();
+    list.split([';', ',']).any(|entry| {
+        let entry = entry.trim();
+        let (name, entry_port) = if let Some(rest) = entry.strip_prefix('[') {
+            match rest.split_once(']') {
+                Some((inner, tail)) => (inner.to_string(), tail.strip_prefix(':')),
+                None => return false,
+            }
+        } else if entry.matches(':').count() == 1 {
+            match entry.split_once(':') {
+                Some((n, p)) => (n.to_string(), Some(p)),
+                None => return false,
+            }
+        } else {
+            (entry.to_string(), None)
+        };
+        if name.is_empty() || name.starts_with('.') || name.contains('*') {
+            return false;
+        }
+        if let Some(p) = entry_port {
+            if p.parse::<u16>().ok() != Some(port) {
+                return false;
+            }
+        }
+        let name = norm(&name);
+        name == want || (want_ip.is_some() && name.parse::<IpAddr>().ok() == want_ip)
+    })
+}
+
+/// Whether an `Internal` destination may be requested: always in human mode
+/// (and under `IRONSHELL_POLICY=permissive`); in agent mode only when the
+/// operator lists the host exactly in `IRONSHELL_NET_ALLOW`. The debug-build
+/// test seam admits loopback.
+fn internal_allowed(host: &str, port: u16, loopback: bool) -> bool {
+    if crate::safety::current_mode() != crate::safety::Mode::Agent
+        || crate::safety::policy_permissive()
+    {
+        return true;
+    }
+    (loopback && loopback_allowed_for_tests()) || operator_lists_exact(host, port)
+}
+
+/// The refusal for a destination the policy does not admit.
+fn refuse_reach(builtin: &str, host: &str, shown: &str, reach: Reach) -> anyhow::Error {
+    let (message, hint) = match reach {
+        Reach::Metadata => (
+            format!("access to {shown} is blocked: it is a link-local or cloud-metadata address (SSRF protection)"),
+            "this is a security policy, not a malformed call: link-local and cloud-metadata addresses are refused in every mode, and IRONSHELL_NET_ALLOW does not lift it".to_string(),
+        ),
+        Reach::Reserved => (
+            format!("access to {shown} is blocked: it is not a routable destination (SSRF protection)"),
+            "this is a security policy, not a malformed call: unspecified, multicast, reserved, documentation and carrier-grade NAT addresses are refused in every mode".to_string(),
+        ),
+        _ => (
+            format!("access to {shown} is blocked in agent mode: it is this machine or a private network (SSRF protection)"),
+            format!("this is a security policy, not a malformed call. Agent mode refuses loopback and private addresses unless the operator lists that exact host, or host:port (such as {host}:8080), in IRONSHELL_NET_ALLOW; an agent cannot set that variable. Human mode allows loopback and the private ranges. Link-local and cloud-metadata addresses are refused in every mode"),
+        ),
+    };
+    crate::safety::policy_deny(builtin, message, &hint)
+}
+
+/// The part of [`check_http_url`] that needs no name lookup, judged from the
+/// URL's text:
+/// - link-local and cloud-metadata addresses and names, and unroutable
+///   addresses (`0.0.0.0`, multicast, reserved), are E_POLICY_DENY in every
+///   mode, and `IRONSHELL_NET_ALLOW` does not lift it;
+/// - this machine (`127.0.0.0/8`, `::1`, `localhost`) and the private ranges
+///   are allowed in human mode, and in agent mode are E_POLICY_DENY unless the
+///   operator lists that exact host (optionally `host:port`) in
+///   `IRONSHELL_NET_ALLOW`.
+///
+/// A caller runs it before the approval gate, so no token is issued for a
+/// request that the SSRF policy refuses after any approval. A URL that does not
+/// parse, or a host that needs a lookup, passes: the full check answers for
+/// those.
 pub fn refuse_literal_internal_url(builtin: &str, url_str: &str) -> Result<()> {
     let Ok(parsed) = url::Url::parse(url_str) else {
         return Ok(());
@@ -2015,41 +2203,24 @@ pub fn refuse_literal_internal_url(builtin: &str, url_str: &str) -> Result<()> {
     let Some(host) = parsed.host_str() else {
         return Ok(());
     };
-    let exempt = loopback_allowed_for_tests();
-    let loopback_name = ["localhost", "127.0.0.1", "::1", "[::1]"]
-        .iter()
-        .any(|n| host.eq_ignore_ascii_case(n));
-    // RFC 6761: `localhost`, `localhost.` and every `*.localhost` name is this
-    // machine, whatever a resolver says.
-    let bare = host.trim_end_matches('.').to_ascii_lowercase();
-    let names_localhost = bare == "localhost" || bare.ends_with(".localhost");
-    let names_this_machine = names_localhost
-        || ["127.0.0.1", "::1", "0.0.0.0", "[::]"]
-            .iter()
-            .any(|n| host.eq_ignore_ascii_case(n));
-    let loopback_name = loopback_name || names_localhost;
-    if names_this_machine && !(exempt && loopback_name) {
-        return Err(crate::safety::policy_deny(
-            builtin,
-            format!("access to {host} is blocked: it is this machine (SSRF protection)"),
-            "this is a security policy, not a malformed call, and no approval or IRONSHELL_NET_ALLOW setting lifts it; use a public host",
-        ));
-    }
     let literal = match parsed.host() {
         Some(url::Host::Ipv4(v4)) => Some(IpAddr::V4(v4)),
         Some(url::Host::Ipv6(v6)) => Some(IpAddr::V6(v6)),
         _ => None,
     };
-    if let Some(ip) = literal {
-        if is_internal_ip(&ip) && !(exempt && is_loopback_ip(&ip)) {
-            return Err(crate::safety::policy_deny(
-                builtin,
-                format!("access to internal address {ip} is blocked (SSRF protection)"),
-                "this is a security policy, not a malformed call, and no approval or IRONSHELL_NET_ALLOW setting lifts it; use a public host",
-            ));
+    let port = parsed.port_or_known_default().unwrap_or(80);
+    match reach_of_host(host, literal) {
+        Reach::Public => Ok(()),
+        Reach::Internal => {
+            let loopback = literal.is_none_or(|ip| is_loopback_ip(&ip));
+            if internal_allowed(host, port, loopback) {
+                Ok(())
+            } else {
+                Err(refuse_reach(builtin, host, host, Reach::Internal))
+            }
         }
+        other => Err(refuse_reach(builtin, host, host, other)),
     }
-    Ok(())
 }
 
 /// [`validate_http_url`], returning the addresses the check accepted so that the
@@ -2080,21 +2251,6 @@ pub fn check_http_url(builtin: &str, url_str: &str) -> Result<CheckedHttpUrl> {
         .host_str()
         .ok_or_else(|| crate::safety::bad_arg(builtin, "a URL with a host", "none"))?;
     refuse_literal_internal_url(builtin, url_str)?;
-    let exempt = loopback_allowed_for_tests();
-
-    // Block localhost variants
-    let localhost_names = ["localhost", "127.0.0.1", "::1", "0.0.0.0", "[::]"];
-    let loopback_name = ["localhost", "127.0.0.1", "::1", "[::1]"]
-        .iter()
-        .any(|n| host.eq_ignore_ascii_case(n));
-    let names_this_machine = localhost_names.iter().any(|n| host.eq_ignore_ascii_case(n));
-    if names_this_machine && !(exempt && loopback_name) {
-        return Err(crate::safety::policy_deny(
-            builtin,
-            format!("access to {host} is blocked: it is this machine (SSRF protection)"),
-            "this is a security policy, not a malformed call; use a public host",
-        ));
-    }
 
     // Resolve the host and check every address it gives. The port only
     // matters to the pin, which must name the port the transfer uses.
@@ -2110,19 +2266,19 @@ pub fn check_http_url(builtin: &str, url_str: &str) -> Result<CheckedHttpUrl> {
     if addrs.is_empty() {
         return Err(crate::safety::not_found(builtin, "resolvable host", host));
     }
+    // A name is judged again by what it resolved to, so a public name that
+    // answers with an internal address (DNS rebinding) is refused as an
+    // internal host would be: in agent mode unless the operator listed that
+    // exact name, and a metadata address in every mode.
     for addr in &addrs {
         let ip = addr.ip();
-        if is_internal_ip(&ip) && !(exempt && is_loopback_ip(&ip)) {
-            return Err(crate::safety::policy_deny(
-                builtin,
-                format!(
-                    "the host {host} resolved to the internal address {ip}, which is blocked \
-                     (SSRF protection)"
-                ),
-                "the name resolves to an address inside this machine or a private network; \
-                 this is a security policy, and no approval or IRONSHELL_NET_ALLOW setting lifts it, \
-                 so use a host that resolves to a public address",
-            ));
+        match reach_of_ip(&ip) {
+            Reach::Public => {}
+            Reach::Internal if internal_allowed(host, port, is_loopback_ip(&ip)) => {}
+            other => {
+                let shown = format!("{host} (resolved to {ip})");
+                return Err(refuse_reach(builtin, host, &shown, other));
+            }
         }
     }
 

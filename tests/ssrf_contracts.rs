@@ -32,27 +32,16 @@ fn isolate() {
     });
 }
 
-/// Hosts that must be refused. Every one is an IP literal (or a name that
-/// `url` or the local-name list maps to this machine), so no lookup happens.
+/// Hosts that are refused in every mode: link-local and metadata addresses,
+/// and addresses no request should reach. Every one is an IP literal (or a name
+/// that `url` or the local-name list maps to this machine), so no lookup
+/// happens.
 #[test]
-fn internal_hosts_in_every_spelling_are_refused() {
+fn unroutable_and_metadata_hosts_in_every_spelling_are_refused() {
     isolate();
     let refused = [
-        // IPv4-mapped IPv6 (::ffff:a.b.c.d)
-        "http://[::ffff:127.0.0.1]/",
         "http://[::ffff:169.254.169.254]/",
-        "http://[::ffff:10.0.0.1]/",
         "http://[::ffff:100.64.0.1]/",
-        // IPv4-compatible IPv6 (::a.b.c.d)
-        "http://[::127.0.0.1]/",
-        "http://[::10.0.0.1]/",
-        // NAT64 well-known prefix, embedded address internal
-        "http://[64:ff9b::7f00:1]/",
-        "http://[64:ff9b::a00:1]/",
-        // 6to4, embedded address internal
-        "http://[2002:7f00:1::]/",
-        "http://[2002:c0a8:101::]/",
-        // IPv4 ranges added to the check
         "http://100.64.0.1/",
         "http://0.0.0.0/",
         "http://0.1.2.3/",
@@ -60,20 +49,12 @@ fn internal_hosts_in_every_spelling_are_refused() {
         "http://198.18.0.1/",
         "http://224.0.0.1/",
         "http://240.0.0.1/",
-        // IPv6 ranges: site-local, unique local, link local, multicast
         "http://[fec0::1]/",
-        "http://[fd00::1]/",
         "http://[fe80::1]/",
         "http://[ff02::1]/",
-        // Non-canonical IPv4 spellings. `url` normalises them to dotted form.
-        "http://2130706433/",
-        "http://0x7f.1/",
-        "http://0177.0.0.1/",
-        // Loopback names, the metadata address and the unspecified address
-        "http://localhost/",
-        "http://127.0.0.1/",
         "http://169.254.169.254/",
-        "http://[::1]/",
+        "http://[fd00:ec2::254]/",
+        "http://100.100.100.200/",
     ];
     for url in refused {
         let err = validate_http_url("web_fetch", url)
@@ -81,6 +62,39 @@ fn internal_hosts_in_every_spelling_are_refused() {
             .unwrap_or_else(|| panic!("{url} was accepted"));
         let msg = format!("{err:#}");
         assert!(msg.contains("SSRF protection"), "{url}: {msg}");
+    }
+}
+
+/// This machine and the private ranges, in every spelling `url` normalises or
+/// the address forms embed. Human mode allows them (agent mode refuses them
+/// unless the operator lists the exact host: see `agent_mode_with_approval_*`
+/// below and tests/round66b_release.rs).
+#[test]
+fn internal_hosts_in_every_spelling_are_allowed_in_human_mode_only() {
+    use iron_shell::security::{reach_of_url, Reach};
+    isolate();
+    let internal = [
+        "http://[::ffff:127.0.0.1]/",
+        "http://[::ffff:10.0.0.1]/",
+        "http://[::127.0.0.1]/",
+        "http://[::10.0.0.1]/",
+        "http://[64:ff9b::7f00:1]/",
+        "http://[64:ff9b::a00:1]/",
+        "http://[2002:7f00:1::]/",
+        "http://[2002:c0a8:101::]/",
+        "http://[fd00::1]/",
+        "http://2130706433/",
+        "http://0x7f.1/",
+        "http://0177.0.0.1/",
+        "http://localhost/",
+        "http://127.0.0.1/",
+        "http://[::1]/",
+    ];
+    for url in internal {
+        assert_eq!(reach_of_url(url), Reach::Internal, "{url}");
+        // Human mode: the literal check passes (nothing is resolved or sent).
+        iron_shell::security::refuse_literal_internal_url("web_fetch", url)
+            .unwrap_or_else(|e| panic!("{url} refused in human mode: {e:#}"));
     }
 }
 

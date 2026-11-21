@@ -131,6 +131,7 @@ has
 help
 hex_decode
 hex_encode
+hex_to_base64
 in
 index_of
 input_autocomplete
@@ -276,6 +277,11 @@ search_similar
 select
 select-object
 selection_strategy
+semver_bump
+semver_compare
+semver_parse
+semver_sort
+semver_valid
 sleep
 slice
 sort

@@ -251,6 +251,7 @@ pub mod secure_config;
 /// Security — RBAC, audit logging, SSO integration.
 #[cfg(feature = "native")]
 pub mod security;
+pub mod semver_ops;
 /// HTTP server shutdown — drain open requests on Ctrl-C or SIGTERM.
 #[cfg(feature = "native")]
 pub mod serve;

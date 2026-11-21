@@ -122,5 +122,9 @@ fn the_signature_lists_the_algorithm_before_the_data() {
     // The piped text is the subject, and it comes first; the direct form's
     // algorithm and data follow it, in the order the canonical call writes
     // them: crypto.hash("sha256", data).
-    assert_eq!(names, vec!["subject", "algorithm", "data"], "{v}");
+    assert_eq!(
+        names,
+        vec!["subject", "algorithm", "data", "options"],
+        "{v}"
+    );
 }

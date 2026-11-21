@@ -463,6 +463,7 @@ pub const IRREVERSIBLE: &[&str] = &[
     "git_reset",
     "git_stash",
     "git_stash_pop",
+    "git_tag",
     "glab_issue",
     "glab_mr",
     "go_build",

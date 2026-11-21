@@ -827,6 +827,7 @@ pub fn git_module() -> Value {
         ("rebase", "git_rebase"),
         ("cherry_pick", "git_cherry_pick"),
         ("tags", "git_tags"),
+        ("tag", "git_tag"),
         ("show", "git_show"),
         ("rev_parse", "git_rev_parse"),
         ("root", "git_root"),

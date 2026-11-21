@@ -513,6 +513,7 @@ git_stash	Exec
 git_stash_list	ReadLocal
 git_stash_pop	Exec
 git_status	ReadLocal
+git_tag	Exec
 git_tags	ReadLocal
 glab_issue	Network
 glab_mr	Network
@@ -588,6 +589,7 @@ helm_upgrade	Exec
 help	Pure
 hex_decode	Pure
 hex_encode	Pure
+hex_to_base64	Pure
 host	Network
 host_lookup	Network
 hostname	ReadLocal
@@ -1199,6 +1201,11 @@ selection_strategy	Pure
 semantic_cache	WriteLocal
 semantic_cache_clear	WriteLocal
 semantic_cache_get	WriteLocal
+semver_bump	Pure
+semver_compare	Pure
+semver_parse	Pure
+semver_sort	Pure
+semver_valid	Pure
 service	ReadLocal
 sess_close	WriteLocal
 sess_eval	Exec

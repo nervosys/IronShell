@@ -51,9 +51,11 @@ fn an_internal_address_is_refused_before_any_connection() {
     std::env::remove_var("IRONSHELL_AGENT");
     std::env::remove_var("IRONSHELL_TEST_ALLOW_LOOPBACK");
     isolate();
+    // Loopback is this machine, which human mode may reach; the test runs in
+    // human mode, so it names the addresses refused in every mode.
     for url in [
-        format!("ws://127.0.0.1:{port}/"),
-        format!("ws://[::ffff:127.0.0.1]:{port}/"),
+        format!("ws://0.0.0.0:{port}/"),
+        format!("ws://[::ffff:169.254.169.254]:{port}/"),
         "wss://169.254.169.254/".to_string(),
     ] {
         let mut env = Env::new();

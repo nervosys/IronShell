@@ -827,6 +827,16 @@ lazy_static::lazy_static! {
         map.insert("cron_next", 1223);
         // The expanded fields of a cron expression (1224)
         map.insert("cron_parse", 1224);
+        // Semantic Versioning 2.0.0 (1225-1229)
+        map.insert("semver_parse", 1225);
+        map.insert("semver_compare", 1226);
+        map.insert("semver_sort", 1227);
+        map.insert("semver_bump", 1228);
+        map.insert("semver_valid", 1229);
+        // Create a git tag (1230)
+        map.insert("git_tag", 1230);
+        // A hex digest as base64 (1231)
+        map.insert("hex_to_base64", 1231);
         // 500-519: Database
         map.insert("db_sqlite_open", 500);
         map.insert("db_sqlite_query", 1217);
@@ -3942,6 +3952,16 @@ static BUILTIN_DISPATCH: &[fn(Vec<Value>, Option<Value>, &mut Env) -> Result<Val
     |args, input, _| bi_cron_next(args, input), // 1223
     // The expanded fields of a cron expression
     |args, input, _| bi_cron_parse(args, input), // 1224
+    // Semantic Versioning 2.0.0
+    |args, input, _| bi_semver_parse(args, input), // 1225
+    |args, input, _| bi_semver_compare(args, input), // 1226
+    |args, input, _| bi_semver_sort(args, input),  // 1227
+    |args, input, _| bi_semver_bump(args, input),  // 1228
+    |args, input, _| bi_semver_valid(args, input), // 1229
+    // Create a git tag
+    |args, input, _| bi_git_tag(args, input), // 1230
+    // A hex digest as base64
+    |args, input, _| bi_hex_to_base64(args, input), // 1231
 ];
 
 /// The dispatch row that serves `name`, if the fast table has one.
@@ -13092,6 +13112,183 @@ fn bi_from_yaml_all(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
             };
             crate::safety::value_not_representable(B, message, &hint)
         })
+}
+
+/// The version text of a semver builtin: a String, parsed or refused with
+/// E_BAD_ARG naming the text and what is wrong with it.
+fn semver_of(builtin: &str, v: &Value) -> Result<crate::semver_ops::Semver> {
+    let Value::Str(s) = v else {
+        return Err(crate::safety::bad_arg(
+            builtin,
+            r#"a version String such as "1.2.3""#,
+            v.type_name(),
+        ));
+    };
+    crate::semver_ops::parse(s).map_err(|why| {
+        crate::safety::bad_arg_with_hint(
+            builtin,
+            "a semantic version (major.minor.patch with optional -prerelease and +build; a leading v is allowed)",
+            &format!("{s:?}: {why}"),
+            "see https://semver.org; check a list first with semver_valid",
+        )
+    })
+}
+
+/// semver_parse(version) - The parts of a semantic version.
+///
+/// Returns: Record {major, minor, patch, prerelease, build}; prerelease is an
+/// Array of identifiers (a numeric one is an Int), build an Array of Strings.
+/// A leading `v` is accepted. Anything else is E_BAD_ARG.
+fn bi_semver_parse(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
+    const B: &str = "semver_parse";
+    let (text, rest) = text_subject(B, args, input)?;
+    if !rest.is_empty() {
+        return Err(arity_error(B, "one version", rest.len() + 1));
+    }
+    let v = semver_of(B, &Value::Str(text))?;
+    let mut r = BTreeMap::new();
+    r.insert("major".to_string(), Value::Int(v.major as i64));
+    r.insert("minor".to_string(), Value::Int(v.minor as i64));
+    r.insert("patch".to_string(), Value::Int(v.patch as i64));
+    let pre = v
+        .pre
+        .iter()
+        .map(|i| match i {
+            crate::semver_ops::Ident::Num(n) => Value::Int(*n as i64),
+            crate::semver_ops::Ident::Text(t) => Value::Str(t.clone()),
+        })
+        .collect();
+    r.insert("prerelease".to_string(), Value::Array(pre));
+    let build = v.build.iter().map(|b| Value::Str(b.clone())).collect();
+    r.insert("build".to_string(), Value::Array(build));
+    Ok(Value::Record(r))
+}
+
+/// semver_valid(version) - Whether a String is a semantic version.
+fn bi_semver_valid(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
+    const B: &str = "semver_valid";
+    if args.len() > usize::from(input.is_none()) {
+        return Err(arity_error(B, "one version", args.len()));
+    }
+    let subject = match input {
+        Some(v) => Some(v),
+        None => args.first().cloned(),
+    };
+    Ok(Value::Bool(match subject {
+        Some(Value::Str(s)) => crate::semver_ops::parse(&s).is_ok(),
+        _ => false,
+    }))
+}
+
+/// semver_compare(a, b) - -1, 0 or 1 by semver 2.0.0 precedence.
+fn bi_semver_compare(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
+    const B: &str = "semver_compare";
+    let mut all: Vec<Value> = input.into_iter().collect();
+    all.extend(args);
+    if all.len() != 2 {
+        return Err(arity_error(B, "two versions", all.len()));
+    }
+    let a = semver_of(B, &all[0])?;
+    let b = semver_of(B, &all[1])?;
+    Ok(Value::Int(match crate::semver_ops::compare(&a, &b) {
+        std::cmp::Ordering::Less => -1,
+        std::cmp::Ordering::Equal => 0,
+        std::cmp::Ordering::Greater => 1,
+    }))
+}
+
+/// semver_sort(list) - The versions in ascending precedence order, as the
+/// strings they were given (a leading `v` stays). The sort is stable, so
+/// versions that differ only in build metadata keep their order. An entry that
+/// is not a semantic version is E_BAD_ARG naming it and its index; filter a
+/// mixed list first with `where(semver_valid)`.
+fn bi_semver_sort(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
+    const B: &str = "semver_sort";
+    let subject = match input {
+        Some(v) => {
+            if !args.is_empty() {
+                return Err(arity_error(B, "the list only", args.len() + 1));
+            }
+            v
+        }
+        None => {
+            if args.len() != 1 {
+                return Err(arity_error(B, "one Array of versions", args.len()));
+            }
+            args[0].clone()
+        }
+    };
+    let Value::Array(items) = subject else {
+        return Err(crate::safety::bad_arg(
+            B,
+            "an Array of version Strings",
+            subject.type_name(),
+        ));
+    };
+    let mut keyed = Vec::with_capacity(items.len());
+    for (i, item) in items.into_iter().enumerate() {
+        let key = semver_of(B, &item).map_err(|e| {
+            let text = match &item {
+                Value::Str(s) => format!("{s:?}"),
+                other => other.type_name().to_string(),
+            };
+            crate::safety::bad_arg_with_hint(
+                B,
+                "an Array whose entries are all semantic versions",
+                &format!("entry {i} {text}"),
+                "drop the entries that are not versions first: list | where(semver_valid) | semver_sort",
+            )
+            .context(e.to_string())
+        })?;
+        keyed.push((key, item));
+    }
+    keyed.sort_by(|a, b| crate::semver_ops::compare(&a.0, &b.0));
+    Ok(Value::Array(keyed.into_iter().map(|(_, v)| v).collect()))
+}
+
+/// semver_bump(version, level, id?) - The next version.
+///
+/// level is `major`, `minor`, `patch` or `prerelease`; for `prerelease`, `id`
+/// names the line (`rc` gives 1.2.4-rc.0). Build metadata is dropped, and a
+/// leading `v` on the input is kept on the result.
+fn bi_semver_bump(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
+    const B: &str = "semver_bump";
+    let (text, rest) = text_subject(B, args, input)?;
+    if rest.is_empty() || rest.len() > 2 {
+        return Err(arity_error(
+            B,
+            "a version, a level and an optional prerelease id",
+            rest.len() + 1,
+        ));
+    }
+    let level = expect_string(B, &rest[0])?.to_string();
+    let id = match rest.get(1) {
+        Some(v) => Some(expect_string(B, v)?.to_string()),
+        None => None,
+    };
+    if id.is_some() && level != "prerelease" {
+        return Err(crate::safety::bad_arg_with_hint(
+            B,
+            "no id unless the level is prerelease",
+            &format!("an id with level {level:?}"),
+            r#"semver_bump("1.2.3", "prerelease", "rc") is 1.2.4-rc.0"#,
+        ));
+    }
+    let v = semver_of(B, &Value::Str(text.clone()))?;
+    let next = v.bump(&level, id.as_deref()).map_err(|why| {
+        crate::safety::bad_arg_with_hint(
+            B,
+            "a level of major, minor, patch or prerelease and a valid id",
+            &why,
+            r#"semver_bump("1.2.3", "minor") is 1.3.0"#,
+        )
+    })?;
+    let prefix = if text.trim_start().starts_with('v') {
+        "v"
+    } else {
+        ""
+    };
+    Ok(Value::Str(format!("{prefix}{}", next.render())))
 }
 
 /// cron_parse(expr) - The fields of a cron expression, expanded.
@@ -42079,6 +42276,48 @@ fn zip_claim_name(builtin: &str, st: &mut ZipBuild, name: &str) -> Result<()> {
     Ok(())
 }
 
+/// The time a zip entry records for a file: `SOURCE_DATE_EPOCH` when set, else
+/// the file's modification time, in UTC and to the 2 seconds a zip keeps. None
+/// outside 1980 to 2107, which a zip cannot hold (the entry then has the zip
+/// default, 1980-01-01).
+fn zip_mtime(meta: &std::fs::Metadata) -> Option<zip::DateTime> {
+    let secs: i64 = match source_date_epoch() {
+        Some(t) => i64::try_from(t).ok()?,
+        None => {
+            let d = meta
+                .modified()
+                .ok()?
+                .duration_since(std::time::UNIX_EPOCH)
+                .ok()?;
+            i64::try_from(d.as_secs()).ok()?
+        }
+    };
+    let days = secs.div_euclid(86_400);
+    let rem = secs.rem_euclid(86_400);
+    // Civil date from days since 1970-01-01 (Howard Hinnant's algorithm).
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z.rem_euclid(146_097);
+    let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let day = doy - (153 * mp + 2) / 5 + 1;
+    let month = if mp < 10 { mp + 3 } else { mp - 9 };
+    let year = yoe + era * 400 + i64::from(month <= 2);
+    if !(1980..=2107).contains(&year) {
+        return None;
+    }
+    zip::DateTime::from_date_and_time(
+        year as u16,
+        month as u8,
+        day as u8,
+        (rem / 3_600) as u8,
+        (rem % 3_600 / 60) as u8,
+        (rem % 60) as u8,
+    )
+    .ok()
+}
+
 /// Add `fs_path`, a file or a whole folder, to `w` under `entry_name`. Empty
 /// folders are kept as directory entries. A symlink to a folder is not followed.
 fn zip_add_tree(
@@ -42096,8 +42335,11 @@ fn zip_add_tree(
     if st.entries > WALK_MAX_ENTRIES {
         return Err(walk_over(builtin, WALK_MAX_ENTRIES));
     }
-    let opts = zip::write::SimpleFileOptions::default()
+    let mut opts = zip::write::SimpleFileOptions::default()
         .compression_method(zip::CompressionMethod::Deflated);
+    if let Some(t) = zip_mtime(&meta) {
+        opts = opts.last_modified_time(t);
+    }
     if meta.is_dir() {
         zip_claim_name(builtin, st, &format!("{entry_name}/"))?;
         w.add_directory(entry_name, opts)
@@ -42355,6 +42597,44 @@ fn archive_entry_escapes(name: &str) -> bool {
         return true;
     }
     name.split(['/', '\\']).any(|part| part == "..")
+}
+
+/// The target of a tar symbolic link as `archive_entry_refusal` should judge
+/// it: a relative target is resolved against the link's own folder, so
+/// `../a/deep` held by `t/b/up` is `t/a/deep`, which stays inside the
+/// destination. A target that climbs out of the archive root comes back as
+/// `..`, and an absolute or drive-letter target is returned as written; both
+/// are refused. A hard link's target is already relative to the archive root
+/// and is returned as written.
+fn archive_link_check_target(name: &str, is_symlink: bool, target: String) -> String {
+    let drive = {
+        let b = target.as_bytes();
+        b.len() >= 2 && b[1] == b':' && b[0].is_ascii_alphabetic()
+    };
+    if !is_symlink || target.starts_with(['/', '\\']) || drive {
+        return target;
+    }
+    let mut parts: Vec<&str> = name
+        .split(['/', '\\'])
+        .filter(|p| !p.is_empty() && *p != ".")
+        .collect();
+    parts.pop();
+    for part in target.split(['/', '\\']) {
+        match part {
+            "" | "." => {}
+            ".." => {
+                if parts.pop().is_none() {
+                    return "..".to_string();
+                }
+            }
+            other => parts.push(other),
+        }
+    }
+    if parts.is_empty() {
+        ".".to_string()
+    } else {
+        parts.join("/")
+    }
 }
 
 /// Refuse the first entry, or link target, that would land outside the
@@ -42807,6 +43087,7 @@ impl ExtractTrail {
 
 /// Whether an I/O error, or one it wraps (the tar crate wraps the cause in its
 /// own error), carries the OS error `code`.
+#[cfg_attr(not(test), allow(dead_code))]
 fn io_error_has_code(e: &std::io::Error, code: i32) -> bool {
     if e.raw_os_error() == Some(code) {
         return true;
@@ -43242,7 +43523,13 @@ fn read_tar_entries<R: std::io::Read>(
             entry
                 .link_name()
                 .map_err(|e| crate::safety::tool_failed(builtin, "tar", None, &e.to_string()))?
-                .map(|p| p.to_string_lossy().into_owned())
+                .map(|p| {
+                    archive_link_check_target(
+                        &name,
+                        ty.is_symlink(),
+                        p.to_string_lossy().into_owned(),
+                    )
+                })
         } else {
             None
         };
@@ -43672,10 +43959,26 @@ fn tar_add_tree<W: std::io::Write>(
     if st.entries > WALK_MAX_ENTRIES {
         return Err(walk_over(B, WALK_MAX_ENTRIES));
     }
+    if meta.file_type().is_symlink() {
+        return tar_add_link(b, fs_path, name, &meta, st);
+    }
+    let epoch = source_date_epoch();
     if meta.is_dir() {
         if !name.is_empty() {
-            b.append_dir(format!("{name}/"), fs_path)
-                .map_err(|e| tar_io_error(&shown, &e))?;
+            match epoch {
+                Some(t) => {
+                    let mut h = tar::Header::new_gnu();
+                    h.set_metadata(&meta);
+                    h.set_mtime(t);
+                    h.set_entry_type(tar::EntryType::Directory);
+                    h.set_size(0);
+                    b.append_data(&mut h, format!("{name}/"), std::io::empty())
+                        .map_err(|e| tar_io_error(&shown, &e))?;
+                }
+                None => b
+                    .append_dir(format!("{name}/"), fs_path)
+                    .map_err(|e| tar_io_error(&shown, &e))?,
+            }
         }
         let mut kids = Vec::new();
         for k in std::fs::read_dir(fs_path).map_err(|e| crate::safety::fs_error(B, &shown, &e))? {
@@ -43710,7 +44013,121 @@ fn tar_add_tree<W: std::io::Write>(
             return Ok(());
         }
     }
+    if let (Some(t), true) = (epoch, meta.is_file()) {
+        let mut f =
+            std::fs::File::open(fs_path).map_err(|e| crate::safety::fs_error(B, &shown, &e))?;
+        let mut h = tar::Header::new_gnu();
+        h.set_metadata(&meta);
+        h.set_mtime(t);
+        return b
+            .append_data(&mut h, name, &mut f)
+            .map_err(|e| tar_io_error(&shown, &e));
+    }
     b.append_path_with_name(fs_path, name)
+        .map_err(|e| tar_io_error(&shown, &e))
+}
+
+/// `SOURCE_DATE_EPOCH` (seconds since 1970), the reproducible-builds variable:
+/// when set to a number, archives store it as every entry's mtime.
+fn source_date_epoch() -> Option<u64> {
+    std::env::var("SOURCE_DATE_EPOCH")
+        .ok()
+        .and_then(|v| v.trim().parse::<u64>().ok())
+}
+
+/// `p` without the verbatim prefix (`//?/`, or `//?/UNC/`) Windows puts on
+/// canonical paths, so a canonical path and a link target read from a
+/// junction compare equal. Compared with `/` as the separator.
+fn strip_verbatim(p: &std::path::Path) -> std::path::PathBuf {
+    let s = p.to_string_lossy().replace(std::path::MAIN_SEPARATOR, "/");
+    if let Some(rest) = s.strip_prefix("//?/UNC/") {
+        return std::path::PathBuf::from(format!("//{rest}"));
+    }
+    match s.strip_prefix("//?/") {
+        Some(rest) => std::path::PathBuf::from(rest),
+        None => std::path::PathBuf::from(s),
+    }
+}
+
+/// The path from the folder `from_dir` to `to`, both under `root`, as a
+/// `/`-separated relative path (`.` for the folder itself). None when either
+/// is outside `root`.
+fn relative_within(
+    root: &std::path::Path,
+    from_dir: &std::path::Path,
+    to: &std::path::Path,
+) -> Option<String> {
+    let comps = |p: &std::path::Path| -> Option<Vec<String>> {
+        let rel = strip_verbatim(p);
+        let rel = rel.strip_prefix(strip_verbatim(root)).ok()?.to_path_buf();
+        Some(
+            rel.components()
+                .filter_map(|c| match c {
+                    std::path::Component::Normal(s) => Some(s.to_string_lossy().into_owned()),
+                    _ => None,
+                })
+                .collect(),
+        )
+    };
+    let (a, b) = (comps(from_dir)?, comps(to)?);
+    let common = a.iter().zip(&b).take_while(|(x, y)| x == y).count();
+    let mut parts: Vec<String> = vec!["..".to_string(); a.len() - common];
+    parts.extend(b[common..].iter().cloned());
+    Some(if parts.is_empty() {
+        ".".to_string()
+    } else {
+        parts.join("/")
+    })
+}
+
+/// Store the link `fs_path` (a symbolic link, or a junction on Windows) whose
+/// target lies inside the archived folder as a link with a target relative to
+/// the link's own folder, so no path of this machine is stored and the archive
+/// extracts inside its destination. A link named as a member, outside any
+/// folder walk, is stored as what it points to.
+fn tar_add_link<W: std::io::Write>(
+    b: &mut tar::Builder<W>,
+    fs_path: &std::path::Path,
+    name: &str,
+    meta: &std::fs::Metadata,
+    st: &mut TarBuild,
+) -> Result<()> {
+    const B: &str = "tar_create";
+    let shown = fs_path.to_string_lossy().into_owned();
+    let Some(root) = st.root.clone() else {
+        let real =
+            std::fs::canonicalize(fs_path).map_err(|e| crate::safety::fs_error(B, &shown, &e))?;
+        return tar_add_tree(b, &real, name, st);
+    };
+    let parent = fs_path.parent().unwrap_or(std::path::Path::new("."));
+    let parent =
+        std::fs::canonicalize(parent).map_err(|e| crate::safety::fs_error(B, &shown, &e))?;
+    let target = match std::fs::canonicalize(fs_path) {
+        Ok(real) => relative_within(&root, &parent, &real),
+        Err(_) => std::fs::read_link(fs_path).ok().and_then(|t| {
+            if t.is_absolute() {
+                relative_within(
+                    &root,
+                    &parent,
+                    std::path::Path::new(&crate::journal::normalized_path(&t.to_string_lossy())),
+                )
+            } else {
+                Some(t.to_string_lossy().replace(std::path::MAIN_SEPARATOR, "/"))
+            }
+        }),
+    };
+    let Some(target) = target else {
+        st.skipped.push(shown);
+        return Ok(());
+    };
+    let mut h = tar::Header::new_gnu();
+    h.set_metadata(meta);
+    if let Some(t) = source_date_epoch() {
+        h.set_mtime(t);
+    }
+    h.set_entry_type(tar::EntryType::Symlink);
+    h.set_size(0);
+    b.append_link(&mut h, name, target)
         .map_err(|e| tar_io_error(&shown, &e))
 }
 
@@ -43973,6 +44390,10 @@ fn tar_extract_in_process(archive: &str, root: &str) -> Result<bool> {
     let mut total: u64 = 0;
     let mut extracted: usize = 0;
     let mut skipped_links: usize = 0;
+    // Links Windows would not create as symbolic links: made as junctions or
+    // copies once every entry is written (see `windows_link_fallback`).
+    let mut deferred: Vec<(std::path::PathBuf, String)> = Vec::new();
+    let mut fallback_made: usize = 0;
     for entry in entries {
         crate::safety::check_deadline_now()?;
         let mut entry =
@@ -43986,13 +44407,28 @@ fn tar_extract_in_process(archive: &str, root: &str) -> Result<bool> {
             .map(|p| p.to_string_lossy().into_owned())
             .unwrap_or_default();
         let is_symlink = entry.header().entry_type().is_symlink();
+        let link_text = if is_symlink {
+            entry
+                .link_name()
+                .ok()
+                .flatten()
+                .map(|p| p.to_string_lossy().into_owned())
+        } else {
+            None
+        };
         let unpacked = match entry.unpack_in(root) {
             Ok(done) => done,
             // On Windows a symbolic link needs a privilege most sessions lack.
-            // Such an entry is skipped, as `zip_extract` skips every symlink
-            // entry, rather than failing after earlier entries were written.
-            Err(e) if cfg!(windows) && is_symlink && io_error_has_code(&e, 1314) => {
-                skipped_links += 1;
+            // The link is made after the other entries as a junction (a link
+            // to a folder) or a copy (a link to a file); one that cannot be
+            // made is skipped, rather than failing after earlier entries were
+            // written.
+            Err(_) if cfg!(windows) && is_symlink && link_text.is_some() => {
+                let entry_name = name.trim_end_matches('/');
+                deferred.push((
+                    std::path::Path::new(root).join(entry_name),
+                    link_text.unwrap_or_default(),
+                ));
                 continue;
             }
             Err(e) => return Err(crate::safety::fs_write_error(B, root, &e)),
@@ -44002,6 +44438,18 @@ fn tar_extract_in_process(archive: &str, root: &str) -> Result<bool> {
         }
         extracted += 1;
     }
+    for (link, target) in &deferred {
+        if windows_link_fallback(root, link, target) {
+            fallback_made += 1;
+            eprintln!(
+                "tar_extract: made '{}' as a junction or copy of '{target}': this session may not create symbolic links",
+                link.display()
+            );
+        } else {
+            skipped_links += 1;
+        }
+    }
+    extracted += fallback_made;
     if extracted == 0 && skipped_links > 0 {
         return Err(crate::safety::bad_state_with_hint(
             B,
@@ -44010,6 +44458,47 @@ fn tar_extract_in_process(archive: &str, root: &str) -> Result<bool> {
         ));
     }
     Ok(true)
+}
+
+/// Make the link `link` (whose target text is `target`, relative to the
+/// link's folder) on Windows without the symbolic-link privilege: a junction
+/// when the target is a folder inside `root`, a copy when it is a file. False
+/// elsewhere, and when the target is missing, outside `root`, or has a
+/// character `cmd` would read as syntax.
+fn windows_link_fallback(root: &str, link: &std::path::Path, target: &str) -> bool {
+    if !cfg!(windows) {
+        return false;
+    }
+    let base = link.parent().unwrap_or(std::path::Path::new("."));
+    let wanted = base.join(target);
+    let (Ok(real), Ok(root_real)) = (std::fs::canonicalize(wanted), std::fs::canonicalize(root))
+    else {
+        return false;
+    };
+    if !real.starts_with(&root_real) {
+        return false;
+    }
+    if real.is_dir() {
+        let plain = strip_verbatim(&real);
+        let link_path: std::path::PathBuf = link.components().collect();
+        let risky = |p: &std::path::Path| {
+            p.to_string_lossy()
+                .chars()
+                .any(|c| matches!(c, '&' | '|' | '<' | '>' | '^' | '%' | '"'))
+        };
+        if risky(&plain) || risky(&link_path) {
+            return false;
+        }
+        let plain: std::path::PathBuf = plain.components().collect();
+        let mut cmd = crate::safety::child_command("cmd");
+        cmd.args(["/C", "mklink", "/J"]);
+        cmd.arg(&link_path);
+        cmd.arg(&plain);
+        cmd.stdout(std::process::Stdio::null());
+        cmd.stderr(std::process::Stdio::null());
+        return cmd.status().is_ok_and(|s| s.success());
+    }
+    real.is_file() && std::fs::copy(&real, link).is_ok()
 }
 
 /// What an archive's name says it is: "zip", "tar", "tar.gz", "gzip",
@@ -44304,10 +44793,13 @@ fn archive_test_local(path: &str, kind: LocalArchive, cap: u64) -> Result<bool> 
                             .unwrap_or_default();
                         let ty = e.header().entry_type();
                         let target = if ty.is_symlink() || ty.is_hard_link() {
-                            e.link_name()
-                                .ok()
-                                .flatten()
-                                .map(|p| p.to_string_lossy().into_owned())
+                            e.link_name().ok().flatten().map(|p| {
+                                archive_link_check_target(
+                                    &name,
+                                    ty.is_symlink(),
+                                    p.to_string_lossy().into_owned(),
+                                )
+                            })
                         } else {
                             None
                         };
@@ -50551,11 +51043,15 @@ fn web_curl_once(builtin: &str, args: &[&str]) -> Result<WebRun> {
     let status = match run.status {
         Some(status) if !run.timed_out => status,
         _ => {
+            // A run-wide --timeout that expired stopped it: say so, not "45 s".
+            if crate::safety::deadline_passed() {
+                return Err(crate::safety::run_deadline_error(builtin, "curl"));
+            }
             return Err(crate::safety::budget_exceeded(
                 builtin,
                 format!("curl did not finish within {limit} s and was stopped"),
                 "the server is slow or unreachable; retry later or request a smaller resource",
-            ))
+            ));
         }
     };
     Ok(WebRun {
@@ -53439,6 +53935,8 @@ fn is_hash_algorithm(name: &str) -> bool {
 }
 
 fn bi_crypto_hash(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
+    let mut args = args;
+    let encoding = take_digest_encoding("crypto_hash", &mut args)?;
     // `crypto.hash("sha256", data)`, the algorithm first, as AGENTS.md writes it.
     // Read as (data, algorithm) it was E_BAD_ARG "expected algorithm ..., got
     // \"abc\"". It is taken this way only when the first argument names an
@@ -53460,10 +53958,12 @@ fn bi_crypto_hash(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
         }
         if let [Value::Str(first), Value::Str(second)] = args.as_slice() {
             if is_hash_algorithm(first) && !is_hash_algorithm(second) {
-                return Ok(Value::Str(digest_hex(
+                let hex = digest_hex("crypto_hash", first, second.as_bytes())?;
+                return Ok(Value::Str(encode_digest(
                     "crypto_hash",
                     first,
-                    second.as_bytes(),
+                    hex,
+                    &encoding,
                 )?));
             }
             if is_hash_algorithm(first) && is_hash_algorithm(second) {
@@ -53515,10 +54015,12 @@ fn bi_crypto_hash(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
     }
     let (data, params) = subject_and_params("crypto_hash", &args, input)?;
     let algo = algo_param("crypto_hash", &params, "sha256")?;
-    Ok(Value::Str(digest_hex(
+    let hex = digest_hex("crypto_hash", &algo, data.as_bytes())?;
+    Ok(Value::Str(encode_digest(
         "crypto_hash",
         &algo,
-        data.as_bytes(),
+        hex,
+        &encoding,
     )?))
 }
 
@@ -53538,6 +54040,8 @@ fn bi_named_hash(name: &str, args: Vec<Value>, input: Option<Value>) -> Result<V
 }
 
 fn bi_crypto_hash_file(args: Vec<Value>, _input: Option<Value>) -> Result<Value> {
+    let mut args = args;
+    let encoding = take_digest_encoding("crypto_hash_file", &mut args)?;
     let path = match args.first() {
         Some(Value::Str(s)) => s.clone(),
         other => {
@@ -53565,7 +54069,13 @@ fn bi_crypto_hash_file(args: Vec<Value>, _input: Option<Value>) -> Result<Value>
         ));
     }
     let bytes = read_bytes_capped("crypto_hash_file", &validated)?;
-    Ok(Value::Str(digest_hex("crypto_hash_file", &algo, &bytes)?))
+    let hex = digest_hex("crypto_hash_file", &algo, &bytes)?;
+    Ok(Value::Str(encode_digest(
+        "crypto_hash_file",
+        &algo,
+        hex,
+        &encoding,
+    )?))
 }
 
 fn bi_crypto_hmac(args: Vec<Value>, _input: Option<Value>) -> Result<Value> {
@@ -53935,6 +54445,105 @@ fn bi_crypto_hex_encode(args: Vec<Value>, input: Option<Value>) -> Result<Value>
     let data = hex_subject("crypto_hex_encode", &args, input)?;
     let hex: String = data.bytes().map(|b| format!("{:02x}", b)).collect();
     Ok(Value::Str(hex))
+}
+
+/// hex_to_base64(hex) - The bytes a hex string spells, as standard base64.
+/// Unlike `crypto_base64_encode(crypto_hex_decode(x))` it takes binary bytes,
+/// so `crypto_hash_file(f, "sha384") | hex_to_base64` is an SRI digest body.
+fn bi_hex_to_base64(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
+    use base64::{engine::general_purpose::STANDARD, Engine as _};
+    let data = hex_subject("hex_to_base64", &args, input)?;
+    Ok(Value::Str(
+        STANDARD.encode(hex_bytes("hex_to_base64", &data)?),
+    ))
+}
+
+/// The bytes of hex digit pairs; odd length or a non-hex digit is E_BAD_ARG.
+fn hex_bytes(builtin: &str, data: &str) -> Result<Vec<u8>> {
+    let digits = data.trim().as_bytes();
+    if !digits.len().is_multiple_of(2) || !digits.iter().all(u8::is_ascii_hexdigit) {
+        return Err(crate::safety::bad_arg(
+            builtin,
+            "hex digit pairs (0-9, a-f)",
+            &format!("{data:?}"),
+        ));
+    }
+    Ok(digits
+        .chunks(2)
+        .map(|p| {
+            let hi = (p[0] as char).to_digit(16).unwrap_or(0);
+            let lo = (p[1] as char).to_digit(16).unwrap_or(0);
+            (hi * 16 + lo) as u8
+        })
+        .collect())
+}
+
+/// Remove a trailing `{encoding: "hex" | "base64" | "sri"}` Record from `args`
+/// and return the encoding (`hex` when there is none).
+fn take_digest_encoding(builtin: &str, args: &mut Vec<Value>) -> Result<String> {
+    if !matches!(args.last(), Some(Value::Record(_))) {
+        return Ok("hex".to_string());
+    }
+    let Some(Value::Record(options)) = args.pop() else {
+        unreachable!()
+    };
+    let mut encoding = "hex".to_string();
+    for (key, value) in &options {
+        match (key.as_str(), value) {
+            ("encoding", Value::Str(s)) => encoding = s.to_ascii_lowercase(),
+            ("encoding", other) => {
+                return Err(crate::safety::bad_arg(
+                    builtin,
+                    "encoding: String",
+                    other.type_name(),
+                ))
+            }
+            _ => {
+                return Err(crate::safety::bad_arg_with_hint(
+                    builtin,
+                    "the option encoding",
+                    key,
+                    r#"{encoding: "hex"} (default), {encoding: "base64"} or {encoding: "sri"}, which gives sha384-<base64> for a Subresource Integrity attribute"#,
+                ))
+            }
+        }
+    }
+    if !matches!(encoding.as_str(), "hex" | "base64" | "sri") {
+        return Err(crate::safety::bad_arg_with_hint(
+            builtin,
+            "encoding hex, base64 or sri",
+            &format!("{encoding:?}"),
+            "hex is the default; base64 is standard padded base64 of the digest bytes; sri is <algorithm>-<base64>",
+        ));
+    }
+    Ok(encoding)
+}
+
+/// A hex digest in the requested encoding. `sri` needs sha256, sha384 or
+/// sha512, the algorithms Subresource Integrity allows.
+fn encode_digest(builtin: &str, algo: &str, hex: String, encoding: &str) -> Result<String> {
+    use base64::{engine::general_purpose::STANDARD, Engine as _};
+    if encoding == "hex" {
+        return Ok(hex);
+    }
+    let b64 = STANDARD.encode(hex_bytes(builtin, &hex)?);
+    if encoding == "base64" {
+        return Ok(b64);
+    }
+    let name = match algo.to_ascii_lowercase().as_str() {
+        "sha256" | "sha-256" => "sha256",
+        "sha384" | "sha-384" => "sha384",
+        "sha512" | "sha-512" => "sha512",
+        other => {
+            return Err(crate::safety::bad_arg_with_hint(
+                builtin,
+                "algorithm sha256, sha384 or sha512 for encoding sri",
+                &format!("{other:?}"),
+                r#"Subresource Integrity allows only the SHA-2 family; use {encoding: "base64"} for another algorithm"#,
+            ))
+        }
+    };
+    Ok(format!("{name}-{b64}"))
 }
 
 fn bi_crypto_hex_decode(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
@@ -60836,6 +61445,21 @@ fn bi_git_diff_staged(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
     ))
 }
 
+/// A revision range such as `v1.1.0..HEAD`, `main` or `a...b`. Empty, NUL,
+/// control characters and a leading `-` are refused (an option for git); the
+/// caller also passes it after `--end-of-options`.
+fn git_range_arg(builtin: &str, what: &str, value: &str) -> Result<String> {
+    if value.trim().is_empty() || value.chars().any(|c| c.is_control()) {
+        return Err(crate::safety::bad_arg(
+            builtin,
+            &format!("{what}: a revision range"),
+            &format!("{value:?}"),
+        ));
+    }
+    crate::safety::reject_option_like(builtin, std::slice::from_ref(&value.to_string()))?;
+    Ok(value.to_string())
+}
+
 fn bi_git_log(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
     git_refuse_input("git_log", &input)?;
     // `git_log(n)` keeps its `<short hash> <subject>` lines. A trailing Record
@@ -60843,6 +61467,9 @@ fn bi_git_log(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
     let mut args = args;
     let mut typed = false;
     let mut with_files = false;
+    let mut with_body = false;
+    let mut range: Option<String> = None;
+    let mut since: Option<String> = None;
     let mut count_from_options = None;
     if matches!(args.last(), Some(Value::Record(_))) {
         let Some(Value::Record(options)) = args.pop() else {
@@ -60853,18 +61480,59 @@ fn bi_git_log(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
             match (key.as_str(), value) {
                 ("files", Value::Bool(b)) => with_files = *b,
                 ("files", other) => {
-                    return Err(crate::safety::bad_arg("git_log", "files: Bool", other.type_name()))
+                    return Err(crate::safety::bad_arg(
+                        "git_log",
+                        "files: Bool",
+                        other.type_name(),
+                    ))
+                }
+                ("body", Value::Bool(b)) => with_body = *b,
+                ("body", other) => {
+                    return Err(crate::safety::bad_arg(
+                        "git_log",
+                        "body: Bool",
+                        other.type_name(),
+                    ))
+                }
+                ("range", Value::Str(s)) => range = Some(git_range_arg("git_log", "range", s)?),
+                ("range", other) => {
+                    return Err(crate::safety::bad_arg(
+                        "git_log",
+                        "range: String",
+                        other.type_name(),
+                    ))
+                }
+                ("since", Value::Str(s)) => {
+                    if s.trim().is_empty() || s.contains('\0') {
+                        return Err(crate::safety::bad_arg(
+                            "git_log",
+                            "since: a date",
+                            &format!("{s:?}"),
+                        ));
+                    }
+                    since = Some(s.clone());
+                }
+                ("since", other) => {
+                    return Err(crate::safety::bad_arg(
+                        "git_log",
+                        "since: String",
+                        other.type_name(),
+                    ))
                 }
                 ("n" | "count", Value::Int(n)) => count_from_options = Some(*n),
                 ("n" | "count", other) => {
-                    return Err(crate::safety::bad_arg("git_log", "n: Int", other.type_name()))
+                    return Err(crate::safety::bad_arg(
+                        "git_log",
+                        "n: Int",
+                        other.type_name(),
+                    ))
                 }
                 _ => {
                     return Err(crate::safety::bad_arg_with_hint(
                         "git_log",
-                        "an option among n and files",
+                        "an option among n, files, body, range and since",
                         key,
-                        "git_log({n: 20, files: true}) returns records {hash, author, date, subject, files}; files lists the paths each commit changed",
+                        r#"git_log({range: "v1.0.0..HEAD", body: true}) returns records {hash, author, date, subject, body}; files: true adds the paths each commit changed; since takes a date such as 2026-01-01 or 2 weeks ago"#,
                     ))
                 }
             }
@@ -60881,6 +61549,9 @@ fn bi_git_log(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
         }
         (Some(v), None) => expect_int("git_log", v)?,
         (None, Some(n)) => n,
+        // A range or a since date asks for a span, not for the latest few:
+        // cut at 10 commits it would drop part of the span without a word.
+        (None, None) if range.is_some() || since.is_some() => 10_000,
         (None, None) => 10,
     };
     if args.len() > 1 {
@@ -60904,12 +61575,20 @@ fn bi_git_log(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
         // Records are separated by 0x1e and fields by 0x1f, which a subject
         // or an author name cannot hold. `--name-only` follows the header.
         cmd.args(["-c", "core.quotepath=off", "log", &format!("-{}", count)]);
-        cmd.arg("--format=%x1e%H%x1f%an%x1f%aI%x1f%s");
+        cmd.arg("--format=%x1e%H%x1f%an%x1f%aI%x1f%s%x1f%b%x1d");
+        if let Some(s) = &since {
+            cmd.arg(format!("--since={s}"));
+        }
         if with_files {
             // --name-status -M names a rename as `R<score>\told\tnew`; a merge is
             // diffed against its first parent (--diff-merges, which unlike
             // --first-parent does not drop the second-parent commits).
             cmd.args(["--name-status", "-M", "--diff-merges=first-parent"]);
+        }
+        if let Some(r) = &range {
+            // --end-of-options: nothing after it is an option; the trailing
+            // `--` makes git read the range as revisions, never as paths.
+            cmd.args(["--end-of-options", r.as_str(), "--"]);
         }
         let output = bounded_cmd_output("git_log", "git", cmd, TOOL_DEADLINE_SECS)?;
         git_succeeded("git_log", &output, ".")?;
@@ -60918,15 +61597,21 @@ fn bi_git_log(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
             .split('\u{1e}')
             .filter(|chunk| !chunk.trim().is_empty())
             .map(|chunk| {
-                let mut lines = chunk.lines();
-                let header = lines.next().unwrap_or("");
-                let mut fields = header.splitn(4, '\u{1f}');
+                // The header ends at 0x1d; the body is its last field, and the
+                // changed paths (with files: true) follow it, one per line.
+                let (header, tail) = chunk.split_once('\u{1d}').unwrap_or((chunk, ""));
+                let lines = tail.lines();
+                let mut fields = header.splitn(5, '\u{1f}');
                 let mut take = || Value::Str(fields.next().unwrap_or("").to_string());
                 let mut m = BTreeMap::new();
                 m.insert("hash".to_string(), take());
                 m.insert("author".to_string(), take());
                 m.insert("date".to_string(), take());
                 m.insert("subject".to_string(), take());
+                if with_body {
+                    let body = fields.next().unwrap_or("").trim_end().to_string();
+                    m.insert("body".to_string(), Value::Str(body));
+                }
                 if with_files {
                     let mut files: Vec<Value> = Vec::new();
                     let mut renames: Vec<Value> = Vec::new();
@@ -61207,16 +61892,199 @@ fn bi_git_cherry_pick(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
     Ok(Value::Bool(true))
 }
 
-fn bi_git_tags(_args: Vec<Value>, _input: Option<Value>) -> Result<Value> {
+fn bi_git_tags(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
+    git_refuse_input("git_tags", &input)?;
+    let mut sort = "name".to_string();
+    let mut details = false;
+    match args.as_slice() {
+        [] => {}
+        [Value::Record(options)] => {
+            for (key, value) in options {
+                match (key.as_str(), value) {
+                    ("sort", Value::Str(s)) => sort = s.to_ascii_lowercase(),
+                    ("details", Value::Bool(b)) => details = *b,
+                    ("sort" | "details", other) => {
+                        return Err(crate::safety::bad_arg(
+                            "git_tags",
+                            "sort: String or details: Bool",
+                            other.type_name(),
+                        ))
+                    }
+                    _ => {
+                        return Err(crate::safety::bad_arg_with_hint(
+                            "git_tags",
+                            "an option among sort and details",
+                            key,
+                            r#"git_tags({sort: "semver"}) orders by version; git_tags({details: true}) returns records {name, ref, date, annotated}"#,
+                        ))
+                    }
+                }
+            }
+        }
+        [other] => {
+            return Err(crate::safety::bad_arg(
+                "git_tags",
+                "an options Record",
+                other.type_name(),
+            ))
+        }
+        _ => {
+            return Err(crate::safety::bad_arg(
+                "git_tags",
+                "at most an options Record",
+                &format!("{} arguments", args.len()),
+            ))
+        }
+    }
+    if !matches!(sort.as_str(), "name" | "semver" | "date") {
+        return Err(crate::safety::bad_arg_with_hint(
+            "git_tags",
+            "sort name, semver or date",
+            &format!("{sort:?}"),
+            "name is git's order (lexical); semver orders by version precedence, with tags that are not versions last; date orders by tag date, oldest first",
+        ));
+    }
+    if sort == "name" && !details {
+        let mut cmd = git_command();
+        cmd.args(["tag", "-l"]);
+        let output = bounded_cmd_output("git_tags", "git", cmd, TOOL_DEADLINE_SECS)?;
+        git_succeeded("git_tags", &output, ".")?;
+        let tags: Vec<Value> = String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .map(|l| Value::Str(l.to_string()))
+            .collect();
+        return Ok(Value::Array(tags));
+    }
+    // name, object type, object, what an annotated tag points at, date.
+    // For an annotated tag the date is the tagger's; for a lightweight tag,
+    // the commit's.
     let mut cmd = git_command();
-    cmd.args(["tag", "-l"]);
+    cmd.args(["for-each-ref"]);
+    cmd.arg(if sort == "date" {
+        "--sort=creatordate"
+    } else {
+        "--sort=refname"
+    });
+    cmd.arg("--format=%(refname:strip=2)%1f%(objecttype)%1f%(objectname)%1f%(*objectname)%1f%(creatordate:iso-strict)");
+    cmd.arg("refs/tags");
     let output = bounded_cmd_output("git_tags", "git", cmd, TOOL_DEADLINE_SECS)?;
     git_succeeded("git_tags", &output, ".")?;
-    let tags: Vec<Value> = String::from_utf8_lossy(&output.stdout)
-        .lines()
-        .map(|l| Value::Str(l.to_string()))
-        .collect();
-    Ok(Value::Array(tags))
+    let mut rows: Vec<(String, Value)> = Vec::new();
+    for line in String::from_utf8_lossy(&output.stdout).lines() {
+        let f: Vec<&str> = line.split('\u{1f}').collect();
+        if f.len() < 5 {
+            continue;
+        }
+        let annotated = f[1] == "tag";
+        let target = if annotated { f[3] } else { f[2] };
+        let mut m = BTreeMap::new();
+        m.insert("name".to_string(), Value::Str(f[0].to_string()));
+        m.insert("ref".to_string(), Value::Str(target.to_string()));
+        m.insert("date".to_string(), Value::Str(f[4].to_string()));
+        m.insert("annotated".to_string(), Value::Bool(annotated));
+        rows.push((f[0].to_string(), Value::Record(m)));
+    }
+    if sort == "semver" {
+        let mut valid: Vec<(crate::semver_ops::Semver, (String, Value))> = Vec::new();
+        let mut other: Vec<(String, Value)> = Vec::new();
+        for row in rows {
+            match crate::semver_ops::parse(&row.0) {
+                Ok(v) => valid.push((v, row)),
+                Err(_) => other.push(row),
+            }
+        }
+        valid.sort_by(|a, b| crate::semver_ops::compare(&a.0, &b.0));
+        rows = valid.into_iter().map(|(_, r)| r).chain(other).collect();
+    }
+    Ok(Value::Array(
+        rows.into_iter()
+            .map(|(name, rec)| if details { rec } else { Value::Str(name) })
+            .collect(),
+    ))
+}
+
+/// git_tag(name, options?) - Create a tag on HEAD or on `ref`: lightweight, or
+/// annotated when `message` is given. Writes the repository; an existing tag
+/// is E_TOOL_FAILED (git never moves it here). Returns {name, ref, annotated}.
+fn bi_git_tag(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
+    const B: &str = "git_tag";
+    git_refuse_input(B, &input)?;
+    let name = git_ref_arg(B, &args, "a tag name")?;
+    crate::safety::reject_option_like(B, std::slice::from_ref(&name))?;
+    let mut message: Option<String> = None;
+    let mut target: Option<String> = None;
+    match args.get(1) {
+        None => {}
+        Some(Value::Record(options)) => {
+            for (key, value) in options {
+                match (key.as_str(), value) {
+                    ("message", Value::Str(m)) => {
+                        if m.trim().is_empty() || m.contains('\0') {
+                            return Err(crate::safety::bad_arg(
+                                B,
+                                "message: text without NUL",
+                                &format!("{m:?}"),
+                            ));
+                        }
+                        message = Some(m.clone());
+                    }
+                    ("ref", Value::Str(r)) => target = Some(git_range_arg(B, "ref", r)?),
+                    ("message" | "ref", other) => {
+                        return Err(crate::safety::bad_arg(
+                            B,
+                            "message: String or ref: String",
+                            other.type_name(),
+                        ))
+                    }
+                    _ => {
+                        return Err(crate::safety::bad_arg_with_hint(
+                            B,
+                            "an option among message and ref",
+                            key,
+                            r#"git_tag("v1.2.0", {message: "Release 1.2.0", ref: "HEAD~1"}); without a message the tag is lightweight"#,
+                        ))
+                    }
+                }
+            }
+        }
+        Some(other) => {
+            return Err(crate::safety::bad_arg(
+                B,
+                "an options Record",
+                other.type_name(),
+            ))
+        }
+    }
+    if args.len() > 2 {
+        return Err(crate::safety::bad_arg(
+            B,
+            "a name and an options Record",
+            &format!("{} arguments", args.len()),
+        ));
+    }
+    let mut cmd = git_command();
+    cmd.arg("tag");
+    if let Some(m) = &message {
+        cmd.args(["-a", "-m", m.as_str()]);
+    }
+    cmd.arg(&name);
+    if let Some(r) = &target {
+        cmd.arg(r);
+    }
+    let output = bounded_cmd_output(B, "git", cmd, TOOL_DEADLINE_SECS)?;
+    git_succeeded(B, &output, ".")?;
+    let mut show = git_command();
+    show.args(["rev-list", "-n", "1", &format!("refs/tags/{name}")]);
+    let shown = bounded_cmd_output(B, "git", show, TOOL_DEADLINE_SECS)?;
+    git_succeeded(B, &shown, ".")?;
+    let mut r = BTreeMap::new();
+    r.insert("name".to_string(), Value::Str(name));
+    r.insert(
+        "ref".to_string(),
+        Value::Str(String::from_utf8_lossy(&shown.stdout).trim().to_string()),
+    );
+    r.insert("annotated".to_string(), Value::Bool(message.is_some()));
+    Ok(Value::Record(r))
 }
 
 fn bi_git_show(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
