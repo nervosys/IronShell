@@ -100,10 +100,12 @@ fn sed_case_escapes_follow_gnu() {
         (r"echo HELLO | sed 's/.*/\L&/'", "hello\n"),
         (r"echo abc | sed 's/b/\U&x\Ey/'", "aBXyc\n"),
         (r"echo hello | sed 's/\(h\)\(ello\)/\U\1\E\2/'", "Hello\n"),
-        // `\u` changes the next character only; `\u\L` gives a capital and the rest lower.
+        // `\u` changes the next character only; `\L\u` gives a capital and the rest lower,
+        // while `\u\L` loses the `\u` (GNU sed 4.9: `\L` replaces a pending one-shot).
         (r"echo 'foo bar' | sed 's/[a-z]*/\u&/g'", "Foo Bar\n"),
         (r"echo HELLO | sed 's/HELLO/\l&/'", "hELLO\n"),
-        (r"echo hello | sed 's/hello/\u\L&/'", "Hello\n"),
+        (r"echo hello | sed 's/hello/\L\u&/'", "Hello\n"),
+        (r"echo hello | sed 's/hello/\u\L&/'", "hello\n"),
         // The same in ERE.
         (r"echo hello | sed -E 's/(h)(e)/\U\1\2/'", "HEllo\n"),
         // A `$` in the replacement is text, as in every other replacement.

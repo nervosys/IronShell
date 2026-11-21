@@ -41,28 +41,28 @@ fn run(tag: &str, files: &[(&str, &str)], script: &str) -> (String, String, i32)
 // ---- printf: an integer past 64 bits is clamped and reported ----
 
 #[test]
-fn printf_clamps_a_decimal_past_i64_max_with_result_too_large() {
-    // bash: printf "%d\n" 9999999999999999999
+fn printf_clamps_a_decimal_past_i64_max_with_a_range_warning() {
+    // bash 5.2.37: printf "%d\n" 9999999999999999999 warns and exits 0.
     let (out, err, code) = run("pf-big", &[], r#"printf "%d\n" 9999999999999999999"#);
     assert_eq!(
         (out.as_str(), err.as_str(), code),
         (
             "9223372036854775807\n",
-            "printf: 9999999999999999999: Result too large\n",
-            1
+            "printf: warning: 9999999999999999999: Numerical result out of range\n",
+            0
         )
     );
 }
 
 #[test]
-fn printf_clamps_a_negative_decimal_past_i64_min_with_result_too_large() {
+fn printf_clamps_a_negative_decimal_past_i64_min_with_a_range_warning() {
     let (out, err, code) = run("pf-neg", &[], r#"printf "%d\n" -9999999999999999999"#);
     assert_eq!(
         (out.as_str(), err.as_str(), code),
         (
             "-9223372036854775808\n",
-            "printf: -9999999999999999999: Result too large\n",
-            1
+            "printf: warning: -9999999999999999999: Numerical result out of range\n",
+            0
         )
     );
 }
@@ -75,8 +75,8 @@ fn printf_clamps_an_unsigned_looking_hex_that_overflows_i64() {
         (out.as_str(), err.as_str(), code),
         (
             "9223372036854775807\n",
-            "printf: 0xFFFFFFFFFFFFFFFF: Result too large\n",
-            1
+            "printf: warning: 0xFFFFFFFFFFFFFFFF: Numerical result out of range\n",
+            0
         )
     );
 }
