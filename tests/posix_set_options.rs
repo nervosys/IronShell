@@ -224,7 +224,8 @@ fn separate_option_words_run() {
         "o_errexit_o_nounset",
         "set -o errexit -o nounset\necho \"[${NOPE_ISH_UNSET_X}]\"\n",
     );
-    assert_eq!(code, 127);
+    // bash 5.2: an expansion error under `set -e` ends the shell with 1, not 127.
+    assert_eq!(code, 1);
     assert_eq!(out, "");
 }
 

@@ -230,6 +230,13 @@ fn lex_quoted(chars: &[char], w: &mut Word) -> PResult<()> {
     q.double_quoted(w)
 }
 
+/// Whether `s` is a shell identifier: a letter or `_`, then letters, digits
+/// and `_`.
+fn valid_name(s: &str) -> bool {
+    let mut it = s.chars();
+    it.next().is_some_and(is_name_start) && it.all(is_name_char)
+}
+
 fn is_name_start(c: char) -> bool {
     c.is_ascii_alphabetic() || c == '_'
 }
@@ -455,16 +462,25 @@ impl<'a> Lexer<'a> {
             }
             Some('&') => {
                 self.i += 1;
-                let d = self.peek();
-                return match d {
-                    Some(d @ '0'..='9') => {
-                        self.i += 1;
-                        Ok(Redir::Dup {
-                            from: fd,
-                            to: d as u8 - b'0',
-                        })
-                    }
-                    _ => unsupported(">&word"),
+                let mut digits = String::new();
+                while let Some(c @ '0'..='9') = self.peek() {
+                    digits.push(c);
+                    self.i += 1;
+                }
+                if digits.is_empty() {
+                    return unsupported(">&word");
+                }
+                // Only descriptors 1 and 2 are open in a script that cannot open
+                // one (`3>f` and `exec 3>f` are refused). `echo hi >&3` is bash's
+                // `Bad file descriptor`, and `>&0` writes to the input, so both
+                // are refused here, before anything runs.
+                return match (fd, digits.as_str()) {
+                    (1 | 2, "1" | "2") => Ok(Redir::Dup {
+                        from: fd,
+                        to: digits.as_bytes()[0] - b'0',
+                    }),
+                    (0, _) | (_, "0") => unsupported("descriptor 0 in `>&`"),
+                    _ => unsupported("descriptor above 2"),
                 };
             }
             Some('(') => return unsupported("process substitution"),
@@ -1547,6 +1563,15 @@ impl Parser {
                 }
                 // A `(` after a command's name is not a subshell (that starts a
                 // command) and not `name()`: bash's syntax error.
+                Some(Tok::LParen)
+                    if words
+                        .last()
+                        .and_then(plain)
+                        .is_some_and(|w| w.ends_with('=')) =>
+                {
+                    // `export a=(1 2)`, `declare -a a=(...)`: an array assignment.
+                    return unsupported_at("array assignment", start);
+                }
                 Some(Tok::LParen) if !words.is_empty() => {
                     return self.syntax("a `(` can only start a subshell or follow a function name as `name()`; quote it to pass it as text".to_string());
                 }
@@ -1646,9 +1671,102 @@ fn unsupported_builtin(words: &[Word]) -> Option<String> {
         "export" => arg
             .filter(|a| a.len() > 1 && a.starts_with('-'))
             .map(|a| format!("`export {a}`")),
+        "read" => read_refusal(&words[1..]),
+        "sed" => sed_refusal(&words[1..]),
         n if UNSUPPORTED_BUILTINS.contains(&n) => Some(format!("`{n}` builtin")),
         _ => None,
     }
+}
+
+/// `sed -f` with the script on standard input (`-f /dev/stdin`, `-f -`): the
+/// in-process sed reads no script file, and a PATH sed would find the pipe
+/// where this shell has already put the input. `None` for every other `sed`.
+fn sed_refusal(words: &[Word]) -> Option<String> {
+    let stdin_script = |v: &str| matches!(v, "/dev/stdin" | "-" | "/dev/fd/0" | "/proc/self/fd/0");
+    let mut k = 0;
+    while k < words.len() {
+        let Some(a) = plain(&words[k]) else {
+            k += 1;
+            continue;
+        };
+        if a == "-f" || a == "--file" {
+            if words.get(k + 1).and_then(plain).is_some_and(stdin_script) {
+                return Some("`sed -f /dev/stdin`".to_string());
+            }
+            k += 1;
+        } else if a
+            .strip_prefix("-f")
+            .or_else(|| a.strip_prefix("--file="))
+            .is_some_and(stdin_script)
+        {
+            return Some("`sed -f /dev/stdin`".to_string());
+        }
+        k += 1;
+    }
+    None
+}
+
+/// The option of `read` the subset does not run, as the refusal names it, or
+/// `None` when it runs every one written. `read` takes `-r`, `-s`, `-e`, `-p
+/// PROMPT`, `-u 0`, and `-d DELIM` and `-n N` together with `-r`; `-N`, `-t`,
+/// `-a`, `-i` and the rest are refused, as is a name that is an array element.
+fn read_refusal(words: &[Word]) -> Option<String> {
+    let mut k = 0;
+    let mut raw = false;
+    let mut needs_raw: Option<&str> = None;
+    while k < words.len() {
+        let Some(a) = plain(&words[k]) else { break };
+        if a == "--" {
+            k += 1;
+            break;
+        }
+        if a.len() < 2 || !a.starts_with('-') {
+            break;
+        }
+        k += 1;
+        let flags: Vec<char> = a[1..].chars().collect();
+        for (at, &c) in flags.iter().enumerate() {
+            match c {
+                'r' => raw = true,
+                's' | 'e' => {}
+                'p' | 'd' | 'n' | 'u' => {
+                    // The value is the rest of this word, or the next word.
+                    let rest: String = flags[at + 1..].iter().collect();
+                    let value = if rest.is_empty() {
+                        let v = words.get(k).and_then(plain).map(str::to_string);
+                        k += 1;
+                        v
+                    } else {
+                        Some(rest)
+                    };
+                    match c {
+                        'u' if value.as_deref() != Some("0") => {
+                            return Some("`read -u`".to_string())
+                        }
+                        'n' if !value.as_deref().is_some_and(|v| {
+                            !v.is_empty() && v.bytes().all(|b| b.is_ascii_digit())
+                        }) =>
+                        {
+                            return Some("`read -n`".to_string())
+                        }
+                        'd' => needs_raw = Some("-d"),
+                        'n' => needs_raw = Some("-n"),
+                        _ => {}
+                    }
+                    break;
+                }
+                other => return Some(format!("`read -{other}`")),
+            }
+        }
+    }
+    if let (Some(opt), false) = (needs_raw, raw) {
+        return Some(format!("`read {opt}` without -r"));
+    }
+    words[k.min(words.len())..]
+        .iter()
+        .map(literal_text)
+        .find(|n| n.contains('['))
+        .map(|n| format!("`read {n}` (an array element)"))
 }
 
 /// A `set` option the subset runs.
@@ -1864,9 +1982,34 @@ impl Input {
     /// was not UTF-8 read as the end of input; consumed lines are now dropped,
     /// not kept. A last line with no newline is returned with `false`.
     fn read_line(&mut self) -> Result<Option<(Vec<u8>, bool)>, String> {
+        self.read_record(b'\n')
+    }
+
+    /// Reads one more chunk of real standard input, up to the next `delim`, into
+    /// the buffer. `Err` for a record longer than [`READ_LINE_MAX`].
+    fn fill_chunk(&mut self, delim: u8) -> Result<(), String> {
         use std::io::BufRead;
+        let mut chunk = Vec::new();
+        let limit = (READ_LINE_MAX + 1) as u64;
+        match std::io::stdin()
+            .lock()
+            .take(limit)
+            .read_until(delim, &mut chunk)
+        {
+            Ok(0) | Err(_) => self.eof = true,
+            Ok(_) if chunk.len() > READ_LINE_MAX && chunk.last() != Some(&delim) => {
+                self.eof = true;
+                return Err(format!("a line longer than {READ_LINE_MAX} bytes"));
+            }
+            Ok(_) => self.data.extend_from_slice(&chunk),
+        }
+        Ok(())
+    }
+
+    /// [`Input::read_line`] with `delim` ending the record instead of a newline.
+    fn read_record(&mut self, delim: u8) -> Result<Option<(Vec<u8>, bool)>, String> {
         loop {
-            if let Some(nl) = self.data[self.pos..].iter().position(|&b| b == b'\n') {
+            if let Some(nl) = self.data[self.pos..].iter().position(|&b| b == delim) {
                 let line = self.data[self.pos..self.pos + nl].to_vec();
                 self.pos += nl + 1;
                 if self.real {
@@ -1876,20 +2019,57 @@ impl Input {
                 return Ok(Some((line, true)));
             }
             if self.real && !self.eof {
-                let mut chunk = Vec::new();
-                let limit = (READ_LINE_MAX + 1) as u64;
-                match std::io::stdin()
-                    .lock()
-                    .take(limit)
-                    .read_until(b'\n', &mut chunk)
-                {
-                    Ok(0) | Err(_) => self.eof = true,
-                    Ok(_) if chunk.len() > READ_LINE_MAX && !chunk.ends_with(b"\n") => {
-                        self.eof = true;
-                        return Err(format!("a line longer than {READ_LINE_MAX} bytes"));
-                    }
-                    Ok(_) => self.data.extend_from_slice(&chunk),
+                self.fill_chunk(delim)?;
+                continue;
+            }
+            if self.pos < self.data.len() {
+                let line = self.data[self.pos..].to_vec();
+                self.pos = self.data.len();
+                return Ok(Some((line, false)));
+            }
+            return Ok(None);
+        }
+    }
+
+    /// `read -n N`: up to `n` characters, fewer when a newline comes first (it
+    /// is consumed and not returned). The flag is true when the line ended by
+    /// a newline or by reaching `n` characters, false at end of input.
+    fn read_chars(&mut self, n: usize) -> Result<Option<(Vec<u8>, bool)>, String> {
+        if n == 0 {
+            return Ok(Some((Vec::new(), true)));
+        }
+        loop {
+            let rest = &self.data[self.pos..];
+            let mut chars = 0usize;
+            let mut end = None;
+            for (i, &b) in rest.iter().enumerate() {
+                if b == b'\n' {
+                    end = Some((i, i + 1));
+                    break;
                 }
+                // A byte that starts a character, not one that continues it.
+                if b & 0xC0 != 0x80 {
+                    if chars == n {
+                        end = Some((i, i));
+                        break;
+                    }
+                    chars += 1;
+                }
+            }
+            if end.is_none() && chars == n {
+                end = Some((rest.len(), rest.len()));
+            }
+            if let Some((take, consume)) = end {
+                let line = rest[..take].to_vec();
+                self.pos += consume;
+                if self.real {
+                    self.data.drain(..self.pos);
+                    self.pos = 0;
+                }
+                return Ok(Some((line, true)));
+            }
+            if self.real && !self.eof {
+                self.fill_chunk(b'\n')?;
                 continue;
             }
             if self.pos < self.data.len() {
@@ -2083,6 +2263,9 @@ struct Shell {
     discarded: bool,
     /// The line of the pipeline now running, for an expansion error's message.
     line: usize,
+    /// How many command substitutions are running: a fatal expansion error in
+    /// one ends it with status 1, where the main shell's `-c` string gives 127.
+    subst_depth: u32,
 }
 
 const SHELL_NAME: &str = "ish";
@@ -2118,6 +2301,10 @@ impl Shell {
         if name == "RANDOM" && !self.vars.contains_key(name) {
             return Some(next_random().to_string());
         }
+        // The line of the command now running, as bash numbers it.
+        if name == "LINENO" {
+            return Some(self.line.to_string());
+        }
         // A variable the script unset stays unset, whatever the environment
         // this process started with holds.
         let folded = crate::safety::fold_env_name(name);
@@ -2138,6 +2325,9 @@ impl Shell {
                 .ok()
                 .map(|p| posix_path(&p.to_string_lossy())),
             None if name == "PPID" => parent_pid(),
+            // Set in every bash: the default field separators, and OPTIND 1.
+            None if name == "IFS" => Some(" \t\n".to_string()),
+            None if name == "OPTIND" => Some("1".to_string()),
             None => None,
         }
     }
@@ -2188,8 +2378,12 @@ impl Shell {
         // bash 5.2 ends a `-c` string with 127 for a failed `${x:?}` or an
         // unbound variable, and a script file (or stdin) with 1; a failed
         // arithmetic expansion is 1 in both.
+        // Inside a command substitution, and under `set -e`, it is 1 in a `-c`
+        // string too.
         let status = if std::mem::take(&mut self.arith_failed) {
             self.discarded = true;
+            1
+        } else if self.subst_depth > 0 || self.errexit {
             1
         } else if self.script_name == SHELL_NAME {
             127
@@ -2716,7 +2910,9 @@ impl Shell {
         // The body's lines count from its own start, so the caller's line is
         // restored: its later messages name its own line.
         let line = self.line;
+        self.subst_depth += 1;
         let flow = self.run_list(&list, &mut input, &mut sink);
+        self.subst_depth -= 1;
         self.errexit = errexit;
         self.unbound = unbound;
         self.arith_failed = arith_failed;
@@ -2933,10 +3129,16 @@ impl Shell {
                 // sets, an option it changes or a directory it enters is gone
                 // when it ends (`echo x | read v` leaves `v` as it was).
                 let saved = self.subshell_state();
+                // A failed `${x:?}` in the last stage, when it is a plain
+                // command, ends with the status the main shell gives it
+                // (127 in a `-c` string); in any other stage it is 1.
+                let bump = u32::from(!(k + 1 == n && matches!(cmd, Cmd::Simple { .. })));
+                self.subst_depth += bump;
                 let c = match self.run_cmd(cmd, input, &mut stage) {
                     Flow::Next(c) | Flow::Exit(c) => c,
                     _ => 0,
                 };
+                self.subst_depth -= bump;
                 self.restore_subshell(saved);
                 // A `--timeout` that killed a stage stops the later ones too.
                 if RUN_TIMEOUT_STATUS.load(std::sync::atomic::Ordering::SeqCst) != 0 {
@@ -3152,6 +3354,15 @@ impl Shell {
         sink: &mut Sink,
     ) -> Result<String, Flow> {
         let mut fields = self.expand(w, stdin);
+        // A failed expansion in a redirection's word fails that command, as in
+        // bash, and the script goes on (the arithmetic error aside).
+        if !self.arith_failed {
+            if let Some(msg) = self.unbound.take() {
+                sink.eline(&msg);
+                self.last = 1;
+                return Err(Flow::Next(1));
+            }
+        }
         if let Some(flow) = self.unbound_refusal(sink) {
             return Err(flow);
         }
@@ -3286,6 +3497,23 @@ impl Shell {
     ) -> Flow {
         let mut argv = Vec::new();
         for w in words {
+            // `export NAME=$value` is an assignment: bash does not split or
+            // glob what the value expands to.
+            if argv.first().map(String::as_str) == Some("export") {
+                if let Some(Part::Lit(s, _)) = w.first() {
+                    if let Some((n, rest)) = s.split_once('=') {
+                        let n = n.strip_suffix('+').unwrap_or(n);
+                        if valid_name(n) {
+                            let eq = s.len() - rest.len() - 1;
+                            let mut tail = w.clone();
+                            tail[0] = Part::Lit(s[eq + 1..].to_string(), true);
+                            let v = self.expand_assign(&tail, stdin);
+                            argv.push(format!("{}{v}", &s[..eq + 1]));
+                            continue;
+                        }
+                    }
+                }
+            }
             argv.extend(self.expand(w, stdin));
         }
         let mut env_overrides = Vec::new();
@@ -3368,6 +3596,7 @@ impl Shell {
                 };
             }
             "export" => {
+                let mut status = 0;
                 for a in args {
                     let (n, v) = match a.split_once('=') {
                         Some((n, v)) => (n.to_string(), Some(v.to_string())),
@@ -3378,6 +3607,14 @@ impl Shell {
                         Some(base) if v.is_some() && !base.is_empty() => (base.to_string(), true),
                         _ => (n, false),
                     };
+                    // A name that is no identifier is bash's error, and sets nothing.
+                    if !valid_name(&n) {
+                        sink.eline(&format!(
+                            "{SHELL_NAME}: export: `{a}': not a valid identifier"
+                        ));
+                        status = 1;
+                        continue;
+                    }
                     if refuse_steering(sink, &n) {
                         return Flow::Next(POLICY_DENY_STATUS);
                     }
@@ -3389,7 +3626,7 @@ impl Shell {
                     }
                     self.mark_exported(n);
                 }
-                return Flow::Next(0);
+                return Flow::Next(status);
             }
             "unset" => {
                 for a in args {
@@ -3537,6 +3774,15 @@ impl Shell {
                 };
             }
             "read" => return Flow::Next(self.read_builtin(args, env, stdin)),
+            // `printf -v VAR` sets a variable, and bash reads options before the
+            // format: `--` ends them and any other is an error.
+            "printf"
+                if args
+                    .first()
+                    .is_some_and(|a| a.len() > 1 && a.starts_with('-')) =>
+            {
+                return Flow::Next(self.printf_options(args, env, stdin, sink));
+            }
             "pwd" => {
                 sink.out.extend_from_slice(logical_pwd().as_bytes());
                 sink.out.push(b'\n');
@@ -3560,6 +3806,104 @@ impl Shell {
         Flow::Next(self.external(argv, env, stdin, sink, why.as_deref()))
     }
 
+    /// `printf` with options: `-v VAR` (or `-vVAR`) puts the output in VAR
+    /// instead of writing it, `--` ends the options, and any other option is
+    /// bash's `invalid option`, status 2, as is a missing format.
+    fn printf_options(
+        &mut self,
+        args: &[String],
+        env: &[(String, String)],
+        stdin: &mut Input,
+        sink: &mut Sink,
+    ) -> i32 {
+        let usage = "printf: usage: printf [-v var] format [arguments]";
+        let mut var: Option<String> = None;
+        let mut k = 0;
+        while k < args.len() {
+            let a = args[k].as_str();
+            if a == "--" {
+                k += 1;
+                break;
+            }
+            if a.len() < 2 || !a.starts_with('-') {
+                break;
+            }
+            if a.starts_with("-v") {
+                let name = if a.len() > 2 {
+                    a[2..].to_string()
+                } else {
+                    k += 1;
+                    match args.get(k) {
+                        Some(n) => n.clone(),
+                        None => {
+                            sink.eline(&format!(
+                                "{SHELL_NAME}: printf: -v: option requires an argument"
+                            ));
+                            sink.eline(usage);
+                            return 2;
+                        }
+                    }
+                };
+                var = Some(name);
+                k += 1;
+                continue;
+            }
+            let bad = a.chars().nth(1).unwrap_or('-');
+            sink.eline(&format!("{SHELL_NAME}: printf: -{bad}: invalid option"));
+            sink.eline(usage);
+            return 2;
+        }
+        let rest = &args[k..];
+        if rest.is_empty() {
+            sink.eline(usage);
+            return 2;
+        }
+        let Some(name) = var else {
+            let mut why = None;
+            if env.is_empty() {
+                match utility("printf", rest, stdin, sink) {
+                    Util::Done(c) => return c,
+                    Util::Decline => {}
+                    Util::DeclineFor(part) => why = Some(part),
+                }
+            }
+            let argv: Vec<String> = std::iter::once("printf".to_string())
+                .chain(rest.iter().cloned())
+                .collect();
+            return self.external(&argv, env, stdin, sink, why.as_deref());
+        };
+        if name.contains('[') {
+            sink.eline(&format!(
+                "{SHELL_NAME}: printf: -v {name}: an array element is not in the subset"
+            ));
+            return POLICY_DENY_STATUS;
+        }
+        if !valid_name(&name) {
+            sink.eline(&format!(
+                "{SHELL_NAME}: printf: `{name}': not a valid identifier"
+            ));
+            return 2;
+        }
+        if refuse_steering(sink, &name) {
+            return POLICY_DENY_STATUS;
+        }
+        let mut cap = Sink::new(ErrMode::Capture);
+        let done = utility("printf", rest, stdin, &mut cap);
+        sink.ewrite(&cap.err);
+        match done {
+            Util::Done(c) => {
+                self.set_var(&name, String::from_utf8_lossy(&cap.out).into_owned());
+                c
+            }
+            _ => {
+                sink.eline(&format!(
+                    "{SHELL_NAME}: printf: this format is not in the subset with -v"
+                ));
+                2
+            }
+        }
+    }
+
     /// `read [-r] [NAME...]`. The line is split into the names with the IFS in
     /// force for this command: a prefix assignment (`IFS=, read`) for this
     /// command only, else the shell's own IFS, else the default. Nothing is
@@ -3573,33 +3917,95 @@ impl Shell {
         let mut raw = false;
         let mut names = Vec::new();
         let mut prompt: Option<String> = None;
-        let mut it = args.iter();
-        while let Some(a) = it.next() {
-            if a == "-r" {
-                raw = true;
-            } else if a == "-p" {
-                match it.next() {
-                    Some(p) => prompt = Some(p.clone()),
-                    None => {
+        // `-d`: the byte that ends the line (NUL for an empty DELIM); `-n`: the
+        // most characters to take, a newline ending the line sooner.
+        let mut delim = b'\n';
+        let mut nchars: Option<usize> = None;
+        let mut k = 0;
+        while k < args.len() {
+            let a = args[k].as_str();
+            if a == "--" {
+                k += 1;
+                break;
+            }
+            if a.len() < 2 || !a.starts_with('-') {
+                break;
+            }
+            k += 1;
+            let flags: Vec<char> = a[1..].chars().collect();
+            for (at, &c) in flags.iter().enumerate() {
+                match c {
+                    'r' => raw = true,
+                    // Only a terminal changes for these two.
+                    's' | 'e' => {}
+                    'p' | 'd' | 'n' | 'u' => {
+                        let rest: String = flags[at + 1..].iter().collect();
+                        let value = if rest.is_empty() {
+                            k += 1;
+                            match args.get(k - 1) {
+                                Some(v) => v.clone(),
+                                None => {
+                                    let _ = writeln!(
+                                        std::io::stderr(),
+                                        "{SHELL_NAME}: read: -{c}: option requires an argument"
+                                    );
+                                    return 2;
+                                }
+                            }
+                        } else {
+                            rest
+                        };
+                        match c {
+                            'p' => prompt = Some(value),
+                            'd' => delim = value.bytes().next().unwrap_or(0),
+                            'n' => match value.parse::<usize>() {
+                                Ok(n) => nchars = Some(n),
+                                Err(_) => {
+                                    let _ = writeln!(
+                                        std::io::stderr(),
+                                        "{SHELL_NAME}: read: {value}: invalid number"
+                                    );
+                                    return 1;
+                                }
+                            },
+                            _ if value == "0" => {}
+                            _ => {
+                                let _ = writeln!(
+                                    std::io::stderr(),
+                                    "{SHELL_NAME}: read: -u {value}: unsupported option"
+                                );
+                                return 2;
+                            }
+                        }
+                        break;
+                    }
+                    other => {
+                        // Refused before the script ran; this is a guard only.
                         let _ = writeln!(
                             std::io::stderr(),
-                            "{SHELL_NAME}: read: -p: option requires an argument"
+                            "{SHELL_NAME}: read: -{other}: unsupported option"
                         );
                         return 2;
                     }
                 }
-            } else if let Some(p) = a.strip_prefix("-p").filter(|p| !p.is_empty()) {
-                prompt = Some(p.to_string());
-            } else if a.starts_with('-') {
-                // -p, -t, -n …: honoured by ignoring would be a lie; say no.
-                let _ = writeln!(
-                    std::io::stderr(),
-                    "{SHELL_NAME}: read: {a}: unsupported option"
-                );
-                return 2;
-            } else {
-                names.push(a.clone());
             }
+        }
+        names.extend(args[k.min(args.len())..].iter().cloned());
+        // `-d` and `-n` are run only with `-r` (see `read_refusal`).
+        if !raw && (delim != b'\n' || nchars.is_some()) {
+            let _ = writeln!(
+                std::io::stderr(),
+                "{SHELL_NAME}: read: -d and -n need -r in this shell"
+            );
+            return 2;
+        }
+        // A name that is no identifier is an error before anything is read.
+        if let Some(bad) = names.iter().find(|n| !valid_name(n)) {
+            let _ = writeln!(
+                std::io::stderr(),
+                "{SHELL_NAME}: read: `{bad}': not a valid identifier"
+            );
+            return 1;
         }
         // With no name, the line goes to REPLY whole, without field splitting.
         let default_reply = names.is_empty();
@@ -3616,7 +4022,11 @@ impl Shell {
                 let _ = err.flush();
             }
         }
-        let (mut line, mut terminated) = match stdin.read_line() {
+        let first = match nchars {
+            Some(n) => stdin.read_chars(n),
+            None => stdin.read_record(delim),
+        };
+        let (mut line, mut terminated) = match first {
             Ok(Some(found)) => found,
             Ok(None) => {
                 for n in &names {
@@ -5262,6 +5672,15 @@ fn utility(name: &str, args: &[String], stdin: &mut Input, sink: &mut Sink) -> U
 /// digits) or `\0NNN` is one raw byte, so `\xc3\xa9` is the UTF-8 for `é`. A
 /// `\x` with no hex digit after it is kept as written, as bash does.
 fn unescape_echo(s: &str) -> (Vec<u8>, bool) {
+    unescape(s, false)
+}
+
+/// The escapes of `echo -e` and of a `printf` `%b` argument. A `%b` argument
+/// (`percent_b`) also reads `\NNN`, one to three octal digits, as the byte;
+/// `echo -e` takes only `\0NNN`. Both read `\uHHHH` and `\UHHHHHHHH` (one to
+/// four or eight hex digits) as that character, and the bare `\u` and `\U`
+/// as written.
+fn unescape(s: &str, percent_b: bool) -> (Vec<u8>, bool) {
     let mut out: Vec<u8> = Vec::new();
     let mut it = s.chars().peekable();
     while let Some(c) = it.next() {
@@ -5299,6 +5718,45 @@ fn unescape_echo(s: &str) -> (Vec<u8>, bool) {
                 } else {
                     out.push(v as u8);
                 }
+            }
+            Some(d @ ('u' | 'U')) => {
+                let max = if d == 'u' { 4 } else { 8 };
+                let mut v = 0u32;
+                let mut digits = 0;
+                while digits < max {
+                    match it.peek().and_then(|h| h.to_digit(16)) {
+                        Some(h) => {
+                            v = v * 16 + h;
+                            it.next();
+                            digits += 1;
+                        }
+                        None => break,
+                    }
+                }
+                match (digits, char::from_u32(v)) {
+                    (0, _) | (_, None) => {
+                        out.push(b'\\');
+                        out.push(d as u8);
+                    }
+                    (_, Some(ch)) => {
+                        let mut utf8 = [0u8; 4];
+                        out.extend_from_slice(ch.encode_utf8(&mut utf8).as_bytes());
+                    }
+                }
+            }
+            // `%b`: `\NNN`, the first digit not a 0, takes up to two more.
+            Some(d @ '1'..='7') if percent_b => {
+                let mut v = d as u32 - '0' as u32;
+                for _ in 0..2 {
+                    match it.peek() {
+                        Some(o @ '0'..='7') => {
+                            v = v * 8 + (*o as u32 - '0' as u32);
+                            it.next();
+                        }
+                        _ => break,
+                    }
+                }
+                out.push(v as u8);
             }
             Some('0') => {
                 let mut v = 0u32;
@@ -5464,10 +5922,15 @@ fn printf(args: &[String], sink: &mut Sink) -> Util {
             if c == '\\' {
                 // `\xHH` takes up to two hex digits after the `x`.
                 let mut end = (i + 2).min(fmt.len());
-                if fmt.get(i + 1) == Some(&'x') {
-                    while end < fmt.len() && end < i + 4 && fmt[end].is_ascii_hexdigit() {
-                        end += 1;
-                    }
+                // `\xHH`, `\uHHHH` and `\UHHHHHHHH` take their hex digits.
+                let digits = match fmt.get(i + 1) {
+                    Some('x') => 2,
+                    Some('u') => 4,
+                    Some('U') => 8,
+                    _ => 0,
+                };
+                while end < fmt.len() && end < i + 2 + digits && fmt[end].is_ascii_hexdigit() {
+                    end += 1;
                 }
                 let (e, stop) = unescape_echo(&fmt[i..end].iter().collect::<String>());
                 // Only a `%b` argument takes `\c` as the end of the output; in
@@ -5583,7 +6046,7 @@ fn printf(args: &[String], sink: &mut Sink) -> Util {
             let body = match conv {
                 's' | 'b' => {
                     let text = if conv == 'b' {
-                        let (bytes, stop) = unescape_echo(&arg);
+                        let (bytes, stop) = unescape(&arg, true);
                         stop_after = stop;
                         let shown = String::from_utf8_lossy(&bytes).into_owned();
                         if precision.is_none() {
@@ -5974,11 +6437,57 @@ fn test_top_level(a: &[String], op: &str) -> Option<usize> {
     None
 }
 
+/// The position of the `-a` in `a` that joins two tests: the first one at the
+/// top level, outside parentheses, whose left neighbour is an operand and not
+/// an operator waiting for one.
+fn test_and_position(a: &[String]) -> Option<usize> {
+    let is_op = |w: &str| {
+        matches!(
+            w,
+            "!" | "("
+                | "-a"
+                | "-o"
+                | "-e"
+                | "-f"
+                | "-d"
+                | "-s"
+                | "-r"
+                | "-w"
+                | "-x"
+                | "-L"
+                | "-h"
+                | "-b"
+                | "-c"
+                | "-p"
+                | "-S"
+                | "-O"
+                | "-G"
+                | "-u"
+                | "-g"
+                | "-k"
+                | "-N"
+                | "-t"
+                | "-z"
+                | "-n"
+        )
+    };
+    let mut depth = 0i32;
+    for (k, x) in a.iter().enumerate() {
+        match x.as_str() {
+            "(" => depth += 1,
+            ")" => depth -= 1,
+            "-a" if depth == 0 && k > 0 && !is_op(&a[k - 1]) => return Some(k),
+            _ => {}
+        }
+    }
+    None
+}
+
 fn test(args: &[String], sink: &mut Sink) -> i32 {
     fn unary(op: &str, a: &str) -> Option<bool> {
         let md = std::fs::metadata(a);
         Some(match op {
-            "-e" => md.is_ok(),
+            "-e" | "-a" => md.is_ok(),
             "-f" => md.map(|m| m.is_file()).unwrap_or(false),
             "-d" => md.map(|m| m.is_dir()).unwrap_or(false),
             "-s" => md.map(|m| m.len() > 0).unwrap_or(false),
@@ -6054,7 +6563,9 @@ fn test(args: &[String], sink: &mut Sink) -> i32 {
                 return Ok(eval(&a[..p], sink)? || eval(&a[p + 1..], sink)?);
             }
         }
-        if let Some(p) = test_top_level(a, "-a") {
+        // The first `-a` that follows an operand: a leading or doubled `-a` is
+        // the unary test (`[ -e . -a -a . ]` is two tests).
+        if let Some(p) = test_and_position(a) {
             if p > 0 && p + 1 < a.len() {
                 return Ok(eval(&a[..p], sink)? && eval(&a[p + 1..], sink)?);
             }
@@ -6097,7 +6608,8 @@ fn test(args: &[String], sink: &mut Sink) -> i32 {
                 // the answer would say whether the path exists outside.
                 let file_test = matches!(
                     op.as_str(),
-                    "-e" | "-f"
+                    "-e" | "-a"
+                        | "-f"
                         | "-d"
                         | "-s"
                         | "-r"
@@ -6948,15 +7460,22 @@ fn wc(args: &[String], stdin: &mut Input, sink: &mut Sink) -> Util {
 }
 
 /// A POSIX basic regular expression as a Rust regex: in BRE, `+ ? | ( ) { }`
-/// are literal and their backslashed forms are the operators.
+/// are literal and their backslashed forms are the operators. A `*` at the
+/// start of the regex, after `\(` or `\|`, or after a leading `^`, is an
+/// ordinary character; `` \` `` and `\'` are the start and end of the text.
 pub(crate) fn bre_to_regex(p: &str) -> Option<String> {
     let mut out = String::new();
     let mut it = p.chars().peekable();
     let mut first = true;
     while let Some(c) = it.next() {
+        // Whether a `*` right after this piece is an ordinary character.
+        let mut star_literal = false;
         match c {
             '\\' => match it.next() {
-                Some(o @ ('+' | '?' | '|' | '(' | ')' | '{' | '}')) => out.push(o),
+                Some(o @ ('+' | '?' | '|' | '(' | ')' | '{' | '}')) => {
+                    out.push(o);
+                    star_literal = matches!(o, '|' | '(');
+                }
                 Some(d @ '1'..='9') => {
                     let _ = d;
                     return None; // back-references
@@ -6966,24 +7485,49 @@ pub(crate) fn bre_to_regex(p: &str) -> Option<String> {
                     out.push(o);
                 }
                 Some('<') | Some('>') => out.push_str("\\b"),
+                Some('`') => out.push_str("\\A"),
+                Some('\'') => out.push_str("\\z"),
                 Some(o) => out.push_str(&regex::escape(&o.to_string())),
                 None => out.push_str("\\\\"),
             },
             '+' | '?' | '|' | '(' | ')' | '{' | '}' => out.push_str(&regex::escape(&c.to_string())),
             '*' if first => out.push_str("\\*"),
+            '^' if first => {
+                out.push('^');
+                star_literal = true;
+            }
             _ => out.push(c),
         }
-        first = false;
+        first = star_literal;
     }
     Some(out)
 }
 
-/// An extended regex: already close to Rust's, but back-references are not.
+/// An extended regex: already close to Rust's, but back-references are not,
+/// and `` \` `` and `\'` are the start and end of the text.
 fn ere_to_regex(p: &str) -> Option<String> {
     if p.contains("\\1") || p.contains("\\2") {
         return None;
     }
-    Some(p.replace("\\<", "\\b").replace("\\>", "\\b"))
+    let mut out = String::new();
+    let mut it = p.chars();
+    while let Some(c) = it.next() {
+        if c != '\\' {
+            out.push(c);
+            continue;
+        }
+        match it.next() {
+            Some('<') | Some('>') => out.push_str("\\b"),
+            Some('`') => out.push_str("\\A"),
+            Some('\'') => out.push_str("\\z"),
+            Some(o) => {
+                out.push('\\');
+                out.push(o);
+            }
+            None => out.push('\\'),
+        }
+    }
+    Some(out)
 }
 
 /// The `--include`, `--exclude` and `--exclude-dir` globs of a `grep`, each
@@ -8152,6 +8696,11 @@ fn cut(args: &[String], stdin: &mut Input, sink: &mut Sink) -> Util {
         };
         if a.starts_with("-d") {
             let d = take(&mut i, "-d");
+            // GNU cut takes one byte, so a multi-byte character is an error.
+            if d.as_ref().is_some_and(|d| d.len() > 1) {
+                sink.eline("cut: the delimiter must be a single character\nTry 'cut --help' for more information.");
+                return Util::Done(1);
+            }
             match d.and_then(|d| d.chars().next()) {
                 Some(c) => delim = c,
                 None => return Util::Decline,
@@ -8230,7 +8779,9 @@ fn cut(args: &[String], stdin: &mut Input, sink: &mut Sink) -> Util {
 enum Addr {
     Line(usize),
     Last,
-    Re(regex::bytes::Regex),
+    /// `/re/`; `None` is the empty regex `//`, which stands for the last regex
+    /// used when the program runs.
+    Re(Option<regex::bytes::Regex>),
 }
 
 enum SedCmd {
@@ -8261,7 +8812,9 @@ enum SedCmd {
     Exchange,
     /// `y/abc/xyz/`: the characters and what each becomes.
     Trans(Vec<(char, char)>),
-    Subst(regex::bytes::Regex, Vec<RepItem>, bool, bool, usize),
+    /// `s/re/rep/`: the regex (`None` for the empty regex, see [`Addr::Re`]),
+    /// the replacement, and the `g`, `p` and occurrence-number flags.
+    Subst(Option<regex::bytes::Regex>, Vec<RepItem>, bool, bool, usize),
     /// `{`: the index of its matching `}` in the program; an unselected block
     /// jumps there.
     Block(usize),
@@ -8415,7 +8968,7 @@ fn sed_in_place(
 ) -> Util {
     if files.is_empty() {
         sink.eline("sed: no input files");
-        return Util::Done(1);
+        return Util::Done(4);
     }
     let mut status = 0;
     let mut quit = false;
@@ -8450,10 +9003,17 @@ fn sed_in_place(
             }
         };
         for sl in prog.iter_mut() {
-            sl.active = false;
+            sl.active = matches!(sl.a1, Some(Addr::Line(0)));
         }
         let mut out = Vec::new();
-        quit |= sed_run(prog, quiet, &data, true, &mut out);
+        let end = sed_run(prog, quiet, &data, true, &mut out);
+        quit |= end.quit;
+        if let Some(m) = end.failed {
+            // A run-time error leaves the file as it was.
+            sink.eline(&format!("sed: -e expression #1, char 0: {m}"));
+            status = 1;
+            continue;
+        }
         if !suffix.is_empty() {
             let backup = match check_write_in_place(&format!("{f}{suffix}")) {
                 Ok(p) => p,
@@ -8516,33 +9076,211 @@ fn sed_addr(
             let end = c[*k + 1..].iter().position(|&x| x == '/').ok_or(())?;
             let pat: String = c[*k + 1..*k + 1 + end].iter().collect();
             *k += end + 2;
-            Ok(Some(Addr::Re(to_re(&pat).ok_or(())?)))
+            if pat.is_empty() {
+                return Ok(Some(Addr::Re(None)));
+            }
+            Ok(Some(Addr::Re(Some(to_re(&pat).ok_or(())?))))
         }
         _ => Ok(None),
     }
 }
 
-/// A sed pattern with `\n` and `\t` read as the newline and tab characters, as
-/// GNU sed reads them (also inside `[...]`); `\\n` stays a backslash and `n`.
-fn sed_pattern_escapes(p: &str) -> String {
+/// The byte of a GNU sed numeric escape written after `\c`, `\d`, `\o` or `\x`
+/// (`kind`), reading from `c[*i]`: `\cX` is control-X, `\dNNN` up to three
+/// decimal digits, `\oNNN` up to three octal digits and `\xHH` up to two hex
+/// digits. `None`, with `*i` unmoved, when no character or digit follows.
+fn sed_num_escape(c: &[char], i: &mut usize, kind: char) -> Option<u8> {
+    if kind == 'c' {
+        let x = *c.get(*i)?;
+        if !x.is_ascii() {
+            return None;
+        }
+        *i += 1;
+        return Some(x.to_ascii_uppercase() as u8 ^ 0x40);
+    }
+    let (radix, max) = match kind {
+        'd' => (10, 3),
+        'o' => (8, 3),
+        _ => (16, 2),
+    };
+    let mut v = 0u32;
+    let mut n = 0;
+    while n < max {
+        match c.get(*i + n).and_then(|d| d.to_digit(radix)) {
+            Some(d) => v = v * radix + d,
+            None => break,
+        }
+        n += 1;
+    }
+    if n == 0 {
+        return None;
+    }
+    *i += n;
+    Some(v as u8)
+}
+
+/// A sed pattern with the GNU escapes read: `\n`, `\t`, `\a`, `\f`, `\r` and
+/// `\v` as the characters, and `\cX`, `\dNNN`, `\oNNN` and `\xHH` as the
+/// character they name (which then keeps any meaning it has in a regex, as in
+/// GNU: `\x2e` is a `.` that matches any character). Also inside `[...]`;
+/// `\\n` stays a backslash and `n`. `None` for a character that cannot be put
+/// in a pattern string (a byte above 127, a backslash).
+fn sed_pattern_escapes(p: &str) -> Option<String> {
+    let c: Vec<char> = p.chars().collect();
     let mut out = String::new();
-    let mut it = p.chars();
-    while let Some(c) = it.next() {
-        if c != '\\' {
-            out.push(c);
+    let mut i = 0;
+    while i < c.len() {
+        if c[i] != '\\' {
+            out.push(c[i]);
+            i += 1;
             continue;
         }
-        match it.next() {
-            Some('n') => out.push('\n'),
-            Some('t') => out.push('\t'),
-            Some(o) => {
+        let Some(&n) = c.get(i + 1) else {
+            out.push('\\');
+            i += 1;
+            continue;
+        };
+        i += 2;
+        match n {
+            'n' => out.push('\n'),
+            't' => out.push('\t'),
+            'a' => out.push('\x07'),
+            'f' => out.push('\x0c'),
+            'r' => out.push('\r'),
+            'v' => out.push('\x0b'),
+            'c' | 'd' | 'o' | 'x' => match sed_num_escape(&c, &mut i, n) {
+                Some(b) if b < 0x80 && b != b'\\' => out.push(b as char),
+                Some(_) => return None,
+                // With no digits the escape is the letter itself.
+                None => out.push(n),
+            },
+            o => {
                 out.push('\\');
                 out.push(o);
             }
-            None => out.push('\\'),
+        }
+    }
+    Some(out)
+}
+
+/// The bytes of the text of an `a`, `i` or `c` command, from its raw characters
+/// (a backslash and the character after it stay together, so `\` and a newline
+/// continue the text): `\a`, `\f`, `\n`, `\r`, `\t`, `\v`, `\cX`, `\dNNN`,
+/// `\oNNN` and `\xHH` are the characters GNU sed reads them as, and any other
+/// backslash is dropped and keeps the character after it (`\\` is one
+/// backslash, `\q` is `q`).
+fn sed_text_bytes(c: &[char]) -> Vec<u8> {
+    let mut out = Vec::new();
+    let mut i = 0;
+    let push = |out: &mut Vec<u8>, ch: char| {
+        let mut b = [0; 4];
+        out.extend_from_slice(ch.encode_utf8(&mut b).as_bytes());
+    };
+    while i < c.len() {
+        let ch = c[i];
+        i += 1;
+        if ch != '\\' {
+            push(&mut out, ch);
+            continue;
+        }
+        let Some(&n) = c.get(i) else { break };
+        i += 1;
+        match n {
+            'a' => out.push(0x07),
+            'f' => out.push(0x0c),
+            'n' => out.push(b'\n'),
+            'r' => out.push(b'\r'),
+            't' => out.push(b'\t'),
+            'v' => out.push(0x0b),
+            'c' | 'd' | 'o' | 'x' => match sed_num_escape(c, &mut i, n) {
+                Some(b) => out.push(b),
+                None => push(&mut out, n),
+            },
+            o => push(&mut out, o),
         }
     }
     out
+}
+
+/// Whether a regex has a repetition with nothing to repeat, which GNU sed's
+/// regex compiler refuses: in a BRE a `*` right after another `*`, in an ERE a
+/// `*`, `+`, `?` or `{` at the start, after `(` or `|`, or after a leading `^`.
+fn sed_dangling_repeat(p: &str, ere: bool) -> bool {
+    let c: Vec<char> = p.chars().collect();
+    let mut in_bracket = false;
+    // Nothing to repeat yet: the start of the regex, after `(` or `|` (in a BRE
+    // `\(` or `\|`), and after a leading `^`.
+    let mut start = true;
+    // The last piece was a BRE `*` that repeats something.
+    let mut star = false;
+    let mut i = 0;
+    while i < c.len() {
+        let ch = c[i];
+        i += 1;
+        if in_bracket {
+            if ch == ']' {
+                in_bracket = false;
+            }
+            continue;
+        }
+        match ch {
+            '[' => {
+                in_bracket = true;
+                if c.get(i) == Some(&'^') {
+                    i += 1;
+                }
+                if c.get(i) == Some(&']') {
+                    i += 1;
+                }
+                start = false;
+                star = false;
+            }
+            '\\' => {
+                let n = c.get(i).copied();
+                i += 1;
+                start = !ere && matches!(n, Some('(' | '|'));
+                star = false;
+            }
+            '(' | '|' if ere => {
+                start = true;
+                star = false;
+            }
+            '^' if start => star = false,
+            '^' if ere => {
+                start = true;
+                star = false;
+            }
+            '*' | '+' | '?' | '{' if ere => {
+                if start {
+                    return true;
+                }
+                start = false;
+                star = false;
+            }
+            '*' if !ere => {
+                if star {
+                    return true;
+                }
+                if start {
+                    start = false;
+                } else {
+                    star = true;
+                }
+            }
+            _ => {
+                start = false;
+                star = false;
+            }
+        }
+    }
+    false
+}
+
+/// A sed script error GNU reports itself (`sed: -e expression #1, char N:
+/// ...`, status 1), as opposed to a construct this sed declines. The marker
+/// byte tells [`sed`] which one an `Err` from [`sed_parse`] is.
+fn sed_bad(msg: &str, at: usize) -> String {
+    format!("\u{1}sed: -e expression #1, char {at}: {msg}")
 }
 
 /// Reads a sed script (the `-e` pieces joined by newlines) into a flat program:
@@ -8552,7 +9290,13 @@ fn sed_pattern_escapes(p: &str) -> String {
 /// ending in `\` continuing it. `Err` says what makes it decline.
 fn sed_parse(script: &str, ere: bool) -> Result<Vec<SedLine>, String> {
     let to_re = |p: &str| -> Option<regex::bytes::Regex> {
-        let p = sed_pattern_escapes(p);
+        let p = sed_pattern_escapes(p)?;
+        // GNU sed rejects a repetition with nothing to repeat (`a**`, ERE
+        // `^*`); the regex engine here would accept it. Decline, so the error
+        // is GNU's.
+        if sed_dangling_repeat(&p, ere) {
+            return None;
+        }
         let r = if ere {
             ere_to_regex(&p)?
         } else {
@@ -8636,9 +9380,14 @@ fn sed_parse(script: &str, ere: bool) -> Result<Vec<SedLine>, String> {
                     return Err(format!("sed command `{}`", segment(start)));
                 }
                 let Some(b) = open.pop() else {
-                    return Err("sed command `}` with no `{`".to_string());
+                    return Err(sed_bad("unexpected `}'", k));
                 };
                 prog[b].cmd = SedCmd::Block(prog.len());
+                // GNU wants the end of the command after a `}`: `2{p}3{p}`
+                // is an error, not two commands.
+                if !ends_here(&mut k) {
+                    return Err(sed_bad("extra characters after command", k + 1));
+                }
                 SedCmd::EndBlock
             }
             'p' | 'd' | 'q' | 'P' | 'D' | 'Q' | '=' | 'l' | 'n' | 'N' | 'h' | 'H' | 'g' | 'G'
@@ -8717,18 +9466,21 @@ fn sed_parse(script: &str, ere: bool) -> Result<Vec<SedLine>, String> {
                 if k >= c.len() {
                     return Err(format!("sed command `{}` with no text", segment(at)));
                 }
-                let mut text = String::new();
+                // The raw text, a backslash and the character after it kept
+                // together; its escapes are read by `sed_text_bytes`.
+                let mut raw: Vec<char> = Vec::new();
                 while k < c.len() && c[k] != '\n' {
                     if c[k] == '\\' {
+                        raw.push('\\');
                         k += 1;
                     }
                     if let Some(&ch) = c.get(k) {
-                        text.push(ch);
+                        raw.push(ch);
                         k += 1;
                     }
                 }
-                text.push('\n');
-                let bytes = text.into_bytes();
+                let mut bytes = sed_text_bytes(&raw);
+                bytes.push(b'\n');
                 match cc {
                     'a' => SedCmd::Append(bytes),
                     'i' => SedCmd::Insert(bytes),
@@ -8788,52 +9540,94 @@ fn sed_parse(script: &str, ere: bool) -> Result<Vec<SedLine>, String> {
                         _ => return Err(format!("the s command's occurrence number `{digits}`")),
                     }
                 };
-                let Some(re) = to_re(pat.as_str()) else {
-                    return Err(format!("the regular expression `{pat}`"));
+                // An empty regex is the last one used when the program runs;
+                // it takes no flags of its own to read here.
+                let re = if pat.is_empty() {
+                    None
+                } else {
+                    match to_re(pat.as_str()) {
+                        Some(re) => Some(re),
+                        None => return Err(format!("the regular expression `{pat}`")),
+                    }
                 };
+                let groups = re.as_ref().map(|r| r.captures_len() - 1);
                 // `&` is the match and `\N` a group; the case escapes are
                 // applied to the text they reach (see `expand_rep`).
                 let mut items: Vec<RepItem> = Vec::new();
-                let mut it = rep.chars();
-                while let Some(ch) = it.next() {
-                    let text = match ch {
+                let rc: Vec<char> = rep.chars().collect();
+                let mut r = 0;
+                while r < rc.len() {
+                    let ch = rc[r];
+                    r += 1;
+                    let mut b = [0; 4];
+                    let bytes: Vec<u8> = match ch {
                         '&' => {
                             items.push(RepItem::Group(0));
                             continue;
                         }
-                        '\\' => match it.next() {
-                            Some(d @ '1'..='9') => {
-                                items.push(RepItem::Group(d as usize - '0' as usize));
-                                continue;
+                        '\\' => match rc.get(r).copied() {
+                            None => b"\\".to_vec(),
+                            Some(n) => {
+                                r += 1;
+                                match n {
+                                    // `\0` is the whole match, as `&` is.
+                                    '0'..='9' => {
+                                        let g = n as usize - '0' as usize;
+                                        if groups.is_some_and(|have| g > have) {
+                                            return Err(sed_bad(
+                                                &format!(
+                                                    "invalid reference \\{g} on `s' command's RHS"
+                                                ),
+                                                k,
+                                            ));
+                                        }
+                                        items.push(RepItem::Group(g));
+                                        continue;
+                                    }
+                                    'U' | 'L' | 'u' | 'l' | 'E' => {
+                                        items.push(RepItem::Case(n));
+                                        continue;
+                                    }
+                                    'n' => b"\n".to_vec(),
+                                    't' => b"\t".to_vec(),
+                                    'a' => vec![0x07],
+                                    'f' => vec![0x0c],
+                                    'r' => b"\r".to_vec(),
+                                    'v' => vec![0x0b],
+                                    'c' | 'd' | 'o' | 'x' => match sed_num_escape(&rc, &mut r, n) {
+                                        Some(v) => vec![v],
+                                        // `\c` at the end is a backslash; the
+                                        // others, with no digits, their letter.
+                                        None if n == 'c' => b"\\".to_vec(),
+                                        None => vec![n as u8],
+                                    },
+                                    o => o.encode_utf8(&mut b).as_bytes().to_vec(),
+                                }
                             }
-                            Some(c @ ('U' | 'L' | 'u' | 'l' | 'E')) => {
-                                items.push(RepItem::Case(c));
-                                continue;
-                            }
-                            Some('n') => '\n',
-                            Some('t') => '\t',
-                            Some(o) => o,
-                            None => '\\',
                         },
-                        o => o,
+                        o => o.encode_utf8(&mut b).as_bytes().to_vec(),
                     };
-                    let mut b = [0; 4];
-                    let bytes = text.encode_utf8(&mut b).as_bytes();
                     match items.last_mut() {
-                        Some(RepItem::Text(t)) => t.extend_from_slice(bytes),
-                        _ => items.push(RepItem::Text(bytes.to_vec())),
+                        Some(RepItem::Text(t)) => t.extend_from_slice(&bytes),
+                        _ => items.push(RepItem::Text(bytes)),
                     }
                 }
                 SedCmd::Subst(re, items, tail.contains('g'), tail.contains('p'), nth)
             }
             _ => return Err(format!("sed command `{}`", segment(at))),
         };
+        // Line 0 is only the start of a `0,/re/` range.
+        let a1_zero = matches!(a1, Some(Addr::Line(0)));
+        if a1_zero && !matches!(a2, Some(Addr::Re(_))) {
+            return Err(sed_bad("invalid usage of line address 0", k));
+        }
         prog.push(SedLine {
             a1,
             a2,
             neg,
             cmd,
-            active: false,
+            // `0,/re/` starts open: its regex is tried on the first line too.
+            active: a1_zero,
         });
     }
     if !open.is_empty() {
@@ -8888,7 +9682,14 @@ fn sed(args: &[String], stdin: &mut Input, sink: &mut Sink) -> Util {
     }
     let mut prog = match sed_parse(&scripts.join("\n"), ere) {
         Ok(prog) => prog,
-        Err(why) => return Util::DeclineFor(why),
+        Err(why) => {
+            // An error GNU sed reports itself: print it, as sed does.
+            if let Some(msg) = why.strip_prefix('\u{1}') {
+                sink.eline(msg);
+                return Util::Done(1);
+            }
+            return Util::DeclineFor(why);
+        }
     };
     if prog.is_empty() {
         return Util::Decline;
@@ -8908,9 +9709,14 @@ fn sed(args: &[String], stdin: &mut Input, sink: &mut Sink) -> Util {
     }
     let mut out = Vec::new();
     // As GNU sed, a last line with no final newline is printed without one.
-    sed_run(&mut prog, quiet, &data, true, &mut out);
+    let end = sed_run(&mut prog, quiet, &data, true, &mut out);
     sink.out.extend_from_slice(&out);
-    Util::Done(status)
+    if let Some(m) = end.failed {
+        sink.eline(&format!("sed: -e expression #1, char 0: {m}"));
+        return Util::Done(1);
+    }
+    // An input file that cannot be read is status 2 in sed.
+    Util::Done(if status != 0 { 2 } else { 0 })
 }
 
 /// `l`: the pattern space with each non-printing byte as an escape (`\n`,
@@ -8943,6 +9749,30 @@ fn sed_list(text: &[u8]) -> Vec<u8> {
     out
 }
 
+/// How [`sed_run`] ended: whether `q` ran, and the message of a run-time error
+/// (`no previous regular expression`), which stops the program with status 1.
+struct SedEnd {
+    quit: bool,
+    failed: Option<String>,
+}
+
+/// The regex a `/re/` or `s/re/` stands for: itself, which then becomes the
+/// last regex used, or for the empty regex that last one.
+fn sed_resolve<'a>(
+    r: &'a Option<regex::bytes::Regex>,
+    last: &'a mut Option<regex::bytes::Regex>,
+) -> Result<&'a regex::bytes::Regex, String> {
+    match r {
+        Some(x) => {
+            *last = Some(x.clone());
+            Ok(x)
+        }
+        None => last
+            .as_ref()
+            .ok_or_else(|| "no previous regular expression".to_string()),
+    }
+}
+
 /// Runs the sed program `prog` over the lines of `data`, appending what it prints
 /// to `out`. With `keep_missing_newline`, a last line with no final newline
 /// is printed without one, as GNU sed does; otherwise each printed line ends in a
@@ -8960,7 +9790,23 @@ fn sed_run(
     data: &[u8],
     keep_missing_newline: bool,
     out: &mut Vec<u8>,
-) -> bool {
+) -> SedEnd {
+    // A run-time error ends the program at once, with what it printed so far.
+    macro_rules! tri {
+        ($e:expr) => {
+            match $e {
+                Ok(v) => v,
+                Err(m) => {
+                    return SedEnd {
+                        quit: false,
+                        failed: Some(m),
+                    }
+                }
+            }
+        };
+    }
+    // The last regex used, which an empty regex stands for.
+    let mut last: Option<regex::bytes::Regex> = None;
     let unterminated = keep_missing_newline && !data.is_empty() && !data.ends_with(b"\n");
     // Set when the last line went out without its newline: the next output
     // starts with that newline.
@@ -9017,15 +9863,20 @@ fn sed_run(
         let mut pc = 0;
         while pc < prog.len() {
             let ln = next;
-            let hits = |a: &Addr, line: &[u8]| match a {
-                Addr::Line(k) => *k == ln,
-                Addr::Last => ln == n,
-                Addr::Re(r) => r.is_match(line),
+            let hits = |a: &Addr,
+                        line: &[u8],
+                        last: &mut Option<regex::bytes::Regex>|
+             -> Result<bool, String> {
+                Ok(match a {
+                    Addr::Line(k) => *k == ln,
+                    Addr::Last => ln == n,
+                    Addr::Re(r) => sed_resolve(r, last)?.is_match(line),
+                })
             };
             let sl = &mut prog[pc];
             let matched = match (&sl.a1, &sl.a2) {
                 (None, _) => true,
-                (Some(a), None) => hits(a, &pattern),
+                (Some(a), None) => tri!(hits(a, &pattern, &mut last)),
                 (Some(a), Some(b)) => {
                     if sl.active {
                         match b {
@@ -9039,7 +9890,7 @@ fn sed_run(
                             _ => {
                                 let end = match b {
                                     Addr::Line(k) => ln >= *k,
-                                    _ => hits(b, &pattern),
+                                    _ => tri!(hits(b, &pattern, &mut last)),
                                 };
                                 if end {
                                     sl.active = false;
@@ -9047,7 +9898,7 @@ fn sed_run(
                                 true
                             }
                         }
-                    } else if hits(a, &pattern) {
+                    } else if tri!(hits(a, &pattern, &mut last)) {
                         let ends_now = match b {
                             Addr::Line(k) => *k <= ln,
                             _ => false,
@@ -9093,7 +9944,7 @@ fn sed_run(
                 SedCmd::HoldAppend => {
                     hold.push(b'\n');
                     hold.extend_from_slice(&pattern);
-                    hold_chomped |= chomped;
+                    hold_chomped = chomped;
                 }
                 SedCmd::Get => {
                     pattern = hold.clone();
@@ -9102,7 +9953,7 @@ fn sed_run(
                 SedCmd::GetAppend => {
                     pattern.push(b'\n');
                     pattern.extend_from_slice(&hold);
-                    chomped |= hold_chomped;
+                    chomped = hold_chomped;
                 }
                 SedCmd::Exchange => {
                     std::mem::swap(&mut pattern, &mut hold);
@@ -9162,15 +10013,38 @@ fn sed_run(
                     break;
                 }
                 SedCmd::Quit | SedCmd::QuitSilent => {
-                    if !quiet && matches!(sl.cmd, SedCmd::Quit) {
-                        emit(out, &mut missing, &pattern, chomped);
+                    // `q` prints the pattern space, ends a line left without its
+                    // newline, and writes the queued `a` text; `Q` does none.
+                    if matches!(sl.cmd, SedCmd::Quit) {
+                        if !quiet {
+                            emit(out, &mut missing, &pattern, chomped);
+                        }
+                        for t in &appended {
+                            put(out, &mut missing, t);
+                        }
+                        put(out, &mut missing, b"");
                     }
-                    for t in &appended {
-                        put(out, &mut missing, t);
-                    }
-                    return true;
+                    return SedEnd {
+                        quit: true,
+                        failed: None,
+                    };
                 }
                 SedCmd::Subst(re, rep, global, print, nth) => {
+                    let re = tri!(sed_resolve(re, &mut last));
+                    // An empty regex has no group count to check at parse time.
+                    let top = rep
+                        .iter()
+                        .filter_map(|i| match i {
+                            RepItem::Group(g) => Some(*g),
+                            _ => None,
+                        })
+                        .max()
+                        .unwrap_or(0);
+                    if top > re.captures_len() - 1 {
+                        tri!(Err(format!(
+                            "invalid reference \\{top} on `s' command's RHS"
+                        )));
+                    }
                     let fill = |caps: &regex::bytes::Captures| {
                         let mut out = Vec::new();
                         expand_rep(rep, caps, &mut out);
@@ -9198,7 +10072,10 @@ fn sed_run(
             put(out, &mut missing, t);
         }
     }
-    false
+    SedEnd {
+        quit: false,
+        failed: None,
+    }
 }
 
 fn ls(args: &[String], sink: &mut Sink) -> Util {
@@ -9668,6 +10545,7 @@ fn run_named(src: &str, script_name: &str, args: &[String]) -> Option<i32> {
         arith_failed: false,
         discarded: false,
         line: 1,
+        subst_depth: 0,
     };
     let mut stdin = Input::real();
     let mut sink = Sink::new(ErrMode::Real);
@@ -10801,6 +11679,7 @@ mod tests {
             arith_failed: false,
             discarded: false,
             line: 1,
+            subst_depth: 0,
         };
         let mut stdin = Input::buf(Vec::new());
         let mut sink = Sink::new(ErrMode::Null);
