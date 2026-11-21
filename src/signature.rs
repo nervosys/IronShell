@@ -8230,6 +8230,22 @@ pub static SIGNATURES: &[Signature] = &[
         ],
     },
     Signature {
+        name: "format_bytes",
+        category: None,
+        subject_required: false,
+        aliases: &[],
+        subject: Some(Ty::Numeric),
+        params: &[opt("binary", Ty::Bool, "true (the default) counts in 1024s and writes KiB, MiB; false counts in 1000s and writes kB, MB")],
+        returns: "String",
+        doc: "Write a byte count or file size as human-readable text with one decimal place: 1536 is \"1.5 KiB\" (binary) or \"1.5 kB\" (decimal, with false). Below one unit it is whole bytes (\"512 B\", \"0 B\"). Units run to EiB or EB. A value that would round up to the next unit's base moves to that unit (1023.99 KiB writes as \"1.0 MiB\"). A negative or non-finite number, or a non-number, is E_BAD_ARG. Use it for the size column of ls() or the result of stat().",
+        examples: &[
+            (r#"format_bytes(1536)"#, r#""1.5 KiB""#),
+            (r#"format_bytes(1500, false)"#, r#""1.5 kB""#),
+            (r#"format_bytes(0)"#, r#""0 B""#),
+            (r#"(try { format_bytes(-1) } catch e { e.error.code })"#, "E_BAD_ARG"),
+        ],
+    },
+    Signature {
         name: "path_join",
         category: Some("FileSystem"),
         subject_required: false,

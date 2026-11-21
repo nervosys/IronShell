@@ -438,6 +438,7 @@ float	Pure
 floor	Pure
 foreach	Pure
 foreach-object	Pure
+format_bytes	Pure
 format_number	Pure
 from-csv	Pure
 from-json	ReadLocal
