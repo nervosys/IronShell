@@ -217,11 +217,13 @@ fn grep_reports_the_regex_error_for_a_pattern_that_does_not_compile() {
 }
 
 #[test]
-fn grep_keeps_the_back_reference_note_for_a_back_reference() {
-    let text = eval(r#""aa" | grep("\\(a\\)\\1")"#)
-        .expect_err("back-reference")
-        .to_string();
-    assert!(text.contains("back-reference"), "{text}");
+fn grep_matches_a_back_reference() {
+    // Round 62 added back-references to the grep builtin, which used to
+    // refuse them with a note: the pattern matches "aa" and not "ab".
+    assert_eq!(
+        eval(r#""aa\nab" | grep("\\(a\\)\\1") | len"#).unwrap(),
+        Value::Int(1)
+    );
 }
 
 #[test]
