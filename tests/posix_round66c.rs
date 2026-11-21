@@ -317,6 +317,17 @@ fn a_refused_program_leaves_its_redirection_target_alone() {
     let (out, err, code) = ish_raw_env("env printf x > a", &dir, &[("IRONSHELL_MODE", "agent")]);
     assert_eq!(code, 75, "stdout {out:?} stderr {err}");
     assert_eq!(std::fs::read(work.join("a")).unwrap(), b"keep\n");
+    // Also as a later stage of a pipeline, whose files are otherwise opened
+    // before the first stage runs.
+    for script in ["echo x | env printf y > a", "echo x | env printf y >> a"] {
+        let (out, err, code) = ish_raw_env(script, &dir, &[("IRONSHELL_MODE", "agent")]);
+        assert_eq!(code, 75, "{script}: stdout {out:?} stderr {err}");
+        assert_eq!(
+            std::fs::read(work.join("a")).unwrap(),
+            b"keep\n",
+            "{script}"
+        );
+    }
     let _ = std::fs::remove_dir_all(&dir);
 }
 

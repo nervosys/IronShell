@@ -1080,13 +1080,24 @@ const KEY_SCAN_MAX: u64 = 256 * 1024 * 1024;
 const KEY_SCAN_CHUNK: usize = 64 * 1024;
 /// Bytes kept from one chunk to the next, so a marker split across two chunks is
 /// still seen whole. A marker and the text that decides it are well under this.
-const KEY_SCAN_OVERLAP: usize = 512;
+const KEY_SCAN_OVERLAP: usize = 2048;
 
 /// Whether the marker found at `at` in `buf` opens a private key. `file_start`
 /// is whether `buf[0]` is the first byte of the file; `at_end` whether `buf`
 /// ends the file (so a marker cut off by the end has no more text to wait for).
 /// `None` means the buffer is too short to say yet.
-fn key_marker_at(buf: &[u8], at: usize, file_start: bool, at_end: bool) -> Option<bool> {
+///
+/// `strict` is set for the normalized view of the text ([`normalize_key_text`]),
+/// where a decoded line break before the marker says nothing about the file's
+/// own lines: a marker counts only by the mid-line rule (a break after it, then
+/// the body), and extra dashes after the marker are skipped.
+fn key_marker_at(
+    buf: &[u8],
+    at: usize,
+    file_start: bool,
+    at_end: bool,
+    strict: bool,
+) -> Option<bool> {
     const BEGIN: &[u8] = b"-----BEGIN ";
     const PUTTY: &[u8] = b"PuTTY-User-Key-File-";
     let line_start = {
@@ -1134,18 +1145,27 @@ fn key_marker_at(buf: &[u8], at: usize, file_start: bool, at_end: bool) -> Optio
         }
         return Some(false);
     }
-    if line_start {
+    if line_start && !strict {
         return Some(true);
     }
     // Mid-line (a JSON string, a quoted blob): a key only when the marker is
     // followed by a line break, real or written as a backslash and `n` or `r`,
     // and then the first characters of the body. Source that mentions the marker
     // inside a string (a quote follows it) is not a key.
-    let body = &after_words[5.min(after_words.len())..];
+    let mut body = &after_words[5.min(after_words.len())..];
+    // In the normalized view a `/` (`\/` written for a line break) stands for
+    // one, and extra dashes (`-`) are skipped.
+    let mut slash_break = false;
+    if strict {
+        while let Some(c) = body.first().filter(|c| matches!(**c, b'-' | b'/')) {
+            slash_break |= *c == b'/';
+            body = &body[1..];
+        }
+    }
     if body.len() < 40 && !at_end {
         return None;
     }
-    let mut saw_break = false;
+    let mut saw_break = slash_break;
     let mut b = body;
     loop {
         if b.starts_with(b"\\n") || b.starts_with(b"\\r") {
@@ -1210,8 +1230,145 @@ fn key_marker_at(buf: &[u8], at: usize, file_start: bool, at_end: bool) -> Optio
         .count();
     Some(
         run >= 8
-            && (run == b.len() || matches!(b[run], b'"' | b'\'' | b'\\' | b'\r' | b'\n' | b',')),
+            && (run == b.len()
+                || matches!(b[run], b'"' | b'\'' | b'\\' | b'\r' | b'\n' | b',' | b'\t')
+                || (strict && b[run] == b'-')),
     )
+}
+
+/// Decode the escapes of JSON, YAML and C-like string literals in `buf`:
+/// `\n \r \t \/ \\ \" \' \uXXXX \xHH`. Any other backslash stays.
+fn decode_key_escapes(buf: &[u8]) -> (Vec<u8>, bool) {
+    fn hex(s: &[u8]) -> Option<u32> {
+        if !s.iter().all(u8::is_ascii_hexdigit) {
+            return None;
+        }
+        u32::from_str_radix(std::str::from_utf8(s).ok()?, 16).ok()
+    }
+    let mut out = Vec::with_capacity(buf.len());
+    let mut changed = false;
+    let mut i = 0usize;
+    while i < buf.len() {
+        let c = buf[i];
+        if c != b'\\' || i + 1 >= buf.len() {
+            out.push(c);
+            i += 1;
+            continue;
+        }
+        let n = buf[i + 1];
+        let simple = match n {
+            b'n' => Some(b'\n'),
+            b'r' => Some(b'\r'),
+            b't' => Some(b'\t'),
+            b'/' | b'\\' | b'"' | b'\'' => Some(n),
+            _ => None,
+        };
+        if let Some(s) = simple {
+            out.push(s);
+            i += 2;
+            changed = true;
+        } else if n == b'u' && i + 6 <= buf.len() && hex(&buf[i + 2..i + 6]).is_some() {
+            let cp = hex(&buf[i + 2..i + 6]).unwrap_or(0x3f);
+            let ch = char::from_u32(cp).unwrap_or('?');
+            let mut tmp = [0u8; 4];
+            out.extend_from_slice(ch.encode_utf8(&mut tmp).as_bytes());
+            i += 6;
+            changed = true;
+        } else if n == b'x' && i + 4 <= buf.len() && hex(&buf[i + 2..i + 4]).is_some() {
+            out.push(hex(&buf[i + 2..i + 4]).unwrap_or(0x3f) as u8);
+            i += 4;
+            changed = true;
+        } else {
+            out.push(c);
+            i += 1;
+        }
+    }
+    (out, changed)
+}
+
+/// Join adjacent string literals: a closing quote, white space, an optional `,`
+/// or `+`, white space and an opening quote vanish, so `"-----BEGIN " + "PRIVATE
+/// KEY-----"`, `"a" "b"` and the items of an array read as one text. A gap that
+/// holds a comma or a line break after a run of five dashes (the end of a marker
+/// line) becomes a line break, so an array of lines keeps its lines.
+fn join_key_literals(buf: &[u8]) -> Vec<u8> {
+    fn skip_ws(buf: &[u8], j: &mut usize, item_break: &mut bool) {
+        while *j < buf.len() && matches!(buf[*j], b' ' | b'\t' | b'\r' | b'\n') {
+            if buf[*j] == b'\n' {
+                *item_break = true;
+            }
+            *j += 1;
+        }
+    }
+    let mut out = Vec::with_capacity(buf.len());
+    let mut i = 0usize;
+    while i < buf.len() {
+        let c = buf[i];
+        if c == b'"' || c == b'\'' {
+            let mut j = i + 1;
+            let mut item_break = false;
+            skip_ws(buf, &mut j, &mut item_break);
+            if j < buf.len() && (buf[j] == b',' || buf[j] == b'+') {
+                if buf[j] == b',' {
+                    item_break = true;
+                }
+                j += 1;
+                skip_ws(buf, &mut j, &mut item_break);
+            }
+            if j < buf.len() && (buf[j] == b'"' || buf[j] == b'\'') {
+                let line_end = out
+                    .iter()
+                    .rposition(|c| !matches!(*c, b' ' | b'\t' | b'\r'))
+                    .map_or(0, |i| i + 1);
+                if item_break && out[..line_end].ends_with(b"-----") {
+                    out.truncate(line_end);
+                    out.push(b'\n');
+                }
+                i = j + 1;
+                continue;
+            }
+        }
+        out.push(c);
+        i += 1;
+    }
+    out
+}
+
+/// The normalized view of text for the key scan: JSON, YAML and C escapes
+/// decoded (two passes, so a double-escaped `\\n` is a line break), then
+/// adjacent string literals joined. `None` when the text shows no sign of a
+/// marker (five dashes, an escape that could write one, or the PuTTY name) or
+/// has no backslash and no quote, which keeps the cost of the second view to the
+/// chunks that could hold a hidden marker.
+fn normalize_key_text(buf: &[u8]) -> Option<Vec<u8>> {
+    let hint = memchr::memmem::find(buf, b"-----").is_some()
+        || memchr::memmem::find(buf, b"\\u00").is_some()
+        || memchr::memmem::find(buf, b"\\x").is_some()
+        || memchr::memmem::find(buf, b"PuTTY").is_some();
+    if !hint || !buf.iter().any(|c| matches!(*c, b'\\' | b'"' | b'\'')) {
+        return None;
+    }
+    let (mut text, changed) = decode_key_escapes(buf);
+    if changed && text.contains(&b'\\') {
+        text = decode_key_escapes(&text).0;
+    }
+    Some(join_key_literals(&text))
+}
+
+/// Whether the normalized view of `buf` holds a private key marker.
+fn normalized_view_holds_key(buf: &[u8], at_end: bool) -> bool {
+    let Some(view) = normalize_key_text(buf) else {
+        return false;
+    };
+    [
+        b"-----BEGIN ".as_slice(),
+        b"PuTTY-User-Key-File-".as_slice(),
+    ]
+    .iter()
+    .any(|marker| {
+        memchr::memmem::find_iter(&view, marker)
+            .any(|at| key_marker_at(&view, at, false, at_end, true) == Some(true))
+    })
 }
 
 /// Whether the file at `path` holds a private key: a PEM, OpenSSH or PGP private
@@ -1252,10 +1409,13 @@ pub fn file_holds_private_key(path: &str) -> bool {
         buf.extend_from_slice(&chunk[..n]);
         for finder in &finders {
             for at in finder.find_iter(&buf) {
-                if key_marker_at(&buf, at, file_start, at_end) == Some(true) {
+                if key_marker_at(&buf, at, file_start, at_end, false) == Some(true) {
                     return true;
                 }
             }
+        }
+        if normalized_view_holds_key(&buf, at_end) {
+            return true;
         }
         if at_end {
             return false;
@@ -1272,15 +1432,16 @@ pub fn file_holds_private_key(path: &str) -> bool {
 /// by the rule [`file_holds_private_key`] applies to a file's bytes: a marker at
 /// the start of a line, or mid-line before a line break and the key's body.
 pub fn bytes_hold_private_key(buf: &[u8]) -> bool {
-    [
-        b"-----BEGIN ".as_slice(),
-        b"PuTTY-User-Key-File-".as_slice(),
-    ]
-    .iter()
-    .any(|marker| {
-        memchr::memmem::find_iter(buf, marker)
-            .any(|at| key_marker_at(buf, at, true, true) == Some(true))
-    })
+    normalized_view_holds_key(buf, true)
+        || [
+            b"-----BEGIN ".as_slice(),
+            b"PuTTY-User-Key-File-".as_slice(),
+        ]
+        .iter()
+        .any(|marker| {
+            memchr::memmem::find_iter(buf, marker)
+                .any(|at| key_marker_at(buf, at, true, true, false) == Some(true))
+        })
 }
 
 /// The refusal of a read of a private key's text, in agent mode: `E_POLICY_DENY`,

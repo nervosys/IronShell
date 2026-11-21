@@ -73,6 +73,10 @@ fn is_marker(line: &str, marker: &str) -> bool {
     }
 }
 
+/// The most documents one stream may hold: 100,000. A stream of two million tiny
+/// documents is a denial of service, not data an agent reads.
+const MAX_DOCUMENTS: usize = 100_000;
+
 /// Parse every document of a YAML stream, as PyYAML's `safe_load_all` does.
 ///
 /// Documents are separated by `---`; `...` ends one. An empty document (nothing
@@ -94,10 +98,19 @@ pub fn parse_all(src: &str) -> Result<Vec<Value>> {
                  content: &mut bool|
      -> Result<()> {
         if *explicit || *content {
+            if docs.len() >= MAX_DOCUMENTS {
+                return Err(crate::safety::budget_exceeded(
+                    "from_yaml_all",
+                    format!("the stream holds more than {MAX_DOCUMENTS} documents"),
+                    "split the stream and read it in parts",
+                ));
+            }
+            // Run against the clock, so a long stream ends at `--timeout`.
+            crate::safety::check_deadline_now()?;
             if *content {
-                // Blank lines keep the line numbers of the stream.
-                let padded = format!("{}{}", "\n".repeat(start), body);
-                docs.push(parse(&padded)?);
+                // The document's lines keep the line numbers of the stream: an
+                // offset, not padding, which made a long stream quadratic.
+                docs.push(parse_at(body, start)?);
             } else {
                 docs.push(Value::Null);
             }
@@ -133,7 +146,13 @@ pub fn parse_all(src: &str) -> Result<Vec<Value>> {
 /// Returns an error naming the unsupported construct rather than guessing —
 /// see the module docs for the supported subset.
 pub fn parse(src: &str) -> Result<Value> {
-    let lines = significant_lines(src)?;
+    parse_at(src, 0)
+}
+
+/// [`parse`] for a document that starts `offset` lines into its stream: the line
+/// numbers in an error count from there.
+fn parse_at(src: &str, offset: usize) -> Result<Value> {
+    let lines = significant_lines(src, offset)?;
     if lines.is_empty() {
         return Ok(Value::Null);
     }
@@ -152,14 +171,17 @@ pub fn parse(src: &str) -> Result<Value> {
 }
 
 /// Strip blanks, comments and document markers; reject unsupported constructs.
-fn significant_lines(src: &str) -> Result<Vec<Line>> {
+fn significant_lines(src: &str, offset: usize) -> Result<Vec<Line>> {
     let mut out = Vec::new();
     let mut seen_doc_start = false;
     // A leading byte order mark is not part of the first key.
     let src = src.strip_prefix('\u{feff}').unwrap_or(src);
 
     for (i, raw) in src.lines().enumerate() {
-        let number = i + 1;
+        let number = i + 1 + offset;
+        if i % 4096 == 4095 {
+            crate::safety::check_deadline_now()?;
+        }
         let indent = raw.len() - raw.trim_start().len();
         let trimmed = raw.trim();
 

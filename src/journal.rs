@@ -44,6 +44,43 @@ const MAX_FILE_BYTES: usize = 8 * 1024 * 1024;
 /// session cannot exhaust memory.
 const MAX_TOTAL_BYTES: usize = 64 * 1024 * 1024;
 
+/// The most journal steps one run records: 10,000, or the number in
+/// `IRONSHELL_JOURNAL_MAX_ENTRIES` (0 = no limit). Each step is a file in the
+/// session directory, so a loop that writes on every iteration grew it without
+/// bound (44,000 files and 256 MB from one `--timeout 10` command). Past the
+/// limit a journaled write fails with `E_BUDGET_EXCEEDED` instead of running
+/// with nothing to undo it by; see [`check_budget`].
+const MAX_RUN_ENTRIES: usize = 10_000;
+
+/// Steps recorded since the process started or the journal was last cleared.
+static RUN_ENTRIES: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+fn max_run_entries() -> usize {
+    std::env::var("IRONSHELL_JOURNAL_MAX_ENTRIES")
+        .ok()
+        .and_then(|v| v.trim().parse().ok())
+        .unwrap_or(MAX_RUN_ENTRIES)
+}
+
+/// Refuse a journaled write once the run has recorded [`MAX_RUN_ENTRIES`] steps.
+/// Called before a write that the journal would record; with the journal off it
+/// never refuses.
+pub fn check_budget() -> anyhow::Result<()> {
+    let limit = max_run_entries();
+    if limit == 0 || !enabled() {
+        return Ok(());
+    }
+    let n = RUN_ENTRIES.load(std::sync::atomic::Ordering::Relaxed);
+    if n >= limit {
+        return Err(crate::safety::budget_exceeded(
+            "journal",
+            format!("this run has recorded {n} journal steps, the limit of {limit}; the write was not made"),
+            "write less often (collect the data and write it once), or raise IRONSHELL_JOURNAL_MAX_ENTRIES (0 = no limit)",
+        ));
+    }
+    Ok(())
+}
+
 /// What was there before a step ran.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Before {
@@ -1059,6 +1096,7 @@ fn push_capture(s: &mut State, builtin: &str, effect: Effect, path: String, grou
     };
     persist(&entry);
     s.journal.push(entry);
+    RUN_ENTRIES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 }
 
 thread_local! {
@@ -1101,6 +1139,7 @@ pub fn record_irreversible(builtin: &str, effect: Effect, why: &str) {
     };
     persist(&entry);
     s.journal.push(entry);
+    RUN_ENTRIES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 }
 
 /// Note the removal of the directory at `path`, before it happens. An empty
@@ -1135,6 +1174,7 @@ pub fn record_removed_directory(builtin: &str, effect: Effect, path: &str, tree_
     };
     persist(&entry);
     s.journal.push(entry);
+    RUN_ENTRIES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 }
 
 /// Once a journalled call has run: a call that failed, or that reported no
@@ -1873,6 +1913,7 @@ pub fn try_clear() -> Result<(), (PathBuf, std::io::Error)> {
     let mut s = STATE.lock().unwrap_or_else(|e| e.into_inner());
     s.journal.clear();
     s.redo.clear();
+    RUN_ENTRIES.store(0, std::sync::atomic::Ordering::Relaxed);
     // Read before the directory goes: a process that cleared without taking an
     // id of its own knows only what the file says.
     let next = s.next_id.max(read_next_id(session_dir().as_deref()));
