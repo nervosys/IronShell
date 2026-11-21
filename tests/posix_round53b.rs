@@ -183,7 +183,8 @@ fn b7_read_takes_a_prompt_only_for_a_terminal() {
 #[test]
 fn b8_nounset_names_a_positional_with_its_dollar() {
     let out = sh("b8", "set -u\necho \"$1\"\n");
-    assert_eq!(out.status.code(), Some(1));
+    // bash 5.2: 127 for a `-c` string.
+    assert_eq!(out.status.code(), Some(127));
     assert!(
         text(&out.stderr).contains("$1: unbound variable"),
         "{}",

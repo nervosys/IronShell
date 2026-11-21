@@ -16,7 +16,7 @@ fn sed_command_outside_the_subset_with_no_sed_on_path_is_refused_before_approval
     let out = std::process::Command::new(env!("CARGO_BIN_EXE_ish"))
         .args(["--agent", "--workspace"])
         .arg(&work)
-        .args(["-b", "-c", "echo abc | sed 'y/abc/xyz/'"])
+        .args(["-b", "-c", "echo abc | sed 'b'"])
         .current_dir(&work)
         .env("NO_COLOR", "1")
         .env("PATH", &empty_path)
@@ -29,7 +29,7 @@ fn sed_command_outside_the_subset_with_no_sed_on_path_is_refused_before_approval
 
     assert_eq!(out.status.code(), Some(2), "{err}");
     assert!(!err.contains("E_NEEDS_APPROVAL"), "{err}");
-    assert!(err.contains("sed command `y/abc/xyz/`"), "{err}");
+    assert!(err.contains("sed command `b`"), "{err}");
     assert!(
         err.contains("is not in the in-process subset, which runs p, d, q and s///"),
         "{err}"

@@ -53,7 +53,8 @@ fn a_dash_c_script_is_named_ish_with_its_line() {
     let root = folder("dash_c_nounset", "unused.sh", "");
     let out = ish(&root, &["-c", "echo one\nset -u\necho \"$NOPE_ISH_X\"\n"]);
     let err = String::from_utf8_lossy(&out.stderr).into_owned();
-    assert_eq!(out.status.code(), Some(1), "{err}");
+    // bash 5.2 ends a `-c` string with 127 here (a script file with 1).
+    assert_eq!(out.status.code(), Some(127), "{err}");
     assert!(
         err.contains("ish: line 3: NOPE_ISH_X: unbound variable"),
         "{err}"
@@ -82,7 +83,7 @@ fn a_question_mark_form_without_a_message_uses_the_shell_default() {
     let root = folder("bare_question", "unused.sh", "");
     let out = ish(&root, &["-c", "x=\necho \"${x:?}\"\n"]);
     let err = String::from_utf8_lossy(&out.stderr).into_owned();
-    assert_eq!(out.status.code(), Some(1), "{err}");
+    assert_eq!(out.status.code(), Some(127), "{err}");
     assert!(
         err.contains("ish: line 2: x: parameter null or not set"),
         "{err}"
@@ -93,7 +94,7 @@ fn a_question_mark_form_without_a_message_uses_the_shell_default() {
     assert_eq!(String::from_utf8_lossy(&out.stdout), "[]\n");
     let out = ish(&root, &["-c", "echo \"${NOPE_ISH_Q?}\"\n"]);
     let err = String::from_utf8_lossy(&out.stderr).into_owned();
-    assert_eq!(out.status.code(), Some(1), "{err}");
+    assert_eq!(out.status.code(), Some(127), "{err}");
     assert!(err.contains("NOPE_ISH_Q: parameter not set"), "{err}");
 }
 

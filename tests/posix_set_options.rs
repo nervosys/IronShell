@@ -118,7 +118,8 @@ fn nounset_names_an_unset_variable_and_exits_1() {
         "nounset_var",
         "set -u\necho \"[${NOPE_ISH_UNSET_X}]\"\necho after\n",
     );
-    assert_eq!(code, 1);
+    // bash 5.2 ends a `-c` string with 127 here.
+    assert_eq!(code, 127);
     assert_eq!(out, "");
     assert!(
         err.contains("ish: line 2: NOPE_ISH_UNSET_X: unbound variable"),
@@ -129,7 +130,7 @@ fn nounset_names_an_unset_variable_and_exits_1() {
 #[test]
 fn nounset_refuses_an_unset_positional_parameter() {
     let (code, out, err) = run("nounset_pos", "set -u\necho \"$1\"\n");
-    assert_eq!(code, 1);
+    assert_eq!(code, 127);
     assert_eq!(out, "");
     assert!(err.contains("ish: line 2: $1: unbound variable"), "{err}");
 }
@@ -223,7 +224,7 @@ fn separate_option_words_run() {
         "o_errexit_o_nounset",
         "set -o errexit -o nounset\necho \"[${NOPE_ISH_UNSET_X}]\"\n",
     );
-    assert_eq!(code, 1);
+    assert_eq!(code, 127);
     assert_eq!(out, "");
 }
 
