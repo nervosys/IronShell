@@ -1013,7 +1013,7 @@ impl<'a> Lexer<'a> {
                     let mut w = Vec::new();
                     // Treat the operand like double-quoted text when the
                     // expansion itself is quoted, else as a word.
-                    if quoted {
+                    if quoted && !matches!(op.as_str(), "%" | "%%" | "#" | "##") {
                         // A `"` inside the operand opens and closes quoting
                         // that is already in force, so it only drops out.
                         let mut chars = strip_inner_quotes(&inner);
@@ -1036,6 +1036,9 @@ impl<'a> Lexer<'a> {
                             }
                             sub.i += blanks.chars().count();
                             w.push(Part::Lit(blanks, false));
+                            if sub.i >= inner.len() {
+                                break;
+                            }
                             let before = sub.i;
                             w.extend(sub.word().map_err(|e| relocate(e, start, dollar_at))?);
                             if sub.i == before && sub.i < inner.len() {
@@ -2622,7 +2625,7 @@ impl Shell {
         &mut self,
         name: &str,
         op: &Option<(String, Word)>,
-        quoted: bool,
+        _quoted: bool,
         stdin: &mut Input,
     ) -> String {
         let value = self.var(name);
@@ -2676,7 +2679,7 @@ impl Shell {
             // the part the pattern matches. An unset name is empty (and an
             // error under `set -u`, noted above).
             "%" | "%%" | "#" | "##" => {
-                let pat = self.pattern(word, quoted, stdin);
+                let pat = self.pattern(word, false, stdin);
                 value
                     .as_deref()
                     .map_or(String::new(), |v| trim_affix(v, &pat, op))
@@ -3577,11 +3580,25 @@ impl Shell {
             "true" | ":" => return Flow::Next(0),
             "false" => return Flow::Next(1),
             "exit" => {
-                let c = args
-                    .first()
-                    .and_then(|a| a.parse().ok())
-                    .unwrap_or(self.last);
-                return Flow::Exit(c);
+                // As bash reads it: a number (blanks and a sign allowed) taken
+                // modulo 256; anything else ends the shell with status 2, and
+                // a second operand is an error that does not end it.
+                let Some(a) = args.first() else {
+                    return Flow::Exit(self.last);
+                };
+                return match a.trim().parse::<i64>() {
+                    Err(_) => {
+                        sink.eline(&format!(
+                            "{SHELL_NAME}: exit: {a}: numeric argument required"
+                        ));
+                        Flow::Exit(2)
+                    }
+                    Ok(_) if args.len() > 1 => {
+                        sink.eline(&format!("{SHELL_NAME}: exit: too many arguments"));
+                        Flow::Exit(1)
+                    }
+                    Ok(n) => Flow::Exit((n & 255) as i32),
+                };
             }
             "break" | "continue" => {
                 let n = args
@@ -3732,7 +3749,19 @@ impl Shell {
                         }
                     },
                     Some(t) => t.clone(),
-                    None => self.var("HOME").unwrap_or_default(),
+                    None => match self.var("HOME") {
+                        Some(h) => h,
+                        None => {
+                            sink.eline(&format!("{SHELL_NAME}: cd: HOME not set"));
+                            return Flow::Next(1);
+                        }
+                    },
+                };
+                // An empty directory name is the current directory, as in bash.
+                let target = if target.is_empty() {
+                    ".".to_string()
+                } else {
+                    target
                 };
                 // With --workspace set, a cd may not leave the workspace. Otherwise
                 // pwd reports the outside folder while a relative write still
@@ -3773,6 +3802,20 @@ impl Shell {
                     }
                 };
             }
+            "test" | "[" if env.is_empty() => {
+                let operands = if name == "[" {
+                    match args.split_last() {
+                        Some((last, rest)) if last == "]" => rest,
+                        _ => {
+                            sink.eline(&format!("{SHELL_NAME}: [: missing `]'"));
+                            return Flow::Next(2);
+                        }
+                    }
+                } else {
+                    args
+                };
+                return Flow::Next(test(operands, sink, Some(&*self)));
+            }
             "read" => return Flow::Next(self.read_builtin(args, env, stdin)),
             // `printf -v VAR` sets a variable, and bash reads options before the
             // format: `--` ends them and any other is an error.
@@ -3784,6 +3827,20 @@ impl Shell {
                 return Flow::Next(self.printf_options(args, env, stdin, sink));
             }
             "pwd" => {
+                // `-L` and `-P`, `--` ends the options; any other is an error.
+                for a in args {
+                    if a == "--" {
+                        break;
+                    }
+                    if a.len() < 2 || !a.starts_with('-') {
+                        break;
+                    }
+                    if let Some(bad) = a[1..].chars().find(|c| !matches!(c, 'L' | 'P')) {
+                        sink.eline(&format!("{SHELL_NAME}: pwd: -{bad}: invalid option"));
+                        sink.eline("pwd: usage: pwd [-LP]");
+                        return Flow::Next(2);
+                    }
+                }
                 sink.out.extend_from_slice(logical_pwd().as_bytes());
                 sink.out.push(b'\n');
                 return Flow::Next(0);
@@ -4059,26 +4116,30 @@ impl Shell {
                 }
             }
         }
-        let mut line = String::from_utf8_lossy(&line).into_owned();
-        if !raw {
-            let mut s = String::new();
+        let line = String::from_utf8_lossy(&line).into_owned();
+        // Without -r a backslash quotes the next character, and is removed:
+        // a quoted character is never a separator. Each character carries
+        // whether it was quoted.
+        let mut chars: Vec<(char, bool)> = Vec::with_capacity(line.len());
+        if raw {
+            chars.extend(line.chars().map(|c| (c, false)));
+        } else {
             let mut it = line.chars();
             while let Some(c) = it.next() {
                 if c == '\\' {
                     if let Some(n) = it.next() {
-                        s.push(n);
+                        chars.push((n, true));
                     }
                 } else {
-                    s.push(c);
+                    chars.push((c, false));
                 }
             }
-            line = s;
         }
         // As bash does, a last line with no newline is assigned but reads as
         // a failure, so `while read` does not run its body for it.
         let status = if terminated { 0 } else { 1 };
         if default_reply {
-            self.set_var("REPLY", line);
+            self.set_var("REPLY", chars.iter().map(|&(c, _)| c).collect());
             return status;
         }
         let ifs = match env.iter().rev().find(|(n, _)| n == "IFS") {
@@ -4089,7 +4150,7 @@ impl Shell {
                 .cloned()
                 .unwrap_or_else(|| " \t\n".to_string()),
         };
-        for (n, v) in names.iter().zip(read_fields(&line, &ifs, names.len())) {
+        for (n, v) in names.iter().zip(read_fields(&chars, &ifs, names.len())) {
             self.set_var(n, v);
         }
         status
@@ -5564,17 +5625,203 @@ fn short_flags(args: &[String], allowed: &str) -> Option<(HashSet<char>, Vec<Str
     Some((flags, ops))
 }
 
+/// `basename` and `dirname` as GNU coreutils run them. Options may follow the
+/// operands and `--` ends them; `basename` takes `-a`/`--multiple`,
+/// `-s SUFFIX`/`--suffix=SUFFIX` (which implies `-a`) and `-z`/`--zero`,
+/// `dirname` takes `-z`/`--zero` and any number of operands. `--help` and
+/// `--version` are left to the real program.
+fn name_tool(is_base: bool, args: &[String], sink: &mut Sink) -> Util {
+    let tool = if is_base { "basename" } else { "dirname" };
+    let try_help = format!("Try '{tool} --help' for more information.");
+    let mut multiple = false;
+    let mut zero = false;
+    let mut suffix: Option<String> = None;
+    let mut operands: Vec<&String> = Vec::new();
+    let longs: &[&str] = if is_base {
+        &["multiple", "suffix", "zero", "help", "version"]
+    } else {
+        &["zero", "help", "version"]
+    };
+    let mut k = 0;
+    let mut options_done = false;
+    while k < args.len() {
+        let a = args[k].as_str();
+        k += 1;
+        if options_done || !a.starts_with('-') || a == "-" {
+            operands.push(&args[k - 1]);
+            continue;
+        }
+        if a == "--" {
+            options_done = true;
+            continue;
+        }
+        if let Some(long) = a.strip_prefix("--") {
+            let (name, value) = match long.split_once('=') {
+                Some((n, v)) => (n, Some(v.to_string())),
+                None => (long, None),
+            };
+            let hits: Vec<&&str> = longs.iter().filter(|l| l.starts_with(name)).collect();
+            let exact = longs.iter().find(|l| **l == name);
+            let chosen = match (exact, hits.as_slice()) {
+                (Some(e), _) => *e,
+                (None, [one]) => **one,
+                (None, []) => {
+                    sink.eline(&format!("{tool}: unrecognized option '{a}'\n{try_help}"));
+                    return Util::Done(1);
+                }
+                (None, _) => {
+                    sink.eline(&format!("{tool}: option '{a}' is ambiguous\n{try_help}"));
+                    return Util::Done(1);
+                }
+            };
+            match chosen {
+                "help" | "version" => return Util::Decline,
+                "multiple" | "zero" if value.is_some() => {
+                    sink.eline(&format!(
+                        "{tool}: option '--{chosen}' doesn't allow an argument\n{try_help}"
+                    ));
+                    return Util::Done(1);
+                }
+                "multiple" => multiple = true,
+                "zero" => zero = true,
+                _ => {
+                    let v = match value {
+                        Some(v) => v,
+                        None if k < args.len() => {
+                            k += 1;
+                            args[k - 1].clone()
+                        }
+                        None => {
+                            sink.eline(&format!(
+                                "{tool}: option '--suffix' requires an argument\n{try_help}"
+                            ));
+                            return Util::Done(1);
+                        }
+                    };
+                    suffix = Some(v);
+                    multiple = true;
+                }
+            }
+            continue;
+        }
+        let flags: Vec<char> = a[1..].chars().collect();
+        for (at, &c) in flags.iter().enumerate() {
+            match c {
+                'z' => zero = true,
+                'a' if is_base => multiple = true,
+                's' if is_base => {
+                    let rest: String = flags[at + 1..].iter().collect();
+                    let v = if !rest.is_empty() {
+                        rest
+                    } else if k < args.len() {
+                        k += 1;
+                        args[k - 1].clone()
+                    } else {
+                        sink.eline(&format!(
+                            "{tool}: option requires an argument -- 's'\n{try_help}"
+                        ));
+                        return Util::Done(1);
+                    };
+                    suffix = Some(v);
+                    multiple = true;
+                    break;
+                }
+                other => {
+                    sink.eline(&format!("{tool}: invalid option -- '{other}'\n{try_help}"));
+                    return Util::Done(1);
+                }
+            }
+        }
+    }
+    if operands.is_empty() {
+        sink.eline(&format!("{tool}: missing operand\n{try_help}"));
+        return Util::Done(1);
+    }
+    if is_base && !multiple && operands.len() > 2 {
+        sink.eline(&format!(
+            "{tool}: extra operand '{}'\n{try_help}",
+            operands[2]
+        ));
+        return Util::Done(1);
+    }
+    let end = if zero { b'\0' } else { b'\n' };
+    let base_of = |name: &str, suffix: Option<&str>| -> String {
+        // On Windows a `\` separates too.
+        let p = posix_path(name);
+        let trimmed = p.trim_end_matches('/');
+        let mut b = trimmed.rsplit('/').next().unwrap_or("").to_string();
+        if trimmed.is_empty() && p.starts_with('/') {
+            b = "/".into();
+        }
+        if let Some(suffix) = suffix {
+            if b.len() > suffix.len() && b.ends_with(suffix) {
+                b.truncate(b.len() - suffix.len());
+            }
+        }
+        b
+    };
+    let dir_of = |name: &str| -> String {
+        // coreutils `dir_len`: drop the last component and the slashes
+        // before it, but keep a leading slash.
+        let p = posix_path(name);
+        let b = p.as_bytes();
+        let skip = b.iter().take_while(|&&c| c == b'/').count();
+        let mut last = skip;
+        let mut was_slash = false;
+        for (i, &c) in b.iter().enumerate().skip(skip) {
+            if c == b'/' {
+                was_slash = true;
+            } else if was_slash {
+                last = i;
+                was_slash = false;
+            }
+        }
+        let prefix = usize::from(b.first() == Some(&b'/'));
+        let mut length = last;
+        while prefix < length {
+            if b[length - 1] != b'/' {
+                return p[..length].to_string();
+            }
+            length -= 1;
+        }
+        if prefix == 0 {
+            ".".to_string()
+        } else {
+            p[..prefix].to_string()
+        }
+    };
+    let mut emit = |text: String| {
+        sink.out.extend_from_slice(text.as_bytes());
+        sink.out.push(end);
+    };
+    if is_base {
+        if multiple {
+            for o in &operands {
+                emit(base_of(o, suffix.as_deref()));
+            }
+        } else {
+            let sfx = operands.get(1).map(|s| s.as_str());
+            emit(base_of(operands[0], sfx));
+        }
+    } else {
+        for o in &operands {
+            emit(dir_of(o));
+        }
+    }
+    Util::Done(0)
+}
+
 fn utility(name: &str, args: &[String], stdin: &mut Input, sink: &mut Sink) -> Util {
     match name {
         "echo" => echo(args, sink),
         "printf" => printf(args, sink),
-        "test" => Util::Done(test(args, sink)),
+        "test" => Util::Done(test(args, sink, None)),
         "[" => {
             if args.last().map(String::as_str) != Some("]") {
                 sink.eline(&format!("{SHELL_NAME}: [: missing `]'"));
                 return Util::Done(2);
             }
-            Util::Done(test(&args[..args.len() - 1], sink))
+            Util::Done(test(&args[..args.len() - 1], sink, None))
         }
         "cat" => cat(args, stdin, sink),
         "tee" => tee(args, stdin, sink),
@@ -5593,44 +5840,8 @@ fn utility(name: &str, args: &[String], stdin: &mut Input, sink: &mut Sink) -> U
         "ls" => ls(args, sink),
         "find" => find(args, sink),
         "date" => date(args, sink),
-        "basename" => match args {
-            [p] | [p, _] => {
-                // On Windows a `\` separates too.
-                let p = &posix_path(p);
-                let trimmed = p.trim_end_matches('/');
-                let mut b = trimmed.rsplit('/').next().unwrap_or("").to_string();
-                if trimmed.is_empty() && p.starts_with('/') {
-                    b = "/".into();
-                }
-                if let [_, suffix] = args {
-                    if b.len() > suffix.len() && b.ends_with(suffix.as_str()) {
-                        b.truncate(b.len() - suffix.len());
-                    }
-                }
-                sink.out.extend_from_slice(format!("{b}\n").as_bytes());
-                Util::Done(0)
-            }
-            _ => Util::Decline,
-        },
-        "dirname" => match args {
-            [p] => {
-                let p = &posix_path(p);
-                let t = p.trim_end_matches('/');
-                let d = match t.rfind('/') {
-                    Some(0) => "/".to_string(),
-                    Some(i) => t[..i].trim_end_matches('/').to_string(),
-                    None => ".".to_string(),
-                };
-                let d = if t.is_empty() && p.starts_with('/') {
-                    "/".into()
-                } else {
-                    d
-                };
-                sink.out.extend_from_slice(format!("{d}\n").as_bytes());
-                Util::Done(0)
-            }
-            _ => Util::Decline,
-        },
+        "basename" => name_tool(true, args, sink),
+        "dirname" => name_tool(false, args, sink),
         "seq" => {
             let nums: Option<Vec<i64>> = args.iter().map(|a| a.parse().ok()).collect();
             let (first, step, last) = match nums.as_deref() {
@@ -5830,22 +6041,39 @@ fn ifs_split(value: &str, ifs: &str) -> (Vec<String>, bool, bool) {
 /// delimits, and each non-white IFS character delimits on its own, so two in a
 /// row make an empty field. The last value takes the rest of the line with its
 /// trailing IFS white space dropped. An empty IFS splits nothing.
-fn read_fields(line: &str, ifs: &str, count: usize) -> Vec<String> {
-    let is_ws = |c: char| matches!(c, ' ' | '\t' | '\n') && ifs.contains(c);
-    let is_sep = |c: char| ifs.contains(c);
+fn read_fields(line: &[(char, bool)], ifs: &str, count: usize) -> Vec<String> {
+    // A character that a backslash quoted is never a separator.
+    let is_ws =
+        |&(c, quoted): &(char, bool)| !quoted && matches!(c, ' ' | '\t' | '\n') && ifs.contains(c);
+    let is_sep = |&(c, quoted): &(char, bool)| !quoted && ifs.contains(c);
+    let text = |part: &[(char, bool)]| part.iter().map(|&(c, _)| c).collect::<String>();
+    let n = line.len();
     let mut out = Vec::with_capacity(count);
-    let mut rest = line.trim_start_matches(|c: char| is_ws(c));
+    let mut i = 0;
+    while i < n && is_ws(&line[i]) {
+        i += 1;
+    }
     for _ in 1..count {
-        let end = rest.find(|c: char| is_sep(c)).unwrap_or(rest.len());
-        out.push(rest[..end].to_string());
-        rest = rest[end..].trim_start_matches(|c: char| is_ws(c));
-        if let Some(c) = rest.chars().next() {
-            if is_sep(c) && !is_ws(c) {
-                rest = rest[c.len_utf8()..].trim_start_matches(|c: char| is_ws(c));
+        let start = i;
+        while i < n && !is_sep(&line[i]) {
+            i += 1;
+        }
+        out.push(text(&line[start..i]));
+        while i < n && is_ws(&line[i]) {
+            i += 1;
+        }
+        if i < n && is_sep(&line[i]) && !is_ws(&line[i]) {
+            i += 1;
+            while i < n && is_ws(&line[i]) {
+                i += 1;
             }
         }
     }
-    out.push(rest.trim_end_matches(|c: char| is_ws(c)).to_string());
+    let mut end = n;
+    while end > i && is_ws(&line[end - 1]) {
+        end -= 1;
+    }
+    out.push(text(&line[i..end]));
     out
 }
 
@@ -5901,7 +6129,7 @@ fn printf(args: &[String], sink: &mut Sink) -> Util {
     let mut out: Vec<u8> = Vec::new();
     // bash's complaints about integer arguments; they go to stderr only once the
     // whole format is done, so a declined format is not reported twice.
-    let mut complaints: Vec<String> = Vec::new();
+    let mut complaints: Vec<(String, bool)> = Vec::new();
     'format: loop {
         let mut consumed = false;
         let mut i = 0;
@@ -5981,9 +6209,7 @@ fn printf(args: &[String], sink: &mut Sink) -> Util {
                     consumed |= star.is_some();
                     let n = star.map_or(0, |a| {
                         let (n, complaint) = printf_int_arg(a);
-                        if let Some(c) = complaint {
-                            complaints.push(format!("printf: {a}: {c}"));
-                        }
+                        note_int_complaint(&mut complaints, a, complaint);
                         n
                     });
                     if spec.contains('.') {
@@ -6002,6 +6228,10 @@ fn printf(args: &[String], sink: &mut Sink) -> Util {
                 } else {
                     break;
                 }
+            }
+            // C length modifiers (`%ld`, `%lld`, `%Lf`) mean nothing here.
+            while matches!(fmt.get(i), Some('h' | 'l' | 'L' | 'j' | 'z' | 't')) {
+                i += 1;
             }
             let conv = fmt.get(i).copied().unwrap_or('s');
             i += 1;
@@ -6062,28 +6292,33 @@ fn printf(args: &[String], sink: &mut Sink) -> Util {
                     }
                 }
                 'd' | 'i' | 'u' | 'x' | 'X' | 'o' => {
-                    let n = if arg.is_empty() {
-                        0
-                    } else {
+                    // Signed conversions read the argument as `intmax_t`
+                    // (`strtoimax`), the others as `uintmax_t` (`strtoumax`):
+                    // a value past the type's range is clamped with a warning,
+                    // and a negative one for an unsigned conversion wraps.
+                    let signed = matches!(conv, 'd' | 'i');
+                    let (neg, mag) = if arg.is_empty() {
+                        (false, 0)
+                    } else if signed {
                         let (n, complaint) = printf_int_arg(&arg);
-                        if let Some(c) = complaint {
-                            complaints.push(format!("printf: {arg}: {c}"));
-                        }
-                        n
+                        note_int_complaint(&mut complaints, &arg, complaint);
+                        (n < 0, n.unsigned_abs())
+                    } else {
+                        let (u, complaint) = printf_uint_arg(&arg);
+                        note_int_complaint(&mut complaints, &arg, complaint);
+                        (false, u)
                     };
                     numeric = true;
                     let mut text = match conv {
-                        'd' | 'i' => n.unsigned_abs().to_string(),
-                        // As bash does, a negative number is shown as 64 bits.
-                        'u' => (n as u64).to_string(),
-                        'x' => format!("{:x}", n as u64),
-                        'X' => format!("{:X}", n as u64),
-                        _ => format!("{:o}", n as u64),
+                        'd' | 'i' | 'u' => mag.to_string(),
+                        'x' => format!("{mag:x}"),
+                        'X' => format!("{mag:X}"),
+                        _ => format!("{mag:o}"),
                     };
                     // `+` and the space flag mean something only for a signed
                     // conversion; `%+x` is `%x`.
-                    if matches!(conv, 'd' | 'i') {
-                        sign = if n < 0 {
+                    if signed {
+                        sign = if neg {
                             "-"
                         } else if plus {
                             "+"
@@ -6096,7 +6331,7 @@ fn printf(args: &[String], sink: &mut Sink) -> Util {
                     // A precision is the least number of digits; `%.0d` of 0 is
                     // no digits at all.
                     if let Some(p) = precision {
-                        if p == 0 && n == 0 {
+                        if p == 0 && mag == 0 {
                             text.clear();
                         } else if text.len() < p {
                             text = format!("{}{text}", "0".repeat(p - text.len()));
@@ -6104,33 +6339,61 @@ fn printf(args: &[String], sink: &mut Sink) -> Util {
                     }
                     if alt && conv == 'o' && !text.starts_with('0') {
                         text.insert(0, '0');
-                    } else if alt && n != 0 && matches!(conv, 'x' | 'X') {
+                    } else if alt && mag != 0 && matches!(conv, 'x' | 'X') {
                         prefix = if conv == 'x' { "0x" } else { "0X" };
                     }
                     text
                 }
-                'f' | 'e' | 'E' | 'g' | 'G' => {
-                    let value = match arg.trim().parse::<f64>() {
-                        Ok(v) if v.is_finite() => v,
-                        Err(_) if arg.is_empty() => 0.0,
-                        _ => return Util::Decline,
-                    };
+                'f' | 'F' | 'e' | 'E' | 'g' | 'G' => {
                     numeric = true;
                     let upper = conv.is_ascii_uppercase();
                     let p = precision.unwrap_or(6);
-                    let mut text = match conv {
-                        'f' => format!("{:.*}", p, value),
-                        'e' | 'E' => c_exp(value, p, upper),
-                        _ => c_general(value, p, upper, alt),
+                    // bash reads the argument as a long double and glibc
+                    // writes that exact value, so a tie in the decimal text
+                    // (0.005) is judged on the binary number it became.
+                    let lowered = arg.trim().to_ascii_lowercase();
+                    let nonfinite = matches!(
+                        lowered.trim_start_matches(['+', '-']),
+                        "inf" | "infinity" | "nan"
+                    );
+                    let (negative, mut text) = if nonfinite {
+                        // No zero padding: glibc pads these with spaces.
+                        zero = false;
+                        let word = if lowered.contains("nan") {
+                            "nan"
+                        } else {
+                            "inf"
+                        };
+                        let word = if upper {
+                            word.to_ascii_uppercase()
+                        } else {
+                            word.to_string()
+                        };
+                        (lowered.starts_with('-'), word)
+                    } else {
+                        let ld = if arg.is_empty() {
+                            LongDouble {
+                                neg: false,
+                                m: 0,
+                                e: 0,
+                            }
+                        } else {
+                            match LongDouble::parse(&arg) {
+                                Some(ld) => ld,
+                                None => return Util::Decline,
+                            }
+                        };
+                        let text = match conv {
+                            'f' | 'F' => c_fixed(&ld, p),
+                            'e' | 'E' => c_exp(&ld, p, upper),
+                            _ => c_general(&ld, p, upper, alt),
+                        };
+                        (ld.neg, text)
                     };
                     // `#` keeps the decimal point of `%.0f` and `%.0e`.
-                    if alt && p == 0 && conv != 'g' && conv != 'G' {
+                    if !nonfinite && alt && p == 0 && conv != 'g' && conv != 'G' {
                         let at = text.find(['e', 'E']).unwrap_or(text.len());
                         text.insert(at, '.');
-                    }
-                    let negative = text.starts_with('-');
-                    if negative {
-                        text.remove(0);
                     }
                     sign = if negative {
                         "-"
@@ -6143,7 +6406,11 @@ fn printf(args: &[String], sink: &mut Sink) -> Util {
                     };
                     text
                 }
-                'c' => arg.chars().next().map(String::from).unwrap_or_default(),
+                // An empty argument is a NUL byte, as bash writes it.
+                'c' => arg
+                    .chars()
+                    .next()
+                    .map_or_else(|| "\0".to_string(), String::from),
                 'q' => shell_quote_q(&arg),
                 _ => return Util::Decline,
             };
@@ -6179,11 +6446,16 @@ fn printf(args: &[String], sink: &mut Sink) -> Util {
             break;
         }
     }
-    sink.out.extend_from_slice(&out);
-    for c in &complaints {
+    // bash writes a complaint as it reads the argument, before the output.
+    for (c, _) in &complaints {
         sink.eline(c);
     }
-    Util::Done(if complaints.is_empty() { 0 } else { 1 })
+    sink.out.extend_from_slice(&out);
+    Util::Done(if complaints.iter().any(|(_, fatal)| *fatal) {
+        1
+    } else {
+        0
+    })
 }
 
 /// `printf %q`: the argument quoted so the shell reads it back as one word,
@@ -6235,16 +6507,34 @@ fn shell_quote_q(s: &str) -> String {
     out
 }
 
-/// How bash reads an integer argument of `printf` (its `getintmax`). A leading
-/// quote gives the code of the character after it. Otherwise the text is a C
-/// integer constant (`strtoimax` in base 0): leading blanks, an optional sign,
-/// `0x` for hex, a leading `0` for octal, decimal otherwise. The value is what
-/// was read before any text that is not part of the number, and the complaint
-/// is bash's words for that text. A value past 64 bits is clamped to i64::MAX
-/// or i64::MIN and reported as "Result too large", as bash does.
-fn printf_int_arg(arg: &str) -> (i64, Option<&'static str>) {
+/// The message of an integer argument's complaint, and whether it makes
+/// `printf` exit 1: a value out of range is only a warning.
+const PRINTF_RANGE: &str = "Numerical result out of range";
+
+fn note_int_complaint(complaints: &mut Vec<(String, bool)>, arg: &str, c: Option<&'static str>) {
+    match c {
+        Some(PRINTF_RANGE) => complaints.push((
+            format!("printf: warning: {arg}: {c}", c = PRINTF_RANGE),
+            false,
+        )),
+        Some(c) => complaints.push((format!("printf: {arg}: {c}"), true)),
+        None => {}
+    }
+}
+
+/// How bash reads an integer argument of `printf`. A leading quote gives the
+/// code of the character after it. Otherwise the text is a C integer constant
+/// (`strtoimax`/`strtoumax` in base 0): leading blanks, an optional sign, `0x`
+/// for hex, a leading `0` for octal, decimal otherwise. The result is the sign
+/// and the magnitude read before any text that is not part of the number
+/// (capped at 2^64), and the complaint is bash's words for that text.
+fn printf_int_parts(arg: &str) -> (bool, u128, Option<&'static str>) {
     if let Some(rest) = arg.strip_prefix(['\'', '"']) {
-        return (rest.chars().next().map_or(0, |c| c as u32 as i64), None);
+        return (
+            false,
+            rest.chars().next().map_or(0, |c| c as u32 as u128),
+            None,
+        );
     }
     let body = arg.trim_start_matches([' ', '\t', '\n', '\r', '\x0b', '\x0c']);
     let (neg, body) = match body.as_bytes().first().copied() {
@@ -6284,7 +6574,7 @@ fn printf_int_arg(arg: &str) -> (i64, Option<&'static str>) {
     } else {
         Some("invalid number")
     };
-    // Accumulated saturating and capped at 2^64, so the i128 below cannot wrap.
+    // Accumulated saturating and capped at 2^64, so it cannot wrap.
     let mut mag: u128 = 0;
     for c in value_digits.chars() {
         let digit = c.to_digit(radix).unwrap_or(0);
@@ -6292,42 +6582,533 @@ fn printf_int_arg(arg: &str) -> (i64, Option<&'static str>) {
             .saturating_mul(radix as u128)
             .saturating_add(u128::from(digit));
     }
-    let mag = mag.min(1u128 << 64);
+    (neg, mag.min(1u128 << 64), complaint)
+}
+
+/// A signed conversion's argument (bash's `getintmax`): past 64 bits the value
+/// is clamped to `i64::MAX` or `i64::MIN` with a range warning.
+fn printf_int_arg(arg: &str) -> (i64, Option<&'static str>) {
+    let (neg, mag, complaint) = printf_int_parts(arg);
     let value = if neg { -(mag as i128) } else { mag as i128 };
     if value > i64::MAX as i128 || value < i64::MIN as i128 {
         let clamped = if neg { i64::MIN } else { i64::MAX };
-        return (clamped, Some("Result too large"));
+        return (clamped, complaint.or(Some(PRINTF_RANGE)));
     }
     (value as i64, complaint)
 }
 
-/// C's `%e`: one digit, the decimals, then `e`, a sign and at least two
-/// exponent digits (`1.234568e+04`). Rust's `{:e}` writes `1.234568e4`, so the
-/// exponent is rewritten.
-fn c_exp(v: f64, precision: usize, upper: bool) -> String {
-    let s = format!("{:.*e}", precision, v);
-    let (mantissa, exp) = s.split_once('e').unwrap_or((s.as_str(), "0"));
-    let exp: i32 = exp.parse().unwrap_or(0);
-    format!(
-        "{mantissa}{}{}{:02}",
-        if upper { 'E' } else { 'e' },
-        if exp < 0 { '-' } else { '+' },
-        exp.abs()
-    )
+/// An unsigned conversion's argument (`getuintmax`): a negative value wraps
+/// to 64 bits, and a magnitude past 64 bits gives `u64::MAX` and a warning.
+fn printf_uint_arg(arg: &str) -> (u64, Option<&'static str>) {
+    let (neg, mag, complaint) = printf_int_parts(arg);
+    if mag > u128::from(u64::MAX) {
+        return (u64::MAX, complaint.or(Some(PRINTF_RANGE)));
+    }
+    let mag = mag as u64;
+    (if neg { mag.wrapping_neg() } else { mag }, complaint)
+}
+
+/// A little-endian big unsigned integer, for `printf`'s exact floating-point
+/// conversions: a decimal argument is rounded to the 64-bit mantissa of the
+/// x87 `long double` that bash reads it as, and that value's exact binary
+/// expansion is then written out to the requested number of digits.
+#[derive(Clone)]
+struct Big(Vec<u32>);
+
+impl Big {
+    fn from_u128(mut v: u128) -> Big {
+        let mut limbs = Vec::new();
+        while v != 0 {
+            limbs.push(v as u32);
+            v >>= 32;
+        }
+        Big(limbs)
+    }
+    fn is_zero(&self) -> bool {
+        self.0.is_empty()
+    }
+    fn trim(&mut self) {
+        while self.0.last() == Some(&0) {
+            self.0.pop();
+        }
+    }
+    fn bitlen(&self) -> usize {
+        match self.0.last() {
+            None => 0,
+            Some(&top) => self.0.len() * 32 - top.leading_zeros() as usize,
+        }
+    }
+    fn bit(&self, i: usize) -> bool {
+        self.0.get(i / 32).is_some_and(|l| l >> (i % 32) & 1 == 1)
+    }
+    fn set_bit(&mut self, i: usize) {
+        if self.0.len() <= i / 32 {
+            self.0.resize(i / 32 + 1, 0);
+        }
+        self.0[i / 32] |= 1 << (i % 32);
+    }
+    fn clear_bit(&mut self, i: usize) {
+        if let Some(l) = self.0.get_mut(i / 32) {
+            *l &= !(1 << (i % 32));
+        }
+        self.trim();
+    }
+    /// Whether any bit below `n` is set.
+    fn any_below(&self, n: usize) -> bool {
+        let (whole, part) = (n / 32, n % 32);
+        self.0.iter().take(whole).any(|&l| l != 0)
+            || (part != 0
+                && self
+                    .0
+                    .get(whole)
+                    .is_some_and(|l| l & ((1u32 << part) - 1) != 0))
+    }
+    fn shl(&self, n: usize) -> Big {
+        if self.is_zero() {
+            return Big(Vec::new());
+        }
+        let (whole, part) = (n / 32, n % 32);
+        let mut out = vec![0u32; whole];
+        let mut carry = 0u32;
+        for &l in &self.0 {
+            if part == 0 {
+                out.push(l);
+            } else {
+                out.push(l << part | carry);
+                carry = l >> (32 - part);
+            }
+        }
+        if carry != 0 {
+            out.push(carry);
+        }
+        Big(out)
+    }
+    fn shr(&self, n: usize) -> Big {
+        let (whole, part) = (n / 32, n % 32);
+        if whole >= self.0.len() {
+            return Big(Vec::new());
+        }
+        let src = &self.0[whole..];
+        let mut out = Vec::with_capacity(src.len());
+        for (i, &l) in src.iter().enumerate() {
+            let hi = src.get(i + 1).copied().unwrap_or(0);
+            out.push(if part == 0 {
+                l
+            } else {
+                l >> part | hi << (32 - part)
+            });
+        }
+        let mut b = Big(out);
+        b.trim();
+        b
+    }
+    fn mul_small(&mut self, k: u32) {
+        let mut carry = 0u64;
+        for l in &mut self.0 {
+            let v = u64::from(*l) * u64::from(k) + carry;
+            *l = v as u32;
+            carry = v >> 32;
+        }
+        if carry != 0 {
+            self.0.push(carry as u32);
+        }
+    }
+    fn add_small(&mut self, k: u32) {
+        let mut carry = u64::from(k);
+        for l in &mut self.0 {
+            if carry == 0 {
+                return;
+            }
+            let v = u64::from(*l) + carry;
+            *l = v as u32;
+            carry = v >> 32;
+        }
+        if carry != 0 {
+            self.0.push(carry as u32);
+        }
+    }
+    /// Divide by `k` in place; the remainder.
+    fn divmod_small(&mut self, k: u32) -> u32 {
+        let mut rem = 0u64;
+        for l in self.0.iter_mut().rev() {
+            let cur = rem << 32 | u64::from(*l);
+            *l = (cur / u64::from(k)) as u32;
+            rem = cur % u64::from(k);
+        }
+        self.trim();
+        rem as u32
+    }
+    fn cmp(&self, o: &Big) -> std::cmp::Ordering {
+        self.0
+            .len()
+            .cmp(&o.0.len())
+            .then_with(|| self.0.iter().rev().cmp(o.0.iter().rev()))
+    }
+    /// `self - o`, which must not be negative.
+    fn sub_assign(&mut self, o: &Big) {
+        let mut borrow = 0i64;
+        for (i, l) in self.0.iter_mut().enumerate() {
+            let v = i64::from(*l) - i64::from(o.0.get(i).copied().unwrap_or(0)) - borrow;
+            *l = v as u32;
+            borrow = i64::from(v < 0);
+        }
+        self.trim();
+    }
+    fn low_u64(&self) -> u64 {
+        let at = |i: usize| u64::from(self.0.get(i).copied().unwrap_or(0));
+        at(0) | at(1) << 32
+    }
+    /// Quotient and remainder, by shifting and subtracting.
+    fn divmod(&self, d: &Big) -> (Big, Big) {
+        if self.cmp(d) == std::cmp::Ordering::Less {
+            return (Big(Vec::new()), self.clone());
+        }
+        let shift = self.bitlen() - d.bitlen();
+        let mut divisor = d.shl(shift);
+        let mut rem = self.clone();
+        let mut quot = Big(Vec::new());
+        for i in (0..=shift).rev() {
+            if rem.cmp(&divisor) != std::cmp::Ordering::Less {
+                rem.sub_assign(&divisor);
+                quot.set_bit(i);
+            }
+            divisor = divisor.shr(1);
+        }
+        (quot, rem)
+    }
+    /// The decimal digits, most significant first (`[0]` for zero).
+    fn decimal(&self) -> Vec<u8> {
+        if self.is_zero() {
+            return vec![0];
+        }
+        let mut n = self.clone();
+        let mut out = Vec::new();
+        while !n.is_zero() {
+            let mut chunk = n.divmod_small(1_000_000_000);
+            for _ in 0..9 {
+                out.push((chunk % 10) as u8);
+                chunk /= 10;
+                if n.is_zero() && chunk == 0 {
+                    break;
+                }
+            }
+        }
+        while out.len() > 1 && out.last() == Some(&0) {
+            out.pop();
+        }
+        out.reverse();
+        out
+    }
+}
+
+/// A number as x87 `long double` holds it: `m * 2^e` with `m` a 64-bit
+/// mantissa (zero when `m` is 0), and a sign that a zero keeps.
+struct LongDouble {
+    neg: bool,
+    m: u64,
+    e: i32,
+}
+
+/// The lowest exponent of a long double's mantissa (a denormal's last bit).
+const LD_MIN_EXP: i32 = -16445;
+/// The largest exponent of its top bit.
+const LD_MAX_TOP: i32 = 16383;
+
+/// `n` rounded to 64 significant bits, ties to even; `sticky` says bits below
+/// `n` were dropped already. The mantissa and the exponent of its lowest bit
+/// (`e0` is the exponent of `n`'s own lowest bit).
+fn ld_round(n: &Big, sticky: bool, e0: i32) -> (u64, i32) {
+    let bl = n.bitlen();
+    if bl <= 64 {
+        let up = 64 - bl;
+        return (n.low_u64() << up, e0 - up as i32);
+    }
+    let sh = bl - 64;
+    let mut m = u128::from(n.shr(sh).low_u64());
+    let guard = n.bit(sh - 1);
+    let rest = sticky || n.any_below(sh - 1);
+    if guard && (rest || m & 1 == 1) {
+        m += 1;
+    }
+    let mut e = e0 + sh as i32;
+    if m >> 64 != 0 {
+        m >>= 1;
+        e += 1;
+    }
+    (m as u64, e)
+}
+
+impl LongDouble {
+    /// What bash's `strtold` reads from a decimal argument (blanks, a sign,
+    /// digits with an optional point and an `e` exponent). `None` for other
+    /// text, and for a value past a long double's range.
+    fn parse(text: &str) -> Option<LongDouble> {
+        let t = text.trim_start_matches([' ', '\t', '\n', '\r', '\x0b', '\x0c']);
+        let (neg, t) = match t.as_bytes().first() {
+            Some(b'-') => (true, &t[1..]),
+            Some(b'+') => (false, &t[1..]),
+            _ => (false, t),
+        };
+        let b = t.as_bytes();
+        let mut i = 0;
+        let mut digits: Vec<u8> = Vec::new();
+        let mut frac = 0i64;
+        let mut seen_point = false;
+        while i < b.len() {
+            match b[i] {
+                d @ b'0'..=b'9' => {
+                    digits.push(d - b'0');
+                    if seen_point {
+                        frac += 1;
+                    }
+                }
+                b'.' if !seen_point => seen_point = true,
+                _ => break,
+            }
+            i += 1;
+        }
+        if digits.is_empty() {
+            return None;
+        }
+        let mut exp10 = 0i64;
+        if i < b.len() && matches!(b[i], b'e' | b'E') {
+            i += 1;
+            let eneg = match b.get(i) {
+                Some(b'-') => {
+                    i += 1;
+                    true
+                }
+                Some(b'+') => {
+                    i += 1;
+                    false
+                }
+                _ => false,
+            };
+            let start = i;
+            while i < b.len() && b[i].is_ascii_digit() {
+                exp10 = (exp10 * 10 + i64::from(b[i] - b'0')).min(1_000_000);
+                i += 1;
+            }
+            if i == start {
+                return None;
+            }
+            if eneg {
+                exp10 = -exp10;
+            }
+        }
+        if i != b.len() {
+            return None;
+        }
+        let lead = digits.iter().take_while(|&&d| d == 0).count();
+        let digits = &digits[lead..];
+        if digits.is_empty() {
+            return Some(LongDouble { neg, m: 0, e: 0 });
+        }
+        let dec_exp = exp10 - frac;
+        // The value is below the smallest denormal, or above the largest finite.
+        let magnitude = digits.len() as i64 + dec_exp;
+        if magnitude < -4960 {
+            return Some(LongDouble { neg, m: 0, e: 0 });
+        }
+        if magnitude > 4934 {
+            return None;
+        }
+        let mut d = Big(Vec::new());
+        for chunk in digits.chunks(9) {
+            let mut scale = 1u32;
+            let mut v = 0u32;
+            for &x in chunk {
+                scale *= 10;
+                v = v * 10 + u32::from(x);
+            }
+            d.mul_small(scale);
+            d.add_small(v);
+        }
+        let (mut m, mut e);
+        if dec_exp >= 0 {
+            let mut n = d;
+            let mut left = dec_exp;
+            while left > 0 {
+                let step = left.min(9);
+                n.mul_small(10u32.pow(step as u32));
+                left -= step;
+            }
+            (m, e) = ld_round(&n, false, 0);
+        } else {
+            let mut den = Big::from_u128(1);
+            let mut left = -dec_exp;
+            while left > 0 {
+                let step = left.min(9);
+                den.mul_small(10u32.pow(step as u32));
+                left -= step;
+            }
+            // Scale so the quotient has 66 or 67 bits, then round it.
+            let s = 66 + den.bitlen() as i64 - d.bitlen() as i64;
+            let (q, r, e0) = if s >= 0 {
+                let (q, r) = d.shl(s as usize).divmod(&den);
+                (q, r, -(s as i32))
+            } else {
+                let t = (-s) as usize;
+                let (q, r) = d.divmod(&den.shl(t));
+                (q, r, t as i32)
+            };
+            (m, e) = ld_round(&q, !r.is_zero(), e0);
+        }
+        if e + 63 > LD_MAX_TOP {
+            return None;
+        }
+        if e < LD_MIN_EXP {
+            // A denormal has fewer bits: round at the lowest one it has.
+            let drop = (LD_MIN_EXP - e) as u32;
+            if drop > 64 {
+                m = 0;
+            } else if drop == 64 {
+                m = u64::from(m > 1 << 63);
+            } else {
+                let kept = m >> drop;
+                let rem = m & ((1u64 << drop) - 1);
+                let half = 1u64 << (drop - 1);
+                m = kept + u64::from(rem > half || (rem == half && kept & 1 == 1));
+            }
+            e = LD_MIN_EXP;
+        }
+        Some(LongDouble { neg, m, e })
+    }
+
+    /// The exact decimal expansion: digits before the point and after it.
+    fn exact_digits(&self) -> (Vec<u8>, Vec<u8>) {
+        if self.m == 0 {
+            return (vec![0], Vec::new());
+        }
+        let (mut m, mut e) = (self.m, self.e);
+        let tz = m.trailing_zeros() as i32;
+        let cut = tz.min(-e).max(0);
+        m >>= cut;
+        e += cut;
+        if e >= 0 {
+            return (
+                Big::from_u128(u128::from(m)).shl(e as usize).decimal(),
+                Vec::new(),
+            );
+        }
+        let k = (-e) as usize;
+        let whole = Big::from_u128(u128::from(m)).shr(k);
+        let mut int_digits = whole.decimal();
+        if whole.is_zero() {
+            int_digits = vec![0];
+        }
+        // The fraction: the low `k` bits of `m`, as a fraction of 2^k.
+        let mut fraction = Big::from_u128(u128::from(m));
+        for i in k..64.max(k) {
+            fraction.clear_bit(i);
+        }
+        let mut frac_digits = Vec::new();
+        while !fraction.is_zero() {
+            fraction.mul_small(10);
+            let mut digit = 0u8;
+            for j in 0..4 {
+                if fraction.bit(k + j) {
+                    digit |= 1 << j;
+                    fraction.clear_bit(k + j);
+                }
+            }
+            frac_digits.push(digit);
+        }
+        (int_digits, frac_digits)
+    }
+}
+
+/// Round the digit string `digits` to `keep` digits, half to even on the exact
+/// remainder. `true` when a carry added a digit (`99` to `100`).
+fn round_digits(digits: &mut Vec<u8>, keep: usize) -> bool {
+    if digits.len() <= keep {
+        digits.resize(keep, 0);
+        return false;
+    }
+    let tail = digits.split_off(keep);
+    let up = match tail[0].cmp(&5) {
+        std::cmp::Ordering::Greater => true,
+        std::cmp::Ordering::Less => false,
+        std::cmp::Ordering::Equal => {
+            tail[1..].iter().any(|&d| d != 0) || digits.last().is_some_and(|d| d % 2 == 1)
+        }
+    };
+    if up {
+        for d in digits.iter_mut().rev() {
+            if *d == 9 {
+                *d = 0;
+            } else {
+                *d += 1;
+                return false;
+            }
+        }
+        digits.insert(0, 1);
+        return true;
+    }
+    false
+}
+
+fn digit_text(d: &[u8]) -> String {
+    d.iter().map(|&x| char::from(b'0' + x)).collect()
+}
+
+/// C's `%f` of a long double, without the sign.
+fn c_fixed(v: &LongDouble, precision: usize) -> String {
+    let (int_digits, frac_digits) = v.exact_digits();
+    let mut all = int_digits.clone();
+    all.extend_from_slice(&frac_digits);
+    round_digits(&mut all, int_digits.len() + precision);
+    // A carry that made a new leading digit leaves one more before the point.
+    let int_len = all.len() - precision;
+    let mut out = digit_text(&all[..int_len]);
+    if precision > 0 {
+        out.push('.');
+        out.push_str(&digit_text(&all[int_len..]));
+    }
+    out
+}
+
+/// The `%e` digits of `v` at `precision` decimals, and the decimal exponent.
+fn exp_digits(v: &LongDouble, precision: usize) -> (Vec<u8>, i32) {
+    let (int_digits, frac_digits) = v.exact_digits();
+    let mut all = int_digits.clone();
+    all.extend_from_slice(&frac_digits);
+    let Some(first) = all.iter().position(|&d| d != 0) else {
+        return (vec![0; precision + 1], 0);
+    };
+    let mut x = int_digits.len() as i32 - 1 - first as i32;
+    let mut sig = all.split_off(first);
+    if round_digits(&mut sig, precision + 1) {
+        // 9.99 became 10.0: one digit too many.
+        sig.pop();
+        x += 1;
+    }
+    (sig, x)
+}
+
+/// C's `%e` of a long double, without the sign: one digit, the decimals, `e`,
+/// a sign and at least two exponent digits (`1.234568e+04`).
+fn c_exp(v: &LongDouble, precision: usize, upper: bool) -> String {
+    let (digits, x) = exp_digits(v, precision);
+    let mut out = digit_text(&digits[..1]);
+    if precision > 0 {
+        out.push('.');
+        out.push_str(&digit_text(&digits[1..]));
+    }
+    out.push(if upper { 'E' } else { 'e' });
+    out.push(if x < 0 { '-' } else { '+' });
+    out.push_str(&format!("{:02}", x.abs()));
+    out
 }
 
 /// C's `%g`: `precision` significant digits (6 by default, 1 for 0). The `%e`
 /// form is used when the exponent is below -4 or at least the precision, else
 /// `%f`; trailing zeros of the fraction are removed, unless `alt` (the `#`
 /// flag) keeps them and the decimal point.
-fn c_general(v: f64, precision: usize, upper: bool, alt: bool) -> String {
+fn c_general(v: &LongDouble, precision: usize, upper: bool, alt: bool) -> String {
     let p = precision.max(1);
     // The exponent `%e` would show with this precision decides the form.
-    let probe = format!("{:.*e}", p - 1, v);
-    let x: i64 = probe
-        .split_once('e')
-        .and_then(|(_, e)| e.parse().ok())
-        .unwrap_or(0);
+    let (_, x) = exp_digits(v, p - 1);
     fn strip_zeros(s: &str) -> String {
         if s.contains('.') {
             s.trim_end_matches('0').trim_end_matches('.').to_string()
@@ -6347,13 +7128,27 @@ fn c_general(v: f64, precision: usize, upper: bool, alt: bool) -> String {
             strip_zeros(s)
         }
     };
-    if x < -4 || x >= p as i64 {
-        let s = c_exp(v, p - 1, upper);
+    if x < -4 || x >= p as i32 {
+        // glibc picks the `%e` form after rounding but keeps the decimals
+        // the `%f` form would have had (`%#g` of 999999.5 is `1.e+06`).
+        let mut decimals = p - 1;
+        if alt {
+            let (int_digits, frac_digits) = v.exact_digits();
+            let mut all = int_digits.clone();
+            all.extend_from_slice(&frac_digits);
+            if let Some(first) = all.iter().position(|&d| d != 0) {
+                let before = int_digits.len() as i32 - 1 - first as i32;
+                if before < p as i32 && before >= -4 {
+                    decimals = (p as i32 - 1 - before) as usize;
+                }
+            }
+        }
+        let s = c_exp(v, decimals, upper);
         let at = s.find(['e', 'E']).unwrap_or(s.len());
         format!("{}{}", strip(&s[..at]), &s[at..])
     } else {
-        let decimals = (p as i64 - 1 - x) as usize;
-        strip(&format!("{:.*}", decimals, v))
+        let decimals = (p as i32 - 1 - x) as usize;
+        strip(&c_fixed(v, decimals))
     }
 }
 
@@ -6423,68 +7218,13 @@ fn test_binary_op(op: &str) -> bool {
     )
 }
 
-/// The position of the last `op` in `a` that is not inside parentheses.
-fn test_top_level(a: &[String], op: &str) -> Option<usize> {
-    let mut depth = 0i32;
-    for (k, x) in a.iter().enumerate().rev() {
-        match x.as_str() {
-            ")" => depth += 1,
-            "(" => depth -= 1,
-            s if s == op && depth == 0 => return Some(k),
-            _ => {}
-        }
-    }
-    None
-}
-
-/// The position of the `-a` in `a` that joins two tests: the first one at the
-/// top level, outside parentheses, whose left neighbour is an operand and not
-/// an operator waiting for one.
-fn test_and_position(a: &[String]) -> Option<usize> {
-    let is_op = |w: &str| {
-        matches!(
-            w,
-            "!" | "("
-                | "-a"
-                | "-o"
-                | "-e"
-                | "-f"
-                | "-d"
-                | "-s"
-                | "-r"
-                | "-w"
-                | "-x"
-                | "-L"
-                | "-h"
-                | "-b"
-                | "-c"
-                | "-p"
-                | "-S"
-                | "-O"
-                | "-G"
-                | "-u"
-                | "-g"
-                | "-k"
-                | "-N"
-                | "-t"
-                | "-z"
-                | "-n"
-        )
-    };
-    let mut depth = 0i32;
-    for (k, x) in a.iter().enumerate() {
-        match x.as_str() {
-            "(" => depth += 1,
-            ")" => depth -= 1,
-            "-a" if depth == 0 && k > 0 && !is_op(&a[k - 1]) => return Some(k),
-            _ => {}
-        }
-    }
-    None
-}
-
-fn test(args: &[String], sink: &mut Sink) -> i32 {
-    fn unary(op: &str, a: &str) -> Option<bool> {
+/// `test` and `[`, as bash's `test.c` reads them: with up to four arguments
+/// the POSIX rules by argument count (where `!` and a parenthesis bind to what
+/// follows them), with more a recursive parse (`!` over `-a` over `-o`, and
+/// parentheses). Both sides of `-a` and `-o` are always evaluated, so an
+/// error on the right still shows when the left already decides.
+fn test(args: &[String], sink: &mut Sink, shell: Option<&Shell>) -> i32 {
+    fn unary(op: &str, a: &str, shell: Option<&Shell>) -> Option<bool> {
         let md = std::fs::metadata(a);
         Some(match op {
             "-e" | "-a" => md.is_ok(),
@@ -6511,8 +7251,30 @@ fn test(args: &[String], sink: &mut Sink) -> i32 {
                 .unwrap_or(false),
             "-z" => a.is_empty(),
             "-n" => !a.is_empty(),
+            // A variable that is set (an array element is not in the subset).
+            "-v" => {
+                valid_name(a) && shell.is_some_and(|s| s.var(a).is_some())
+                    || (!a.is_empty()
+                        && a.bytes().all(|b| b.is_ascii_digit())
+                        && shell.is_some_and(|s| s.var(a).is_some()))
+            }
+            // A shell option that is on: the three `set` runs, and the ones
+            // bash has on in a script.
+            "-o" => match a {
+                "errexit" => shell.is_some_and(|s| s.errexit),
+                "nounset" => shell.is_some_and(|s| s.nounset),
+                "pipefail" => shell.is_some_and(|s| s.pipefail),
+                "braceexpand" | "hashall" | "interactive-comments" => true,
+                _ => false,
+            },
+            // A name reference: the subset has none.
+            "-R" => false,
             _ => return None,
         })
+    }
+    fn is_unop(op: &str) -> bool {
+        let b = op.as_bytes();
+        b.len() == 2 && b[0] == b'-' && b"abcdefghknoprstuvwxzGLNOSR".contains(&b[1])
     }
     fn binary(a: &str, op: &str, b: &str) -> Option<Result<bool, String>> {
         let num = |s: &str| {
@@ -6556,123 +7318,243 @@ fn test(args: &[String], sink: &mut Sink) -> i32 {
             _ => return None,
         })
     }
-    fn eval(a: &[String], sink: &mut Sink) -> Result<bool, i32> {
-        // -a / -o, lowest precedence first.
-        if let Some(p) = test_top_level(a, "-o") {
-            if p > 0 && p + 1 < a.len() {
-                return Ok(eval(&a[..p], sink)? || eval(&a[p + 1..], sink)?);
+    struct P<'a> {
+        a: &'a [String],
+        pos: usize,
+        shell: Option<&'a Shell>,
+        sink: &'a mut Sink,
+        expr_used: bool,
+    }
+    type R = Result<bool, i32>;
+    impl P<'_> {
+        fn syntax<T>(&mut self, msg: &str) -> Result<T, i32> {
+            self.sink.eline(&format!("{SHELL_NAME}: test: {msg}"));
+            Err(2)
+        }
+        fn at(&self, k: usize) -> &str {
+            self.a.get(k).map(String::as_str).unwrap_or("")
+        }
+        /// `op ARG`, with the jail's refusal for a path outside it.
+        fn unary_test(&mut self, op: &str, arg: &str) -> R {
+            let file_test = matches!(
+                op,
+                "-e" | "-a"
+                    | "-f"
+                    | "-d"
+                    | "-s"
+                    | "-r"
+                    | "-w"
+                    | "-x"
+                    | "-L"
+                    | "-h"
+                    | "-b"
+                    | "-c"
+                    | "-p"
+                    | "-S"
+                    | "-O"
+                    | "-G"
+                    | "-u"
+                    | "-g"
+                    | "-k"
+                    | "-N"
+            );
+            if let Some(refusal) = file_test.then(|| jail_refusal("test", arg)).flatten() {
+                self.sink.eline(&refusal);
+                return Err(2);
+            }
+            match unary(op, arg, self.shell) {
+                Some(v) => Ok(v),
+                None => self.syntax(&format!("{op}: unary operator expected")),
             }
         }
-        // The first `-a` that follows an operand: a leading or doubled `-a` is
-        // the unary test (`[ -e . -a -a . ]` is two tests).
-        if let Some(p) = test_and_position(a) {
-            if p > 0 && p + 1 < a.len() {
-                return Ok(eval(&a[..p], sink)? && eval(&a[p + 1..], sink)?);
+        /// `A OP B` at `pos`; advances past all three.
+        fn binary_operator(&mut self) -> R {
+            let (x, op, y) = (
+                self.at(self.pos).to_string(),
+                self.at(self.pos + 1).to_string(),
+                self.at(self.pos + 2).to_string(),
+            );
+            self.pos += 3;
+            if matches!(op.as_str(), "-nt" | "-ot" | "-ef") {
+                for p in [&x, &y] {
+                    if let Some(refusal) = jail_refusal("test", p) {
+                        self.sink.eline(&refusal);
+                        return Err(2);
+                    }
+                }
+            }
+            match binary(&x, &op, &y) {
+                Some(Ok(v)) => Ok(v),
+                Some(Err(m)) => self.syntax(&m),
+                None => self.syntax(&format!("{op}: binary operator expected")),
             }
         }
-        // `( EXPR )`. With three words and an operator in the middle, POSIX
-        // reads the operator first: `[ ( = ) ]` compares two strings.
-        if a.len() >= 3
-            && a[0] == "("
-            && a[a.len() - 1] == ")"
-            && !(a.len() == 3 && test_binary_op(&a[1]))
-        {
-            let mut depth = 0i32;
-            let mut closes_last = true;
-            for (k, x) in a.iter().enumerate() {
-                match x.as_str() {
-                    "(" => depth += 1,
-                    ")" => {
-                        depth -= 1;
-                        if depth == 0 && k + 1 < a.len() {
-                            closes_last = false;
-                        }
-                    }
-                    _ => {}
+        /// `-X ARG` at `pos`; advances past both.
+        fn unary_operator(&mut self) -> R {
+            let op = self.at(self.pos).to_string();
+            if !is_unop(&op) {
+                return Ok(false);
+            }
+            // `-t` alone tests descriptor 1.
+            if op == "-t" {
+                self.pos += 1;
+                if self.pos < self.a.len() {
+                    let v = self.at(self.pos).trim().parse::<i64>().is_ok();
+                    let arg = self.at(self.pos).to_string();
+                    self.pos += 1;
+                    return if v {
+                        self.unary_test(&op, &arg)
+                    } else {
+                        Ok(false)
+                    };
+                }
+                return self.unary_test(&op, "1");
+            }
+            if self.pos + 1 >= self.a.len() {
+                return self.syntax("argument expected");
+            }
+            let arg = self.at(self.pos + 1).to_string();
+            self.pos += 2;
+            self.unary_test(&op, &arg)
+        }
+        fn expr(&mut self) -> R {
+            self.expr_used = true;
+            if self.pos >= self.a.len() {
+                return self.syntax("argument expected");
+            }
+            self.or()
+        }
+        fn or(&mut self) -> R {
+            let value = self.and()?;
+            if self.pos < self.a.len() && self.at(self.pos) == "-o" {
+                self.pos += 1;
+                let rest = self.or()?;
+                return Ok(rest || value);
+            }
+            Ok(value)
+        }
+        fn and(&mut self) -> R {
+            let value = self.term()?;
+            if self.pos < self.a.len() && self.at(self.pos) == "-a" {
+                self.pos += 1;
+                let rest = self.and()?;
+                return Ok(rest && value);
+            }
+            Ok(value)
+        }
+        fn term(&mut self) -> R {
+            if self.pos >= self.a.len() {
+                return self.syntax("argument expected");
+            }
+            // Leading `!`s.
+            if self.at(self.pos) == "!" {
+                let mut not = false;
+                while self.pos < self.a.len() && self.at(self.pos) == "!" {
+                    self.pos += 1;
+                    not = !not;
+                }
+                let v = self.term()?;
+                return Ok(if not { !v } else { v });
+            }
+            if self.at(self.pos) == "(" {
+                self.pos += 1;
+                let v = self.expr()?;
+                if self.pos >= self.a.len() {
+                    return self.syntax("`)' expected");
+                }
+                if self.at(self.pos) != ")" {
+                    let found = self.at(self.pos).to_string();
+                    return self.syntax(&format!("`)' expected, found {found}"));
+                }
+                self.pos += 1;
+                return Ok(v);
+            }
+            if self.pos + 3 <= self.a.len() && test_binary_op(self.at(self.pos + 1)) {
+                return self.binary_operator();
+            }
+            let cur = self.at(self.pos).to_string();
+            if cur.len() == 2 && cur.starts_with('-') {
+                if !is_unop(&cur) {
+                    return self.syntax(&format!("{cur}: unary operator expected"));
+                }
+                // An operator with nothing left to test is a plain word.
+                if self.pos + 1 < self.a.len() {
+                    return self.unary_operator();
                 }
             }
-            if closes_last {
-                return eval(&a[1..a.len() - 1], sink);
+            self.pos += 1;
+            Ok(!cur.is_empty())
+        }
+        fn two(&mut self) -> R {
+            let first = self.at(self.pos).to_string();
+            if first == "!" {
+                return Ok(self.at(self.pos + 1).is_empty());
+            }
+            if is_unop(&first) {
+                return self.unary_operator();
+            }
+            self.syntax(&format!("{first}: unary operator expected"))
+        }
+        fn three(&mut self) -> R {
+            let (first, second) = (
+                self.at(self.pos).to_string(),
+                self.at(self.pos + 1).to_string(),
+            );
+            if test_binary_op(&second) {
+                self.binary_operator()
+            } else if second == "-a" || second == "-o" {
+                // Three words with `-a` or `-o` between: the outer two are
+                // strings, whatever they look like (`[ -n -a x ]`).
+                let (x, y) = (!first.is_empty(), !self.at(self.pos + 2).is_empty());
+                Ok(if second == "-a" { x && y } else { x || y })
+            } else if first == "!" {
+                self.pos += 1;
+                Ok(!self.two()?)
+            } else if first == "(" && self.at(self.pos + 2) == ")" {
+                Ok(!second.is_empty())
+            } else {
+                self.syntax(&format!("{second}: binary operator expected"))
             }
         }
-        match a {
-            [] => Ok(false),
-            [x] => Ok(!x.is_empty()),
-            // Three words with an operator in the middle are a comparison, even
-            // when the first is `!`: `[ ! = ! ]` is true.
-            [bang, rest @ ..] if bang == "!" && !(a.len() == 3 && test_binary_op(&a[1])) => {
-                Ok(!eval(rest, sink)?)
+        fn four(&mut self) -> R {
+            if self.at(self.pos) == "!" {
+                self.pos += 1;
+                return Ok(!self.three()?);
             }
-            [op, x] => {
-                // A file test on a path outside the jail is refused, not answered:
-                // the answer would say whether the path exists outside.
-                let file_test = matches!(
-                    op.as_str(),
-                    "-e" | "-a"
-                        | "-f"
-                        | "-d"
-                        | "-s"
-                        | "-r"
-                        | "-w"
-                        | "-x"
-                        | "-L"
-                        | "-h"
-                        | "-b"
-                        | "-c"
-                        | "-p"
-                        | "-S"
-                        | "-O"
-                        | "-G"
-                        | "-u"
-                        | "-g"
-                        | "-k"
-                        | "-N"
-                );
-                if let Some(refusal) = file_test.then(|| jail_refusal("test", x)).flatten() {
-                    sink.eline(&refusal);
-                    return Err(2);
-                }
-                match unary(op, x) {
-                    Some(v) => Ok(v),
-                    None => {
-                        sink.eline(&format!(
-                            "{SHELL_NAME}: test: {op}: unary operator expected"
-                        ));
-                        Err(2)
-                    }
-                }
+            if self.at(self.pos) == "(" && self.at(self.pos + 3) == ")" {
+                self.pos += 1;
+                return self.two();
             }
-            [x, op, y] => {
-                // Like the unary file tests, these may not look outside the jail.
-                if matches!(op.as_str(), "-nt" | "-ot" | "-ef") {
-                    for p in [x, y] {
-                        if let Some(refusal) = jail_refusal("test", p) {
-                            sink.eline(&refusal);
-                            return Err(2);
-                        }
-                    }
-                }
-                match binary(x, op, y) {
-                    Some(Ok(v)) => Ok(v),
-                    Some(Err(m)) => {
-                        sink.eline(&format!("{SHELL_NAME}: test: {m}"));
-                        Err(2)
-                    }
-                    None => {
-                        sink.eline(&format!(
-                            "{SHELL_NAME}: test: {op}: binary operator expected"
-                        ));
-                        Err(2)
-                    }
-                }
-            }
-            _ => {
-                sink.eline(&format!("{SHELL_NAME}: test: too many arguments"));
-                Err(2)
+            self.expr()
+        }
+        fn posix(&mut self) -> R {
+            match self.a.len() - self.pos {
+                0 => Ok(false),
+                1 => Ok(!self.at(self.pos).is_empty()),
+                2 => self.two(),
+                3 => self.three(),
+                4 => self.four(),
+                _ => self.expr(),
             }
         }
     }
-    match eval(args, sink) {
+    let mut p = P {
+        a: args,
+        pos: 0,
+        shell,
+        sink,
+        expr_used: false,
+    };
+    let r = p.posix();
+    // The count rules take every word; only the parse leaves words over.
+    if r.is_ok() && !p.expr_used {
+        p.pos = args.len();
+    }
+    let r = match r {
+        Ok(v) if p.pos < args.len() => p.syntax("too many arguments").map(|()| v),
+        other => other,
+    };
+    match r {
         Ok(true) => 0,
         Ok(false) => 1,
         Err(c) => c,
@@ -7092,8 +7974,14 @@ fn rm_operand(
 /// escapes `\n`, `\t`, `\r`, `\\`. `None` for anything else (`[=c=]`, `[c*n]`,
 /// octal escapes), so the caller declines.
 fn tr_set(spec: &str) -> Option<Vec<char>> {
+    Some(tr_items(spec)?.into_iter().flat_map(|(_, c)| c).collect())
+}
+
+/// A set as its items: a character class (with its name) or a run of plain
+/// characters, each with the characters it stands for.
+fn tr_items(spec: &str) -> Option<Vec<(Option<String>, Vec<char>)>> {
     let chars: Vec<char> = spec.chars().collect();
-    let mut out = Vec::new();
+    let mut out: Vec<(Option<String>, Vec<char>)> = Vec::new();
     let mut i = 0;
     while i < chars.len() {
         if chars[i] == '[' && chars.get(i + 1) == Some(&':') {
@@ -7109,7 +7997,7 @@ fn tr_set(spec: &str) -> Option<Vec<char>> {
                 "alnum" => ('0'..='9').chain('A'..='Z').chain('a'..='z').collect(),
                 _ => return None,
             };
-            out.extend(members);
+            out.push((Some(class.to_string()), members));
             i += rest[..end + 2].chars().count();
             continue;
         }
@@ -7137,14 +8025,49 @@ fn tr_set(spec: &str) -> Option<Vec<char>> {
             if hi == '\\' || hi < c {
                 return None;
             }
-            out.extend(c..=hi);
+            out.push((None, (c..=hi).collect()));
             i += width + 2;
         } else {
-            out.push(c);
+            out.push((None, vec![c]));
             i += width;
         }
     }
     Some(out)
+}
+
+/// GNU tr's refusals when translating with classes: SET2 may hold only
+/// `[:upper:]` and `[:lower:]`, and each must stand where SET1 has the other.
+fn tr_class_error(sets: &[String]) -> Option<&'static str> {
+    let [a, b] = sets else { return None };
+    let (items1, items2) = (tr_items(a)?, tr_items(b)?);
+    if items2.iter().any(|(class, _)| {
+        class
+            .as_deref()
+            .is_some_and(|c| c != "upper" && c != "lower")
+    }) {
+        return Some(
+            "tr: when translating, the only character classes that may appear in\nstring2 are 'upper' and 'lower'",
+        );
+    }
+    let mut at = 0;
+    for (class, members) in &items2 {
+        if let Some(class) = class {
+            // Where SET1 has an item beginning at this position, it must be
+            // the opposite class.
+            let mut pos = 0;
+            let opposite = items1.iter().find_map(|(c1, m1)| {
+                let hit = (pos == at).then(|| c1.clone());
+                pos += m1.len();
+                hit
+            });
+            let want = if class == "upper" { "lower" } else { "upper" };
+            if opposite.flatten().as_deref() != Some(want) {
+                return Some("tr: misaligned [:upper:] and/or [:lower:] construct");
+            }
+        }
+        at += members.len();
+    }
+    None
 }
 
 /// `tr SET1 SET2`, `tr -d SET1`, `tr -s SET1` and `tr -s SET1 SET2`, over
@@ -7181,6 +8104,12 @@ fn tr(args: &[String], stdin: &mut Input, sink: &mut Sink) -> Util {
     let Some(parsed) = parsed else {
         return Util::Decline;
     };
+    if !delete {
+        if let Some(msg) = tr_class_error(&sets) {
+            sink.eline(msg);
+            return Util::Done(1);
+        }
+    }
     let (set1, set2) = match (delete, squeeze, parsed.as_slice()) {
         (true, false, [a]) => (a.clone(), Vec::new()),
         (false, true, [a]) => (a.clone(), Vec::new()),
@@ -7416,7 +8345,7 @@ fn wc(args: &[String], stdin: &mut Input, sink: &mut Sink) -> Util {
     // GNU pads to the width of the total byte count when every input is a
     // regular file, to 7 when one is not (a pipe, /dev/null, a directory),
     // and not at all for a single number.
-    let width = if ncols == 1 && rows.len() <= 1 {
+    let width = if ncols == 1 && files.len() <= 1 {
         0
     } else if from_stdin
         || files.iter().any(|f| {
@@ -7443,17 +8372,38 @@ fn wc(args: &[String], stdin: &mut Input, sink: &mut Sink) -> Util {
         line.push('\n');
         sink.out.extend_from_slice(line.as_bytes());
     };
+    // The rows are the operands that could be read, in order: name each
+    // by its operand, which is `-` for standard input.
+    let mut next_operand = 0;
     for (name, r) in &rows {
+        let shown = if name == "(standard input)" {
+            files[next_operand..]
+                .iter()
+                .position(|f| f == "-")
+                .map(|k| {
+                    next_operand += k + 1;
+                    "-".to_string()
+                })
+        } else {
+            files[next_operand..]
+                .iter()
+                .position(|f| f == name)
+                .map(|k| {
+                    next_operand += k + 1;
+                    name.clone()
+                })
+        };
         emit(
             selected(r),
             if from_stdin {
                 None
             } else {
-                Some(name.as_str())
+                Some(shown.as_deref().unwrap_or(name.as_str()))
             },
         );
     }
-    if rows.len() > 1 {
+    // GNU prints the total whenever there is more than one operand, readable or not.
+    if files.len() > 1 {
         emit(selected(&total), Some("total"));
     }
     Util::Done(status)
@@ -8855,9 +9805,16 @@ fn expand_rep(items: &[RepItem], caps: &regex::bytes::Captures, out: &mut Vec<u8
             RepItem::Text(t) => t.as_slice(),
             RepItem::Group(n) => caps.get(*n).map_or(&b""[..], |m| m.as_bytes()),
             RepItem::Case(c) => {
+                // `\L`, `\U` and `\E` also drop a `\u` or `\l` not yet applied.
                 match *c {
-                    'U' | 'L' => hold = Some(*c),
-                    'E' => hold = None,
+                    'U' | 'L' => {
+                        hold = Some(*c);
+                        next = None;
+                    }
+                    'E' => {
+                        hold = None;
+                        next = None;
+                    }
                     _ => next = Some(*c),
                 }
                 continue;
@@ -9298,7 +10255,7 @@ fn sed_bad(msg: &str, at: usize) -> String {
 /// text from the rest of the line, or from the next line after `a\`, a line
 /// ending in `\` continuing it. `Err` says what makes it decline.
 fn sed_parse(script: &str, ere: bool) -> Result<Vec<SedLine>, String> {
-    let to_re = |p: &str| -> Option<regex::bytes::Regex> {
+    let build = |p: &str, multiline: bool| -> Option<regex::bytes::Regex> {
         let p = sed_pattern_escapes(p)?;
         // GNU sed rejects a repetition with nothing to repeat (`a**`, ERE
         // `^*`); the regex engine here would accept it. Decline, so the error
@@ -9313,8 +10270,11 @@ fn sed_parse(script: &str, ere: bool) -> Result<Vec<SedLine>, String> {
         };
         // The pattern space can hold several lines (`N`, `G`), and in sed `.`
         // matches a newline there.
-        regex::bytes::Regex::new(&format!("(?s){r}")).ok()
+        // With `M`, `^` and `$` also match at the line breaks inside it.
+        let flags = if multiline { "(?sm)" } else { "(?s)" };
+        regex::bytes::Regex::new(&format!("{flags}{r}")).ok()
     };
+    let to_re = |p: &str| build(p, false);
     let c: Vec<char> = script.chars().collect();
     // The text from `at` to the end of its command, for a refusal message.
     let segment = |at: usize| -> String {
@@ -9535,7 +10495,8 @@ fn sed_parse(script: &str, ere: bool) -> Result<Vec<SedLine>, String> {
                 let pat = unescape_delim(&pat, sep, ere);
                 let digits: String = fl.chars().take_while(char::is_ascii_digit).collect();
                 let tail = &fl[digits.len()..];
-                if let Some(f) = tail.chars().find(|f| !matches!(f, 'g' | 'p')) {
+                let multiline = tail.contains(['M', 'm']);
+                if let Some(f) = tail.chars().find(|f| !matches!(f, 'g' | 'p' | 'M' | 'm')) {
                     return Err(format!("the s command's flag `{f}`"));
                 }
                 if !ends_here(&mut k) {
@@ -9552,9 +10513,12 @@ fn sed_parse(script: &str, ere: bool) -> Result<Vec<SedLine>, String> {
                 // An empty regex is the last one used when the program runs;
                 // it takes no flags of its own to read here.
                 let re = if pat.is_empty() {
+                    if multiline {
+                        return Err("the s command's flag `M` on an empty regex".to_string());
+                    }
                     None
                 } else {
-                    match to_re(pat.as_str()) {
+                    match build(pat.as_str(), multiline) {
                         Some(re) => Some(re),
                         None => return Err(format!("the regular expression `{pat}`")),
                     }
@@ -9650,6 +10614,7 @@ fn sed(args: &[String], stdin: &mut Input, sink: &mut Sink) -> Util {
     let mut ere = false;
     let mut scripts = Vec::new();
     let mut files = Vec::new();
+    let mut positional: Vec<String> = Vec::new();
     let mut inplace: Option<String> = None;
     let mut separate = false;
     let mut i = 0;
@@ -9681,15 +10646,29 @@ fn sed(args: &[String], stdin: &mut Input, sink: &mut Sink) -> Util {
             s if s.starts_with('-') && s != "-" => {
                 return Util::DeclineFor(format!("option `{s}`"));
             }
-            _ => {
-                if scripts.is_empty() {
-                    scripts.push(a.clone());
-                } else {
-                    files.push(a.clone());
-                }
-            }
+            _ => positional.push(a.clone()),
         }
         i += 1;
+    }
+    // Without -e the first word is the script; with one, every word is a file.
+    if scripts.is_empty() && !positional.is_empty() {
+        scripts.push(positional.remove(0));
+    }
+    files.extend(positional);
+    // Only the text of `a`, `i` and `c` goes on in the next -e: a script
+    // that ends in a backslash anywhere else is an error GNU sed reports.
+    for sc in scripts.iter().take(scripts.len().saturating_sub(1)) {
+        let slashes = sc.chars().rev().take_while(|&c| c == '\\').count();
+        let last_line = sc.rsplit('\n').next().unwrap_or("");
+        // The line has an `a`, `i` or `c` at the start of a command, after
+        // its address: its text is what the backslash continues.
+        let text_cmd = regex::Regex::new(
+            r"(?:^|[;{}])\s*(?:(?:\d+|\$|/(?:[^/\\]|\\.)*/)(?:\s*,\s*(?:\d+|\$|/(?:[^/\\]|\\.)*/))?\s*!?\s*)?[aic](?:\s|\\|$)",
+        )
+        .is_ok_and(|re| re.is_match(last_line));
+        if slashes % 2 == 1 && !text_cmd {
+            return Util::DeclineFor("an -e script ending in a backslash".into());
+        }
     }
     let mut prog = match sed_parse(&scripts.join("\n"), ere) {
         Ok(prog) => prog,
