@@ -108,6 +108,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `ish -b`: `grep -m N` (`--max-count`) stops after N selected lines per file and then prints the last one's trailing context, and `-b` (`--byte-offset`) prefixes the byte offset of each line, or of each match under `-o`; `$((...))` takes `base#digits` literals (bases 2 to 64) and reads a bare `0x` as 0.
 ### Fixed
 
+- `ish -b` applies redirections left to right, so `cmd 2>&1 >/dev/null | wc -l` counts the lines of stderr as bash does, and a redirection word that expands to no name or to several fails with `ambiguous redirect` (status 1) instead of creating a file named after the first word.
+- `ish -b` keeps quoted words inside `${x:-"a  b"}` and `${x:+"q  s"}` whole, in double quotes and outside them, where it gave an empty string or collapsed the spaces.
+- `ish -b` honours POSIX character classes (`[[:alpha:]]`, `[[:digit:]]`, and the others) in `${x#p}`, `${x##p}`, `${x%p}` and `${x%%p}` patterns and in pathname globs.
+- `ish -b` joins `"$*"` with the first character of IFS, and a glob that ends in `/` (`d/*/`) matches only directories.
+- `ish -b` `read` without `-r` treats backslash-newline as a line continuation, and each pipeline stage runs as a subshell, so `echo x | read v` leaves `v` unset as in bash.
+- `ish -b` refuses the `time` keyword before anything runs (exit 77, naming `time`) instead of running the commands before it and then failing with `time: command not found`; `x+=text` now appends to a plain variable instead of running `x+=text` as a command.
+- `ish -b` `cd` accepts `-L`, `-P` and `--`, refuses extra operands (`too many arguments`, status 1) and an unknown option (status 2), and `cd -` after `unset OLDPWD` fails with `OLDPWD not set` even when the process environment holds one.
 - The error for a null operand of a comparison or arithmetic operator, and the errors of `sum`, `avg`, `min`, `max`, `sort` and `sort_by` for a null element or key, now say that the value is null (an empty CSV cell or a missing field) and suggest `where(.x != null && ...)` or `coalesce(x, 0)`.
 - Agent-mode redaction no longer replaces an empty string under a secret-named field with `[REDACTED]`, so a blank password cell no longer looks set; the stderr count includes only values that were replaced.
 - `tool_search` also searches the builtins (their names and signature docs) and lists them first, each row with `kind: "builtin"`; the external OS tool rows follow, now with `kind: "external"`.
