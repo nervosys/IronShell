@@ -7464,6 +7464,12 @@ fn wc(args: &[String], stdin: &mut Input, sink: &mut Sink) -> Util {
 /// start of the regex, after `\(` or `\|`, or after a leading `^`, is an
 /// ordinary character; `` \` `` and `\'` are the start and end of the text.
 pub(crate) fn bre_to_regex(p: &str) -> Option<String> {
+    bre_translate(p, false)
+}
+
+/// `bre_to_regex`, optionally keeping a back-reference (`\1` to `\9`) in the
+/// output, for an engine that supports it (`fancy-regex`).
+pub(crate) fn bre_translate(p: &str, keep_backrefs: bool) -> Option<String> {
     let mut out = String::new();
     let mut it = p.chars().peekable();
     let mut first = true;
@@ -7477,8 +7483,11 @@ pub(crate) fn bre_to_regex(p: &str) -> Option<String> {
                     star_literal = matches!(o, '|' | '(');
                 }
                 Some(d @ '1'..='9') => {
-                    let _ = d;
-                    return None; // back-references
+                    if !keep_backrefs {
+                        return None; // back-references
+                    }
+                    out.push('\\');
+                    out.push(d);
                 }
                 Some(o @ ('w' | 'W' | 's' | 'S' | 'b' | 'B')) => {
                     out.push('\\');

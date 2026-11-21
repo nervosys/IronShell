@@ -203,6 +203,10 @@ notify = "6.1"
 md5 = "0.7"
 sysinfo = "0.33"
 regex = "1.10"
+# Back-references in grep patterns (already locked, via tiktoken-rs); used only when a pattern has one.
+fancy-regex = "0.13"
+# Reverse a String by grapheme cluster (already locked).
+unicode-segmentation = "1.12"
 # Fast non-cryptographic hashing for the evaluator's variable table (src/env.rs).
 # Already in the dependency graph transitively.
 rustc-hash = "2"
