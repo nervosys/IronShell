@@ -123,9 +123,30 @@ fn significant_lines(src: &str) -> Result<Vec<Line>> {
 
         reject_unsupported(trimmed, number)?;
 
+        // `- - 1` is a sequence whose first item is a sequence that starts on
+        // the dash line: read it as `-` with the inner sequence beneath it.
+        let mut indent = indent;
+        let mut content = trimmed;
+        loop {
+            let rest = content.strip_prefix('-').map(str::trim_start);
+            match rest {
+                Some(rest)
+                    if content.starts_with("- ") && (rest.starts_with("- ") || rest == "-") =>
+                {
+                    out.push(Line {
+                        indent,
+                        content: "-".to_string(),
+                        number,
+                    });
+                    indent += content.len() - rest.len();
+                    content = rest;
+                }
+                _ => break,
+            }
+        }
         out.push(Line {
             indent,
-            content: trimmed.to_string(),
+            content: content.to_string(),
             number,
         });
     }
@@ -173,6 +194,11 @@ fn parse_block(lines: &[Line], pos: &mut usize, indent: usize) -> Result<Value> 
     let content = lines[*pos].content.as_str();
     if content.starts_with("- ") || content == "-" {
         parse_sequence(lines, pos, indent)
+    } else if *pos == 0 && lines.len() == 1 && split_key(content).is_none() {
+        // A document of one scalar, as `to_yaml(5)` writes it.
+        let number = lines[0].number;
+        *pos += 1;
+        parse_scalar(content, number)
     } else if content.starts_with(['{', '['])
         && (serde_json::from_str::<serde_json::Value>(content).is_ok()
             || parse_flow(content, lines[*pos].number).is_ok())

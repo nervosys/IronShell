@@ -96,6 +96,7 @@ native = [
     "dep:jsonschema",
     "dep:syn",
     "dep:quote",
+    "dep:proc-macro2",
 ]
 candle = [
     "dep:candle-core",
@@ -315,6 +316,7 @@ rustls = { version = "0.23.46", default-features = false, features = ["std"] }
 # Parse and traverse Rust source for pure documentation/refactoring; native only.
 syn = { version = "2", optional = true, features = ["full", "visit", "visit-mut"] }
 quote = { version = "1", optional = true }
+proc-macro2 = { version = "1", optional = true, features = ["span-locations"] }
 
 # WASM-only dependencies
 [target.'cfg(target_arch = "wasm32")'.dependencies]

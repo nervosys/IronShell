@@ -85,7 +85,7 @@ fn renamed_field_and_local_stay_consistent_and_compile() {
             s("total"),
         ],
     );
-    assert!(output.contains("pub total : i32"), "{output}");
+    assert!(output.contains("pub total: i32"), "{output}");
     compile_and_run(
         &output,
         "let mut p = P { total: 1 }; assert_eq!(bump(&mut p), 2); assert_eq!(p.total, 2);",
