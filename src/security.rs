@@ -1071,12 +1071,112 @@ fn reads_text(builtin: &str) -> bool {
     )
 }
 
-/// Whether the first 8 KiB of the file at `path` is a private key: a line that
-/// opens a PEM, OpenSSH or PGP private key block, or a PuTTY key file. Judged by
-/// content, so a key named `key.txt`, `deploy` or `id_rsa.bak` is found. Only a
-/// line that *begins* with the marker counts, so source code that mentions the
-/// marker in a string or a pattern is not a key. `false` for a path that is not
-/// a readable regular file.
+/// The most bytes of one file that [`file_holds_private_key`] scans: 256 MiB.
+/// A file is read in 64 KiB chunks and searched with `memchr`, so the whole of a
+/// normal file is covered (a certificate chain before the key, a service-account
+/// JSON); a file past the cap is judged by its first 256 MiB only, which bounds
+/// the cost of a `head` of a multi-gigabyte log.
+const KEY_SCAN_MAX: u64 = 256 * 1024 * 1024;
+const KEY_SCAN_CHUNK: usize = 64 * 1024;
+/// Bytes kept from one chunk to the next, so a marker split across two chunks is
+/// still seen whole. A marker and the text that decides it are well under this.
+const KEY_SCAN_OVERLAP: usize = 512;
+
+/// Whether the marker found at `at` in `buf` opens a private key. `file_start`
+/// is whether `buf[0]` is the first byte of the file; `at_end` whether `buf`
+/// ends the file (so a marker cut off by the end has no more text to wait for).
+/// `None` means the buffer is too short to say yet.
+fn key_marker_at(buf: &[u8], at: usize, file_start: bool, at_end: bool) -> Option<bool> {
+    const BEGIN: &[u8] = b"-----BEGIN ";
+    const PUTTY: &[u8] = b"PuTTY-User-Key-File-";
+    let line_start = {
+        let mut i = at;
+        loop {
+            if i == 0 {
+                break file_start || buf.len() > KEY_SCAN_OVERLAP;
+            }
+            let c = buf[i - 1];
+            if c == b'\n' {
+                break true;
+            }
+            // A BOM (EF BB BF) and white space may precede the marker.
+            if !(c == b' ' || c == b'\t' || c == b'\r' || c == 0xEF || c == 0xBB || c == 0xBF) {
+                break false;
+            }
+            i -= 1;
+        }
+    };
+    let rest = &buf[at..];
+    if rest.starts_with(PUTTY) {
+        return Some(line_start);
+    }
+    if !rest.starts_with(BEGIN) {
+        return Some(false);
+    }
+    // `-----BEGIN ` then upper-case words, then `PRIVATE KEY-----`.
+    let tail = &rest[BEGIN.len()..];
+    let words = tail
+        .iter()
+        .take_while(|c| c.is_ascii_uppercase() || **c == b' ')
+        .count();
+    if words == tail.len() && !at_end && words < 64 {
+        return None;
+    }
+    let after_words = &tail[words..];
+    // The words must end with `PRIVATE KEY` right before the dashes.
+    // (`PGP PRIVATE KEY BLOCK` ends with one more word.)
+    if !tail[..words].ends_with(b"PRIVATE KEY") && !tail[..words].ends_with(b"PRIVATE KEY BLOCK") {
+        return Some(false);
+    }
+    if !after_words.starts_with(b"-----") {
+        if after_words.len() < 5 && !at_end {
+            return None;
+        }
+        return Some(false);
+    }
+    if line_start {
+        return Some(true);
+    }
+    // Mid-line (a JSON string, a quoted blob): a key only when the marker is
+    // followed by a line break, real or written as a backslash and `n` or `r`,
+    // and then the first characters of the body. Source that mentions the marker
+    // inside a string (a quote follows it) is not a key.
+    let body = &after_words[5.min(after_words.len())..];
+    if body.len() < 12 && !at_end {
+        return None;
+    }
+    let mut saw_break = false;
+    let mut b = body;
+    loop {
+        if b.starts_with(b"\\n") || b.starts_with(b"\\r") {
+            b = &b[2..];
+            saw_break = true;
+        } else if b.first().is_some_and(|c| *c == b'\n' || *c == b'\r') {
+            b = &b[1..];
+            saw_break = true;
+        } else {
+            break;
+        }
+    }
+    Some(
+        saw_break
+            && b.iter()
+                .take(8)
+                .filter(|c| c.is_ascii_alphanumeric())
+                .count()
+                >= 8,
+    )
+}
+
+/// Whether the file at `path` holds a private key: a PEM, OpenSSH or PGP private
+/// key block, or a PuTTY key file. The whole file is scanned (to
+/// [`KEY_SCAN_MAX`]), not its head, so a key behind a long certificate chain is
+/// found. A marker at the start of a line counts; one in the middle of a line
+/// counts when a line break follows it, real or written as a backslash and `n`
+/// as in a service-account JSON file, and then the body. Judged by content, so a
+/// key named `key.txt`, `deploy` or `id_rsa.bak` is found. Source code that
+/// mentions the marker in a string or a pattern is not a key. `false` for a path
+/// that is not a readable regular file.
 pub fn file_holds_private_key(path: &str) -> bool {
     use std::io::Read;
     let Ok(meta) = fs::metadata(path) else {
@@ -1088,16 +1188,38 @@ pub fn file_holds_private_key(path: &str) -> bool {
     let Ok(file) = fs::File::open(path) else {
         return false;
     };
-    let mut head = Vec::with_capacity(8192);
-    if file.take(8192).read_to_end(&mut head).is_err() {
-        return false;
+    let mut file = file.take(KEY_SCAN_MAX);
+    let mut buf: Vec<u8> = Vec::with_capacity(KEY_SCAN_CHUNK + KEY_SCAN_OVERLAP);
+    let mut chunk = vec![0u8; KEY_SCAN_CHUNK];
+    let mut file_start = true;
+    let finders = [
+        memchr::memmem::Finder::new(b"-----BEGIN "),
+        memchr::memmem::Finder::new(b"PuTTY-User-Key-File-"),
+    ];
+    loop {
+        let n = match file.read(&mut chunk) {
+            Ok(n) => n,
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(_) => return false,
+        };
+        let at_end = n == 0;
+        buf.extend_from_slice(&chunk[..n]);
+        for finder in &finders {
+            for at in finder.find_iter(&buf) {
+                if key_marker_at(&buf, at, file_start, at_end) == Some(true) {
+                    return true;
+                }
+            }
+        }
+        if at_end {
+            return false;
+        }
+        if buf.len() > KEY_SCAN_OVERLAP {
+            let cut = buf.len() - KEY_SCAN_OVERLAP;
+            buf.drain(..cut);
+            file_start = false;
+        }
     }
-    let text = String::from_utf8_lossy(&head);
-    text.lines().any(|line| {
-        let l = line.trim_start_matches('\u{feff}').trim();
-        (l.starts_with("-----BEGIN ") && l.contains("PRIVATE KEY"))
-            || l.starts_with("PuTTY-User-Key-File-")
-    })
 }
 
 /// The refusal of a read of a private key's text, in agent mode: `E_POLICY_DENY`,

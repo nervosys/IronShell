@@ -6910,6 +6910,18 @@ pub fn guard_exec_env(
         .map(|(k, v)| (fold_env_name(k), v.as_str()))
         .collect();
     let mut radius = serde_json::json!({ "command": command });
+    // `command` is the words joined with spaces, so `env printf %s 'a b'` and
+    // `env printf %s a b` read alike. When a word is empty or holds white space
+    // the join is ambiguous and the words are bound as a list, so each form has
+    // its own token. A command whose words have none keeps its earlier token.
+    if argv
+        .iter()
+        .any(|w| w.is_empty() || w.chars().any(char::is_whitespace))
+    {
+        if let Some(map) = radius.as_object_mut() {
+            map.insert("argv".to_string(), json!(argv));
+        }
+    }
     if !sorted.is_empty() {
         let pairs: Vec<Json> = sorted.iter().map(|(k, v)| json!([k, v])).collect();
         if let Some(map) = radius.as_object_mut() {
@@ -10255,6 +10267,43 @@ lazy_static! {
         r#"(?i)("(?:value|val|secret|data)"\s*:\s*")((?:[^"\\]|\\.)+)("\s*,\s*"(?:name|key|variable|var|env)"\s*:\s*"([^"\\]{1,64})")"#
     ).unwrap();
 
+    /// A YAML environment entry written as two lines: `name: DB_PASSWORD` and then
+    /// `value: ...` on the next line (the Kubernetes and Compose shape). Group 1 is
+    /// the indent, 2 the optional `- `, 3 the name key and separator, 4 the name,
+    /// 5 the line break, 6 the value line's indent, 7 the value key, 8 the value.
+    static ref YAML_PAIR_RE: regex::Regex = regex::Regex::new(
+        r#"(?im)^([ \t]*)(-[ \t]+)?((?:name|key|variable|var|env)[ \t]*:[ \t]*["']?)([A-Za-z0-9_.\-]{1,64})(["']?[ \t]*\r?\n)([ \t]*)((?:value|val|secret|data)[ \t]*:[ \t]*["']?)([^\r\n"']*[^\s"'])"#
+    ).unwrap();
+
+    /// The same pair written in flow style: `{name: DB_PASSWORD, value: ...}`.
+    static ref YAML_FLOW_PAIR_RE: regex::Regex = regex::Regex::new(
+        r#"(?i)(\{\s*(?:name|key|variable|var|env)\s*:\s*["']?)([A-Za-z0-9_.\-]{1,64})(["']?\s*,\s*(?:value|val|secret|data)\s*:\s*["']?)([^\s,}"']+)"#
+    ).unwrap();
+
+    /// PowerShell `$env:NAME = value` and a Dockerfile `ENV NAME value`. Group 1 is
+    /// kept through the opening quote, group 2 is the name, group 3 the value.
+    static ref ENV_SET_RE: regex::Regex = regex::Regex::new(
+        r#"(?im)((?:\$env:|^[ \t]*ENV[ \t]+)([A-Za-z_][A-Za-z0-9_]*)(?:[ \t]*=[ \t]*|[ \t]+)["']?)([^\s"'=$][^\r\n"']*)"#
+    ).unwrap();
+
+    /// A command-line flag that carries a secret: `--password x`, `--token=x`,
+    /// `--api-key x`. Group 1 is the flag and its separator through an opening
+    /// quote, group 2 the flag name, group 3 the value.
+    static ref SECRET_FLAG_RE: regex::Regex = regex::Regex::new(
+        r#"(?:^|[\s"'`(])(--([A-Za-z][A-Za-z0-9_-]*)(?:=|[ \t]+)["']?)([^\s"'`]+)"#
+    ).unwrap();
+
+    /// The start of a value that is code, not a literal: `os.environ[...]`,
+    /// `getenv(...)`, `input(...)`, `ENV[...]`.
+    static ref CODE_CALL_RE: regex::Regex = regex::Regex::new(
+        r#"^[A-Za-z_$][A-Za-z0-9_$.]*[(\[]"#
+    ).unwrap();
+
+    /// A dotted identifier path (`os.environ`, `process.env.API_KEY;`).
+    static ref DOTTED_PATH_RE: regex::Regex = regex::Regex::new(
+        r#"^[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)+[;,)]*$"#
+    ).unwrap();
+
     /// `Digest username="u", realm="r", response="..."` with no header name in
     /// front of it. Group 1 is the scheme, group 2 the parameters, of which
     /// `response` and `cnonce` are redacted.
@@ -10291,9 +10340,26 @@ pub fn secrets_permitted() -> bool {
 /// (uppercased) on strong indicators only — `KEY` alone is excluded to avoid
 /// `KEYBOARD`/`MONKEY` false positives; `_KEY` requires the underscore.
 pub fn is_secret_name(name: &str) -> bool {
+    if names_a_descriptor(name) {
+        return false;
+    }
     name_variants(name)
         .iter()
         .any(|v| substring_secret_name_exact(v) || segment_secret_name_exact(v))
+}
+
+/// Whether the last word of `name` says the field describes a secret and is not
+/// one: `password_policy`, `secret_name`, `api_key_header`. The value of such a
+/// field is a rule, a label or a header name.
+fn names_a_descriptor(name: &str) -> bool {
+    name_segments(&fold_confusables(name))
+        .last()
+        .is_some_and(|s| {
+            matches!(
+                s.as_str(),
+                "policy" | "policies" | "name" | "names" | "header" | "headers"
+            )
+        })
 }
 
 /// A character that looks like a Latin letter or fullwidth form, as the ASCII
@@ -10767,6 +10833,7 @@ pub(crate) fn env_name_steers_children(name: &str) -> bool {
         "AR",
         "INPUTRC",
         "LOCPATH",
+        "LOCALE_ARCHIVE",
         "MALLOC_CONF",
         "_RJEM_MALLOC_CONF",
         "TCLLIBPATH",
@@ -11118,6 +11185,16 @@ fn redact_str_counted(s: &str) -> (String, usize) {
         cur = text;
         count += replaced;
     }
+    if cur.contains(':') || cur.contains("ENV") || cur.contains("env") {
+        let (text, replaced) = redact_yaml_pairs(&cur);
+        cur = text;
+        count += replaced;
+    }
+    if cur.contains("--") || cur.contains("$env:") || cur.contains("ENV") || cur.contains("env") {
+        let (text, replaced) = redact_env_and_flags(&cur);
+        cur = text;
+        count += replaced;
+    }
     if AUTH_HEADER_RE.is_match(&cur) {
         let mut replaced = 0usize;
         cur = AUTH_HEADER_RE
@@ -11267,6 +11344,16 @@ fn assignment_value_hides(name: &str, value: &str) -> bool {
     !names_secret_variable(word)
 }
 
+/// Whether an unquoted value after `=` or `:` is a code expression, not a
+/// literal: it starts with `$` (`$VAR`, `${VAR}`), or is an identifier path
+/// followed by `(` or `[` (`getenv(`, `input(`, `os.environ[`, `ENV[`), or is a
+/// dotted identifier path (`os.environ`, `process.env.API_KEY;`). A value with
+/// none of those (`abc123def456`, `hunter2`, `sk-...`) is a literal, as a `.env`
+/// file writes it.
+fn value_is_code(value: &str) -> bool {
+    value.starts_with('$') || CODE_CALL_RE.is_match(value) || DOTTED_PATH_RE.is_match(value)
+}
+
 /// Redact the secret values of `name=value` and `name: value` forms in text.
 ///
 /// A match whose name is no secret is searched again from the start of its
@@ -11290,7 +11377,11 @@ fn redact_assignments(text: &str) -> (String, usize) {
             break;
         };
         let value = val.as_str();
-        if assignment_value_hides(&caps[2], value) {
+        // A value written in quotes is a literal. Unquoted, one that is code
+        // (`os.environ['K']`, `input(...)`, `$VAR`, `process.env.K`) holds no
+        // secret.
+        let quoted = caps[1].ends_with(['"', '\'']);
+        if (quoted || !value_is_code(value)) && assignment_value_hides(&caps[2], value) {
             let word_len = value.trim_end_matches(')').len();
             out.push_str(&text[last..val.start()]);
             out.push_str(REDACTION_MARKER);
@@ -11310,6 +11401,168 @@ fn redact_assignments(text: &str) -> (String, usize) {
     (out, replaced)
 }
 
+/// Whether the value of a name/value pair (`{name: DB_PASSWORD, value: x}`) is a
+/// secret: the name is a secret name and the value passes the same tests as a
+/// `name: value` text line (the length floor, a count under a count-like name,
+/// a state word such as `required`).
+pub fn pair_value_hides(name: &str, value: &str) -> bool {
+    value != REDACTION_MARKER
+        && !is_capability_token(value)
+        && !names_secret_variable(value)
+        && !(names_a_count(name) && value.chars().all(|c| c.is_ascii_digit() || c == '.'))
+        && text_assignment_hides(name, value)
+}
+
+/// Redact the value of a YAML name/value pair in text: `name: DB_PASSWORD` and
+/// `value: ...` on the next line (the value's indent at least the name's), or
+/// the flow form `{name: DB_PASSWORD, value: ...}`.
+fn redact_yaml_pairs(text: &str) -> (String, usize) {
+    let mut count = 0usize;
+    let mut cur = text.to_string();
+    if YAML_PAIR_RE.is_match(&cur) {
+        cur = YAML_PAIR_RE
+            .replace_all(&cur, |caps: &regex::Captures| {
+                // `value:` sits on the next line at the name key's column or
+                // deeper (the key is after the `- ` when there is one).
+                let key_col =
+                    caps[1].chars().count() + caps.get(2).map_or(0, |m| m.as_str().chars().count());
+                if caps[6].chars().count() < key_col {
+                    return caps[0].to_string();
+                }
+                if !pair_value_hides(&caps[4], &caps[8]) {
+                    return caps[0].to_string();
+                }
+                count += 1;
+                format!(
+                    "{}{}{}{}{}{}{}{}",
+                    &caps[1],
+                    caps.get(2).map_or("", |m| m.as_str()),
+                    &caps[3],
+                    &caps[4],
+                    &caps[5],
+                    &caps[6],
+                    &caps[7],
+                    REDACTION_MARKER
+                )
+            })
+            .into_owned();
+    }
+    if YAML_FLOW_PAIR_RE.is_match(&cur) {
+        cur = YAML_FLOW_PAIR_RE
+            .replace_all(&cur, |caps: &regex::Captures| {
+                if !pair_value_hides(&caps[2], &caps[4]) {
+                    return caps[0].to_string();
+                }
+                count += 1;
+                format!("{}{}{}{}", &caps[1], &caps[2], &caps[3], REDACTION_MARKER)
+            })
+            .into_owned();
+    }
+    (cur, count)
+}
+
+/// Whether a value written after a secret name in an explicit setting
+/// (`$env:NAME = v`, `ENV NAME v`, `--flag v`) is placeholder or code rather
+/// than a secret: a variable reference, a `<placeholder>`, an all-capitals word,
+/// a state word, or a run of mask characters.
+fn setting_value_is_no_secret(value: &str) -> bool {
+    let v = value.trim_end_matches([';', ',', ')']);
+    v.is_empty()
+        || v == REDACTION_MARKER
+        || is_capability_token(v)
+        || v.starts_with(['$', '<', '[', '{', '(', '%', '-'])
+        || v.chars().all(|c| matches!(c, '*' | '•' | '.' | '#'))
+        || (v.len() > 1 && v.chars().all(|c| c.is_ascii_uppercase() || c == '_'))
+        || PLACEHOLDER_WORDS.contains(&v.to_ascii_lowercase().as_str())
+        || crate::signature::Ty::is_type_name(v)
+}
+
+/// Flag names that carry a secret's location or description, not the secret.
+fn flag_names_no_secret(name: &str) -> bool {
+    name_segments(name).iter().any(|s| {
+        matches!(
+            s.as_str(),
+            "file"
+                | "path"
+                | "dir"
+                | "url"
+                | "stdin"
+                | "prompt"
+                | "env"
+                | "from"
+                | "length"
+                | "len"
+                | "ttl"
+                | "timeout"
+                | "count"
+                | "policy"
+                | "name"
+                | "type"
+                | "id"
+                | "mode"
+                | "expiry"
+                | "expires"
+                | "header"
+        )
+    })
+}
+
+/// Redact the value of `$env:NAME = v` (PowerShell), `ENV NAME v` (Dockerfile)
+/// and of `--password v`, `--token=v`, `--api-key v` flags, when the name is a
+/// secret name. `-p v` is not covered: the letter is a port or a path as often
+/// as a password.
+fn redact_env_and_flags(text: &str) -> (String, usize) {
+    let mut count = 0usize;
+    let mut cur = text.to_string();
+    if ENV_SET_RE.is_match(&cur) {
+        cur = ENV_SET_RE
+            .replace_all(&cur, |caps: &regex::Captures| {
+                let value = caps[3].trim_end();
+                if !is_secret_name(&caps[2]) || setting_value_is_no_secret(value) {
+                    return caps[0].to_string();
+                }
+                count += 1;
+                format!("{}{}", &caps[1], REDACTION_MARKER)
+            })
+            .into_owned();
+    }
+    if SECRET_FLAG_RE.is_match(&cur) {
+        cur = SECRET_FLAG_RE
+            .replace_all(&cur, |caps: &regex::Captures| {
+                let name = &caps[2];
+                let value = &caps[3];
+                if !is_secret_name(name)
+                    || flag_names_no_secret(name)
+                    || setting_value_is_no_secret(value)
+                    || text_assignment_stoplisted(value)
+                {
+                    return caps[0].to_string();
+                }
+                count += 1;
+                let whole = &caps[0];
+                let keep = whole.len() - value.len();
+                format!("{}{}", &whole[..keep], REDACTION_MARKER)
+            })
+            .into_owned();
+    }
+    (cur, count)
+}
+
+/// Prose words that follow a flag name in a sentence (`use --token to ...`).
+fn text_assignment_stoplisted(value: &str) -> bool {
+    const PROSE: &[&str] = &[
+        "to", "for", "the", "a", "an", "is", "in", "of", "or", "and", "with", "when", "if", "on",
+        "as", "at", "by", "be", "it", "this", "that", "flag", "option", "instead", "from", "can",
+        "will", "must", "not", "your", "you", "set", "are", "was", "which", "so", "but", "then",
+    ];
+    PROSE.contains(
+        &value
+            .trim_end_matches(['.', ',', ';', ')'])
+            .to_ascii_lowercase()
+            .as_str(),
+    )
+}
+
 /// Redact the value of a JSON `{"name":"DB_PASSWORD","value":"..."}` pair: an
 /// environment list in the shape Kubernetes, ECS and GitHub return. Both orders
 /// of the two members are covered, inside one object.
@@ -11322,11 +11575,7 @@ fn redact_json_pairs(text: &str) -> (String, usize) {
             .replace_all(&cur, |caps: &regex::Captures| {
                 let name = &caps[name_group];
                 let value = &caps[value_group];
-                if value == REDACTION_MARKER
-                    || is_capability_token(value)
-                    || !is_secret_name(name)
-                    || !secret_name_hides_number(name)
-                {
+                if !pair_value_hides(name, value) {
                     return caps[0].to_string();
                 }
                 count += 1;
@@ -11373,6 +11622,17 @@ fn text_assignment_hides(name: &str, word: &str) -> bool {
     if word.chars().all(|c| c.is_ascii_digit() || c == '.') && !secret_name_hides_number(name) {
         return false;
     }
+    // `password: required`, `password: <your-password>`, `password: ******`
+    // describe a setting; they hold no secret. `changeme` is a real password
+    // and is not on the list.
+    if PLACEHOLDER_WORDS.contains(&word.to_ascii_lowercase().as_str())
+        || (word.starts_with('<') && word.ends_with('>'))
+        || word
+            .chars()
+            .all(|c| matches!(c, '*' | '\u{2022}' | '.' | '#'))
+    {
+        return false;
+    }
     // `session: active` is a state, not an id. Under `session` any other
     // value of six characters or more is redacted (round 63), whatever its
     // letters; a short word the text uses for a state is left.
@@ -11390,6 +11650,13 @@ fn text_assignment_hides(name: &str, word: &str) -> bool {
         && word.len() < 12
         && !word.chars().any(|c| c.is_ascii_digit()))
 }
+
+/// Words a secret-named field holds as a state or a placeholder, not a secret.
+const PLACEHOLDER_WORDS: &[&str] = &[
+    "required", "optional", "strong", "weak", "none", "set", "unset", "enabled", "disabled",
+    "true", "false", "null", "nil", "hidden", "redacted", "masked", "empty", "unknown", "missing",
+    "n/a",
+];
 
 /// Words a `session` field holds as a state, not as an id.
 const SESSION_STATE_WORDS: &[&str] = &[

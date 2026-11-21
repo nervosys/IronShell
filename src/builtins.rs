@@ -27711,7 +27711,8 @@ fn redact_array(items: &[Value]) -> Value {
     for it in items {
         if let Value::Str(s) = it {
             let t = s.trim_start();
-            let opens = t.starts_with("-----BEGIN ") && t.contains("PRIVATE KEY-----");
+            // The BEGIN marker may sit mid-line (a JSON string split on newlines).
+            let opens = t.contains("-----BEGIN ") && t.contains("PRIVATE KEY-----");
             if in_key_block || opens {
                 crate::safety::add_redactions(usize::from(opens));
                 let closes = s.contains("-----END ") && s.contains("PRIVATE KEY-----");
@@ -27764,12 +27765,17 @@ const PAIR_NAME_FIELDS: &[&str] = &["name", "key", "variable", "var", "env"];
 /// The fields that hold the value of a name/value pair.
 const PAIR_VALUE_FIELDS: &[&str] = &["value", "val", "secret", "data"];
 
-/// Whether a record is a name/value pair whose name is a secret name.
-fn pair_names_a_secret(m: &std::collections::BTreeMap<String, Value>) -> bool {
-    m.iter().any(|(k, v)| {
-        PAIR_NAME_FIELDS.contains(&k.to_ascii_lowercase().as_str())
-            && matches!(v, Value::Str(s) if crate::safety::is_secret_name(s)
-                && crate::safety::secret_name_hides_number(s))
+/// The name of a name/value pair record, when it is a secret name.
+fn pair_secret_name(m: &std::collections::BTreeMap<String, Value>) -> Option<&str> {
+    m.iter().find_map(|(k, v)| match v {
+        Value::Str(s)
+            if PAIR_NAME_FIELDS.contains(&k.to_ascii_lowercase().as_str())
+                && crate::safety::is_secret_name(s)
+                && crate::safety::secret_name_hides_number(s) =>
+        {
+            Some(s.as_str())
+        }
+        _ => None,
     })
 }
 
@@ -27780,20 +27786,20 @@ fn redact_field_map(
     m: &std::collections::BTreeMap<String, Value>,
 ) -> std::collections::BTreeMap<String, Value> {
     let mut out = std::collections::BTreeMap::new();
-    let pair_secret = pair_names_a_secret(m);
+    let pair_secret = pair_secret_name(m);
     for (k, val) in m {
-        if pair_secret
-            && PAIR_VALUE_FIELDS.contains(&k.to_ascii_lowercase().as_str())
-            && match val {
-                Value::Str(s) | Value::Uri(s) => {
-                    !s.is_empty()
-                        && !crate::safety::is_capability_token(s)
-                        && s != crate::safety::REDACTION_MARKER
+        // The value of a pair under a secret name is hidden when it passes the
+        // tests a `name: value` text line does: a number under a count-like
+        // name (`token_count`) and a short word (`Alice`) stay.
+        if pair_secret.is_some_and(|pair_name| {
+            PAIR_VALUE_FIELDS.contains(&k.to_ascii_lowercase().as_str())
+                && match val {
+                    Value::Str(s) | Value::Uri(s) => crate::safety::pair_value_hides(pair_name, s),
+                    Value::Int(i) => crate::safety::pair_value_hides(pair_name, &i.to_string()),
+                    Value::Float(f) => crate::safety::pair_value_hides(pair_name, &f.to_string()),
+                    _ => false,
                 }
-                Value::Int(_) | Value::Float(_) => true,
-                _ => false,
-            }
-        {
+        }) {
             note_redacted(true);
             out.insert(
                 k.clone(),

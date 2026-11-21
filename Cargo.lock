@@ -2640,6 +2640,7 @@ dependencies = [
  "libc",
  "libloading",
  "md5",
+ "memchr",
  "mime",
  "minijinja",
  "minijinja-contrib",

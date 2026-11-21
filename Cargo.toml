@@ -203,6 +203,8 @@ notify = "6.1"
 md5 = "0.7"
 sysinfo = "0.33"
 regex = "1.10"
+# Byte search for the private-key content check (already locked, via regex).
+memchr = "2.7"
 # Back-references in grep patterns (already locked, via tiktoken-rs); used only when a pattern has one.
 fancy-regex = "0.13"
 # Reverse a String by grapheme cluster (already locked).
