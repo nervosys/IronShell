@@ -4678,11 +4678,13 @@ impl Shell {
                     sink.ewrite(&err);
                 }
             }
-            // Killed for a closed pipe: bash's status for SIGPIPE.
+            // Killed for a closed pipe: bash's status for SIGPIPE. (A program
+            // may also die of the closed pipe itself before it is killed, as
+            // `yes` does on macOS: its signal gives the same 141.)
             return if killed {
                 141
             } else {
-                status.code().unwrap_or(128)
+                exit_status_code(&status)
             };
         } else {
             match child.wait_with_output() {
@@ -4700,8 +4702,25 @@ impl Shell {
         if !out.stderr.is_empty() {
             sink.ewrite(&out.stderr);
         }
-        out.status.code().unwrap_or(128)
+        exit_status_code(&out.status)
     }
+}
+
+/// The status a shell reports for a finished program: its exit code, or 128
+/// plus the signal that ended it (141 for SIGPIPE, 137 for SIGKILL), as bash
+/// reports it. A status with neither is 128.
+fn exit_status_code(status: &std::process::ExitStatus) -> i32 {
+    if let Some(code) = status.code() {
+        return code;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::ExitStatusExt;
+        if let Some(sig) = status.signal() {
+            return 128 + sig;
+        }
+    }
+    128
 }
 
 thread_local! {
@@ -5015,7 +5034,25 @@ fn is_msys_program(program: &str) -> bool {
             None => return false,
         }
     };
-    let Ok(bytes) = std::fs::read(&path) else {
+    if imports_msys_runtime(&path) {
+        return true;
+    }
+    // Git for Windows puts launchers in `Git\bin` (`sh.exe`, `bash.exe`) that
+    // import no runtime themselves and start the program of the same name in
+    // `Git\usr\bin`, handing it the command line as written: that program is
+    // the one whose reading of the arguments counts.
+    let launched = path
+        .parent()
+        .and_then(|bin| bin.parent())
+        .zip(path.file_name())
+        .map(|(git, name)| git.join("usr").join("bin").join(name));
+    launched.is_some_and(|p| p != path && imports_msys_runtime(&p))
+}
+
+/// Whether the executable at `path` imports the MSYS or Cygwin runtime.
+#[cfg(windows)]
+fn imports_msys_runtime(path: &std::path::Path) -> bool {
+    let Ok(bytes) = std::fs::read(path) else {
         return false;
     };
     pe_imports(&bytes)
