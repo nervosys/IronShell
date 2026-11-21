@@ -2521,6 +2521,10 @@ impl Shell {
     }
 
     fn set_var(&mut self, name: &str, value: String) {
+        if let Some(e) = string_cap_refusal(&format!("variable {name}"), value.len()) {
+            stop_run(&e);
+            return;
+        }
         // A variable that is not exported never reaches a child, so a steering
         // name may be a plain shell variable even in agent mode (`tmp=x`). The
         // check is made where a value reaches a child: `export`, a prefix
@@ -2694,6 +2698,11 @@ impl Shell {
         }
         if have {
             fields.push((cur, mask));
+        }
+        let total: usize = fields.iter().map(|f| f.0.len()).sum();
+        if let Some(e) = string_cap_refusal("an expanded word", total) {
+            stop_run(&e);
+            return Vec::new();
         }
         let mut out = Vec::new();
         for (text, mask) in fields {
@@ -3344,7 +3353,32 @@ impl Shell {
         }
     }
 
+    /// Stop the run when `--timeout` has passed, a budget refusal was made
+    /// elsewhere (see [`stop_run`]), or the audit budget is spent: checked at
+    /// each simple command and loop iteration, so a loop of builtins that
+    /// never starts a program still ends at the deadline. The status is that
+    /// of E_BUDGET_EXCEEDED, as for a program the deadline killed.
+    fn deadline_stop(&self, sink: &mut Sink) -> Option<Flow> {
+        let status = RUN_TIMEOUT_STATUS.load(std::sync::atomic::Ordering::SeqCst);
+        if status == 0 {
+            let refusal = if crate::safety::deadline_passed() {
+                crate::safety::check_deadline_now().err()
+            } else {
+                crate::safety::run_budget_error()
+            }?;
+            sink.eline(&refusal.to_string());
+            return Some(Flow::Exit(stop_run(&refusal)));
+        }
+        if let Some(m) = PENDING_REFUSAL.with(|p| p.borrow_mut().take()) {
+            sink.eline(&m);
+        }
+        Some(Flow::Exit(status))
+    }
+
     fn run_pipeline(&mut self, p: &Pipeline, stdin: &mut Input, sink: &mut Sink) -> Flow {
+        if let Some(flow) = self.deadline_stop(sink) {
+            return flow;
+        }
         self.line = p.line;
         // A `!` pipeline is exempt from errexit, and so is everything in it.
         if p.negate {
@@ -3488,6 +3522,9 @@ impl Shell {
         // was killed and whatever the last stage's own status was.
         let timed_out = RUN_TIMEOUT_STATUS.load(std::sync::atomic::Ordering::SeqCst);
         if timed_out != 0 {
+            if let Some(m) = PENDING_REFUSAL.with(|p| p.borrow_mut().take()) {
+                sink.eline(&m);
+            }
             return Flow::Exit(timed_out);
         }
         match flow {
@@ -3830,6 +3867,9 @@ impl Shell {
                 }
                 let mut status = 0;
                 for v in values {
+                    if let Some(flow) = self.deadline_stop(sink) {
+                        return flow;
+                    }
                     self.set_var(var, v);
                     match self.run_list(body, stdin, sink) {
                         Flow::Next(c) => status = c,
@@ -3860,6 +3900,9 @@ impl Shell {
                 let mut guard = 0u64;
                 loop {
                     guard += 1;
+                    if let Some(flow) = self.deadline_stop(sink) {
+                        return flow;
+                    }
                     if guard > 10_000_000 {
                         sink.eline(&format!("{SHELL_NAME}: loop ran 10,000,000 times; stopped"));
                         return Flow::Next(1);
@@ -6281,6 +6324,12 @@ fn check_write_in_place(path: &str) -> Result<String, String> {
 /// prior contents are journalled first, as the dispatcher does for `file.write`,
 /// so the `reversible` the guard is told is true.
 fn write_file(path: &str, data: &[u8], append: bool) -> Result<(), String> {
+    if let Err(e) = crate::journal::check_budget() {
+        // The run ends (the redirection prints the text itself).
+        stop_run(&e);
+        PENDING_REFUSAL.with(|p| p.borrow_mut().take());
+        return Err(e.to_string());
+    }
     let mark = crate::journal::mark();
     // Named explicitly, not guessed from an argument: the guess skips a bare
     // file name (`e1.txt`, which has no directory part), which is what a human
@@ -13663,10 +13712,50 @@ pub fn run_script(src: &str, script: &str, args: &[String]) -> Option<i32> {
 /// killed a program (0 until then); read by the pipeline that ran it.
 static RUN_TIMEOUT_STATUS: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(0);
 
+/// The longest value a variable or an expanded word may hold: the 8 MB the
+/// language gives a String (`x=$x$x` in a loop doubled one without bound).
+const POSIX_STRING_MAX: usize = 8 * 1024 * 1024;
+
+thread_local! {
+    /// The refusal text of a budget stop made where no sink was at hand (a
+    /// variable that outgrew [`POSIX_STRING_MAX`]); printed by the next
+    /// pipeline or loop check.
+    static PENDING_REFUSAL: std::cell::RefCell<Option<String>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// End the run with the exit status of the budget refusal `e` (E_BUDGET_EXCEEDED):
+/// every later check sees the status and stops. The text is kept for
+/// [`Shell::deadline_stop`] to print.
+fn stop_run(e: &anyhow::Error) -> i32 {
+    let code = e
+        .downcast_ref::<crate::safety::SafetyError>()
+        .map(|e| e.code.exit_code())
+        .unwrap_or(1);
+    PENDING_REFUSAL.with(|p| {
+        p.borrow_mut().get_or_insert_with(|| e.to_string());
+    });
+    RUN_TIMEOUT_STATUS.store(code, std::sync::atomic::Ordering::SeqCst);
+    code
+}
+
+/// The refusal for text of `len` bytes headed for `what`, when it is over
+/// [`POSIX_STRING_MAX`].
+fn string_cap_refusal(what: &str, len: usize) -> Option<anyhow::Error> {
+    (len > POSIX_STRING_MAX).then(|| {
+        crate::safety::budget_exceeded(
+            "posix",
+            format!("{what} would hold {len} bytes, over the {POSIX_STRING_MAX} byte string limit"),
+            "build the text in smaller pieces, or write it to a file",
+        )
+    })
+}
+
 fn run_named(src: &str, script_name: &str, args: &[String]) -> Option<i32> {
     let list = parse(src).ok()?;
     SHELL_START.get_or_init(std::time::Instant::now);
     RUN_TIMEOUT_STATUS.store(0, std::sync::atomic::Ordering::SeqCst);
+    PENDING_REFUSAL.with(|p| p.borrow_mut().take());
     let mut sh = Shell {
         vars: HashMap::new(),
         exported: Vec::new(),

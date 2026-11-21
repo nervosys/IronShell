@@ -4301,6 +4301,16 @@ fn bind_exec_context(builtin: &str, radius: &mut Json) -> Result<(), SafetyError
             operand_candidates(word, &mut operands);
         }
     });
+    // The file a `<` redirection reads is bound by its content, as a file named
+    // in the words is (`env cat < f` and the same line after `f` changed are
+    // two actions).
+    EXEC_REDIRS_CTX.with(|redirs| {
+        for r in redirs.borrow().iter() {
+            if let Some(path) = r.strip_prefix('<') {
+                operand_candidates(path, &mut operands);
+            }
+        }
+    });
     let mut seen = std::collections::HashSet::new();
     operands.retain(|o| !o.is_empty() && !o.starts_with('-') && seen.insert(o.clone()));
     // Past the bound, a name is not looked at, so a file named there would go
@@ -6386,6 +6396,41 @@ pub fn __test_poison_audit_lock() {
     .join();
 }
 
+/// The most audit lines one run writes before it is stopped: 100,000, or the
+/// number in `IRONSHELL_AUDIT_MAX_ENTRIES` (0 = no limit). A loop that writes or
+/// runs a program on every iteration adds a line per iteration (21 MB from one
+/// `--timeout 10` command). The log never drops a line to stay under the limit:
+/// the lines already due are written, and the run then stops with
+/// `E_BUDGET_EXCEEDED` at its next check ([`run_budget_error`]).
+const MAX_AUDIT_LINES: u64 = 100_000;
+static AUDIT_LINES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static AUDIT_BUDGET_SPENT: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+fn note_audit_line() {
+    use std::sync::atomic::Ordering::Relaxed;
+    let n = AUDIT_LINES.fetch_add(1, Relaxed) + 1;
+    let limit = std::env::var("IRONSHELL_AUDIT_MAX_ENTRIES")
+        .ok()
+        .and_then(|v| v.trim().parse().ok())
+        .unwrap_or(MAX_AUDIT_LINES);
+    if limit != 0 && n > limit {
+        AUDIT_BUDGET_SPENT.store(true, Relaxed);
+    }
+}
+
+/// The error that ends a run whose audit budget is spent, or `None`.
+pub fn run_budget_error() -> Option<anyhow::Error> {
+    if !AUDIT_BUDGET_SPENT.load(std::sync::atomic::Ordering::Relaxed) {
+        return None;
+    }
+    Some(budget_exceeded(
+        "audit",
+        "this run has written more audit lines than its limit; it was stopped so the log does not grow without bound".to_string(),
+        "do the work in fewer steps, or raise IRONSHELL_AUDIT_MAX_ENTRIES (0 = no limit)",
+    ))
+}
+
 /// Append a tamper-evident audit entry. Best-effort: a write failure logs a
 /// warning but never blocks the guarded operation, unless
 /// `IRONSHELL_AUDIT_REQUIRED=1`, in which case the error is returned.
@@ -6493,6 +6538,7 @@ pub fn audit(
         Ok(()) => {
             state.seq = seq;
             state.last_hash = entry_hash;
+            note_audit_line();
             // Mirror after the primary write succeeds, so the sink never holds
             // an entry the log itself does not.
             if let Err(e) = mirror_to_sink(&line) {
@@ -6950,6 +6996,7 @@ pub fn guard_exec_env(
     // The words are read by the file binding of the approval (see
     // `bind_exec_context`) and are not part of the token themselves.
     EXEC_ARGV.with(|a| *a.borrow_mut() = argv.to_vec());
+    EXEC_REDIRS_CTX.with(|r| *r.borrow_mut() = redirs.to_vec());
     let result = guard(GuardCtx {
         builtin,
         effect: Effect::Exec,
@@ -6960,10 +7007,36 @@ pub fn guard_exec_env(
         fs_paths: false,
     });
     EXEC_ARGV.with(|a| a.borrow_mut().clear());
+    EXEC_REDIRS_CTX.with(|r| r.borrow_mut().clear());
     result
 }
 
+/// The audit detail of an approved or refused exec: its token, and, redacted,
+/// the words it runs and the files its redirections name, so an operator reading
+/// the log sees what ran, not only a token.
+fn exec_audit_detail(token: &str) -> Json {
+    let redact = |s: &String| redact_str(s).0;
+    let argv: Vec<String> = EXEC_ARGV.with(|a| a.borrow().iter().map(redact).collect());
+    let redirs: Vec<String> = EXEC_REDIRS_CTX.with(|r| r.borrow().iter().map(redact).collect());
+    let mut detail = json!({ "token": token });
+    if let Some(map) = detail.as_object_mut() {
+        if !argv.is_empty() {
+            map.insert("argv".to_string(), json!(argv));
+        }
+        if !redirs.is_empty() {
+            map.insert("redirections".to_string(), json!(redirs));
+        }
+    }
+    detail
+}
+
 thread_local! {
+    /// The redirections (`>path`, `<path`) of the command [`guard_exec_env`] is
+    /// judging: the audit entry lists them, and the file a `<` names is bound
+    /// by its content like a file named in the words.
+    static EXEC_REDIRS_CTX: std::cell::RefCell<Vec<String>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+
     /// The words of the command [`guard_exec_env`] is judging, for the file
     /// binding of its approval.
     static EXEC_ARGV: std::cell::RefCell<Vec<String>> =
@@ -9590,7 +9663,11 @@ fn guard_inner(ctx: GuardCtx) -> Result<(), SafetyError> {
                     ctx.effect,
                     "approved",
                     &resource,
-                    json!({ "token": descriptor.token }),
+                    if ctx.effect == Effect::Exec {
+                        exec_audit_detail(&descriptor.token)
+                    } else {
+                        json!({ "token": descriptor.token })
+                    },
                 );
                 Ok(())
             } else {
@@ -9599,7 +9676,11 @@ fn guard_inner(ctx: GuardCtx) -> Result<(), SafetyError> {
                     ctx.effect,
                     "needs_approval",
                     &resource,
-                    json!({ "token": descriptor.token }),
+                    if ctx.effect == Effect::Exec {
+                        exec_audit_detail(&descriptor.token)
+                    } else {
+                        json!({ "token": descriptor.token })
+                    },
                 );
                 let token = descriptor.token.clone();
                 let mut hint = approval_refusal_hint(&token, ctx.effect == Effect::Network);
@@ -10318,6 +10399,12 @@ lazy_static! {
     /// A dotted identifier path (`os.environ`, `process.env.API_KEY;`).
     static ref DOTTED_PATH_RE: regex::Regex = regex::Regex::new(
         r#"^([A-Za-z_][A-Za-z0-9_]*)((?:\.[A-Za-z_][A-Za-z0-9_]*)+)[;,)]*$"#
+    ).unwrap();
+
+    /// A name and its separator (`name =`, `"name":`, `name :=`, `name =>`), the
+    /// start of a value expression. Group 1 is the name.
+    static ref NAME_SEP_RE: regex::Regex = regex::Regex::new(
+        r#"(?i)([\p{L}\p{N}_.\-]+)["']?\s*(?:=>|:=|[:=])\s*"#
     ).unwrap();
 
     /// A quoted string inside a statement: group 1 is a double-quoted body,
@@ -11218,6 +11305,11 @@ fn redact_str_counted(s: &str) -> (String, usize) {
             .into_owned();
         count += hits;
     }
+    if cur.contains(['"', '\'', '`']) {
+        let (text, replaced) = redact_secret_expressions(&cur);
+        cur = text;
+        count += replaced;
+    }
     if SECRET_ASSIGN_RE.is_match(&cur) {
         let (text, replaced) = redact_assignments(&cur);
         cur = text;
@@ -11493,6 +11585,182 @@ fn literal_looks_secret(lit: &str) -> bool {
     let inner_upper = lit.chars().skip(1).any(|c| c.is_uppercase());
     let upper = lit.chars().any(|c| c.is_uppercase());
     (digit && (upper || lower)) || (inner_upper && lower)
+}
+
+/// Whether the text of a literal, with its interpolations (`${x}`, `{x}`, `{}`,
+/// `%s`, `%d`) removed, looks like a secret.
+fn literal_text_looks_secret(lit: &str) -> bool {
+    let mut plain = String::with_capacity(lit.len());
+    let mut chars = lit.chars().peekable();
+    while let Some(c) = chars.next() {
+        match c {
+            '$' if chars.peek() == Some(&'{') => {
+                chars.next();
+                for d in chars.by_ref() {
+                    if d == '}' {
+                        break;
+                    }
+                }
+            }
+            '{' => {
+                for d in chars.by_ref() {
+                    if d == '}' {
+                        break;
+                    }
+                }
+            }
+            '%' if chars.peek().is_some_and(|d| d.is_ascii_alphabetic()) => {
+                chars.next();
+            }
+            _ => plain.push(c),
+        }
+    }
+    literal_looks_secret(&plain)
+}
+
+/// One string literal found in a value expression: the byte range of its body,
+/// and the range of the whole literal with its quotes.
+struct ExprLiteral {
+    body: std::ops::Range<usize>,
+    whole: std::ops::Range<usize>,
+}
+
+/// The string literals of a value expression (the part of a line after `name =`),
+/// in order, and the byte offset at which the expression ends: an unquoted `;`
+/// or `,` at bracket depth 0, a closing bracket the expression did not open, or
+/// the end of the line. Handles `'`, `"`, backtick and triple-quoted literals.
+fn expression_literals(expr: &str) -> (Vec<ExprLiteral>, usize) {
+    let b = expr.as_bytes();
+    let mut lits = Vec::new();
+    let mut depth = 0i32;
+    let mut i = 0usize;
+    while i < b.len() {
+        let c = b[i];
+        match c {
+            b'"' | b'\'' | b'`' => {
+                let q = c;
+                let triple = q != b'`' && b[i..].starts_with(&[q, q, q]);
+                let open = if triple { 3 } else { 1 };
+                let start = i + open;
+                let mut j = start;
+                let mut end = None;
+                while j < b.len() {
+                    if b[j] == b'\\' {
+                        j += 2;
+                        continue;
+                    }
+                    if b[j] == q && (!triple || b[j..].starts_with(&[q, q, q])) {
+                        end = Some(j);
+                        break;
+                    }
+                    j += 1;
+                }
+                let Some(end) = end else {
+                    break;
+                };
+                lits.push(ExprLiteral {
+                    body: start..end,
+                    whole: i..end + open,
+                });
+                i = end + open;
+                continue;
+            }
+            b'(' | b'[' | b'{' => depth += 1,
+            b')' | b']' | b'}' => {
+                depth -= 1;
+                if depth < 0 {
+                    return (lits, i);
+                }
+            }
+            b';' | b',' if depth == 0 => return (lits, i),
+            _ => {}
+        }
+        i += 1;
+    }
+    (lits, b.len().min(i))
+}
+
+/// Round 66: redact every secret-looking string literal in the value expression
+/// of a secret-named assignment, not only the first one. Covers triple-quoted
+/// strings, list and array elements, template literals, format macro arguments,
+/// `%` operands, and `+` concatenation, whose parts are judged as one literal
+/// (`"Zk3p9Q" + "w2Lm..."`). A concatenation that holds a secret is replaced
+/// whole by one redacted literal.
+fn redact_secret_expressions(text: &str) -> (String, usize) {
+    let mut out = String::with_capacity(text.len());
+    let mut count = 0usize;
+    for line in text.split_inclusive('\n') {
+        if !line.contains(['"', '\'', '`']) || line.len() > 100_000 {
+            out.push_str(line);
+            continue;
+        }
+        let body_end = line.trim_end_matches(['\r', '\n']).len();
+        let (body, eol) = line.split_at(body_end);
+        let mut edits: Vec<(std::ops::Range<usize>, String)> = Vec::new();
+        let mut covered = 0usize;
+        for m in NAME_SEP_RE.captures_iter(body) {
+            let (Some(whole), Some(name)) = (m.get(0), m.get(1)) else {
+                continue;
+            };
+            if whole.start() < covered || !is_secret_name(name.as_str()) {
+                continue;
+            }
+            let base = whole.end();
+            let (lits, expr_len) = expression_literals(&body[base..]);
+            covered = base + expr_len;
+            let mut k = 0usize;
+            while k < lits.len() {
+                // A chain: literals joined by `+` (or placed side by side).
+                let mut e = k;
+                while e + 1 < lits.len() {
+                    let gap = body[base + lits[e].whole.end..base + lits[e + 1].whole.start].trim();
+                    if gap == "+" || gap.is_empty() {
+                        e += 1;
+                    } else {
+                        break;
+                    }
+                }
+                let parts: Vec<&str> = (k..=e)
+                    .map(|n| &body[base + lits[n].body.start..base + lits[n].body.end])
+                    .collect();
+                if parts.iter().all(|p| *p == REDACTION_MARKER) {
+                    k = e + 1;
+                    continue;
+                }
+                let joined: String = parts.concat();
+                let secret = if parts.len() > 1 {
+                    parts.contains(&REDACTION_MARKER)
+                        || literal_text_looks_secret(&joined)
+                        || parts.iter().any(|p| literal_text_looks_secret(p))
+                } else {
+                    literal_text_looks_secret(&joined)
+                };
+                if secret {
+                    let first = &lits[k];
+                    let last = &lits[e];
+                    let q = &body[base + first.whole.start..base + first.body.start];
+                    let qc = q.chars().next().unwrap_or('"');
+                    let rep = format!("{q}{REDACTION_MARKER}{}", qc.to_string().repeat(q.len()));
+                    edits.push((base + first.whole.start..base + last.whole.end, rep));
+                    count += 1;
+                }
+                k = e + 1;
+            }
+        }
+        if edits.is_empty() {
+            out.push_str(line);
+            continue;
+        }
+        let mut at = 0usize;
+        for (r, rep) in &edits {
+            out.push_str(&body[at..r.start]);
+            out.push_str(rep);
+            at = r.end;
+        }
+        out.push_str(&body[at..]);
+        out.push_str(eol);
+    }
+    (out, count)
 }
 
 /// The quoted literals of `rest` (the part of a line after a code value) that
@@ -12308,6 +12576,9 @@ pub fn check_deadline() -> anyhow::Result<()> {
     // The memory budget is read at every step: one allocation can double the
     // live bytes, so the amortized clock interval below would be too coarse.
     crate::memory::check()?;
+    if let Some(e) = run_budget_error() {
+        return Err(e);
+    }
     let n = STEPS.with(|s| {
         let n = s.get().wrapping_add(1);
         s.set(n);

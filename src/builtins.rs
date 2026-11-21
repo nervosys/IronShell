@@ -4720,6 +4720,7 @@ fn call_with_input_inner(
         crate::safety::Effect::WriteLocal | crate::safety::Effect::Destructive
     ) && crate::journal::enabled();
     let journal_mark = if journal_on {
+        crate::journal::check_budget()?;
         let m = crate::journal::mark();
         crate::journal::record_before(name, effect, &args);
         m
