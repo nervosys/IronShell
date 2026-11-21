@@ -198,11 +198,11 @@ fn a_sed_command_outside_the_subset_is_named_as_a_command() {
     let sb = Sandbox::new("sed-command");
     // With no GNU sed on PATH, the run-time refusal names the command, and
     // the lines before it still ran. It does not suggest a missing tool.
-    let (out, err, code) = sb.run("echo first\necho x | sed '='\n");
+    let (out, err, code) = sb.run("echo first\necho x | sed 'b'\n");
     assert_eq!((out.as_str(), code), ("first\n", 2), "{err}");
     assert!(
         err.contains(
-            "ish: sed: sed command `=` is not in the in-process subset, which runs p, d, q and s///"
+            "ish: sed: sed command `b` is not in the in-process subset, which runs p, d, q and s///"
         ),
         "{err}"
     );
