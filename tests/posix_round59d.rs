@@ -314,7 +314,9 @@ fn test_reads_parentheses_and_the_extra_unary_operators() {
             ("[ -u f ]", "", "", 1),
             ("[ -g f ]", "", "", 1),
             ("[ -k f ]", "", "", 1),
-            ("[ -N f ]", "", "", 1),
+            // `-N f` (modified since last read) compares mtime with atime, which
+            // depends on the filesystem's atime policy: false on Linux and
+            // Windows here, true on macOS APFS. Not pinned.
             ("[ -b nofile ]", "", "", 1),
             ("[ -N ]", "", "", 0),
         ],

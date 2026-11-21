@@ -141,8 +141,11 @@ fn quoted_words_in_a_default_operand_keep_their_text() {
             // `:=` splits its result, as bash does.
             ("y=; echo ${y:=\"p  q\"}; echo \"$y\"", "p q\np  q\n", 0),
             // An empty default is no word, and `\"\"` is an empty one.
-            ("echo \"${u:-}\" x ${u:-} y | od -c | head -1", "0000000       x       y  \\n\n", 0),
-            ("echo ${u:-\"\"} | od -c | head -1", "0000000  \\n\n", 0),
+            // (Counted with printf and `$#`, not `od -c`, whose layout differs
+            // between GNU and BSD.)
+            ("printf \"[%s]\" \"${u:-}\" x ${u:-} y; echo", "[][x][y]\n", 0),
+            ("set -- \"${u:-}\" x ${u:-} y; echo $#", "3\n", 0),
+            ("set -- ${u:-\"\"}; echo $#", "1\n", 0),
         ],
     );
 }
