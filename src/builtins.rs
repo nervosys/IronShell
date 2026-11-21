@@ -19999,6 +19999,7 @@ fn bi_set_env(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
     let key = env_name(B, &args[0])?;
     refuse_gate_env(B, &key)?;
     let value = env_value(B, &args[1])?;
+    refuse_env_value(B, &key, &value)?;
     crate::safety::note_env_change(&key, Some(&value));
     std::env::set_var(key, value);
     Ok(Value::Null)
@@ -20034,6 +20035,36 @@ fn env_value(builtin: &str, value: &Value) -> Result<String> {
     Ok(text.to_string())
 }
 
+/// Refuse, in agent mode, a value of `TZ` or `TERM` that names a file: a `TZ`
+/// that starts with `:` or `/`, or holds `..` or a backslash, makes the C library
+/// read that file as the zone, and a `TERM` with a path separator or `..` makes
+/// a terminal library look for its description there. A zone name such as
+/// `America/New_York` is fine. Other variables are judged by name only.
+fn refuse_env_value(builtin: &str, name: &str, value: &str) -> Result<()> {
+    if !matches!(crate::safety::current_mode(), crate::safety::Mode::Agent) {
+        return Ok(());
+    }
+    let upper = name.trim().to_ascii_uppercase();
+    let path_like = match upper.as_str() {
+        "TZ" => {
+            value.starts_with([':', '/', '\u{5c}'])
+                || value.contains("..")
+                || value.contains('\u{5c}')
+                || value.chars().nth(1) == Some(':')
+        }
+        "TERM" => value.contains(['/', '\u{5c}']) || value.contains(".."),
+        _ => false,
+    };
+    if path_like {
+        return Err(crate::safety::policy_deny(
+            builtin,
+            format!("{builtin}: {name} may not be set to a path ({value}); it would make a program read that file"),
+            "set TZ to a zone name such as UTC or America/New_York, and TERM to a terminal name such as xterm-256color",
+        ));
+    }
+    Ok(())
+}
+
 /// Refuse, in agent mode, any change to a variable that steers a child program
 /// or the destination of data (see `safety::env_name_steers_children`).
 ///
@@ -20055,8 +20086,9 @@ fn refuse_gate_env(builtin: &str, name: &str) -> Result<()> {
                  a child program, its loader or configuration, or where data is sent"
             ),
             "variables that steer child programs and network destinations (PATH, GIT_*, \
-             IRONGATE_*, *_PROXY, provider keys and endpoints, ...) are set by whoever \
-             launches the agent, not by the agent",
+             IRONGATE_*, NPM_CONFIG_*, *_PROXY, provider keys and endpoints, ...) change what \
+             a program loads or where data goes, so whoever launches the agent sets them, \
+             outside the agent (in the environment ish starts with); the agent may not",
         ));
     }
     Ok(())
@@ -39764,14 +39796,9 @@ fn bi_whoami(_args: Vec<Value>, _input: Option<Value>) -> Result<Value> {
     }
     #[cfg(windows)]
     {
-        return match std::env::var("USERNAME") {
-            Ok(u) if !u.is_empty() => Ok(Value::Str(u)),
-            _ => Err(crate::safety::bad_state_with_hint(
-                "whoami",
-                "USERNAME is not set",
-                "this process was started without a user environment",
-            )),
-        };
+        // The account the process runs as, from the operating system: the
+        // USERNAME variable can be set by an agent and is not evidence.
+        return accounts::current_account("whoami").map(Value::Str);
     }
     #[allow(unreachable_code)]
     Err(crate::safety::unimplemented(
@@ -63346,6 +63373,7 @@ fn bi_env_set(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
     let name = env_name(B, &args[0])?;
     refuse_gate_env(B, &name)?;
     let value = env_value(B, &args[1])?;
+    refuse_env_value(B, &name, &value)?;
     crate::safety::note_env_change(&name, Some(&value));
     std::env::set_var(&name, &value);
     Ok(Value::Bool(true))
@@ -71831,7 +71859,7 @@ pub fn bi_rmdir(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
     // shell's own temp root is the cleanup the help examples end with, so it
     // skips the approval gate. It applies to that exact path only, never to the
     // temp root or any other directory, and the journal step below still runs.
-    let own_tempdir = recursive && is_own_tempdir(&path);
+    let own_tempdir = is_own_tempdir(&path);
     if !own_tempdir {
         crate::safety::guard(crate::safety::GuardCtx {
             builtin: "rmdir",

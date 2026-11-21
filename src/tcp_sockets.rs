@@ -130,6 +130,12 @@ pub(super) fn guard_and_open(
     listen: bool,
 ) -> Result<Value> {
     shape(name, &args, input, 2, 3)?;
+    // A connect to a metadata host is refused whatever the spelling (`0xa9fea9fe`
+    // and `169.254.169.254.` name the same address), before the literal-address
+    // check below turns it into a bad argument.
+    if !listen {
+        safety::refuse_metadata_host(name, string(name, &args[0])?)?;
+    }
     let ip = string(name, &args[0])?.parse::<IpAddr>().map_err(|_| {
         bad(
             name,

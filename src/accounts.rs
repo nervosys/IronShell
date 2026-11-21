@@ -37,6 +37,8 @@ use std::process::Output;
 #[path = "accounts/windows.rs"]
 mod windows;
 #[cfg(windows)]
+pub(crate) use windows::current_account;
+#[cfg(windows)]
 pub use windows::{
     group_add, group_del, group_mod, user_add, user_del, user_lock, user_mod, user_passwd,
     user_unlock,

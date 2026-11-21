@@ -697,7 +697,7 @@ fn sid_subauthorities(sid: &[u32]) -> Option<Vec<u32>> {
 }
 
 /// The name of the account this process runs as.
-fn current_account(builtin: &str) -> Result<String> {
+pub(crate) fn current_account(builtin: &str) -> Result<String> {
     let mut buf = vec![0u16; 257];
     let mut len = buf.len() as u32;
     // SAFETY: `buf` holds `len` UTF-16 units; on success GetUserNameW writes a

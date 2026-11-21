@@ -1509,16 +1509,40 @@ pub fn refuse_remote_bind(builtin: &str, ip: std::net::IpAddr) -> anyhow::Result
 /// IPv6 address.
 pub fn is_metadata_address(ip: std::net::IpAddr) -> bool {
     use std::net::IpAddr;
+    // 100.100.100.200 is Alibaba Cloud's metadata service, inside the
+    // carrier-grade NAT range.
+    let v4_metadata =
+        |v4: std::net::Ipv4Addr| v4.is_link_local() || v4.octets() == [100, 100, 100, 200];
     match ip {
-        IpAddr::V4(v4) => v4.is_link_local(),
+        IpAddr::V4(v4) => v4_metadata(v4),
         IpAddr::V6(v6) => {
             if let Some(v4) = v6.to_ipv4_mapped() {
-                return v4.is_link_local();
+                return v4_metadata(v4);
             }
             let s = v6.segments();
             (s[0] & 0xffc0) == 0xfe80
                 || (s[0] == 0xfd00 && s[1] == 0x0ec2 && v6.octets()[15] == 0x54)
         }
+    }
+}
+
+/// The address a host string spells, in any form `ssh`, `scp` and a URL parser
+/// accept: dotted, IPv6 (brackets and a `%zone` allowed), a trailing dot, and the
+/// hexadecimal (`0xa9fea9fe`), octal (`0251.0376.0251.0376`), shortened and
+/// single-number (`2852039166`) IPv4 spellings that the WHATWG host parser reads
+/// as an address. `None` for a host name.
+pub fn host_literal_ip(host: &str) -> Option<std::net::IpAddr> {
+    use std::net::IpAddr;
+    let bare = host.trim().trim_start_matches('[').trim_end_matches(']');
+    let bare = bare.split('%').next().unwrap_or(bare);
+    let bare = bare.trim_end_matches('.');
+    if let Ok(ip) = bare.parse::<IpAddr>() {
+        return Some(ip);
+    }
+    match url::Host::parse(bare) {
+        Ok(url::Host::Ipv4(v4)) => Some(IpAddr::V4(v4)),
+        Ok(url::Host::Ipv6(v6)) => Some(IpAddr::V6(v6)),
+        _ => None,
     }
 }
 
@@ -1541,9 +1565,7 @@ pub fn refuse_metadata_host(builtin: &str, host: &str) -> anyhow::Result<()> {
         bare.to_ascii_lowercase().trim_end_matches('.'),
         "metadata.google.internal" | "metadata.goog" | "instance-data" | "metadata.azure.internal"
     );
-    let literal = bare
-        .parse::<std::net::IpAddr>()
-        .is_ok_and(is_metadata_address);
+    let literal = host_literal_ip(host).is_some_and(is_metadata_address);
     if named || literal {
         return Err(policy_deny(
             builtin,
@@ -9794,6 +9816,12 @@ const TARGET_PARAMS: &[&str] = &[
 /// Content arguments (the text a write puts in a file, a request body) are never
 /// named, because the log outlives the call and would keep its secrets.
 fn target_resource(builtin: &str, args: &[crate::value::Value]) -> String {
+    // An environment change is logged by the variable's name, never its value.
+    if matches!(builtin, "set_env" | "env_set" | "env_unset") {
+        if let Some(crate::value::Value::Str(name)) = args.first() {
+            return name.clone();
+        }
+    }
     let named: Vec<&str> = crate::signature::signature_of(builtin)
         .map(|sig| {
             sig.params
@@ -10205,7 +10233,24 @@ lazy_static! {
         // and a value that ran through it swallowed the next line. A backslash
         // before any other character is still part of the value, so a Windows
         // path or a password containing `\x` stays whole.
-        r#"(?i)((?:password|passwd|pwd|secret|token|api[_-]?key|access[_-]?key|client[_-]?secret|auth[_-]?token)["']?\s*[:=]\s*["']?)((?:[^\s"',}\\]|\\[^nrtbfu"\\/\s]){6,})"#
+        // Round 62: the name is any word and `text_assignment_hides` asks
+        // `is_secret_name`, the rule record keys use, so the text and record
+        // forms cannot drift apart. Group 1 is the name and separator, group 2
+        // the name, group 3 the value.
+        r#"(?i)(([\p{L}\p{N}_.\-]+)["']?\s*[:=]\s*["']?)((?:[^\s"',}\\]|\\[^nrtbfu"\\/\s]){4,})"#
+    ).unwrap();
+
+    /// `Digest username="u", realm="r", response="..."` with no header name in
+    /// front of it. Group 1 is the scheme, group 2 the parameters, of which
+    /// `response` and `cnonce` are redacted.
+    static ref DIGEST_BARE_RE: regex::Regex = regex::Regex::new(
+        r#"(?i)(\bdigest\s+)((?:username|realm|nonce|uri|response|cnonce|qop|algorithm|opaque)\s*=[^\r\n]*)"#
+    ).unwrap();
+
+    /// A line that is only a Digest `response=` or `cnonce=` parameter (a header
+    /// folded over several lines). The value must be 16 or more characters.
+    static ref DIGEST_LINE_RE: regex::Regex = regex::Regex::new(
+        r#"(?im)^([ \t]*(?:response|cnonce)[ \t]*=[ \t]*["']?)([^\s"',}\\]{16,})"#
     ).unwrap();
 }
 
@@ -10231,7 +10276,105 @@ pub fn secrets_permitted() -> bool {
 /// (uppercased) on strong indicators only — `KEY` alone is excluded to avoid
 /// `KEYBOARD`/`MONKEY` false positives; `_KEY` requires the underscore.
 pub fn is_secret_name(name: &str) -> bool {
-    substring_secret_name(name) || segment_secret_name(name)
+    name_variants(name)
+        .iter()
+        .any(|v| substring_secret_name_exact(v) || segment_secret_name_exact(v))
+}
+
+/// A character that looks like a Latin letter or fullwidth form, as the ASCII
+/// letter it imitates; `None` for any other character. Fullwidth forms
+/// (U+FF01..U+FF5E) are the ASCII characters 0x21..0x7E shifted by 0xFEE0, the
+/// part of NFKC that matters for a name; the Cyrillic and Greek letters are the
+/// ones that are drawn like a Latin one.
+fn confusable_ascii(c: char) -> Option<char> {
+    let u = c as u32;
+    if (0xFF01..=0xFF5E).contains(&u) {
+        return char::from_u32(u - 0xFEE0);
+    }
+    Some(match c {
+        // Cyrillic, lower case then upper case
+        '\u{0430}' => 'a',
+        '\u{0435}' => 'e',
+        '\u{043E}' => 'o',
+        '\u{0440}' => 'p',
+        '\u{0441}' => 'c',
+        '\u{0443}' => 'y',
+        '\u{0445}' => 'x',
+        '\u{0456}' => 'i',
+        '\u{0455}' => 's',
+        '\u{0458}' => 'j',
+        '\u{0410}' => 'A',
+        '\u{0412}' => 'B',
+        '\u{0415}' => 'E',
+        '\u{041A}' => 'K',
+        '\u{041C}' => 'M',
+        '\u{041D}' => 'H',
+        '\u{041E}' => 'O',
+        '\u{0420}' => 'P',
+        '\u{0421}' => 'C',
+        '\u{0422}' => 'T',
+        '\u{0425}' => 'X',
+        // Greek
+        '\u{03BF}' => 'o',
+        '\u{03B1}' => 'a',
+        '\u{03B5}' => 'e',
+        '\u{03B9}' => 'i',
+        '\u{03BA}' => 'k',
+        '\u{03BD}' => 'v',
+        '\u{03C1}' => 'p',
+        '\u{03C4}' => 't',
+        '\u{03C5}' => 'u',
+        '\u{03C7}' => 'x',
+        _ => return None,
+    })
+}
+
+/// A name with fullwidth forms and look-alike Cyrillic and Greek letters turned
+/// into the ASCII letters they imitate, and zero-width and soft-hyphen
+/// characters removed.
+fn fold_confusables(name: &str) -> String {
+    name.chars()
+        .filter(|c| !matches!(*c as u32, 0x00AD | 0x200B..=0x200F | 0x2060 | 0xFEFF))
+        .map(|c| confusable_ascii(c).unwrap_or(c))
+        .collect()
+}
+
+/// The spellings of a name that are matched against the secret-name rules: the
+/// name itself, with look-alike letters folded, and with the digits and `@`
+/// that stand for letters read as those letters (`passw0rd`, `s3ssion`,
+/// `p@ss`: 0 is o, 3 is e, 4 is a, 5 is s, 7 is t, @ is a, and 1 is l or i).
+/// The digit reading is only a way to match: no name is changed.
+fn name_variants(name: &str) -> Vec<String> {
+    let mut out = vec![name.to_string()];
+    let plain = name.is_ascii() && !name.bytes().any(|b| b.is_ascii_digit() || b == b'@');
+    if plain {
+        return out;
+    }
+    let folded = fold_confusables(name);
+    if folded != name {
+        out.push(folded.clone());
+    }
+    if folded.bytes().any(|b| b.is_ascii_digit() || b == b'@') {
+        for one in ['l', 'i'] {
+            let leet: String = folded
+                .chars()
+                .map(|c| match c {
+                    '0' => 'o',
+                    '1' => one,
+                    '3' => 'e',
+                    '4' => 'a',
+                    '5' => 's',
+                    '7' => 't',
+                    '@' => 'a',
+                    other => other,
+                })
+                .collect();
+            if !out.contains(&leet) {
+                out.push(leet);
+            }
+        }
+    }
+    out
 }
 
 /// The name's words, lower-cased: split on every character that is not a letter
@@ -10276,7 +10419,7 @@ fn name_segments(name: &str) -> Vec<String> {
 /// `session_count`, `auth_enabled`, `pin_required`, `jwt_name`) clears it. The
 /// substring rules (`password`, `token`, `secret`, `_key`, ...) are not
 /// cleared that way: `password_policy` is still hidden.
-fn segment_secret_name(name: &str) -> bool {
+fn segment_secret_name_exact(name: &str) -> bool {
     const WORDS: &[&str] = &[
         "authorization",
         "cookie",
@@ -10311,10 +10454,45 @@ fn segment_secret_name(name: &str) -> bool {
     // A segment after the secret word that makes the field a description of
     // the secret, a switch or a count.
     const QUALIFIERS: &[&str] = &[
-        "policy", "name", "names", "count", "counts", "total", "len", "length", "size", "num",
-        "number", "max", "min", "enabled", "disabled", "required", "flag", "ttl", "timeout",
-        "status", "mode", "method", "type", "url", "uri", "host", "sock", "socket", "path", "dir",
+        "policy",
+        "name",
+        "names",
+        "count",
+        "counts",
+        "total",
+        "len",
+        "length",
+        "size",
+        "num",
+        "number",
+        "max",
+        "min",
+        "enabled",
+        "disabled",
+        "required",
+        "flag",
+        "ttl",
+        "timeout",
+        "status",
+        "mode",
+        "method",
+        "type",
+        "url",
+        "uri",
+        "host",
+        "sock",
+        "socket",
+        "path",
+        "dir",
         "file",
+        "expiry",
+        "expires",
+        "expire",
+        "expiration",
+        "seconds",
+        "secs",
+        "minutes",
+        "age",
     ];
     let segs = name_segments(name);
     for (i, seg) in segs.iter().enumerate() {
@@ -10345,6 +10523,12 @@ fn names_a_count(name: &str) -> bool {
 }
 
 fn substring_secret_name(name: &str) -> bool {
+    name_variants(name)
+        .iter()
+        .any(|v| substring_secret_name_exact(v))
+}
+
+fn substring_secret_name_exact(name: &str) -> bool {
     // `-` and `_` are alike: `x-api-key` is `X_API_KEY`.
     let n = name.to_ascii_uppercase().replace('-', "_");
     const NEEDLES: &[&str] = &[
@@ -10362,6 +10546,9 @@ fn substring_secret_name(name: &str) -> bool {
         "CLIENT_SECRET",
         "AUTH_TOKEN",
         "SESSION_KEY",
+        // `x-amz-signature` (a SigV4 signature) and, through `TOKEN` and
+        // `CREDENTIAL`, `x-amz-security-token` and `x-amz-credential`.
+        "AMZ_SIGNATURE",
     ];
     // Suffixes, not substrings: `_AUTH` inside `GIT_AUTHOR_NAME` and `_PAT`
     // inside `LD_LIBRARY_PATH` are not secrets.
@@ -10617,6 +10804,40 @@ pub(crate) fn env_name_steers_children(name: &str) -> bool {
         "TERMINFO_DIRS",
         "MORE",
         "XAUTHORITY",
+        // Round 62: names a shell, an archiver, a typesetter, a font or image
+        // library or a runtime reads for options, a trace file, a config or a
+        // data directory, and Windows' folder names.
+        "ZSH_ENV",
+        "BASH_XTRACEFD",
+        "GZIP",
+        "XZ_OPT",
+        "XZ_DEFAULTS",
+        "ZIPOPT",
+        "UNZIP",
+        "UNZIPOPT",
+        "BZIP2",
+        "BZIP",
+        "TEXMFCNF",
+        "TEXMFHOME",
+        "FONTCONFIG_FILE",
+        "FONTCONFIG_PATH",
+        "TZDIR",
+        "ICU_DATA",
+        "MSYS",
+        "MSYS2_ENV_CONV_EXCL",
+        "CYGWIN",
+        "BAT_PAGER",
+        "MANPATH",
+        "HGEDITOR",
+        "SVN_EDITOR",
+        "LS_OPTIONS",
+        "GOBIN",
+        "SYSTEMDRIVE",
+        "PROGRAMFILES",
+        "PROGRAMFILES(X86)",
+        "PROGRAMW6432",
+        "COMMONPROGRAMFILES",
+        "ALLUSERSPROFILE",
     ];
     const PREFIXES: &[&str] = &[
         "IRONSHELL_",
@@ -10678,6 +10899,12 @@ pub(crate) fn env_name_steers_children(name: &str) -> bool {
         "COMPOSER_",
         "VAGRANT_",
         "BASH_FUNC_",
+        // Round 62: the .NET host's trace and path variables, Docker's context
+        // and daemon settings, ImageMagick's configuration and Lua's init code.
+        "COREHOST_",
+        "DOCKER_",
+        "MAGICK_",
+        "LUA_INIT",
         // Round 59: `gh` takes its host, repository, config directory and
         // token from `GH_*`; the version managers, direnv, virtualenv, pipenv
         // and PHP read their configuration or plugin paths from these.
@@ -10724,6 +10951,13 @@ pub(crate) fn env_name_steers_children(name: &str) -> bool {
         "_ADDOPTS",
     ];
     let upper = name.trim().to_ascii_uppercase();
+    // Names the generic rules and prefixes would block that only select a mode
+    // or hold a return code: `NODE_ENV` picks production or development, and
+    // `LAST_RC` is the status of a command.
+    const ALLOWED: &[&str] = &["NODE_ENV", "EXITRC", "LASTRC"];
+    if ALLOWED.contains(&upper.as_str()) {
+        return false;
+    }
     EXACT.contains(&upper.as_str())
         || PREFIXES.iter().any(|p| upper.starts_with(p))
         || SUFFIXES.iter().any(|s| upper.ends_with(s))
@@ -10738,8 +10972,14 @@ fn names_a_run_control_file(upper: &str) -> bool {
     if !upper.ends_with("RC") {
         return false;
     }
-    if upper.ends_with("_RC") {
-        return true;
+    if let Some(stem) = upper.strip_suffix("_RC") {
+        // `LAST_RC` and `EXIT_RC` hold the status of a command, not a file name.
+        const STATUS_WORDS: &[&str] = &[
+            "LAST", "EXIT", "RET", "RETURN", "PREV", "CMD", "CHILD", "STEP", "TEST", "BUILD",
+            "SCRIPT", "PIPE", "PROC", "JOB",
+        ];
+        let last = stem.rsplit('_').next().unwrap_or(stem);
+        return !STATUS_WORDS.contains(&last);
     }
     upper.len() >= 5
         && !upper.ends_with("SRC")
@@ -10812,6 +11052,10 @@ pub fn note_redactions_on_stderr() {
 fn redact_str_counted(s: &str) -> (String, usize) {
     let mut cur = s.to_string();
     let mut count = 0usize;
+    if let Some((text, n)) = redact_delimited(&cur) {
+        cur = text;
+        count += n;
+    }
     let hits = SECRET_TOKEN_RE.find_iter(&cur).count();
     if hits > 0 {
         cur = SECRET_TOKEN_RE
@@ -10830,10 +11074,13 @@ fn redact_str_counted(s: &str) -> (String, usize) {
         let mut replaced = 0usize;
         cur = SECRET_ASSIGN_RE
             .replace_all(&cur, |caps: &regex::Captures| {
-                let value = &caps[2];
+                let value = &caps[3];
                 let word = value.trim_end_matches(')');
                 // A value an earlier pass already replaced is one secret, not two.
                 if word == REDACTION_MARKER {
+                    return caps[0].to_string();
+                }
+                if !text_assignment_hides(&caps[2], word) {
                     return caps[0].to_string();
                 }
                 // `token: String) -> Record` is a signature, which describes a
@@ -10894,6 +11141,7 @@ fn redact_str_counted(s: &str) -> (String, usize) {
     }
     for (header, field) in [
         (&*DIGEST_HEADER_RE, &*DIGEST_FIELD_RE),
+        (&*DIGEST_BARE_RE, &*DIGEST_FIELD_RE),
         (&*SIGV4_HEADER_RE, &*SIGV4_FIELD_RE),
     ] {
         if !header.is_match(&cur) {
@@ -10913,6 +11161,16 @@ fn redact_str_counted(s: &str) -> (String, usize) {
             })
             .into_owned();
         count += replaced;
+    }
+    let hits = DIGEST_LINE_RE
+        .captures_iter(&cur)
+        .filter(|c| &c[2] != REDACTION_MARKER)
+        .count();
+    if hits > 0 {
+        cur = DIGEST_LINE_RE
+            .replace_all(&cur, concat!("${1}", "[REDACTED]"))
+            .into_owned();
+        count += hits;
     }
     let hits = BEARER_TEXT_RE
         .captures_iter(&cur)
@@ -10948,6 +11206,201 @@ fn redact_str_counted(s: &str) -> (String, usize) {
         count += hits;
     }
     (cur, count)
+}
+
+/// Whether the value `word` after `name` and a `:` or `=` in text is a secret.
+/// The name decides, by [`is_secret_name`] (the rule record keys use), with the
+/// same qualifier exemptions. On top of that: a name whose last word is
+/// `authorization`, `cookie` or `bearer` has its own header rules; a value under
+/// the length floor (6 characters, 4 under `pin` and `otp`) is a placeholder; a
+/// number under a name that only the whole-word rule flagged and that is
+/// count-like stays; and `auth` and `session` are ordinary words in prose, so
+/// under them a short value with no digit (`session: active`) stays.
+fn text_assignment_hides(name: &str, word: &str) -> bool {
+    if !is_secret_name(name) {
+        return false;
+    }
+    let segs = name_segments(&fold_confusables(name));
+    if segs.last().is_some_and(|s| {
+        matches!(
+            s.as_str(),
+            "authorization" | "cookie" | "cookies" | "bearer"
+        )
+    }) {
+        return false;
+    }
+    let floor = if segs.iter().any(|s| s == "pin" || s == "otp") {
+        4
+    } else {
+        6
+    };
+    if word.chars().count() < floor {
+        return false;
+    }
+    if word.chars().all(|c| c.is_ascii_digit() || c == '.') && !secret_name_hides_number(name) {
+        return false;
+    }
+    let prose_word = segs.iter().any(|s| s == "auth" || s == "session");
+    !(prose_word
+        && !substring_secret_name(name)
+        && word.len() < 12
+        && !word.chars().any(|c| c.is_ascii_digit()))
+}
+
+/// One field of a delimited text: its byte range, and whether it was quoted.
+struct DelimCell {
+    start: usize,
+    end: usize,
+    quoted: bool,
+}
+
+/// The records of delimited text (CSV with `,` or `;`, TSV with a tab), with the
+/// byte range of each field. A quoted field may hold the delimiter, a doubled
+/// quote and a newline. `None` when a quote is never closed.
+fn delimited_records(text: &str, delim: u8) -> Option<Vec<Vec<DelimCell>>> {
+    let b = text.as_bytes();
+    let mut records: Vec<Vec<DelimCell>> = Vec::new();
+    let mut row: Vec<DelimCell> = Vec::new();
+    let mut i = 0usize;
+    let n = b.len();
+    while i < n {
+        let start = i;
+        let mut quoted = false;
+        if b[i] == b'"' {
+            quoted = true;
+            i += 1;
+            loop {
+                if i >= n {
+                    return None;
+                }
+                if b[i] == b'"' {
+                    if b.get(i + 1) == Some(&b'"') {
+                        i += 2;
+                        continue;
+                    }
+                    i += 1;
+                    break;
+                }
+                i += 1;
+            }
+        }
+        while i < n && b[i] != delim && b[i] != b'\n' {
+            i += 1;
+        }
+        let mut end = i;
+        if end > start && b[end - 1] == b'\r' && (i >= n || b[i] == b'\n') {
+            end -= 1;
+        }
+        row.push(DelimCell { start, end, quoted });
+        if i >= n {
+            break;
+        }
+        if b[i] == delim {
+            i += 1;
+            if i >= n {
+                row.push(DelimCell {
+                    start: n,
+                    end: n,
+                    quoted: false,
+                });
+            }
+        } else {
+            i += 1;
+            records.push(std::mem::take(&mut row));
+        }
+    }
+    if !row.is_empty() {
+        records.push(row);
+    }
+    Some(records)
+}
+
+/// A header cell's text: trimmed, with the quotes of a quoted cell removed.
+fn delim_cell_text<'a>(text: &'a str, cell: &DelimCell) -> &'a str {
+    let raw = text[cell.start..cell.end].trim();
+    if cell.quoted && raw.len() >= 2 && raw.starts_with('"') && raw.ends_with('"') {
+        &raw[1..raw.len() - 1]
+    } else {
+        raw
+    }
+}
+
+/// Redact the cells of secret-named columns in CSV or TSV text: the first line
+/// is a header of two or more columns, at least one column name is a secret name
+/// ([`is_secret_name`]), and every later non-blank record has as many fields as
+/// the header. Text that does not fit is left alone, so prose and JSON are never
+/// touched. The column count and each cell's quoting are kept. `None` when
+/// nothing was replaced.
+fn redact_delimited(text: &str) -> Option<(String, usize)> {
+    let first = text.lines().find(|l| !l.trim().is_empty())?;
+    for &delim in b",\t;" {
+        if !first.as_bytes().contains(&delim) {
+            continue;
+        }
+        let Some(records) = delimited_records(text, delim) else {
+            continue;
+        };
+        let mut rows = records
+            .iter()
+            .filter(|r| !(r.len() == 1 && text[r[0].start..r[0].end].trim().is_empty()));
+        let Some(header) = rows.next() else {
+            continue;
+        };
+        if header.len() < 2 {
+            continue;
+        }
+        let names: Vec<&str> = header.iter().map(|c| delim_cell_text(text, c)).collect();
+        if names.iter().any(|n| {
+            n.len() > 64
+                || n.contains(['{', '}', '[', ']', '=', ':', '<', '>', '(', ')', '/', '\\'])
+        }) {
+            continue;
+        }
+        let secret_cols: Vec<usize> = names
+            .iter()
+            .enumerate()
+            .filter(|(_, n)| is_secret_name(n))
+            .map(|(i, _)| i)
+            .collect();
+        if secret_cols.is_empty() {
+            continue;
+        }
+        let body: Vec<&Vec<DelimCell>> = rows.collect();
+        if body.iter().any(|r| r.len() != header.len()) {
+            continue;
+        }
+        let mut out = String::with_capacity(text.len());
+        let mut at = 0usize;
+        let mut count = 0usize;
+        for row in body {
+            for &col in &secret_cols {
+                let cell = &row[col];
+                let value = delim_cell_text(text, cell);
+                if value.is_empty()
+                    || value == REDACTION_MARKER
+                    || is_capability_token(value)
+                    || (value.chars().all(|c| c.is_ascii_digit() || c == '.')
+                        && !secret_name_hides_number(names[col]))
+                {
+                    continue;
+                }
+                out.push_str(&text[at..cell.start]);
+                out.push_str(if cell.quoted {
+                    "\"[REDACTED]\""
+                } else {
+                    REDACTION_MARKER
+                });
+                at = cell.end;
+                count += 1;
+            }
+        }
+        if count == 0 {
+            continue;
+        }
+        out.push_str(&text[at..]);
+        return Some((out, count));
+    }
+    None
 }
 
 /// Whether `word` is the name of a variable that holds a secret (`GITHUB_TOKEN`,
