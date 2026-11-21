@@ -1021,6 +1021,8 @@ fn merge_branch_variables(parent: &mut WorkflowContext, branch: WorkflowContext)
 /// uses. A workflow step must not be a way around the network policy.
 async fn http_step(method: String, url: String, body: Option<Value>) -> Result<Value> {
     tokio::task::spawn_blocking(move || {
+        // A literal internal address is refused before the approval gate.
+        crate::security::refuse_literal_internal_url("workflow_http", &url)?;
         crate::builtins::guard_network("workflow_http", &url)?;
         http_send(&method, &url, body)
     })

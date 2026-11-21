@@ -9890,6 +9890,20 @@ pub const REDACTION_MARKER: &str = "[REDACTED]";
 pub const NULL_VALUE_HINT: &str = "a value is null (an empty CSV cell or a missing field); skip it with where(.x != null && .x > 5), or give it a value first with coalesce(x, 0)";
 
 lazy_static! {
+    /// `Authorization: <scheme> <credential>` and `Authorization: <credential>`.
+    /// Group 1 is the name and separator, group 2 the optional scheme and its
+    /// space, group 3 the credential, which is redacted.
+    static ref AUTH_HEADER_RE: regex::Regex = regex::Regex::new(
+        r#"(?i)(\bauthorization["']?\s*[:=]\s*["']?)((?:bearer|basic|digest|negotiate|token)\s+)?([^\s"',}\\]{6,})"#
+    ).unwrap();
+
+    /// `Cookie: k=v; k2=v2` and `Set-Cookie: sid=abc; Path=/`. The value must
+    /// start with `name=`, so prose such as "cookie: yes" is left alone. Group 1
+    /// is kept; the rest of the line (or of the quoted string) is redacted.
+    static ref COOKIE_HEADER_RE: regex::Regex = regex::Regex::new(
+        r#"(?i)(\b(?:set-)?cookie["']?\s*[:=]\s*["']?)([^\s=;"',}\\]+=[^\r\n"'\\]*)"#
+    ).unwrap();
+
     /// Self-contained secret tokens — the whole match *is* the secret and is
     /// replaced wholesale. Ordered alternation; each branch is anchored on a
     /// distinctive prefix/structure so it can't fire on ordinary prose.
@@ -9956,7 +9970,69 @@ pub fn secrets_permitted() -> bool {
 /// (uppercased) on strong indicators only — `KEY` alone is excluded to avoid
 /// `KEYBOARD`/`MONKEY` false positives; `_KEY` requires the underscore.
 pub fn is_secret_name(name: &str) -> bool {
-    let n = name.to_ascii_uppercase();
+    substring_secret_name(name) || segment_secret_name(name)
+}
+
+/// The name's words, lower-cased: split on every character that is not a letter
+/// or digit (`_`, `-`, `.`, space) and between a lower-case letter and an
+/// upper-case one (`dbPass` is `db`, `pass`).
+fn name_segments(name: &str) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    let mut cur = String::new();
+    let mut prev_lower = false;
+    for c in name.chars() {
+        if !c.is_alphanumeric() {
+            if !cur.is_empty() {
+                out.push(std::mem::take(&mut cur));
+            }
+            prev_lower = false;
+            continue;
+        }
+        if c.is_uppercase() && prev_lower && !cur.is_empty() {
+            out.push(std::mem::take(&mut cur));
+        }
+        prev_lower = c.is_lowercase();
+        cur.extend(c.to_lowercase());
+    }
+    if !cur.is_empty() {
+        out.push(cur);
+    }
+    out
+}
+
+/// Names that are secrets as whole words and would be false positives as
+/// substrings: HTTP credential headers and the short spellings of a password.
+/// `pass` matches `pass`, `db_pass` and `dbPass`, not `passage`, `compass` or
+/// `bypass_cache`.
+fn segment_secret_name(name: &str) -> bool {
+    const WORDS: &[&str] = &[
+        "authorization",
+        "cookie",
+        "cookies",
+        "bearer",
+        "pass",
+        "pwd",
+        "apikey",
+    ];
+    name_segments(name)
+        .iter()
+        .any(|seg| WORDS.contains(&seg.as_str()))
+}
+
+/// Whether a field name is count-like (`cookie_count`, `pass_len`): a number
+/// under such a name that only the whole-word rule flagged is a count.
+fn names_a_count(name: &str) -> bool {
+    const COUNTS: &[&str] = &[
+        "count", "counts", "total", "len", "length", "size", "num", "number", "max", "min",
+    ];
+    name_segments(name)
+        .iter()
+        .any(|seg| COUNTS.contains(&seg.as_str()))
+}
+
+fn substring_secret_name(name: &str) -> bool {
+    // `-` and `_` are alike: `x-api-key` is `X_API_KEY`.
+    let n = name.to_ascii_uppercase().replace('-', "_");
     const NEEDLES: &[&str] = &[
         "SECRET",
         "TOKEN",
@@ -10128,6 +10204,24 @@ pub(crate) fn env_name_steers_children(name: &str) -> bool {
         "LIB",
         "LIBPATH",
         "SSLKEYLOGFILE",
+        // Round 60: editors, pagers and toolchain paths that run a program or
+        // load code, and the address a local model server is reached at.
+        "KUBE_EDITOR",
+        "KUBECACHEDIR",
+        "EXINIT",
+        "VIMINIT",
+        "HGRCPATH",
+        "GCC_EXEC_PREFIX",
+        "CPP",
+        "LD",
+        "LIBRARY_PATH",
+        "CPATH",
+        "C_INCLUDE_PATH",
+        "CPLUS_INCLUDE_PATH",
+        "LESSKEY",
+        "NETRC",
+        "MANOPT",
+        "SYSTEMD_PAGER",
         // Names a pager, editor, interpreter or resolver reads to run a program
         // or to find its configuration.
         "LESSOPEN",
@@ -10178,6 +10272,9 @@ pub(crate) fn env_name_steers_children(name: &str) -> bool {
     const PREFIXES: &[&str] = &[
         "IRONSHELL_",
         "IRONGATE_",
+        // `KUBECTL_EXTERNAL_DIFF` and `KUBECTL_PLUGINS_PATH` run a program.
+        "KUBECTL_",
+        "OLLAMA_",
         "GIT_",
         "LD_",
         "DYLD_",
@@ -10370,6 +10467,43 @@ fn redact_str_counted(s: &str) -> (String, usize) {
             .into_owned();
         count += replaced;
     }
+    if AUTH_HEADER_RE.is_match(&cur) {
+        let mut replaced = 0usize;
+        cur = AUTH_HEADER_RE
+            .replace_all(&cur, |caps: &regex::Captures| {
+                let value = &caps[3];
+                let scheme = caps.get(2).map_or("", |m| m.as_str());
+                let word = value.trim_end_matches(')');
+                if word == REDACTION_MARKER
+                    || is_capability_token(word)
+                    || crate::signature::Ty::is_type_name(word)
+                {
+                    return caps[0].to_string();
+                }
+                // With no scheme the value is prose ("authorization: required")
+                // unless it is long or holds a digit.
+                if scheme.is_empty()
+                    && value.len() < 12
+                    && !value.chars().any(|c| c.is_ascii_digit())
+                {
+                    return caps[0].to_string();
+                }
+                replaced += 1;
+                format!("{}{}[REDACTED]{}", &caps[1], scheme, &value[word.len()..])
+            })
+            .into_owned();
+        count += replaced;
+    }
+    let hits = COOKIE_HEADER_RE
+        .captures_iter(&cur)
+        .filter(|c| !c[2].contains(REDACTION_MARKER))
+        .count();
+    if hits > 0 {
+        cur = COOKIE_HEADER_RE
+            .replace_all(&cur, concat!("${1}", "[REDACTED]"))
+            .into_owned();
+        count += hits;
+    }
     let hits = URL_QUERY_SECRET_RE.find_iter(&cur).count();
     if hits > 0 {
         cur = URL_QUERY_SECRET_RE
@@ -10418,7 +10552,10 @@ pub fn is_capability_token(s: &str) -> bool {
 /// name with the plural `tokens` keeps its number. A string under such a name
 /// is still redacted.
 pub fn secret_name_hides_number(name: &str) -> bool {
-    is_secret_name(name) && !name.to_ascii_lowercase().contains("tokens")
+    is_secret_name(name)
+        && !name.to_ascii_lowercase().contains("tokens")
+        // `cookie_count` and `pass_len` hold numbers about a secret, not one.
+        && !(names_a_count(name) && !substring_secret_name(name))
 }
 
 /// Redact a value held under a secret-named key: each non-empty string (an
@@ -11444,6 +11581,66 @@ mod tests {
         }
         for no in ["PATH", "KEYBOARD", "MONKEY", "HOME", "USER", "LANG"] {
             assert!(!is_secret_name(no), "{no} must not be flagged");
+        }
+    }
+
+    #[test]
+    fn header_and_short_password_names_are_secret_names() {
+        for yes in [
+            "authorization",
+            "Authorization",
+            "Proxy-Authorization",
+            "cookie",
+            "Set-Cookie",
+            "x-api-key",
+            "X-Api-Key",
+            "bearer",
+            "pass",
+            "pwd",
+            "db_pass",
+            "DB_PWD",
+            "dbPass",
+            "access-key",
+        ] {
+            assert!(is_secret_name(yes), "{yes} should be a secret name");
+        }
+        for no in [
+            "passage",
+            "compass",
+            "bypass",
+            "bypass_cache",
+            "passenger",
+            "pwdx",
+            "cookiejar",
+            "author",
+        ] {
+            assert!(!is_secret_name(no), "{no} must not be flagged");
+        }
+        // A count named after a cookie is a number, not a cookie.
+        assert!(!secret_name_hides_number("cookie_count"));
+        assert!(secret_name_hides_number("pwd"));
+        assert!(secret_name_hides_number("api_key_count"));
+    }
+
+    #[test]
+    fn header_text_is_redacted_and_prose_is_not() {
+        for (text, secret) in [
+            ("Authorization: Bearer abcdef123456", "abcdef123456"),
+            ("Authorization: Basic dXNlcjpwYXNzd29yZA==", "dXNlcjpw"),
+            ("Cookie: k=v", "k=v"),
+            ("Set-Cookie: sid=abc123def456; Path=/", "abc123def456"),
+        ] {
+            let (r, changed) = redact_str(text);
+            assert!(changed, "{text}");
+            assert!(!r.contains(secret), "{text} -> {r}");
+        }
+        for text in [
+            "authorization: required",
+            "cookie: yes",
+            "Authorization header",
+        ] {
+            let (r, changed) = redact_str(text);
+            assert!(!changed, "{text} -> {r}");
         }
     }
 
@@ -12560,6 +12757,26 @@ mod steering_name_tests {
             "FZF_DEFAULT_COMMAND",
             "PIPENV_VENV_IN_PROJECT",
             "ProgramData",
+            // Round 60.
+            "KUBECTL_EXTERNAL_DIFF",
+            "kubectl_plugins_path",
+            "KUBE_EDITOR",
+            "KUBECACHEDIR",
+            "EXINIT",
+            "VIMINIT",
+            "HGRCPATH",
+            "GCC_EXEC_PREFIX",
+            "CPP",
+            "LD",
+            "LIBRARY_PATH",
+            "CPATH",
+            "C_INCLUDE_PATH",
+            "LESSKEY",
+            "NETRC",
+            "MANOPT",
+            "SYSTEMD_PAGER",
+            "OLLAMA_HOST",
+            "OLLAMA_MODELS",
         ] {
             assert!(env_name_steers_children(name), "{name} is not refused");
         }
@@ -12581,6 +12798,10 @@ mod steering_name_tests {
             "USERNAME",
             "PROMPT",
             "MY_SETTING",
+            "LDAP_URI_SHOWN",
+            "CPU_COUNT",
+            "KUBERNETES_SERVICE_HOST",
+            "LIBRARY",
         ] {
             assert!(!env_name_steers_children(name), "{name} is refused");
         }

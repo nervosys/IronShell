@@ -5576,6 +5576,9 @@ fn bi_http_get(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
     };
     // A URL the SSRF policy refuses by its host text is refused before the
     // approval gate, so no token is issued that approves nothing.
+    // A URL that is not an absolute http(s) URL is a bad argument, not a
+    // request to approve.
+    web_http_url("http_get", &url)?;
     crate::security::refuse_literal_internal_url("http_get", &url)?;
     guard_network("http_get", &url)?;
     // Each hop is checked, and connected to at the address its check accepted,
@@ -49615,6 +49618,9 @@ fn web_http_url(builtin: &str, text: &str) -> Result<String> {
             &format!("a {} URL", parsed.scheme()),
         ));
     }
+    // An address the SSRF policy refuses by its text is refused here, before
+    // the caller reaches the approval gate, so no token is issued for it.
+    crate::security::refuse_literal_internal_url(builtin, parsed.as_str())?;
     Ok(parsed.to_string())
 }
 
@@ -71573,6 +71579,17 @@ pub fn bi_rmdir(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
                     "that path is a file; remove it with rm(path)",
                 ));
             }
+            // Without `recursive` a directory with anything in it is not
+            // removed, so the call is refused before the approval gate.
+            Ok(m) if m.is_dir() && !recursive => {
+                if std::fs::read_dir(&path).is_ok_and(|mut d| d.next().is_some()) {
+                    return Err(crate::safety::bad_state_with_hint(
+                        "rmdir",
+                        &format!("`{path}` is not empty"),
+                        "pass true as the second argument to remove it and its contents",
+                    ));
+                }
+            }
             _ => {}
         }
     }
@@ -79358,6 +79375,7 @@ fn bi_wget_download(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
             &format!("the scheme {}", parsed.scheme()),
         ));
     }
+    crate::security::refuse_literal_internal_url("wget_download", &url)?;
     guard_network("wget_download", &url)?;
     let output = match args.get(1) {
         Some(Value::Str(s)) => s.clone(),

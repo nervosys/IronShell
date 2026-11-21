@@ -1723,9 +1723,15 @@ pub fn refuse_literal_internal_url(builtin: &str, url_str: &str) -> Result<()> {
     let loopback_name = ["localhost", "127.0.0.1", "::1", "[::1]"]
         .iter()
         .any(|n| host.eq_ignore_ascii_case(n));
-    let names_this_machine = ["localhost", "127.0.0.1", "::1", "0.0.0.0", "[::]"]
-        .iter()
-        .any(|n| host.eq_ignore_ascii_case(n));
+    // RFC 6761: `localhost`, `localhost.` and every `*.localhost` name is this
+    // machine, whatever a resolver says.
+    let bare = host.trim_end_matches('.').to_ascii_lowercase();
+    let names_localhost = bare == "localhost" || bare.ends_with(".localhost");
+    let names_this_machine = names_localhost
+        || ["127.0.0.1", "::1", "0.0.0.0", "[::]"]
+            .iter()
+            .any(|n| host.eq_ignore_ascii_case(n));
+    let loopback_name = loopback_name || names_localhost;
     if names_this_machine && !(exempt && loopback_name) {
         return Err(crate::safety::policy_deny(
             builtin,
@@ -1777,6 +1783,7 @@ pub fn check_http_url(builtin: &str, url_str: &str) -> Result<CheckedHttpUrl> {
     let host = parsed
         .host_str()
         .ok_or_else(|| crate::safety::bad_arg(builtin, "a URL with a host", "none"))?;
+    refuse_literal_internal_url(builtin, url_str)?;
     let exempt = loopback_allowed_for_tests();
 
     // Block localhost variants
@@ -1813,10 +1820,12 @@ pub fn check_http_url(builtin: &str, url_str: &str) -> Result<CheckedHttpUrl> {
             return Err(crate::safety::policy_deny(
                 builtin,
                 format!(
-                    "access to internal address {ip} (resolved from {host}) is blocked \
+                    "the host {host} resolved to the internal address {ip}, which is blocked \
                      (SSRF protection)"
                 ),
-                "this is a security policy, not a malformed call; use a public host",
+                "the name resolves to an address inside this machine or a private network; \
+                 this is a security policy, and no approval or IRONSHELL_NET_ALLOW setting lifts it, \
+                 so use a host that resolves to a public address",
             ));
         }
     }
