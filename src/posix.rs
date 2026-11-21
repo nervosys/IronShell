@@ -5055,6 +5055,18 @@ fn printf(args: &[String], sink: &mut Sink) -> Util {
         let mut i = 0;
         while i < fmt.len() {
             let c = fmt[i];
+            if c == '\\' && matches!(fmt.get(i + 1), Some('0'..='7')) {
+                // `\NNN` (and `\0NNN`) is the byte of up to three octal digits.
+                let mut end = i + 1;
+                let mut v = 0u32;
+                while end < fmt.len() && end < i + 4 && matches!(fmt[end], '0'..='7') {
+                    v = v * 8 + (fmt[end] as u32 - '0' as u32);
+                    end += 1;
+                }
+                out.push_str(&String::from_utf8_lossy(&[v as u8]));
+                i = end;
+                continue;
+            }
             if c == '\\' {
                 // `\xHH` takes up to two hex digits after the `x`.
                 let mut end = (i + 2).min(fmt.len());
@@ -5096,10 +5108,36 @@ fn printf(args: &[String], sink: &mut Sink) -> Util {
                 i += 1;
             }
             // What follows the flags: the width, then `.` and the precision.
+            // A `*` takes the width, or after the `.` the precision, from the
+            // next argument; a negative width means `-` and a width of its
+            // absolute value, a negative precision is none at all.
             let mut spec = String::new();
             while let Some(&f) = fmt.get(i) {
                 if f.is_ascii_digit() || f == '.' {
                     spec.push(f);
+                    i += 1;
+                } else if f == '*' {
+                    let star = rest.next();
+                    consumed |= star.is_some();
+                    let n = star.map_or(0, |a| {
+                        let (n, complaint) = printf_int_arg(a);
+                        if let Some(c) = complaint {
+                            complaints.push(format!("printf: {a}: {c}"));
+                        }
+                        n
+                    });
+                    if spec.contains('.') {
+                        if n >= 0 {
+                            spec.push_str(&n.to_string());
+                        } else {
+                            spec.pop();
+                        }
+                    } else if n < 0 {
+                        left = true;
+                        spec.push_str(&n.unsigned_abs().to_string());
+                    } else {
+                        spec.push_str(&n.to_string());
+                    }
                     i += 1;
                 } else {
                     break;
@@ -5394,6 +5432,86 @@ fn c_general(v: f64, precision: usize, upper: bool, alt: bool) -> String {
     }
 }
 
+/// `test -b`, `-c`, `-p` and `-S`: a block device, character device, FIFO or
+/// socket. Windows has none of them, so the answer there is no.
+fn special_file(op: &str, md: &std::fs::Metadata) -> bool {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::FileTypeExt;
+        let ft = md.file_type();
+        match op {
+            "-b" => ft.is_block_device(),
+            "-c" => ft.is_char_device(),
+            "-p" => ft.is_fifo(),
+            _ => ft.is_socket(),
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (op, md);
+        false
+    }
+}
+
+/// `test -O`, `-G`, `-u`, `-g`, `-k` and `-N`: owned by the effective user or
+/// group, set-user-ID, set-group-ID, sticky, or modified since last read. They
+/// are mode and ownership facts Windows files do not have, so the answer there
+/// is no.
+fn file_property(op: &str, md: &std::fs::Metadata) -> bool {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        match op {
+            // SAFETY: geteuid and getegid take no arguments and cannot fail.
+            "-O" => md.uid() == unsafe { libc::geteuid() },
+            "-G" => md.gid() == unsafe { libc::getegid() },
+            "-u" => md.mode() & 0o4000 != 0,
+            "-g" => md.mode() & 0o2000 != 0,
+            "-k" => md.mode() & 0o1000 != 0,
+            _ => (md.mtime(), md.mtime_nsec()) > (md.atime(), md.atime_nsec()),
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (op, md);
+        false
+    }
+}
+
+/// The operators `test` reads between two operands.
+fn test_binary_op(op: &str) -> bool {
+    matches!(
+        op,
+        "=" | "=="
+            | "!="
+            | "<"
+            | ">"
+            | "-nt"
+            | "-ot"
+            | "-ef"
+            | "-eq"
+            | "-ne"
+            | "-lt"
+            | "-le"
+            | "-gt"
+            | "-ge"
+    )
+}
+
+/// The position of the last `op` in `a` that is not inside parentheses.
+fn test_top_level(a: &[String], op: &str) -> Option<usize> {
+    let mut depth = 0i32;
+    for (k, x) in a.iter().enumerate().rev() {
+        match x.as_str() {
+            ")" => depth += 1,
+            "(" => depth -= 1,
+            s if s == op && depth == 0 => return Some(k),
+            _ => {}
+        }
+    }
+    None
+}
+
 fn test(args: &[String], sink: &mut Sink) -> i32 {
     fn unary(op: &str, a: &str) -> Option<bool> {
         let md = std::fs::metadata(a);
@@ -5403,6 +5521,20 @@ fn test(args: &[String], sink: &mut Sink) -> i32 {
             "-d" => md.map(|m| m.is_dir()).unwrap_or(false),
             "-s" => md.map(|m| m.len() > 0).unwrap_or(false),
             "-r" | "-w" | "-x" => md.is_ok(),
+            "-b" | "-c" | "-p" | "-S" => md.as_ref().map(|m| special_file(op, m)).unwrap_or(false),
+            "-O" | "-G" | "-u" | "-g" | "-k" | "-N" => {
+                md.as_ref().map(|m| file_property(op, m)).unwrap_or(false)
+            }
+            // A terminal on that descriptor; any other number or text is not one.
+            "-t" => {
+                use std::io::IsTerminal;
+                match a.trim().parse::<i32>() {
+                    Ok(0) => std::io::stdin().is_terminal(),
+                    Ok(1) => std::io::stdout().is_terminal(),
+                    Ok(2) => std::io::stderr().is_terminal(),
+                    _ => false,
+                }
+            }
             "-L" | "-h" => std::fs::symlink_metadata(a)
                 .map(|m| m.file_type().is_symlink())
                 .unwrap_or(false),
@@ -5455,26 +5587,72 @@ fn test(args: &[String], sink: &mut Sink) -> i32 {
     }
     fn eval(a: &[String], sink: &mut Sink) -> Result<bool, i32> {
         // -a / -o, lowest precedence first.
-        if let Some(p) = a.iter().rposition(|x| x == "-o") {
+        if let Some(p) = test_top_level(a, "-o") {
             if p > 0 && p + 1 < a.len() {
                 return Ok(eval(&a[..p], sink)? || eval(&a[p + 1..], sink)?);
             }
         }
-        if let Some(p) = a.iter().rposition(|x| x == "-a") {
+        if let Some(p) = test_top_level(a, "-a") {
             if p > 0 && p + 1 < a.len() {
                 return Ok(eval(&a[..p], sink)? && eval(&a[p + 1..], sink)?);
+            }
+        }
+        // `( EXPR )`. With three words and an operator in the middle, POSIX
+        // reads the operator first: `[ ( = ) ]` compares two strings.
+        if a.len() >= 3
+            && a[0] == "("
+            && a[a.len() - 1] == ")"
+            && !(a.len() == 3 && test_binary_op(&a[1]))
+        {
+            let mut depth = 0i32;
+            let mut closes_last = true;
+            for (k, x) in a.iter().enumerate() {
+                match x.as_str() {
+                    "(" => depth += 1,
+                    ")" => {
+                        depth -= 1;
+                        if depth == 0 && k + 1 < a.len() {
+                            closes_last = false;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            if closes_last {
+                return eval(&a[1..a.len() - 1], sink);
             }
         }
         match a {
             [] => Ok(false),
             [x] => Ok(!x.is_empty()),
-            [bang, rest @ ..] if bang == "!" => Ok(!eval(rest, sink)?),
+            // Three words with an operator in the middle are a comparison, even
+            // when the first is `!`: `[ ! = ! ]` is true.
+            [bang, rest @ ..] if bang == "!" && !(a.len() == 3 && test_binary_op(&a[1])) => {
+                Ok(!eval(rest, sink)?)
+            }
             [op, x] => {
                 // A file test on a path outside the jail is refused, not answered:
                 // the answer would say whether the path exists outside.
                 let file_test = matches!(
                     op.as_str(),
-                    "-e" | "-f" | "-d" | "-s" | "-r" | "-w" | "-x" | "-L" | "-h"
+                    "-e" | "-f"
+                        | "-d"
+                        | "-s"
+                        | "-r"
+                        | "-w"
+                        | "-x"
+                        | "-L"
+                        | "-h"
+                        | "-b"
+                        | "-c"
+                        | "-p"
+                        | "-S"
+                        | "-O"
+                        | "-G"
+                        | "-u"
+                        | "-g"
+                        | "-k"
+                        | "-N"
                 );
                 if let Some(refusal) = file_test.then(|| jail_refusal("test", x)).flatten() {
                     sink.eline(&refusal);
@@ -6813,8 +6991,13 @@ fn grep(args: &[String], stdin: &mut Input, sink: &mut Sink) -> Util {
                     // command line too.
                 } else if recursive {
                     walk_files(op, op, &mut targets, false, &filter);
-                } else if !f('s') {
-                    sink.eline(&format!("grep: {op}: Is a directory"));
+                } else {
+                    // GNU grep says so (unless `-s`) and exits 2, as for a
+                    // file it cannot read.
+                    if !f('s') {
+                        sink.eline(&format!("grep: {op}: Is a directory"));
+                    }
+                    status_err = true;
                 }
             } else if (p.exists() || op == "/dev/null") && filter.skips_file(&operand_names(op)) {
                 // `--include` and `--exclude` judge a file named on the command
@@ -7075,6 +7258,9 @@ struct SortKey {
     end: Option<usize>,
     numeric: bool,
     reverse: bool,
+    /// The key has an ordering option of its own (`n` or `r`), so the global
+    /// `-n`, `-f` and `-r` do not apply to it, as in GNU sort.
+    own: bool,
 }
 
 /// The options `sort` runs in-process. Anything else (`-h`, `-b`, `-k2.3`, long
@@ -7134,6 +7320,7 @@ fn sort_key(spec: &str) -> Option<SortKey> {
         end,
         numeric: n1 || n2,
         reverse: r1 || r2,
+        own: n1 || n2 || r1 || r2,
     })
 }
 
@@ -7335,17 +7522,19 @@ fn sort(args: &[String], stdin: &mut Input, sink: &mut Sink) -> Util {
         for key in &spec.keys {
             let a = sort_key_text(&lines[i], &fields[i], key);
             let b = sort_key_text(&lines[j], &fields[j], key);
-            let numeric = key.numeric || spec.numeric;
+            // A key with an option of its own takes none of the global ones.
+            let numeric = key.numeric || (!key.own && spec.numeric);
             let o = if numeric {
                 numeric_prefix(a)
                     .partial_cmp(&numeric_prefix(b))
                     .unwrap_or(std::cmp::Ordering::Equal)
-            } else if spec.fold {
+            } else if spec.fold && !key.own {
                 collate(&a.to_uppercase(), &b.to_uppercase())
             } else {
                 collate(a, b)
             };
-            let o = if key.reverse { o.reverse() } else { o };
+            let reverse = if key.own { key.reverse } else { spec.reverse };
+            let o = if reverse { o.reverse() } else { o };
             if o != std::cmp::Ordering::Equal {
                 return o;
             }
@@ -7354,23 +7543,22 @@ fn sort(args: &[String], stdin: &mut Input, sink: &mut Sink) -> Util {
     };
     // Lines that compare equal fall back to comparing the whole line (GNU's
     // last resort), unless `-s` or `-u`, which keep input order. A global `-r`
-    // reverses the whole comparison, the fallback included; a stable tie keeps
-    // its input order.
+    // reverses the whole-line comparison and, with no keys, the line itself; with
+    // keys it reaches only the keys that have no option of their own (see
+    // `by_keys`). A stable tie keeps its input order.
     let last_resort = !spec.stable && !spec.unique;
+    let global = |o: std::cmp::Ordering| if spec.reverse { o.reverse() } else { o };
     let mut order: Vec<usize> = (0..lines.len()).collect();
     order.sort_by(|&i, &j| {
-        let o = by_keys(i, j).then_with(|| {
+        let k = by_keys(i, j);
+        let k = if spec.keys.is_empty() { global(k) } else { k };
+        k.then_with(|| {
             if last_resort {
-                collate(&lines[i], &lines[j])
+                global(collate(&lines[i], &lines[j]))
             } else {
                 std::cmp::Ordering::Equal
             }
-        });
-        if spec.reverse {
-            o.reverse()
-        } else {
-            o
-        }
+        })
     });
     if spec.unique {
         order.dedup_by(|&mut j, &mut i| by_keys(i, j) == std::cmp::Ordering::Equal);
@@ -7497,10 +7685,18 @@ fn cut(args: &[String], stdin: &mut Input, sink: &mut Sink) -> Util {
             if fields.is_none() {
                 return Util::Decline;
             }
+            if fields.iter().flatten().any(|&(a, b)| a > b) {
+                sink.eline("cut: invalid decreasing range\nTry 'cut --help' for more information.");
+                return Util::Done(1);
+            }
         } else if a.starts_with("-c") || a.starts_with("-b") {
             chars = take(&mut i, "-c").and_then(|l| cut_list(&l));
             if chars.is_none() {
                 return Util::Decline;
+            }
+            if chars.iter().flatten().any(|&(a, b)| a > b) {
+                sink.eline("cut: invalid decreasing range\nTry 'cut --help' for more information.");
+                return Util::Done(1);
             }
         } else if a == "-s" {
             only_delimited = true;
@@ -7565,6 +7761,14 @@ enum SedCmd {
     Delete,
     Quit,
     Subst(regex::bytes::Regex, Vec<RepItem>, bool, bool, usize),
+    /// `{`: the index of its matching `}` in the program; an unselected block
+    /// jumps there.
+    Block(usize),
+    EndBlock,
+    /// `a`, `i` and `c`: the text, with its closing newline.
+    Append(Vec<u8>),
+    Insert(Vec<u8>),
+    Change(Vec<u8>),
 }
 
 /// One piece of an `s` command's replacement, after its escapes are read.
@@ -7617,30 +7821,6 @@ struct SedLine {
     a2: Option<Addr>,
     cmd: SedCmd,
     active: bool,
-}
-
-/// The parts of an `s` command's body, split at its delimiter. A `\` keeps the
-/// character after it in the part it is in, so an escaped delimiter does not end
-/// a part; the parts keep their backslashes for [`unescape_delim`] and the
-/// replacement's own escapes to read.
-fn split_s_parts(body: &str, sep: char) -> Vec<String> {
-    let mut parts = Vec::new();
-    let mut cur = String::new();
-    let mut it = body.chars();
-    while let Some(c) = it.next() {
-        match c {
-            '\\' => {
-                cur.push('\\');
-                if let Some(n) = it.next() {
-                    cur.push(n);
-                }
-            }
-            c if c == sep => parts.push(std::mem::take(&mut cur)),
-            c => cur.push(c),
-        }
-    }
-    parts.push(cur);
-    parts
 }
 
 /// A pattern with each `\<delimiter>` read as the delimiter character itself,
@@ -7810,6 +7990,265 @@ fn sed_in_place(
     Util::Done(status)
 }
 
+/// One address of a sed command: a line number, `$` or `/re/`.
+fn sed_addr(
+    c: &[char],
+    k: &mut usize,
+    to_re: &dyn Fn(&str) -> Option<regex::bytes::Regex>,
+) -> Result<Option<Addr>, ()> {
+    match c.get(*k) {
+        Some(d) if d.is_ascii_digit() => {
+            let mut n = 0usize;
+            while let Some(d) = c.get(*k).filter(|d| d.is_ascii_digit()) {
+                n = n * 10 + (*d as usize - '0' as usize);
+                *k += 1;
+            }
+            Ok(Some(Addr::Line(n)))
+        }
+        Some('$') => {
+            *k += 1;
+            Ok(Some(Addr::Last))
+        }
+        Some('/') => {
+            let end = c[*k + 1..].iter().position(|&x| x == '/').ok_or(())?;
+            let pat: String = c[*k + 1..*k + 1 + end].iter().collect();
+            *k += end + 2;
+            Ok(Some(Addr::Re(to_re(&pat).ok_or(())?)))
+        }
+        _ => Ok(None),
+    }
+}
+
+/// Reads a sed script (the `-e` pieces joined by newlines) into a flat program:
+/// commands are separated by `;` or a newline, `{` and `}` bracket a block
+/// (kept as the `Block` and `EndBlock` entries), and `a`, `i`, `c` take their
+/// text from the rest of the line, or from the next line after `a\`, a line
+/// ending in `\` continuing it. `Err` says what makes it decline.
+fn sed_parse(script: &str, ere: bool) -> Result<Vec<SedLine>, String> {
+    let to_re = |p: &str| -> Option<regex::bytes::Regex> {
+        let r = if ere {
+            ere_to_regex(p)?
+        } else {
+            bre_to_regex(p)?
+        };
+        regex::bytes::Regex::new(&r).ok()
+    };
+    let c: Vec<char> = script.chars().collect();
+    // The text from `at` to the end of its command, for a refusal message.
+    let segment = |at: usize| -> String {
+        let end = c[at..]
+            .iter()
+            .position(|&x| x == ';' || x == '\n')
+            .map_or(c.len(), |e| at + e);
+        c[at..end].iter().collect::<String>().trim().to_string()
+    };
+    let mut prog: Vec<SedLine> = Vec::new();
+    let mut open: Vec<usize> = Vec::new();
+    let mut k = 0;
+    loop {
+        while k < c.len() && (c[k].is_whitespace() || c[k] == ';') {
+            k += 1;
+        }
+        if k >= c.len() {
+            break;
+        }
+        let start = k;
+        let Ok(a1) = sed_addr(&c, &mut k, &to_re) else {
+            return Err(format!("the address `{}`", segment(start)));
+        };
+        let mut a2 = None;
+        if a1.is_some() && c.get(k) == Some(&',') {
+            k += 1;
+            match sed_addr(&c, &mut k, &to_re) {
+                Ok(Some(a)) => a2 = Some(a),
+                _ => return Err(format!("the address range `{}`", segment(start))),
+            }
+        }
+        while matches!(c.get(k), Some(' ' | '\t')) {
+            k += 1;
+        }
+        let Some(&cc) = c.get(k) else {
+            return Err(format!("the address `{}` with no command", segment(start)));
+        };
+        if cc == '\n' || cc == ';' {
+            return Err(format!("the address `{}` with no command", segment(start)));
+        }
+        let at = k;
+        k += 1;
+        // After `p`, `d`, `q`, `{` or `}` the command ends at a separator or a `}`.
+        let ends_here = |k: &mut usize| -> bool {
+            while matches!(c.get(*k), Some(' ' | '\t')) {
+                *k += 1;
+            }
+            matches!(c.get(*k), None | Some(';' | '\n' | '}'))
+        };
+        let cmd = match cc {
+            '{' => {
+                open.push(prog.len());
+                SedCmd::Block(0)
+            }
+            '}' => {
+                if a1.is_some() {
+                    return Err(format!("sed command `{}`", segment(start)));
+                }
+                let Some(b) = open.pop() else {
+                    return Err("sed command `}` with no `{`".to_string());
+                };
+                prog[b].cmd = SedCmd::Block(prog.len());
+                SedCmd::EndBlock
+            }
+            'p' | 'd' | 'q' => {
+                if !ends_here(&mut k) {
+                    return Err(format!("sed command `{}`", segment(at)));
+                }
+                match cc {
+                    'p' => SedCmd::Print,
+                    'd' => SedCmd::Delete,
+                    _ => SedCmd::Quit,
+                }
+            }
+            'a' | 'i' | 'c' => {
+                while matches!(c.get(k), Some(' ' | '\t')) {
+                    k += 1;
+                }
+                if c.get(k) == Some(&'\\') {
+                    k += 1;
+                    // `a\` and a newline: the text starts on the next line.
+                    let mut j = k;
+                    while matches!(c.get(j), Some(' ' | '\t')) {
+                        j += 1;
+                    }
+                    if c.get(j) == Some(&'\n') {
+                        k = j + 1;
+                    }
+                }
+                if k >= c.len() {
+                    return Err(format!("sed command `{}` with no text", segment(at)));
+                }
+                let mut text = String::new();
+                while k < c.len() && c[k] != '\n' {
+                    if c[k] == '\\' {
+                        k += 1;
+                    }
+                    if let Some(&ch) = c.get(k) {
+                        text.push(ch);
+                        k += 1;
+                    }
+                }
+                text.push('\n');
+                let bytes = text.into_bytes();
+                match cc {
+                    'a' => SedCmd::Append(bytes),
+                    'i' => SedCmd::Insert(bytes),
+                    _ => SedCmd::Change(bytes),
+                }
+            }
+            's' => {
+                let Some(&sep) = c.get(k) else {
+                    return Err(format!("sed command `{}`", segment(at)));
+                };
+                if sep == '\n' || sep == '\\' || sep == ';' {
+                    return Err(format!("sed command `{}`", segment(at)));
+                }
+                k += 1;
+                // The pattern and the replacement, each closed by an unescaped
+                // delimiter; a backslash keeps the character after it.
+                let mut parts = [String::new(), String::new()];
+                let mut closed = 0;
+                while closed < 2 && k < c.len() {
+                    let ch = c[k];
+                    k += 1;
+                    if ch == '\\' {
+                        parts[closed].push('\\');
+                        if let Some(&n) = c.get(k) {
+                            parts[closed].push(n);
+                            k += 1;
+                        }
+                    } else if ch == sep {
+                        closed += 1;
+                    } else {
+                        parts[closed].push(ch);
+                    }
+                }
+                if closed < 2 {
+                    return Err(format!("the s command with its parts not split by `{sep}`"));
+                }
+                let [pat, rep] = parts;
+                let mut fl = String::new();
+                while let Some(&f) = c.get(k).filter(|f| f.is_ascii_alphanumeric()) {
+                    fl.push(f);
+                    k += 1;
+                }
+                let pat = unescape_delim(&pat, sep, ere);
+                let digits: String = fl.chars().take_while(char::is_ascii_digit).collect();
+                let tail = &fl[digits.len()..];
+                if let Some(f) = tail.chars().find(|f| !matches!(f, 'g' | 'p')) {
+                    return Err(format!("the s command's flag `{f}`"));
+                }
+                if !ends_here(&mut k) {
+                    return Err(format!("sed command `{}`", segment(at)));
+                }
+                let nth = if digits.is_empty() {
+                    1
+                } else {
+                    match digits.parse::<usize>() {
+                        Ok(n) if n >= 1 => n,
+                        _ => return Err(format!("the s command's occurrence number `{digits}`")),
+                    }
+                };
+                let Some(re) = to_re(pat.as_str()) else {
+                    return Err(format!("the regular expression `{pat}`"));
+                };
+                // `&` is the match and `\N` a group; the case escapes are
+                // applied to the text they reach (see `expand_rep`).
+                let mut items: Vec<RepItem> = Vec::new();
+                let mut it = rep.chars();
+                while let Some(ch) = it.next() {
+                    let text = match ch {
+                        '&' => {
+                            items.push(RepItem::Group(0));
+                            continue;
+                        }
+                        '\\' => match it.next() {
+                            Some(d @ '1'..='9') => {
+                                items.push(RepItem::Group(d as usize - '0' as usize));
+                                continue;
+                            }
+                            Some(c @ ('U' | 'L' | 'u' | 'l' | 'E')) => {
+                                items.push(RepItem::Case(c));
+                                continue;
+                            }
+                            Some('n') => '\n',
+                            Some('t') => '\t',
+                            Some(o) => o,
+                            None => '\\',
+                        },
+                        o => o,
+                    };
+                    let mut b = [0; 4];
+                    let bytes = text.encode_utf8(&mut b).as_bytes();
+                    match items.last_mut() {
+                        Some(RepItem::Text(t)) => t.extend_from_slice(bytes),
+                        _ => items.push(RepItem::Text(bytes.to_vec())),
+                    }
+                }
+                SedCmd::Subst(re, items, tail.contains('g'), tail.contains('p'), nth)
+            }
+            _ => return Err(format!("sed command `{}`", segment(at))),
+        };
+        prog.push(SedLine {
+            a1,
+            a2,
+            cmd,
+            active: false,
+        });
+    }
+    if !open.is_empty() {
+        return Err("a `{` with no `}`".to_string());
+    }
+    Ok(prog)
+}
+
 fn sed(args: &[String], stdin: &mut Input, sink: &mut Sink) -> Util {
     let mut quiet = false;
     let mut ere = false;
@@ -7854,144 +8293,10 @@ fn sed(args: &[String], stdin: &mut Input, sink: &mut Sink) -> Util {
         }
         i += 1;
     }
-    let to_re = |p: &str| -> Option<regex::bytes::Regex> {
-        let r = if ere {
-            ere_to_regex(p)?
-        } else {
-            bre_to_regex(p)?
-        };
-        regex::bytes::Regex::new(&r).ok()
+    let mut prog = match sed_parse(&scripts.join("\n"), ere) {
+        Ok(prog) => prog,
+        Err(why) => return Util::DeclineFor(why),
     };
-    let mut prog: Vec<SedLine> = Vec::new();
-    for script in &scripts {
-        for raw in script.split(['\n', ';']) {
-            let s = raw.trim();
-            if s.is_empty() {
-                continue;
-            }
-            let c: Vec<char> = s.chars().collect();
-            let mut k = 0;
-            let addr = |k: &mut usize| -> Result<Option<Addr>, ()> {
-                match c.get(*k) {
-                    Some(d) if d.is_ascii_digit() => {
-                        let mut n = 0usize;
-                        while let Some(d) = c.get(*k).filter(|d| d.is_ascii_digit()) {
-                            n = n * 10 + (*d as usize - '0' as usize);
-                            *k += 1;
-                        }
-                        Ok(Some(Addr::Line(n)))
-                    }
-                    Some('$') => {
-                        *k += 1;
-                        Ok(Some(Addr::Last))
-                    }
-                    Some('/') => {
-                        let end = c[*k + 1..].iter().position(|&x| x == '/').ok_or(())?;
-                        let pat: String = c[*k + 1..*k + 1 + end].iter().collect();
-                        *k += end + 2;
-                        Ok(Some(Addr::Re(to_re(&pat).ok_or(())?)))
-                    }
-                    _ => Ok(None),
-                }
-            };
-            let Ok(a1) = addr(&mut k) else {
-                return Util::DeclineFor(format!("the address `{s}`"));
-            };
-            let mut a2 = None;
-            if a1.is_some() && c.get(k) == Some(&',') {
-                k += 1;
-                match addr(&mut k) {
-                    Ok(Some(a)) => a2 = Some(a),
-                    _ => return Util::DeclineFor(format!("the address range `{s}`")),
-                }
-            }
-            let rest: String = c[k..].iter().collect();
-            let rest = rest.trim();
-            let cmd = match rest {
-                "p" => SedCmd::Print,
-                "d" => SedCmd::Delete,
-                "q" => SedCmd::Quit,
-                r if r.starts_with('s') && r.len() > 1 => {
-                    let sep = r[1..].chars().next().unwrap_or('/');
-                    let body = split_s_parts(&r[1 + sep.len_utf8()..], sep);
-                    let [pat, rep, fl] = body.as_slice() else {
-                        return Util::DeclineFor(format!(
-                            "the s command with its parts not split by `{sep}`"
-                        ));
-                    };
-                    let pat = unescape_delim(pat, sep, ere);
-                    let fl: &str = fl;
-                    let digits: String = fl.chars().take_while(char::is_ascii_digit).collect();
-                    let tail = &fl[digits.len()..];
-                    if let Some(f) = tail.chars().find(|f| !matches!(f, 'g' | 'p')) {
-                        return Util::DeclineFor(format!("the s command's flag `{f}`"));
-                    }
-                    let nth = if digits.is_empty() {
-                        1
-                    } else {
-                        match digits.parse::<usize>() {
-                            Ok(n) if n >= 1 => n,
-                            _ => {
-                                return Util::DeclineFor(format!(
-                                    "the s command's occurrence number `{digits}`"
-                                ))
-                            }
-                        }
-                    };
-                    let Some(re) = to_re(pat.as_str()) else {
-                        return Util::DeclineFor(format!("the regular expression `{pat}`"));
-                    };
-                    // `&` is the match and `\N` a group; the case escapes are
-                    // applied to the text they reach (see `expand_rep`).
-                    let mut items: Vec<RepItem> = Vec::new();
-                    let mut it = rep.chars();
-                    while let Some(ch) = it.next() {
-                        let text = match ch {
-                            '&' => {
-                                items.push(RepItem::Group(0));
-                                continue;
-                            }
-                            '\\' => match it.next() {
-                                Some(d @ '1'..='9') => {
-                                    items.push(RepItem::Group(d as usize - '0' as usize));
-                                    continue;
-                                }
-                                Some(c @ ('U' | 'L' | 'u' | 'l' | 'E')) => {
-                                    items.push(RepItem::Case(c));
-                                    continue;
-                                }
-                                Some('n') => '\n',
-                                Some('t') => '\t',
-                                Some(o) => o,
-                                None => '\\',
-                            },
-                            o => o,
-                        };
-                        let mut b = [0; 4];
-                        let bytes = text.encode_utf8(&mut b).as_bytes();
-                        match items.last_mut() {
-                            Some(RepItem::Text(t)) => t.extend_from_slice(bytes),
-                            _ => items.push(RepItem::Text(bytes.to_vec())),
-                        }
-                    }
-                    SedCmd::Subst(re, items, tail.contains('g'), tail.contains('p'), nth)
-                }
-                _ => {
-                    return Util::DeclineFor(if rest.is_empty() {
-                        format!("the address `{s}` with no command")
-                    } else {
-                        format!("sed command `{rest}`")
-                    })
-                }
-            };
-            prog.push(SedLine {
-                a1,
-                a2,
-                cmd,
-                active: false,
-            });
-        }
-    }
     if prog.is_empty() {
         return Util::Decline;
     }
@@ -8042,6 +8347,15 @@ fn sed_run(
             dst.push(b'\n');
         }
     };
+    // `a`, `i` and `c` text goes out as it is, after any newline the last line
+    // went without.
+    let put = |dst: &mut Vec<u8>, missing: &mut bool, text: &[u8]| {
+        if *missing {
+            dst.push(b'\n');
+            *missing = false;
+        }
+        dst.extend_from_slice(text);
+    };
     let lines = lines_of(data);
     let n = lines.len();
     let hits = |a: &Addr, ln: usize, line: &[u8]| match a {
@@ -8054,7 +8368,11 @@ fn sed_run(
         let ln = idx + 1;
         let mut pattern = line.to_vec();
         let mut deleted = false;
-        for sl in prog.iter_mut() {
+        // `a` text waits for the end of the cycle.
+        let mut appended: Vec<Vec<u8>> = Vec::new();
+        let mut pc = 0;
+        while pc < prog.len() {
+            let sl = &mut prog[pc];
             let selected = match (&sl.a1, &sl.a2) {
                 (None, _) => true,
                 (Some(a), None) => hits(a, ln, &pattern),
@@ -8081,10 +8399,27 @@ fn sed_run(
                 }
             };
             if !selected {
+                // An unselected block is skipped to its `}`.
+                pc = match sl.cmd {
+                    SedCmd::Block(end) => end,
+                    _ => pc + 1,
+                };
                 continue;
             }
+            pc += 1;
             match &sl.cmd {
+                SedCmd::Block(_) | SedCmd::EndBlock => {}
                 SedCmd::Print => emit(out, &mut missing, &pattern, ln == n),
+                SedCmd::Append(t) => appended.push(t.clone()),
+                SedCmd::Insert(t) => put(out, &mut missing, t),
+                SedCmd::Change(t) => {
+                    // Over a range the text goes out once, at its end.
+                    if sl.a2.is_none() || !sl.active {
+                        put(out, &mut missing, t);
+                    }
+                    deleted = true;
+                    break;
+                }
                 SedCmd::Delete => {
                     deleted = true;
                     break;
@@ -8092,6 +8427,9 @@ fn sed_run(
                 SedCmd::Quit => {
                     if !quiet {
                         emit(out, &mut missing, &pattern, ln == n);
+                    }
+                    for t in &appended {
+                        put(out, &mut missing, t);
                     }
                     quit = true;
                     break 'lines;
@@ -8119,6 +8457,9 @@ fn sed_run(
         }
         if !deleted && !quiet {
             emit(out, &mut missing, &pattern, ln == n);
+        }
+        for t in &appended {
+            put(out, &mut missing, t);
         }
     }
     quit
