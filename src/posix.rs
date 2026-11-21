@@ -2069,6 +2069,14 @@ impl Input {
             self.eof = true;
         }
     }
+    /// Put `n` bytes back that `read_all` took, when the input is a regular
+    /// file: GNU `head`, `grep -m` and `sed q` seek back to just after what
+    /// they used, so the next reader of the same file goes on from there.
+    fn unread(&mut self, n: usize) {
+        if self.file {
+            self.pos = self.pos.saturating_sub(n);
+        }
+    }
     fn read_all(&mut self) -> Vec<u8> {
         self.fill_all();
         let out = self.data[self.pos..].to_vec();
@@ -2215,21 +2223,90 @@ impl Dest {
             Dest::Out => sink.out.extend_from_slice(data),
             Dest::Err => sink.ewrite(data),
             Dest::Null => {}
-            Dest::File(path, append) => write_file(path, data, *append)?,
+            // The file was opened (created or truncated) before the command
+            // ran; see `open_target`.
+            Dest::File(path, append) => write_opened(path, data, *append)?,
         }
         Ok(())
     }
 }
 
-/// Bash opens every file of a command's redirections, left to right, so one
-/// that a later redirection of the same descriptor replaces is still created
-/// (or truncated, unless it is appended to). `old` is the destination being
-/// replaced; it is opened now unless a descriptor in `keep` still points at it,
-/// since that descriptor's own write opens it.
-fn open_replaced(old: &Dest, keep: &[&Dest]) -> Result<(), String> {
-    match old {
-        Dest::File(path, append) if !keep.contains(&old) => write_file(path, b"", *append),
-        _ => Ok(()),
+thread_local! {
+    /// The files that redirections and `tee` have opened in the command or
+    /// pipeline now running, with their length before (`None`: they did not
+    /// exist). The journal is told about each file once, and an endless run
+    /// that is refused puts a file back as it was (see `undo_endless_writes`).
+    static OPENED: std::cell::RefCell<Vec<(String, Option<u64>)>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+    /// Files a pipeline opened for its later stages before the first one ran
+    /// (bash starts every stage at once, so `ls | sort > o` lists `o`); the
+    /// stage that owns the redirection does not open its file again.
+    static PREOPENED: std::cell::RefCell<Vec<String>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// Open the file of a `>` (create or truncate) or `>>` (create) before its
+/// command runs, as bash does, so the command sees the file as bash's does
+/// (`ls > o` lists `o`, `sort f > f` reads nothing). The journal records the
+/// file's earlier state first, as one step with the write that follows.
+fn open_target(path: &str, append: bool) -> Result<(), String> {
+    let res = open_target_inner(path, append);
+    // Windows says "Permission denied" for a directory, and a name ending in
+    // `/` is one to bash whatever it names.
+    match res {
+        Err(_) if path.ends_with('/') || Path::new(path).is_dir() => {
+            Err(format!("{SHELL_NAME}: {path}: Is a directory"))
+        }
+        other => other,
+    }
+}
+
+thread_local! {
+    /// The regular file that standard output of the command now running is
+    /// (`>` or `>>`), so `cat` can refuse to read its own output as GNU does.
+    static STDOUT_FILE: std::cell::RefCell<Option<String>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+fn open_target_inner(path: &str, append: bool) -> Result<(), String> {
+    let known = OPENED.with(|o| o.borrow().iter().any(|(p, _)| p == path));
+    let mark = crate::journal::mark();
+    if !known {
+        let before = std::fs::metadata(path).ok().map(|m| m.len());
+        crate::journal::record_paths(
+            "posix",
+            crate::safety::Effect::WriteLocal,
+            vec![path.to_string()],
+        );
+        OPENED.with(|o| o.borrow_mut().push((path.to_string(), before)));
+    }
+    let res = write_file_unrecorded(path, b"", append);
+    if res.is_err() && !known {
+        crate::journal::rollback_to(mark);
+        OPENED.with(|o| o.borrow_mut().pop());
+    }
+    res
+}
+
+/// Write the output of a command into the file `open_target` opened for it:
+/// from its start for `>` (the file is empty, or holds what the command itself
+/// wrote), at its end for `>>`. A file the command removed meanwhile takes
+/// the data, as bash's open descriptor does, and is not made again.
+fn write_opened(path: &str, data: &[u8], append: bool) -> Result<(), String> {
+    note_endless_write(path, append);
+    if data.is_empty() {
+        return Ok(());
+    }
+    let mut opts = std::fs::OpenOptions::new();
+    if append {
+        opts.append(true);
+    } else {
+        opts.write(true);
+    }
+    match opts.open(path).and_then(|mut f| f.write_all(data)) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(format!("{SHELL_NAME}: {path}: {}", io_reason(&e))),
     }
 }
 
@@ -2344,6 +2421,91 @@ thread_local! {
         const { std::cell::RefCell::new(Vec::new()) };
 }
 
+/// Whether the subset runs `name` itself, before any program is looked for.
+fn runs_in_process(name: &str, has_env: bool) -> bool {
+    matches!(
+        name,
+        "true"
+            | ":"
+            | "false"
+            | "exit"
+            | "break"
+            | "continue"
+            | "export"
+            | "unset"
+            | "set"
+            | "shift"
+            | "cd"
+            | "read"
+            | "command"
+            | "mktemp"
+            | "pwd"
+            | "test"
+            | "["
+            | "printf"
+    ) || (SUBSET_NAMES.contains(&name) && !has_env)
+}
+
+/// Whether GNU `timeout -s` takes `s` as a signal: a decimal number up to 64,
+/// or a name (any case, one optional `SIG` prefix) from Linux's list, with
+/// `RTMIN`/`RTMAX` and an offset.
+fn valid_signal(s: &str) -> bool {
+    if !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit()) {
+        return s.parse::<u64>().is_ok_and(|n| n <= 64);
+    }
+    let up = s.to_ascii_uppercase();
+    let name = up.strip_prefix("SIG").unwrap_or(&up);
+    const NAMES: &[&str] = &[
+        "EXIT", "HUP", "INT", "QUIT", "ILL", "TRAP", "ABRT", "IOT", "BUS", "FPE", "KILL", "USR1",
+        "SEGV", "USR2", "PIPE", "ALRM", "TERM", "STKFLT", "CHLD", "CLD", "CONT", "STOP", "TSTP",
+        "TTIN", "TTOU", "URG", "XCPU", "XFSZ", "VTALRM", "PROF", "WINCH", "IO", "POLL", "PWR",
+        "SYS",
+    ];
+    if NAMES.contains(&name) {
+        return true;
+    }
+    // `RTMIN+N` and `RTMAX-N`: the real-time signals are 34 to 64.
+    let (base, rest, sign) = if let Some(r) = name.strip_prefix("RTMIN") {
+        (34i64, r, 1i64)
+    } else if let Some(r) = name.strip_prefix("RTMAX") {
+        (64i64, r, -1i64)
+    } else {
+        return false;
+    };
+    if rest.is_empty() {
+        return true;
+    }
+    let want = if sign > 0 { '+' } else { '-' };
+    match rest.strip_prefix(want) {
+        Some(n) if !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()) => n
+            .parse::<i64>()
+            .ok()
+            .map(|n| base + sign * n)
+            .is_some_and(|v| (34..=64).contains(&v)),
+        _ => false,
+    }
+}
+
+/// A `timeout` duration in seconds: a number with an optional `s`, `m`, `h`
+/// or `d`, `None` for anything else.
+fn parse_interval(duration: &str) -> Option<f64> {
+    let (num, unit) = match duration.chars().last() {
+        Some(c @ ('s' | 'm' | 'h' | 'd')) => (&duration[..duration.len() - 1], c),
+        _ => (duration, 's'),
+    };
+    match num.parse::<f64>() {
+        Ok(n) if n >= 0.0 && n.is_finite() && !num.starts_with('+') => Some(
+            n * match unit {
+                'm' => 60.0,
+                'h' => 3600.0,
+                'd' => 86400.0,
+                _ => 1.0,
+            },
+        ),
+        _ => None,
+    }
+}
+
 /// A redirection target as an absolute path, for an approval token.
 fn resolved_for_binding(path: &str) -> String {
     std::path::absolute(path)
@@ -2363,6 +2525,10 @@ struct Shell {
     /// report errors itself) and taken by the command that contains it, which
     /// is then refused rather than run with part of its arguments.
     glob_refused: Option<String>,
+    /// The output files of the redirected simple command being set up, opened
+    /// once its words are expanded (bash expands first: `echo * > o` does not
+    /// list a new `o`) and before it runs.
+    pending_opens: Option<Vec<(String, bool)>>,
     /// The script's arguments: `$1`..`$9` and `$#`. Empty unless the script was
     /// run with arguments (`ish -b script.sh a b`).
     positional: Vec<String>,
@@ -2683,7 +2849,7 @@ impl Shell {
                     self.splice(&value, *quoted, &mut fields, &mut cur, &mut mask, &mut have);
                 }
                 Part::Cmd(body, quoted) => {
-                    let value = self.substitute(body);
+                    let value = self.substitute(body, stdin);
                     self.splice(&value, *quoted, &mut fields, &mut cur, &mut mask, &mut have);
                 }
                 Part::Arith(expr, quoted) => {
@@ -3105,7 +3271,7 @@ impl Shell {
     }
 
     /// `$(…)`: run the body and take its stdout, less trailing newlines.
-    fn substitute(&mut self, body: &str) -> String {
+    fn substitute(&mut self, body: &str, stdin: &mut Input) -> String {
         let list = match parse(body) {
             Ok(l) => l,
             Err(Unsupported { what, .. }) => {
@@ -3123,7 +3289,12 @@ impl Shell {
             return self.substitute_file(&w.clone());
         }
         let mut sink = Sink::new(ErrMode::Real);
-        let mut input = Input::buf(Vec::new());
+        // The substitution reads the standard input its command has, through
+        // the same offset (`x=$(cat)` in `while read l; do ...; done < f` takes
+        // the rest of `f`). The process's own standard input is not read.
+        let mut empty = Input::buf(Vec::new());
+        let input: &mut Input = if stdin.real { &mut empty } else { stdin };
+        let stdout_file = STDOUT_FILE.with(|s| s.borrow_mut().take());
         // Bash does not pass `set -e` into a command substitution (it clears
         // it unless `inherit_errexit` is set), so a failing command in one does
         // not end the script. `set -u` is inherited. An unbound parameter the
@@ -3139,7 +3310,8 @@ impl Shell {
         let line = self.line;
         self.subst_depth += 1;
         let outer_external = EXTERNAL_RAN.with(|f| f.replace(false));
-        let flow = self.run_list(&list, &mut input, &mut sink);
+        let flow = self.run_list(&list, input, &mut sink);
+        STDOUT_FILE.with(|s| *s.borrow_mut() = stdout_file);
         let ran_external = EXTERNAL_RAN.with(|f| f.replace(outer_external));
         EXTERNAL_RAN.with(|f| f.set(outer_external || ran_external));
         self.subst_depth -= 1;
@@ -3235,7 +3407,7 @@ impl Shell {
                     out.push_str(&value);
                 }
                 Part::Cmd(body, _) => {
-                    let value = self.substitute(body);
+                    let value = self.substitute(body, stdin);
                     out.push_str(&value);
                 }
                 Part::Arith(expr, _) => {
@@ -3344,6 +3516,80 @@ impl Shell {
         }
     }
 
+    /// A word that is plain text once its variables are filled in (no glob,
+    /// no splitting, no command), for a decision made before the stage runs.
+    fn plain_word(&mut self, w: &Word) -> Option<String> {
+        let plain = w.iter().all(|part| match part {
+            Part::Lit(..) => true,
+            Part::Var(n, None, _) => n.chars().all(|c| c.is_ascii_alphanumeric() || c == '_'),
+            _ => false,
+        });
+        if !plain {
+            return None;
+        }
+        let unbound = self.unbound.take();
+        let mut input = Input::buf(Vec::new());
+        let s = self.expand_assign(w, &mut input);
+        self.unbound = unbound;
+        let bad = |c: char| c.is_whitespace() || matches!(c, '*' | '?' | '[');
+        (!s.is_empty() && !s.chars().any(bad)).then_some(s)
+    }
+
+    /// Open the files a later stage of a pipeline writes, when its redirections
+    /// and `tee` operands name them as plain text.
+    fn preopen_stage(&mut self, cmd: &Cmd) {
+        let (redirs, words) = match cmd {
+            Cmd::Simple { redirs, words, .. } => (redirs, Some(words)),
+            Cmd::If { redirs, .. }
+            | Cmd::For { redirs, .. }
+            | Cmd::While { redirs, .. }
+            | Cmd::Group { redirs, .. } => (redirs, None),
+        };
+        for r in redirs {
+            let (target, append) = match r {
+                Redir::Out { target, append, .. } => (target, *append),
+                Redir::Both(target) => (target, false),
+                _ => continue,
+            };
+            let Some(path) = self.plain_word(target) else {
+                continue;
+            };
+            if path.starts_with("/dev/") {
+                continue;
+            }
+            if let Ok(p) = check_write_in_place(&path) {
+                if open_target(&p, append).is_ok() {
+                    PREOPENED.with(|x| x.borrow_mut().push(p));
+                }
+            }
+        }
+        let Some(words) = words else {
+            return;
+        };
+        let argv: Option<Vec<String>> = words.iter().map(|w| self.plain_word(w)).collect();
+        let Some(argv) = argv else {
+            return;
+        };
+        if argv.first().map(String::as_str) != Some("tee") {
+            return;
+        }
+        if let Some((_, files)) = short_flags(&argv[1..], "a") {
+            for f in files {
+                if f.starts_with("/dev/") {
+                    continue;
+                }
+                if let Ok(p) = check_write_in_place(&f) {
+                    // Only a missing file is made now: one that exists may be
+                    // what an earlier stage reads (`sort f | tee f`), and bash
+                    // leaves that to a race, which the data survives more often.
+                    if !Path::new(&p).exists() {
+                        let _ = open_target(&p, true);
+                    }
+                }
+            }
+        }
+    }
+
     fn run_pipeline(&mut self, p: &Pipeline, stdin: &mut Input, sink: &mut Sink) -> Flow {
         self.line = p.line;
         // A `!` pipeline is exempt from errexit, and so is everything in it.
@@ -3379,6 +3625,15 @@ impl Shell {
             let mut statuses: Vec<i32> = Vec::new();
             let n = p.cmds.len();
             let mut k = 0;
+            // Bash starts every stage at once, so the file a later stage
+            // writes (`ls | sort > o`, `ls | tee o`) exists, empty, when the
+            // first one lists the directory.
+            let jmark = crate::journal::mark();
+            let pre_len = PREOPENED.with(|x| x.borrow().len());
+            let opened_len = OPENED.with(|o| o.borrow().len());
+            for later in &p.cmds[1..] {
+                self.preopen_stage(later);
+            }
             while k < n {
                 let cmd = &p.cmds[k];
                 let mut local_in = match data.take() {
@@ -3403,10 +3658,16 @@ impl Shell {
                     STREAM_LIMIT.with(|l| l.set(head_limit(&p.cmds[k + 1])));
                 }
                 EXTERNAL_PROGRAMS.with(|p| p.borrow_mut().clear());
+                let piped_file = if k + 1 < n {
+                    STDOUT_FILE.with(|s| s.borrow_mut().take())
+                } else {
+                    STDOUT_FILE.with(|s| s.borrow().clone())
+                };
                 let c = match self.run_cmd(cmd, input, &mut stage) {
                     Flow::Next(c) | Flow::Exit(c) => c,
                     _ => 0,
                 };
+                STDOUT_FILE.with(|s| *s.borrow_mut() = piped_file);
                 STREAM_LIMIT.with(|l| l.set(None));
                 self.subst_depth -= bump;
                 self.restore_subshell(saved);
@@ -3437,6 +3698,11 @@ impl Shell {
                     data = Some(pipe_text(stage.out));
                 }
                 k += 1;
+            }
+            PREOPENED.with(|x| x.borrow_mut().truncate(pre_len));
+            OPENED.with(|o| o.borrow_mut().truncate(opened_len));
+            if crate::journal::mark() > jmark {
+                crate::journal::seal_steps(jmark);
             }
             // The stages before the reader that stopped an endless source
             // were still writing: SIGPIPE ends them, status 141.
@@ -3512,6 +3778,44 @@ impl Shell {
     }
 
     fn run_cmd(&mut self, cmd: &Cmd, stdin: &mut Input, sink: &mut Sink) -> Flow {
+        // The files a command's redirections open belong to it: what a nested
+        // command (in `$( )`, or in a loop body) opens is its own, and the
+        // journal steps taken here are sealed when the command is done.
+        let saved = self.pending_opens.take();
+        let opened = OPENED.with(|o| o.borrow().len());
+        let mark = crate::journal::mark();
+        let flow = self.run_cmd_body(cmd, stdin, sink);
+        OPENED.with(|o| o.borrow_mut().truncate(opened));
+        if crate::journal::mark() > mark {
+            crate::journal::seal_steps(mark);
+        }
+        self.pending_opens = saved;
+        flow
+    }
+
+    /// Open, before it runs, the output files of the redirected simple command
+    /// whose words have just been expanded. `Some` when one cannot be opened:
+    /// the command does not run and its status is 1, as in bash.
+    fn open_pending(&mut self, sink: &mut Sink) -> Option<Flow> {
+        let opens = self.pending_opens.take()?;
+        for (path, append) in opens {
+            let pre = PREOPENED.with(|p| {
+                let mut p = p.borrow_mut();
+                p.iter().position(|x| *x == path).map(|k| p.remove(k))
+            });
+            if pre.is_some() {
+                continue;
+            }
+            if let Err(msg) = open_target(&path, append) {
+                sink.expansion_eline(&msg);
+                self.last = 1;
+                return Some(Flow::Next(1));
+            }
+        }
+        None
+    }
+
+    fn run_cmd_body(&mut self, cmd: &Cmd, stdin: &mut Input, sink: &mut Sink) -> Flow {
         // A refusal is the business of the command whose expansion set it. One
         // left by an expansion no site checks (a `case` word, a `${x:-...}`
         // operand) must not refuse this, unrelated, command.
@@ -3537,6 +3841,8 @@ impl Shell {
         let mut bound: Vec<String> = Vec::new();
         let mut d1 = Dest::Out;
         let mut d2 = Dest::Err;
+        // The files to open, in the order the redirections name them.
+        let mut opens: Vec<(String, bool)> = Vec::new();
         for r in redirs {
             match r {
                 Redir::In(w) => {
@@ -3610,20 +3916,11 @@ impl Shell {
                         let fd = if *fd == 2 { "2" } else { "" };
                         let op = if *append { ">>" } else { ">" };
                         bound.push(format!("{fd}{op}{}", resolved_for_binding(p)));
+                        opens.push((p.clone(), *append));
                     }
                     if *fd == 2 {
-                        if let Err(msg) = open_replaced(&d2, &[&d1, &dest]) {
-                            sink.eline(&msg);
-                            self.last = 1;
-                            return Flow::Next(1);
-                        }
                         d2 = dest;
                     } else {
-                        if let Err(msg) = open_replaced(&d1, &[&d2, &dest]) {
-                            sink.eline(&msg);
-                            self.last = 1;
-                            return Flow::Next(1);
-                        }
                         d1 = dest;
                     }
                 }
@@ -3647,31 +3944,15 @@ impl Shell {
                     };
                     if let Dest::File(p, _) = &dest {
                         bound.push(format!("&>{}", resolved_for_binding(p)));
-                    }
-                    let opened = open_replaced(&d1, &[&d2, &dest])
-                        .and_then(|()| open_replaced(&d2, &[&d1, &dest]));
-                    if let Err(msg) = opened {
-                        sink.eline(&msg);
-                        self.last = 1;
-                        return Flow::Next(1);
+                        opens.push((p.clone(), false));
                     }
                     d1 = dest.clone();
                     d2 = dest;
                 }
                 Redir::Dup { from: 2, to: 1 } => {
-                    if let Err(msg) = open_replaced(&d2, &[&d1]) {
-                        sink.eline(&msg);
-                        self.last = 1;
-                        return Flow::Next(1);
-                    }
                     d2 = d1.clone();
                 }
                 Redir::Dup { from: 1, to: 2 } => {
-                    if let Err(msg) = open_replaced(&d1, &[&d2]) {
-                        sink.eline(&msg);
-                        self.last = 1;
-                        return Flow::Next(1);
-                    }
                     d1 = d2.clone();
                 }
                 Redir::Dup { .. } => {}
@@ -3682,6 +3963,16 @@ impl Shell {
         }
         if let Some(flow) = self.glob_refusal(sink) {
             return flow;
+        }
+        // Bash opens the files before the command runs: a compound command
+        // has no words to expand first, so now; a simple command's words are
+        // expanded first (`run_simple` opens them), so `echo * > o` does not
+        // list a new `o`, but `ls > o` and `sort f > f` see it.
+        self.pending_opens = Some(opens);
+        if !matches!(cmd, Cmd::Simple { .. }) {
+            if let Some(flow) = self.open_pending(sink) {
+                return flow;
+            }
         }
         // Both descriptors going to one place keep their order (merged); else
         // standard error is captured to be sent on its own.
@@ -3702,10 +3993,28 @@ impl Shell {
             r.extend(bound);
             mark
         });
+        let outer_file = STDOUT_FILE.with(|s| s.borrow().clone());
+        let own_file = match &d1 {
+            Dest::File(p, _) => Some(p.clone()),
+            Dest::Out => outer_file.clone(),
+            _ => None,
+        };
+        STDOUT_FILE.with(|s| *s.borrow_mut() = own_file);
         let flow = match local_in.as_mut() {
             Some(i) => self.run_cmd_inner(cmd, i, &mut local),
             None => self.run_cmd_inner(cmd, stdin, &mut local),
         };
+        STDOUT_FILE.with(|s| *s.borrow_mut() = outer_file);
+        // A simple command whose files are still unopened either stopped
+        // before it ran (a refused expansion or approval: nothing is created)
+        // or ran in a way that never reached them; the latter creates them now.
+        if let Some(opens) = self.pending_opens.take() {
+            if matches!(flow, Flow::Next(c) if c != 75 && c != POLICY_DENY_STATUS) {
+                for (path, append) in opens {
+                    let _ = open_target(&path, append);
+                }
+            }
+        }
         EXEC_REDIRS.with(|r| r.borrow_mut().truncate(mark));
         if !local.parent_err.is_empty() {
             let early = std::mem::take(&mut local.parent_err);
@@ -3959,6 +4268,14 @@ impl Shell {
         }
         if let Some(flow) = self.glob_refusal(sink) {
             return flow;
+        }
+        // A command the subset runs itself opens its files now, as bash does.
+        // A program is judged by the approval gate first (`external`), so a
+        // refused one leaves its `>` targets untouched.
+        if argv.is_empty() || runs_in_process(&argv[0], !env_overrides.is_empty()) {
+            if let Some(flow) = self.open_pending(sink) {
+                return flow;
+            }
         }
         if argv.is_empty() {
             // `$(cmd)` in an assignment leaves its status; a bare assignment 0.
@@ -4332,7 +4649,12 @@ impl Shell {
             match found {
                 Some(path) => {
                     let text = path.to_string_lossy().into_owned();
-                    if cfg!(windows) && path.extension().is_none() && has_shell_shebang(&text) {
+                    if cfg!(windows)
+                        && path.extension().is_none_or(|e| {
+                            e.eq_ignore_ascii_case("sh") || e.eq_ignore_ascii_case("bash")
+                        })
+                        && (has_shell_shebang(&text) || is_plain_script(&text))
+                    {
                         // A script found on PATH is a program, not the user's
                         // script. One outside the subset (Git's `gunzip` and
                         // `zcat` use `case`) runs with the real `sh` through the
@@ -4432,7 +4754,74 @@ impl Shell {
         // exits 128+9, not 124 (even with `--preserve-status`).
         let mut sigkill = false;
         let is_kill = |s: &str| matches!(s, "KILL" | "SIGKILL" | "9" | "kill" | "sigkill");
+        let usage = "Try 'timeout --help' for more information.";
+        // GNU reads the options in order and ends on the first bad one: a
+        // signal it does not know, a `-k` duration that is no time, or an
+        // option with no value.
+        let bad_signal = |sink: &mut Sink, s: &str| {
+            sink.eline(&format!("timeout: '{s}': invalid signal\n{usage}"));
+            Some(Flow::Next(125))
+        };
+        let bad_kill = |sink: &mut Sink, s: &str| {
+            sink.eline(&format!("timeout: invalid time interval '{s}'\n{usage}"));
+            Some(Flow::Next(125))
+        };
         while let Some(a) = args.get(i) {
+            // The value of `-s`, `--signal`, `-k` or `--kill-after`, when the
+            // option takes the next argument.
+            let next = args.get(i + 1);
+            let needs = |sink: &mut Sink, name: &str| {
+                sink.eline(&format!(
+                    "timeout: option requires an argument -- '{name}'\n{usage}"
+                ));
+                Some(Flow::Next(125))
+            };
+            match a.as_str() {
+                "-s" | "--signal" => {
+                    let Some(v) = next else {
+                        return needs(sink, "s");
+                    };
+                    if !valid_signal(v) {
+                        return bad_signal(sink, v);
+                    }
+                    sigkill = is_kill(v);
+                    i += 2;
+                    continue;
+                }
+                "-k" | "--kill-after" => {
+                    let Some(v) = next else {
+                        return needs(sink, "k");
+                    };
+                    if parse_interval(v).is_none() {
+                        return bad_kill(sink, v);
+                    }
+                    i += 2;
+                    continue;
+                }
+                o if o.starts_with("--signal=") => {
+                    let v = &o["--signal=".len()..];
+                    if !valid_signal(v) {
+                        return bad_signal(sink, v);
+                    }
+                }
+                o if o.starts_with("-s") && o.len() > 2 && !o.starts_with("--") => {
+                    if !valid_signal(&o[2..]) {
+                        return bad_signal(sink, &o[2..]);
+                    }
+                }
+                o if o.starts_with("--kill-after=") => {
+                    let v = &o["--kill-after=".len()..];
+                    if parse_interval(v).is_none() {
+                        return bad_kill(sink, v);
+                    }
+                }
+                o if o.starts_with("-k") && o.len() > 2 && !o.starts_with("--") => {
+                    if parse_interval(&o[2..]).is_none() {
+                        return bad_kill(sink, &o[2..]);
+                    }
+                }
+                _ => {}
+            }
             match a.as_str() {
                 "--" => {
                     i += 1;
@@ -4443,11 +4832,6 @@ impl Shell {
                     preserve = true;
                     i += 1;
                 }
-                "-s" => {
-                    sigkill = args.get(i + 1).is_some_and(|s| is_kill(s));
-                    i += 2;
-                }
-                "-k" => i += 2,
                 o if o.starts_with("--signal=") => {
                     sigkill = is_kill(&o["--signal=".len()..]);
                     i += 1;
@@ -4462,35 +4846,24 @@ impl Shell {
                 _ => break,
             }
         }
-        let usage = "Try 'timeout --help' for more information.";
-        let Some(duration) = args.get(i) else {
-            sink.eline(&format!("timeout: missing operand\n{usage}"));
+        // GNU takes the duration and the command together: with fewer than
+        // two operands it prints only its usage hint.
+        if args.len() < i + 2 {
+            sink.eline(usage);
             return Some(Flow::Next(125));
-        };
-        let (num, unit) = match duration.chars().last() {
-            Some(c @ ('s' | 'm' | 'h' | 'd')) => (&duration[..duration.len() - 1], c),
-            _ => (duration.as_str(), 's'),
-        };
-        let seconds = match num.parse::<f64>() {
-            Ok(n) if n >= 0.0 && n.is_finite() && !num.starts_with('+') => {
-                n * match unit {
-                    'm' => 60.0,
-                    'h' => 3600.0,
-                    'd' => 86400.0,
-                    _ => 1.0,
-                }
-            }
-            _ => {
-                sink.eline(&format!(
-                    "timeout: invalid time interval '{duration}'\n{usage}"
-                ));
-                return Some(Flow::Next(125));
-            }
+        }
+        let duration = &args[i];
+        let Some(seconds) = parse_interval(duration) else {
+            sink.eline(&format!(
+                "timeout: invalid time interval '{duration}'\n{usage}"
+            ));
+            return Some(Flow::Next(125));
         };
         let command = &args[i + 1..];
-        if command.is_empty() {
-            sink.eline(&format!("timeout: missing operand\n{usage}"));
-            return Some(Flow::Next(125));
+        if command.first().is_some_and(|c| runs_in_process(c, false)) {
+            if let Some(flow) = self.open_pending(sink) {
+                return Some(flow);
+            }
         }
         let outer = LOCAL_DEADLINE.with(|d| d.get());
         let mine = (seconds > 0.0).then(|| {
@@ -4931,6 +5304,11 @@ impl Shell {
             sink.eline(&refusal);
             return POLICY_DENY_STATUS;
         }
+        // Approved: the redirections' files are created or truncated now, as
+        // the program starts.
+        if let Some(Flow::Next(c)) = self.open_pending(sink) {
+            return c;
+        }
         let found = RESOLVED_PROGRAM.with(|r| r.borrow_mut().take());
         let program = match found {
             Some(p) => p,
@@ -5024,6 +5402,9 @@ impl Shell {
         stdin: &mut Input,
         sink: &mut Sink,
     ) -> i32 {
+        if let Some(Flow::Next(c)) = self.open_pending(sink) {
+            return c;
+        }
         // The script is read and run, so it is held to the read jail as `cat`
         // holds a file it reads: a script outside the workspace is refused
         // before anything runs, through a link or a junction or by an absolute
@@ -5481,7 +5862,14 @@ fn note_endless_write(path: &str, append: bool) {
     ENDLESS_WRITTEN.with(|w| {
         let mut w = w.borrow_mut();
         if !w.iter().any(|(p, _, _)| p == path) {
-            let before = std::fs::metadata(path).ok().map(|m| m.len());
+            let opened = OPENED.with(|o| {
+                o.borrow()
+                    .iter()
+                    .rev()
+                    .find(|(p, _)| p == path)
+                    .map(|(_, b)| *b)
+            });
+            let before = opened.unwrap_or_else(|| std::fs::metadata(path).ok().map(|m| m.len()));
             w.push((path.to_string(), before, append));
         }
     });
@@ -5572,8 +5960,17 @@ fn all_digits(s: &str) -> bool {
     !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit())
 }
 
-/// Whether `a` is a `sed` script that ends by `q`: `5q`, `q`, `/re/q`, `2q3`.
+/// Whether `a` is a `sed` script that ends by `q`: `5q`, `q`, `/re/q`, `2q3`,
+/// or one with a `q` among its commands (`3{p;q}`, `p;q`).
 fn sed_quit_script(a: &str) -> bool {
+    quit_after_address(a)
+        || a.split(';').any(|piece| {
+            let piece = piece.rsplit('{').next().unwrap_or(piece);
+            quit_after_address(piece.trim().trim_end_matches('}').trim())
+        })
+}
+
+fn quit_after_address(a: &str) -> bool {
     let rest = if let Some(tail) = a.strip_prefix('/') {
         tail.find('/').map(|i| &tail[i + 1..])
     } else {
@@ -5656,7 +6053,7 @@ fn is_streaming_stage(cmd: &Cmd) -> bool {
     };
     let args: Vec<&str> = w.iter().skip(1).filter_map(|a| a.as_deref()).collect();
     match w.first().and_then(|n| n.as_deref()) {
-        Some("yes" | "seq" | "cat" | "tr" | "cut") => true,
+        Some("yes" | "seq" | "cat" | "tr" | "cut" | "tee") => true,
         Some("timeout") => args.iter().any(|a| matches!(*a, "yes" | "seq")),
         Some("grep") => !args.iter().any(|a| {
             a.starts_with('-') && !a.starts_with("--") && a[1..].contains(['c', 'l', 'L', 'q'])
@@ -5838,7 +6235,7 @@ fn shell_script_command(argv: &[String]) -> Option<(&str, &[String])> {
         if has_file(head) && crate::security::outside_read_jail(head) {
             return Some((head, &argv[1..]));
         }
-        return has_shell_shebang(head).then_some((head, &argv[1..]));
+        return (has_shell_shebang(head) || is_plain_script(head)).then_some((head, &argv[1..]));
     }
     if matches!(head, "sh" | "bash") {
         let file = argv.get(1)?.as_str();
@@ -5852,6 +6249,27 @@ fn shell_script_command(argv: &[String]) -> Option<(&str, &[String])> {
 /// Whether `path` names an existing file, never probing a remote share.
 fn has_file(path: &str) -> bool {
     !crate::safety::names_a_remote_share(path) && std::path::Path::new(path).is_file()
+}
+
+/// Whether `path` is a file the system could not run and bash would run as a
+/// shell script (what the kernel's `ENOEXEC` leads bash to do): a name with no
+/// extension, or `.sh` or `.bash`, whose first bytes are neither a Windows
+/// program (`MZ`) nor a shebang for another interpreter.
+fn is_plain_script(path: &str) -> bool {
+    use std::io::Read;
+    let ext = std::path::Path::new(path).extension();
+    let named_like_script =
+        ext.is_none_or(|e| e.eq_ignore_ascii_case("sh") || e.eq_ignore_ascii_case("bash"));
+    if !named_like_script || !has_file(path) {
+        return false;
+    }
+    let mut head = [0u8; 2];
+    let n = std::fs::File::open(path)
+        .and_then(|mut f| f.read(&mut head))
+        .unwrap_or(0);
+    // An empty file is not executable in bash's eyes either (`touch x; ./x` is
+    // 126): nothing says it was meant to run.
+    n > 0 && &head[..n] != b"MZ" && &head[..n] != b"#!"
 }
 
 /// Whether `path` is a file whose first line is a shebang for `sh` or `bash`:
@@ -9120,7 +9538,22 @@ fn cat(args: &[String], stdin: &mut Input, sink: &mut Sink) -> Util {
     if inputs.is_empty() {
         inputs.push(Vec::new());
     }
+    let out_file = STDOUT_FILE.with(|s| s.borrow().clone());
     for one in &inputs {
+        // GNU cat will not copy a file onto itself: when standard output is the
+        // file it is about to read, and the file holds something.
+        if let (Some(out), [name]) = (&out_file, one.as_slice()) {
+            let same = name != "-"
+                && std::fs::canonicalize(name)
+                    .ok()
+                    .is_some_and(|a| std::fs::canonicalize(out).ok().is_some_and(|b| a == b))
+                && std::fs::metadata(name).is_ok_and(|m| m.len() > 0);
+            if same {
+                sink.eline(&format!("cat: {name}: input file is output file"));
+                status = 1;
+                continue;
+            }
+        }
         for (_, data) in read_inputs_dirs("cat", one, stdin, sink, &mut status) {
             cat_emit(&data, number, &mut line_no, sink);
         }
@@ -9155,33 +9588,49 @@ fn tee(args: &[String], stdin: &mut Input, sink: &mut Sink) -> Util {
         return Util::Decline;
     };
     let append = flags.contains(&'a');
+    let mut status = 0;
+    // GNU tee opens every file before it reads, so a file is created or
+    // truncated even when nothing arrives, and a producer earlier in the
+    // pipeline that lists the directory sees it.
+    enum Target {
+        Out,
+        Err,
+        File(String),
+    }
+    let mut targets = Vec::new();
+    for f in &files {
+        match f.as_str() {
+            "/dev/null" => {}
+            // The names bash and Linux give the standard streams.
+            "/dev/stdout" | "/dev/fd/1" => targets.push(Target::Out),
+            "/dev/stderr" | "/dev/fd/2" => targets.push(Target::Err),
+            _ => match check_write_in_place(f) {
+                Ok(p) => match open_target(&p, append) {
+                    Ok(()) => targets.push(Target::File(p)),
+                    Err(msg) => {
+                        sink.eline(&msg);
+                        status = 1;
+                    }
+                },
+                Err(msg) => {
+                    sink.eline(&gnu_refusal(&format!("tee: {f}"), &msg));
+                    status = 1;
+                }
+            },
+        }
+    }
     let data = stdin.read_all();
     sink.out.extend_from_slice(&data);
-    let mut status = 0;
-    for f in &files {
-        if f == "/dev/null" {
-            continue;
-        }
-        // The names bash and Linux give the standard streams.
-        if f == "/dev/stdout" || f == "/dev/fd/1" {
-            sink.out.extend_from_slice(&data);
-            continue;
-        }
-        if f == "/dev/stderr" || f == "/dev/fd/2" {
-            sink.ewrite(&data);
-            continue;
-        }
-        let resolved = match check_write_in_place(f) {
-            Ok(p) => p,
-            Err(msg) => {
-                sink.eline(&gnu_refusal(&format!("tee: {f}"), &msg));
-                status = 1;
-                continue;
+    for t in &targets {
+        match t {
+            Target::Out => sink.out.extend_from_slice(&data),
+            Target::Err => sink.ewrite(&data),
+            Target::File(p) => {
+                if let Err(msg) = write_opened(p, &data, append) {
+                    sink.eline(&msg);
+                    status = 1;
+                }
             }
-        };
-        if let Err(msg) = write_file(&resolved, &data, append) {
-            sink.eline(&msg);
-            status = 1;
         }
     }
     Util::Done(status)
@@ -10257,6 +10706,7 @@ fn head_tail(head: bool, args: &[String], stdin: &mut Input, sink: &mut Sink) ->
     // output of an earlier one.
     let many = files.len() > 1 && !quiet;
     let mut headed = false;
+    let stdin_only = files.is_empty() || files == ["-"];
     for (name, data) in inputs.iter() {
         if many {
             if headed {
@@ -10296,6 +10746,9 @@ fn head_tail(head: bool, args: &[String], stdin: &mut Input, sink: &mut Sink) ->
                 &data[n.saturating_sub(count.unsigned_abs() as usize)..]
             };
             sink.out.extend_from_slice(slice);
+            if head && stdin_only {
+                stdin.unread(n - slice.len());
+            }
             continue;
         }
         // Lines, keeping the file's own terminators.
@@ -10321,6 +10774,14 @@ fn head_tail(head: bool, args: &[String], stdin: &mut Input, sink: &mut Sink) ->
             let a = starts[from];
             let b = if to < nlines { starts[to] } else { data.len() };
             sink.out.extend_from_slice(&data[a..b]);
+        }
+        if head && stdin_only {
+            let used = match to {
+                0 => 0,
+                t if t < nlines => starts[t],
+                _ => data.len(),
+            };
+            stdin.unread(data.len() - used);
         }
     }
     Util::Done(status)
@@ -11219,6 +11680,9 @@ fn grep(args: &[String], stdin: &mut Input, sink: &mut Sink) -> Util {
         let silent = f('q') || f('l') || f('L') || f('c') || binary;
         let mut last_printed: Option<usize> = None;
         let mut after_left = 0usize;
+        // The last line `-m` selected, where a file used as standard input is
+        // left (GNU grep seeks back to just after it).
+        let mut last_selected: Option<usize> = None;
         for (n, line) in all_lines.iter().copied().enumerate() {
             // `-m N` is reached: only the trailing context of the last
             // selected line is left to print, whatever those lines are.
@@ -11240,6 +11704,7 @@ fn grep(args: &[String], stdin: &mut Input, sink: &mut Sink) -> Util {
                 continue;
             }
             count += 1;
+            last_selected = Some(n);
             if silent {
                 continue;
             }
@@ -11267,6 +11732,12 @@ fn grep(args: &[String], stdin: &mut Input, sink: &mut Sink) -> Util {
         }
         if count > 0 {
             any = true;
+        }
+        if path.is_none() && context.max.is_some_and(|m| count >= m) {
+            if let Some(n) = last_selected {
+                let used: usize = all_lines.iter().take(n + 1).map(|l| l.len() + 1).sum();
+                stdin.unread(data.len().saturating_sub(used));
+            }
         }
         if with_context && !out.is_empty() {
             printed_group = true;
@@ -12847,6 +13318,16 @@ fn sed(args: &[String], stdin: &mut Input, sink: &mut Sink) -> Util {
     // As GNU sed, a last line with no final newline is printed without one.
     let end = sed_run(&mut prog, quiet, &data, true, &mut out);
     sink.out.extend_from_slice(&out);
+    // After `q`, a regular file used as standard input is left just after the
+    // last line sed read, as GNU sed leaves it.
+    if end.quit && files.is_empty() {
+        let used: usize = data
+            .split_inclusive(|&b| b == b'\n')
+            .take(end.read)
+            .map(<[u8]>::len)
+            .sum();
+        stdin.unread(data.len() - used.min(data.len()));
+    }
     if let Some(m) = end.failed {
         sink.eline(&format!("sed: -e expression #1, char 0: {m}"));
         return Util::Done(1);
@@ -12890,6 +13371,8 @@ fn sed_list(text: &[u8]) -> Vec<u8> {
 struct SedEnd {
     quit: bool,
     failed: Option<String>,
+    /// The lines read when `q` ran.
+    read: usize,
 }
 
 /// The regex a `/re/` or `s/re/` stands for: itself, which then becomes the
@@ -12936,6 +13419,7 @@ fn sed_run(
                     return SedEnd {
                         quit: false,
                         failed: Some(m),
+                        read: 0,
                     }
                 }
             }
@@ -13164,6 +13648,7 @@ fn sed_run(
                     return SedEnd {
                         quit: true,
                         failed: None,
+                        read: next,
                     };
                 }
                 SedCmd::Subst(re, rep, global, print, nth) => {
@@ -13212,6 +13697,7 @@ fn sed_run(
     SedEnd {
         quit: false,
         failed: None,
+        read: 0,
     }
 }
 
@@ -13673,6 +14159,7 @@ fn run_named(src: &str, script_name: &str, args: &[String]) -> Option<i32> {
         unset_env: Vec::new(),
         last: 0,
         glob_refused: None,
+        pending_opens: None,
         positional: args.to_vec(),
         script_name: script_name.to_string(),
         errexit: false,
@@ -14874,6 +15361,7 @@ mod tests {
             unset_env: Vec::new(),
             last: 0,
             glob_refused: None,
+            pending_opens: None,
             positional: Vec::new(),
             script_name: SHELL_NAME.to_string(),
             errexit: false,
