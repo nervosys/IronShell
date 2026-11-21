@@ -56,6 +56,9 @@ const HINT_COLUMNS: usize = 40;
 struct Loaded {
     name: String,
     rows: Vec<BTreeMap<String, Value>>,
+    /// Columns the source declares even when no row has them (the header of a
+    /// CSV or TSV with no rows).
+    header: Vec<String>,
 }
 
 /// A structured `E_BAD_ARG` with a hint the caller chooses.
@@ -102,10 +105,12 @@ fn tables_from_subject(builtin: &str, subject: Value) -> Result<Vec<Loaded>> {
         Value::Array(items) => Ok(vec![Loaded {
             name: "t".to_string(),
             rows: rows_of(builtin, "the piped array", items)?,
+            header: Vec::new(),
         }]),
         Value::Table(t) => Ok(vec![Loaded {
             name: "t".to_string(),
             rows: t.rows,
+            header: Vec::new(),
         }]),
         Value::Record(fields)
             if !fields.is_empty()
@@ -120,7 +125,11 @@ fn tables_from_subject(builtin: &str, subject: Value) -> Result<Vec<Loaded>> {
                     Value::Table(t) => t.rows,
                     _ => unreachable!("guarded above"),
                 };
-                out.push(Loaded { name, rows });
+                out.push(Loaded {
+                    name,
+                    rows,
+                    header: Vec::new(),
+                });
             }
             Ok(out)
         }
@@ -183,6 +192,7 @@ fn table_from_file(builtin: &str, path: &str, kind: &str) -> Result<Vec<Loaded>>
                 Value::Array(items) => vec![Loaded {
                     name: stem,
                     rows: rows_of(builtin, path, items)?,
+                    header: Vec::new(),
                 }],
                 // An object whose fields are all arrays is one table per field, as
                 // a piped record of arrays is. Any other object is not rows.
@@ -225,6 +235,7 @@ fn table_from_file(builtin: &str, path: &str, kind: &str) -> Result<Vec<Loaded>>
             vec![Loaded {
                 name: stem,
                 rows: rows_of(builtin, path, rows)?,
+                header: Vec::new(),
             }]
         }
         _ => {
@@ -247,7 +258,11 @@ fn table_from_file(builtin: &str, path: &str, kind: &str) -> Result<Vec<Loaded>>
                 records.push(record.map_err(|e| parse_err(Some(i + 2), &e))?);
             }
             let rows = crate::builtins::csv_rows_sql(&headers, &records);
-            vec![Loaded { name: stem, rows }]
+            vec![Loaded {
+                name: stem,
+                rows,
+                header: headers,
+            }]
         }
     };
     Ok(tables)
@@ -277,7 +292,12 @@ fn load(conn: &Connection, builtin: &str, tables: &[Loaded]) -> Result<()> {
         .unchecked_transaction()
         .map_err(|e| internal(builtin, &e))?;
     for t in tables {
-        let mut cols: Vec<&String> = t.rows.iter().flat_map(|r| r.keys()).collect();
+        let mut cols: Vec<&String> = t
+            .rows
+            .iter()
+            .flat_map(|r| r.keys())
+            .chain(t.header.iter())
+            .collect();
         cols.sort();
         cols.dedup();
         if cols.is_empty() {

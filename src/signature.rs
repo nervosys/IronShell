@@ -3038,7 +3038,7 @@ pub static SIGNATURES: &[Signature] = &[
         subject: Some(Ty::Any),
         params: &[],
         returns: "Any",
-        doc: "Reverse an array or a string.",
+        doc: "Reverse an array or a string. A string is reversed by extended grapheme cluster, so a combining accent stays on its letter and a ZWJ emoji sequence stays whole.",
         examples: &[
             ("[1, 2, 3] | reverse", r#"[3, 2, 1]"#),
             (r#""abc" | reverse"#, r#""cba""#),
@@ -3370,7 +3370,7 @@ pub static SIGNATURES: &[Signature] = &[
         subject: None,
         params: &[req("pattern", Ty::Str, "a basic regular expression: ^ and $ anchor, . is any character; + ? | ( ) { } are literal unless backslashed (\\+ \\? \\| \\( \\) \\{ \\}); so TODO|FIXME matches nothing; write TODO\\|FIXME, or pass {extended: true}"), opt("path", Ty::Str, "file or glob to search; omit to search the piped text"), opt("options", Ty::Record, "{line_numbers: true} returns {file, line, text} records instead of lines; line counts from 1 in each file, and file is null for piped text; {extended: true} reads the pattern as an extended regex (grep -E: bare | + ? ( ) { }); {ignore_case: true} matches without regard to case (grep -i)")],
         returns: "Array",
-        doc: "Lines matching a basic regular expression (BRE, as grep without -E: `|` is literal, so `grep(\"TODO|FIXME\", f)` matches nothing; write `\\|` or pass {extended: true}). For a case-insensitive search pass {ignore_case: true}; an inline flag such as (?i) is not BRE (it is matched as literal text, so a search for (?i)todo finds nothing) and works only with {extended: true}. There is no recursive option; grep a glob (`src/**/*.rs`) or use search.grep. A back-reference such as \\1 is refused, and a pattern that does not compile says why. With {line_numbers: true} each match is a record {file, line, text} instead, the line numbered from 1 within its file (null for piped text). Under the workspace jail (agent mode, or a workspace set) a file more than 50 directories below the workspace root is not read: E_BUDGET_EXCEEDED naming the limit, though glob still lists it.",
+        doc: "Lines matching a basic regular expression (BRE, as grep without -E: `|` is literal, so `grep(\"TODO|FIXME\", f)` matches nothing; write `\\|` or pass {extended: true}). For a case-insensitive search pass {ignore_case: true}; an inline flag such as (?i) is not BRE (it is matched as literal text, so a search for (?i)todo finds nothing) and works only with {extended: true}. There is no recursive option; grep a glob (`src/**/*.rs`) or use search.grep. A back-reference (\\1 to \\9) works in both BRE and ERE and is matched by a backtracking engine, so `grep(\"\\\\(ab\\\\)\\\\1\", f)` finds abab; a pattern that does not compile says why. With {line_numbers: true} each match is a record {file, line, text} instead, the line numbered from 1 within its file (null for piped text). Under the workspace jail (agent mode, or a workspace set) a file more than 50 directories below the workspace root is not read: E_BUDGET_EXCEEDED naming the limit, though glob still lists it.",
         examples: &[(r#"let d = fs_tempdir("ae_ex"); let f = d + "/main.rs"; file_write(f, ["fn main() {}", "fn helper() {}"]); let r = grep("fn main", f) | len; rmdir(d, true); r"#, "1"), (r#"let d = fs_tempdir("ae_ex"); let f = d + "/main.rs"; file_write(f, ["fn main() {}", "fn helper() {}"]); let r = (grep("fn", f) | len) > 0; rmdir(d, true); r"#, "true"), (r#"let d = fs_tempdir("ae_ex"); let f = d + "/demo.toml"; file_write(f, ["[package]", "name = 'demo'", "version = '1.0'"]); let r = grep("^version", f) | len; rmdir(d, true); r"#, "1"), (r#"let d = fs_tempdir("ae_ex"); let f = d + "/demo.toml"; file_write(f, ["[package]", "name = 'demo'", "version = '1.0'"]); let r = grep("^version", f, {line_numbers: true}) | first | fn(m) => m.line; rmdir(d, true); r"#, "3"), (r#""a\nb\na" | grep("a", {line_numbers: true}) | last | fn(r) => r.line"#, "3"), (r#""TODO x\nok\nFIXME y" | grep("TODO\\|FIXME") | len"#, "2"), (r#""TODO x\nok\nFIXME y" | grep("TODO|FIXME", {extended: true}) | len"#, "2"), (r#""TODO|FIXME\nTODO" | grep("TODO|FIXME") | len"#, "1"), (r#""Todo x\nok" | grep("todo", {ignore_case: true}) | len"#, "1")],
     },
     Signature {
@@ -7181,7 +7181,7 @@ pub static SIGNATURES: &[Signature] = &[
         subject: None,
         params: &[opt("count_or_options", Ty::Any, "how many commits (Int from 1 to 10000, newest first; default 10), or {n: Int, files: Bool}"), opt("options", Ty::Record, "{n: Int, files: Bool}: with a Record the rows are typed, and files: true adds each commit's changed paths")],
         returns: "Array",
-        doc: "The commit history (log) of the current repository: the most recent count commits as an Array of `<short hash> <subject>` lines, newest first. With an options Record (`git_log({n: 20, files: true})` or `git_log(20, {files: true})`; `count` is an alias of `n`, any other key is E_BAD_ARG) it returns records {hash, author, date, subject} instead, and files: true adds `files`, the paths each commit changed (a way to count the most changed files). Read-only. Outside a repository E_BAD_STATE; a repository with no commits, or a failed git, E_TOOL_FAILED. Refuses pipeline input.",
+        doc: "The commit history (log) of the current repository: the most recent count commits as an Array of `<short hash> <subject>` lines, newest first. With an options Record (`git_log({n: 20, files: true})` or `git_log(20, {files: true})`; `count` is an alias of `n`, any other key is E_BAD_ARG) it returns records {hash, author, date, subject} instead, and files: true adds `files`, the paths each commit changed (a way to count the most changed files), and `renames`, a list of {from, to} for each rename (a renamed file is listed in `files` under its new path). A merge commit lists the paths it changed against its first parent. Read-only. Outside a repository E_BAD_STATE; a repository with no commits, or a failed git, E_TOOL_FAILED. Refuses pipeline input.",
         examples: &[
             (r#"(try { git_log(0) } catch e { e.error.code })"#, "E_BAD_ARG"),
             (r#"(try { git_log("3") } catch e { e.error.code })"#, "E_BAD_ARG"),
@@ -8142,7 +8142,7 @@ pub static SIGNATURES: &[Signature] = &[
         subject: Some(Ty::Any),
         params: &[],
         returns: "String",
-        doc: "Write a Record as a TOML document. The top level must be a Record. A null, or a value TOML has no form for, is E_BAD_ARG and the refusal names its path, such as app.servers[1].note.",
+        doc: "Write a Record as a TOML document. The top level must be a Record. A String that is exactly a TOML datetime (an offset datetime such as 1979-05-27T07:32:00Z, a local datetime, a local date or a local time) is written unquoted as a datetime, so a datetime that from_toml read as a String round-trips; any other String is quoted. A null, or a value TOML has no form for, is E_BAD_ARG and the refusal names its path, such as app.servers[1].note.",
         examples: &[
             (r#"from_toml(to_toml({a: 1, b: "x"})).b"#, r#""x""#),
             (r#"(try { to_toml([1]) } catch e { e.error.code })"#, "E_BAD_ARG"),
@@ -8222,7 +8222,7 @@ pub static SIGNATURES: &[Signature] = &[
             opt("separator", Ty::Str, "groups the integer part, such as \",\""),
         ],
         returns: "String",
-        doc: "Format an Int or Float with exactly decimals digits after the point, rounded half away from zero: an exact tie rounds away from zero, unlike Python's round-half-even (format_number(0.125, 2) is 0.13 and format_number(2.5, 0) is 3, where Python gives 0.12 and 2). With a separator the integer part is grouped in threes. A negative number keeps its sign unless it rounds to zero.",
+        doc: "Format an Int or Float with exactly decimals digits after the point, rounded half away from zero: an exact tie rounds away from zero, unlike Python's round-half-even (format_number(0.125, 2) is 0.13 and format_number(2.5, 0) is 3, where Python gives 0.12 and 2). With a separator the integer part is grouped in threes. A negative number keeps its sign unless it rounds to zero, so format_number(-0.001, 2) is \"0.00\" where Python gives \"-0.00\".",
         examples: &[
             (r#"format_number(1234567.891, 2, ",")"#, r#""1,234,567.89""#),
             (r#"format_number(1000, 2)"#, r#""1000.00""#),

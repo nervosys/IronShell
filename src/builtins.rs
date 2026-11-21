@@ -10357,44 +10357,54 @@ fn bi_grep(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
     // substring search, so `grep("^version", "Cargo.toml")` answered [] --
     // an empty result for a pattern every grep user writes. The pattern is
     // now what grep takes: a POSIX basic regular expression.
-    // A back-reference (\1 to \9) is the one BRE form the translation refuses.
-    // Any other failure is the regex compiler's, and its reason is what to fix.
-    // With {extended: true} the pattern is an extended regular expression
-    // (grep -E): it is handed to the regex engine as written.
+    // A back-reference (\1 to \9) is not in the regex crate's syntax, so a
+    // pattern that has one is compiled by fancy-regex (a backtracking engine);
+    // every other pattern keeps the regex crate. With {extended: true} the
+    // pattern is an extended regular expression (grep -E): it is handed to the
+    // engine as written.
+    let backref = grep_has_backref(pattern);
     let translated = if extended {
         pattern.clone()
     } else {
-        crate::posix::bre_to_regex(pattern).ok_or_else(|| {
-            crate::safety::bad_arg_in(
-                "grep",
-                format!("grep: {pattern:?} has a back-reference, which grep does not support"),
-                "remove the \\1 to \\9 back-reference; to match an extended regex, pass {extended: true}",
-            )
-        })?
+        crate::posix::bre_translate(pattern, true).unwrap_or_default()
     };
-    let re = regex::RegexBuilder::new(&translated)
-        .case_insensitive(case_insensitive)
-        .build()
-        .map_err(|e| {
-            // The compiler's last "error:" line is the reason; the lines above it
-            // only quote the pattern with a caret.
-            let text = e.to_string();
-            let reason = text
-                .lines()
-                .rev()
-                .find_map(|line| line.strip_prefix("error: "))
-                .unwrap_or(text.as_str())
-                .to_string();
-            crate::safety::bad_arg_in(
-                "grep",
-                format!("grep: {pattern:?} is not a valid regular expression: {reason}"),
-                "grep takes a basic regular expression: + ? | ( ) { } are literal unless backslashed, so write \\( and \\| for groups and alternatives, or pass {extended: true} to write them bare (TODO|FIXME)",
-            )
-        })?;
+    let invalid = |reason: String| {
+        crate::safety::bad_arg_in(
+            "grep",
+            format!("grep: {pattern:?} is not a valid regular expression: {reason}"),
+            "grep takes a basic regular expression: + ? | ( ) { } are literal unless backslashed, so write \\( and \\| for groups and alternatives, or pass {extended: true} to write them bare (TODO|FIXME)",
+        )
+    };
+    let re = if backref {
+        let source = if case_insensitive {
+            format!("(?i){translated}")
+        } else {
+            translated
+        };
+        GrepMatcher::Fancy(fancy_regex::Regex::new(&source).map_err(|e| invalid(e.to_string()))?)
+    } else {
+        GrepMatcher::Plain(
+            regex::RegexBuilder::new(&translated)
+                .case_insensitive(case_insensitive)
+                .build()
+                .map_err(|e| {
+                    // The compiler's last "error:" line is the reason; the lines above it
+                    // only quote the pattern with a caret.
+                    let text = e.to_string();
+                    let reason = text
+                        .lines()
+                        .rev()
+                        .find_map(|line| line.strip_prefix("error: "))
+                        .unwrap_or(text.as_str())
+                        .to_string();
+                    invalid(reason)
+                })?,
+        )
+    };
     let mut matching: Vec<Value> = Vec::new();
     for (file, text) in &sources {
         for (index, line) in text.lines().enumerate() {
-            if re.is_match(line) == invert {
+            if re.is_match(line)? == invert {
                 continue;
             }
             matching.push(if line_numbers {
@@ -10413,6 +10423,36 @@ fn bi_grep(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
     }
 
     Ok(Value::Array(matching))
+}
+
+/// Whether a grep pattern holds a back-reference (a backslash and a digit 1 to
+/// 9), read in pairs so that an escaped backslash before a digit is not one.
+fn grep_has_backref(pattern: &str) -> bool {
+    let mut it = pattern.chars();
+    while let Some(c) = it.next() {
+        if c == '\\' && matches!(it.next(), Some('1'..='9')) {
+            return true;
+        }
+    }
+    false
+}
+
+/// The compiled pattern of `grep`: the regex crate, or fancy-regex when the
+/// pattern has a back-reference.
+enum GrepMatcher {
+    Plain(regex::Regex),
+    Fancy(fancy_regex::Regex),
+}
+
+impl GrepMatcher {
+    fn is_match(&self, line: &str) -> Result<bool> {
+        match self {
+            GrepMatcher::Plain(re) => Ok(re.is_match(line)),
+            GrepMatcher::Fancy(re) => re.is_match(line).map_err(|e| {
+                crate::safety::arg_err(&format!("grep: the match gave up on a line: {e}"))
+            }),
+        }
+    }
 }
 
 /// The options Record of `grep`, when one is given after the pattern: its keys
@@ -16688,7 +16728,10 @@ fn bi_reverse(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
             arr.reverse();
             Ok(Value::Array(arr))
         }
-        Value::Str(s) => Ok(Value::Str(s.chars().rev().collect())),
+        Value::Str(s) => {
+            use unicode_segmentation::UnicodeSegmentation;
+            Ok(Value::Str(s.graphemes(true).rev().collect()))
+        }
         _ => Err(crate::safety::arg_err(
             "reverse requires array or string input",
         )),
@@ -19197,7 +19240,14 @@ fn toml_value(builtin: &str, value: &Value, path: &str) -> Result<toml::Value> {
             return Err(nonfinite_write_refusal(builtin, *f, path, "TOML"));
         }
         Value::Float(f) => toml::Value::Float(*f),
-        Value::Str(s) | Value::Uri(s) => toml::Value::String(s.clone()),
+        // A String in exactly the form TOML writes a datetime (RFC 3339 offset
+        // datetime, local datetime, local date or local time) is written as one,
+        // so what from_toml read as a datetime round-trips.
+        Value::Str(s) => match s.parse::<toml::value::Datetime>() {
+            Ok(dt) if dt.to_string() == *s => toml::Value::Datetime(dt),
+            _ => toml::Value::String(s.clone()),
+        },
+        Value::Uri(s) => toml::Value::String(s.clone()),
         Value::Array(items) => toml::Value::Array(
             items
                 .iter()
@@ -19282,7 +19332,8 @@ fn bi_to_toml(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
 ///   - text: String (or the piped text)
 /// Returns: Record
 ///
-/// Datetimes come back as their String form. Text that is not TOML is
+/// Datetimes come back as their String form; to_toml writes a String in exactly
+/// the TOML datetime form back unquoted. Text that is not TOML is
 /// E_BAD_VALUE and the refusal says why.
 ///
 /// Example:
@@ -35620,6 +35671,30 @@ fn json_failure(e: &serde_json::Error, text: &str) -> (String, String) {
         e.column(),
         json_message(e)
     );
+    // serde's "number out of range" does not say which number: it is the one
+    // that ends at the reported column.
+    if e.to_string().starts_with("number out of range") {
+        let line = text.lines().nth(e.line().saturating_sub(1)).unwrap_or("");
+        let upto: Vec<char> = line.chars().take(e.column()).collect();
+        let literal: String = upto
+            .iter()
+            .rev()
+            .take_while(|c| c.is_ascii_digit() || matches!(c, '+' | '-' | '.' | 'e' | 'E'))
+            .collect::<Vec<_>>()
+            .into_iter()
+            .rev()
+            .collect();
+        if !literal.is_empty() {
+            let start = upto.len() - literal.chars().count() + 1;
+            return (
+                format!(
+                    "the number {literal} (line {}, column {start}) is out of range: it is past the largest Float, about 1.8e308",
+                    e.line()
+                ),
+                format!("write a number below 1.8e308, or quote {literal} as a string to keep it"),
+            );
+        }
+    }
     // serde's "unexpected end of hex escape" is the only word for a surrogate
     // escape that does not pair up; name the escape instead.
     let message = e.to_string();
@@ -60278,7 +60353,10 @@ fn bi_git_log(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
         cmd.args(["-c", "core.quotepath=off", "log", &format!("-{}", count)]);
         cmd.arg("--format=%x1e%H%x1f%an%x1f%aI%x1f%s");
         if with_files {
-            cmd.arg("--name-only");
+            // --name-status -M names a rename as `R<score>\told\tnew`; a merge is
+            // diffed against its first parent (--diff-merges, which unlike
+            // --first-parent does not drop the second-parent commits).
+            cmd.args(["--name-status", "-M", "--diff-merges=first-parent"]);
         }
         let output = bounded_cmd_output("git_log", "git", cmd, TOOL_DEADLINE_SECS)?;
         git_succeeded("git_log", &output, ".")?;
@@ -60297,11 +60375,28 @@ fn bi_git_log(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
                 m.insert("date".to_string(), take());
                 m.insert("subject".to_string(), take());
                 if with_files {
-                    let files: Vec<Value> = lines
-                        .filter(|l| !l.is_empty())
-                        .map(|l| Value::Str(l.to_string()))
-                        .collect();
+                    let mut files: Vec<Value> = Vec::new();
+                    let mut renames: Vec<Value> = Vec::new();
+                    for line in lines.filter(|l| !l.is_empty()) {
+                        let mut parts = line.split('\t');
+                        let status = parts.next().unwrap_or("");
+                        let paths: Vec<&str> = parts.collect();
+                        match (status.chars().next(), paths.as_slice()) {
+                            (Some('R' | 'C'), [from, to]) => {
+                                files.push(Value::Str((*to).to_string()));
+                                if status.starts_with('R') {
+                                    renames.push(Value::Record(BTreeMap::from([
+                                        ("from".to_string(), Value::Str((*from).to_string())),
+                                        ("to".to_string(), Value::Str((*to).to_string())),
+                                    ])));
+                                }
+                            }
+                            (_, [path]) => files.push(Value::Str((*path).to_string())),
+                            _ => {}
+                        }
+                    }
                     m.insert("files".to_string(), Value::Array(files));
+                    m.insert("renames".to_string(), Value::Array(renames));
                 }
                 Value::Record(m)
             })
