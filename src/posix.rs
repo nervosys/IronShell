@@ -237,6 +237,57 @@ fn is_name_char(c: char) -> bool {
     c.is_ascii_alphanumeric() || c == '_'
 }
 
+/// The operand of a `${x:-...}` inside double quotes, less its own unescaped
+/// `"` characters: the text between them is quoted already. A `$(...)` and a
+/// backquoted command keep theirs.
+fn strip_inner_quotes(inner: &[char]) -> Vec<char> {
+    let mut out = Vec::with_capacity(inner.len());
+    let mut i = 0;
+    while i < inner.len() {
+        match inner[i] {
+            '\\' => {
+                out.push('\\');
+                if let Some(&n) = inner.get(i + 1) {
+                    out.push(n);
+                    i += 1;
+                }
+            }
+            '$' if inner.get(i + 1) == Some(&'(') => {
+                let mut depth = 0;
+                while i < inner.len() {
+                    out.push(inner[i]);
+                    match inner[i] {
+                        '(' => depth += 1,
+                        ')' => {
+                            depth -= 1;
+                            if depth == 0 {
+                                break;
+                            }
+                        }
+                        _ => {}
+                    }
+                    i += 1;
+                }
+            }
+            '`' => {
+                out.push('`');
+                i += 1;
+                while i < inner.len() {
+                    out.push(inner[i]);
+                    if inner[i] == '`' {
+                        break;
+                    }
+                    i += 1;
+                }
+            }
+            '"' => {}
+            c => out.push(c),
+        }
+        i += 1;
+    }
+    out
+}
+
 impl<'a> Lexer<'a> {
     fn peek(&self) -> Option<char> {
         self.s.get(self.i).copied()
@@ -940,14 +991,16 @@ impl<'a> Lexer<'a> {
                     }
                     w
                 } else if inner.is_empty() {
-                    vec![Part::Lit(String::new(), true)]
+                    Vec::new()
                 } else {
                     let mut sub = Lexer { s: &inner, i: 0 };
                     let mut w = Vec::new();
                     // Treat the operand like double-quoted text when the
                     // expansion itself is quoted, else as a word.
                     if quoted {
-                        let mut chars = inner.clone();
+                        // A `"` inside the operand opens and closes quoting
+                        // that is already in force, so it only drops out.
+                        let mut chars = strip_inner_quotes(&inner);
                         chars.push('"');
                         let mut q = Lexer { s: &chars, i: 0 };
                         q.double_quoted(&mut w)
@@ -1574,6 +1627,7 @@ const UNSUPPORTED_BUILTINS: &[&str] = &[
     "help",
     "caller",
     "disown",
+    "time",
 ];
 
 /// The construct a command word names when the subset does not run it: a
@@ -1685,9 +1739,12 @@ fn assignment(w: &Word) -> Option<(String, Word)> {
     };
     let eq = first.find('=')?;
     let name = &first[..eq];
-    if name.is_empty()
-        || !name.chars().next().is_some_and(is_name_start)
-        || !name.chars().all(is_name_char)
+    // `name+=value` appends: the name keeps its `+` here, and `run_simple`
+    // reads it.
+    let base = name.strip_suffix('+').unwrap_or(name);
+    if base.is_empty()
+        || !base.chars().next().is_some_and(is_name_start)
+        || !base.chars().all(is_name_char)
     {
         return None;
     }
@@ -1844,6 +1901,57 @@ impl Input {
     }
 }
 
+/// The parts of the shell's state a subshell may change without the parent
+/// seeing it (see [`Shell::subshell_state`]).
+struct SubshellState {
+    vars: HashMap<String, String>,
+    exported: Vec<String>,
+    unset_env: Vec<String>,
+    positional: Vec<String>,
+    options: (bool, bool, bool),
+    cwd: Option<std::path::PathBuf>,
+}
+
+/// Where a descriptor of a redirected command points.
+#[derive(Clone, PartialEq)]
+enum Dest {
+    /// The enclosing command's standard output.
+    Out,
+    /// The enclosing command's standard error.
+    Err,
+    /// `/dev/null`.
+    Null,
+    /// A file, and whether it is appended to.
+    File(String, bool),
+}
+
+impl Dest {
+    /// Send `data` where this descriptor points.
+    fn write(&self, data: &[u8], sink: &mut Sink) -> Result<(), String> {
+        match self {
+            Dest::Out => sink.out.extend_from_slice(data),
+            Dest::Err => sink.ewrite(data),
+            Dest::Null => {}
+            Dest::File(path, append) => write_file(path, data, *append)?,
+        }
+        Ok(())
+    }
+}
+
+/// A word as it was written, for an error message that names it.
+fn word_source(w: &Word) -> String {
+    w.iter()
+        .map(|p| match p {
+            Part::Lit(s, _) => s.clone(),
+            Part::Var(n, None, _) => format!("${n}"),
+            Part::Var(n, Some(_), _) => format!("${{{n}}}"),
+            Part::Len(n) => format!("${{#{n}}}"),
+            Part::Cmd(..) => "$(...)".to_string(),
+            Part::Arith(..) => "$((...))".to_string(),
+        })
+        .collect()
+}
+
 #[derive(Clone, Copy, PartialEq)]
 enum ErrMode {
     Real,
@@ -1994,7 +2102,14 @@ impl Shell {
         if name == "RANDOM" && !self.vars.contains_key(name) {
             return Some(next_random().to_string());
         }
-        match std::env::var(name).ok() {
+        // A variable the script unset stays unset, whatever the environment
+        // this process started with holds.
+        let folded = crate::safety::fold_env_name(name);
+        let was_unset = self
+            .unset_env
+            .iter()
+            .any(|n| crate::safety::fold_env_name(n) == folded);
+        match std::env::var(name).ok().filter(|_| !was_unset) {
             Some(v) => Some(v),
             // Windows has no HOME; the platform's home directory stands in for it
             // (only here, the process environment is left alone).
@@ -2008,6 +2123,15 @@ impl Shell {
                 .map(|p| posix_path(&p.to_string_lossy())),
             None if name == "PPID" => parent_pid(),
             None => None,
+        }
+    }
+
+    /// What `"$*"` puts between the arguments: the first character of IFS,
+    /// nothing when IFS is empty, a space when it is unset.
+    fn star_sep(&self) -> String {
+        match self.vars.get("IFS") {
+            Some(ifs) => ifs.chars().next().map(String::from).unwrap_or_default(),
+            None => " ".to_string(),
         }
     }
 
@@ -2078,7 +2202,16 @@ impl Shell {
             return Vec::new();
         }
 
-        for (idx, part) in w.iter().enumerate() {
+        let items = self.inline_operands(w);
+        for (idx, (part, sep)) in items.iter().enumerate() {
+            // A blank between the words of an unquoted operand ends a field.
+            if *sep {
+                if have {
+                    fields.push((std::mem::take(&mut cur), std::mem::take(&mut mask)));
+                    have = false;
+                }
+                continue;
+            }
             match part {
                 Part::Lit(s, quoted) => {
                     let s = if idx == 0 && tilde {
@@ -2105,9 +2238,10 @@ impl Shell {
                     }
                     have = true;
                 }
-                // `"$*"` is one field, the arguments joined by a space.
+                // `"$*"` is one field, the arguments joined by the first
+                // character of IFS.
                 Part::Var(name, None, true) if name == "*" => {
-                    let joined = self.positional.join(" ");
+                    let joined = self.positional.join(&self.star_sep());
                     self.splice(&joined, true, &mut fields, &mut cur, &mut mask, &mut have);
                 }
                 // `"$@"` is each argument as its own field, and no field at all
@@ -2175,6 +2309,37 @@ impl Shell {
                 }
             }
             out.push(text);
+        }
+        out
+    }
+
+    /// `w` with each unquoted `${x:-w}` and `${x:+w}` whose operand
+    /// applies replaced by the operand's own parts, so that quotes inside it
+    /// keep their text whole (`${y:-"a  b"}` is one word with two spaces).
+    /// Each part comes with whether it is a run of blanks between the words of
+    /// an operand, which ends a field. An operand that does not apply is left
+    /// to [`Shell::param`].
+    fn inline_operands(&mut self, w: &Word) -> Vec<(Part, bool)> {
+        let mut out = Vec::with_capacity(w.len());
+        for part in w {
+            if let Part::Var(name, Some((op, word)), false) = part {
+                let kind = op.trim_start_matches(':');
+                // (`${x:=w}` is left to `param`: bash splits its result.)
+                if matches!(kind, "-" | "+") && op != ":" {
+                    let value = self.var(name);
+                    let null = match &value {
+                        None => true,
+                        Some(v) => op.starts_with(':') && v.is_empty(),
+                    };
+                    if null != (kind == "+") {
+                        out.extend(self.inline_operands(word));
+                        continue;
+                    }
+                }
+            }
+            let sep = matches!(part, Part::Lit(s, false)
+                if !s.is_empty() && s.chars().all(|c| c == ' ' || c == '\t'));
+            out.push((part.clone(), sep));
         }
         out
     }
@@ -2599,7 +2764,12 @@ impl Shell {
                     out.push_str(&value.unwrap_or_default().chars().count().to_string());
                 }
                 Part::Var(name, None, _) if name == "@" || name == "*" => {
-                    out.push_str(&self.positional.join(" "));
+                    let sep = if name == "*" {
+                        self.star_sep()
+                    } else {
+                        " ".to_string()
+                    };
+                    out.push_str(&self.positional.join(&sep));
                 }
                 Part::Var(name, op, quoted) => {
                     let value = self.param(name, op, *quoted, stdin);
@@ -2690,6 +2860,31 @@ impl Shell {
         flow
     }
 
+    /// What a subshell cannot change in its parent.
+    fn subshell_state(&self) -> SubshellState {
+        SubshellState {
+            vars: self.vars.clone(),
+            exported: self.exported.clone(),
+            unset_env: self.unset_env.clone(),
+            positional: self.positional.clone(),
+            options: (self.errexit, self.nounset, self.pipefail),
+            cwd: std::env::current_dir().ok(),
+        }
+    }
+
+    fn restore_subshell(&mut self, s: SubshellState) {
+        self.vars = s.vars;
+        self.exported = s.exported;
+        self.unset_env = s.unset_env;
+        self.positional = s.positional;
+        (self.errexit, self.nounset, self.pipefail) = s.options;
+        if let Some(dir) = s.cwd {
+            if std::env::current_dir().ok().as_ref() != Some(&dir) {
+                let _ = std::env::set_current_dir(dir);
+            }
+        }
+    }
+
     fn run_pipeline(&mut self, p: &Pipeline, stdin: &mut Input, sink: &mut Sink) -> Flow {
         self.line = p.line;
         // A `!` pipeline is exempt from errexit, and so is everything in it.
@@ -2710,11 +2905,15 @@ impl Shell {
                 let input: &mut Input = if k == 0 { &mut *stdin } else { &mut local_in };
                 let mut stage = Sink::new(sink.err_mode);
                 // Each stage of a pipeline is a subshell in bash: `exit` and
-                // `break` end the stage, not the script.
+                // `break` end the stage, not the script, and a variable it
+                // sets, an option it changes or a directory it enters is gone
+                // when it ends (`echo x | read v` leaves `v` as it was).
+                let saved = self.subshell_state();
                 let c = match self.run_cmd(cmd, input, &mut stage) {
                     Flow::Next(c) | Flow::Exit(c) => c,
                     _ => 0,
                 };
+                self.restore_subshell(saved);
                 // A `--timeout` that killed a stage stops the later ones too.
                 if RUN_TIMEOUT_STATUS.load(std::sync::atomic::Ordering::SeqCst) != 0 {
                     sink.out.extend_from_slice(&stage.out);
@@ -2779,20 +2978,19 @@ impl Shell {
         if redirs.is_empty() {
             return self.run_cmd_inner(cmd, stdin, sink);
         }
-        // Resolve redirections into a local input and sink.
+        // Resolve redirections into a local input and sink, left to right as
+        // the shell applies them: each descriptor points at a destination, and
+        // `2>&1` copies where descriptor 1 points at that moment.
         let mut local_in: Option<Input> = None;
-        let mut out_file: Option<(String, bool)> = None;
-        let mut err_file: Option<(String, bool)> = None;
-        let mut out_null = false;
-        let mut out_to_err = false;
-        let mut err_mode = sink.err_mode;
+        let mut d1 = Dest::Out;
+        let mut d2 = Dest::Err;
         for r in redirs {
             match r {
                 Redir::In(w) => {
-                    let path = self.expand(w, stdin).join(" ");
-                    if let Some(flow) = self.unbound_refusal(sink) {
-                        return flow;
-                    }
+                    let path = match self.redirect_target(w, stdin, sink) {
+                        Ok(p) => p,
+                        Err(flow) => return flow,
+                    };
                     if let Some(refusal) = jail_refusal(SHELL_NAME, &path) {
                         sink.eline(&refusal);
                         self.last = 1;
@@ -2814,46 +3012,42 @@ impl Shell {
                     local_in = Some(Input::buf(text.into_bytes()));
                 }
                 Redir::Out { fd, append, target } => {
-                    let path = self.expand(target, stdin).join(" ");
-                    if *fd == 2 {
-                        if path == "/dev/null" {
-                            err_mode = ErrMode::Null;
-                        } else {
-                            let resolved = match self.refuse_write(sink, &path) {
-                                Ok(p) => p,
-                                Err(flow) => return flow,
-                            };
-                            err_mode = ErrMode::Capture;
-                            err_file = Some((resolved, *append));
-                        }
-                    } else if path == "/dev/null" {
-                        out_null = true;
-                        out_file = None;
+                    let path = match self.redirect_target(target, stdin, sink) {
+                        Ok(p) => p,
+                        Err(flow) => return flow,
+                    };
+                    let dest = if path == "/dev/null" {
+                        Dest::Null
                     } else {
-                        let resolved = match self.refuse_write(sink, &path) {
-                            Ok(p) => p,
+                        match self.refuse_write(sink, &path) {
+                            Ok(p) => Dest::File(p, *append),
                             Err(flow) => return flow,
-                        };
-                        out_null = false;
-                        out_file = Some((resolved, *append));
+                        }
+                    };
+                    if *fd == 2 {
+                        d2 = dest;
+                    } else {
+                        d1 = dest;
                     }
                 }
                 Redir::Both(target) => {
-                    let path = self.expand(target, stdin).join(" ");
-                    if path == "/dev/null" {
-                        out_null = true;
-                        err_mode = ErrMode::Null;
+                    let path = match self.redirect_target(target, stdin, sink) {
+                        Ok(p) => p,
+                        Err(flow) => return flow,
+                    };
+                    let dest = if path == "/dev/null" {
+                        Dest::Null
                     } else {
-                        let resolved = match self.refuse_write(sink, &path) {
-                            Ok(p) => p,
+                        match self.refuse_write(sink, &path) {
+                            Ok(p) => Dest::File(p, false),
                             Err(flow) => return flow,
-                        };
-                        out_file = Some((resolved, false));
-                        err_mode = ErrMode::Merge;
-                    }
+                        }
+                    };
+                    d1 = dest.clone();
+                    d2 = dest;
                 }
-                Redir::Dup { from: 2, to: 1 } => err_mode = ErrMode::Merge,
-                Redir::Dup { from: 1, to: 2 } => out_to_err = true,
+                Redir::Dup { from: 2, to: 1 } => d2 = d1.clone(),
+                Redir::Dup { from: 1, to: 2 } => d1 = d2.clone(),
                 Redir::Dup { .. } => {}
             }
         }
@@ -2863,29 +3057,56 @@ impl Shell {
         if let Some(flow) = self.glob_refusal(sink) {
             return flow;
         }
+        // Both descriptors going to one place keep their order (merged); else
+        // standard error is captured to be sent on its own.
+        let err_mode = if d1 == d2 {
+            ErrMode::Merge
+        } else if d2 == Dest::Null {
+            ErrMode::Null
+        } else if d2 == Dest::Err && sink.err_mode == ErrMode::Real {
+            ErrMode::Real
+        } else {
+            ErrMode::Capture
+        };
         let mut local = Sink::new(err_mode);
         let flow = match local_in.as_mut() {
             Some(i) => self.run_cmd_inner(cmd, i, &mut local),
             None => self.run_cmd_inner(cmd, stdin, &mut local),
         };
-        if let Some((path, append)) = err_file {
-            if let Err(msg) = write_file(&path, &local.err, append) {
+        if err_mode == ErrMode::Capture {
+            let err = std::mem::take(&mut local.err);
+            if let Err(msg) = d2.write(&err, sink) {
                 sink.eline(&msg);
             }
         }
-        if let Some((path, append)) = out_file {
-            if let Err(msg) = write_file(&path, &local.out, append) {
-                sink.eline(&msg);
-                self.last = 1;
-                return Flow::Next(1);
-            }
-        } else if out_to_err {
-            let out = std::mem::take(&mut local.out);
-            sink.ewrite(&out);
-        } else if !out_null {
-            sink.out.extend_from_slice(&local.out);
+        if let Err(msg) = d1.write(&local.out, sink) {
+            sink.eline(&msg);
+            self.last = 1;
+            return Flow::Next(1);
         }
         flow
+    }
+
+    /// The one file name a redirection's word expands to. A word that gives
+    /// none or several is bash's `ambiguous redirect`: the command does not run
+    /// and the status is 1.
+    fn redirect_target(
+        &mut self,
+        w: &Word,
+        stdin: &mut Input,
+        sink: &mut Sink,
+    ) -> Result<String, Flow> {
+        let mut fields = self.expand(w, stdin);
+        if let Some(flow) = self.unbound_refusal(sink) {
+            return Err(flow);
+        }
+        if fields.len() != 1 {
+            let msg = self.expansion_message(&word_source(w), "ambiguous redirect");
+            sink.eline(&msg);
+            self.last = 1;
+            return Err(Flow::Next(1));
+        }
+        Ok(fields.remove(0))
     }
 
     /// Judge a redirection's output file before its command runs. Bash opens the
@@ -3014,12 +3235,20 @@ impl Shell {
         }
         let mut env_overrides = Vec::new();
         for (name, w) in assigns {
+            let (name, append) = match name.strip_suffix('+') {
+                Some(base) => (base.to_string(), true),
+                None => (name.clone(), false),
+            };
+            let name = &name;
             // A prefix assignment on a command reaches that command's
             // environment; a bare assignment stays in the shell.
             if !argv.is_empty() && refuse_steering(sink, name) {
                 return Flow::Next(POLICY_DENY_STATUS);
             }
-            let v = self.expand_assign(w, stdin);
+            let mut v = self.expand_assign(w, stdin);
+            if append {
+                v = self.var(name).unwrap_or_default() + &v;
+            }
             if argv.is_empty() {
                 // A failed arithmetic expansion discards the assignment.
                 if !self.arith_failed {
@@ -3169,7 +3398,32 @@ impl Shell {
                 return Flow::Next(0);
             }
             "cd" => {
-                let target = match args.first() {
+                // Options: `-L`, `-P` (and `-e`, `-@`), then `--`. The shell
+                // follows no links of its own, so -L and -P do the same here.
+                let mut rest: &[String] = args;
+                while let Some(a) = rest.first() {
+                    if a == "--" {
+                        rest = &rest[1..];
+                        break;
+                    }
+                    if a.len() > 1 && a.starts_with('-') {
+                        if let Some(bad) =
+                            a[1..].chars().find(|c| !matches!(c, 'L' | 'P' | 'e' | '@'))
+                        {
+                            sink.eline(&format!("{SHELL_NAME}: cd: -{bad}: invalid option"));
+                            sink.eline("cd: usage: cd [-L|[-P [-e]] [-@]] [dir]");
+                            return Flow::Next(2);
+                        }
+                        rest = &rest[1..];
+                        continue;
+                    }
+                    break;
+                }
+                if rest.len() > 1 {
+                    sink.eline(&format!("{SHELL_NAME}: cd: too many arguments"));
+                    return Flow::Next(1);
+                }
+                let target = match rest.first() {
                     Some(t) if t == "-" => match self.var("OLDPWD").filter(|d| !d.is_empty()) {
                         Some(d) => d,
                         None => {
@@ -3207,7 +3461,7 @@ impl Shell {
                             self.set_var("PWD", posix_path(&d.to_string_lossy()));
                         }
                         // `cd -` says where it went, as bash does.
-                        if args.first().map(|t| t == "-").unwrap_or(false) {
+                        if rest.first().map(|t| t == "-").unwrap_or(false) {
                             sink.out.extend_from_slice(logical_pwd().as_bytes());
                             sink.out.push(b'\n');
                         }
@@ -3299,7 +3553,7 @@ impl Shell {
                 let _ = err.flush();
             }
         }
-        let (line, terminated) = match stdin.read_line() {
+        let (mut line, mut terminated) = match stdin.read_line() {
             Ok(Some(found)) => found,
             Ok(None) => {
                 for n in &names {
@@ -3312,6 +3566,26 @@ impl Shell {
                 return 2;
             }
         };
+        // Without -r, a backslash before the newline continues the line: both
+        // are removed and the next line is joined on. A doubled backslash is
+        // an escaped backslash, so only an odd run continues.
+        while !raw && terminated {
+            let run = line.iter().rev().take_while(|&&b| b == b'\\').count();
+            if run % 2 == 0 {
+                break;
+            }
+            line.pop();
+            match stdin.read_line() {
+                Ok(Some((more, t))) => {
+                    line.extend_from_slice(&more);
+                    terminated = t;
+                }
+                _ => {
+                    terminated = false;
+                    break;
+                }
+            }
+        }
         let mut line = String::from_utf8_lossy(&line).into_owned();
         if !raw {
             let mut s = String::new();
@@ -4237,7 +4511,28 @@ fn collate_in(natural: bool, a: &str, b: &str) -> std::cmp::Ordering {
     a.as_bytes().cmp(b.as_bytes())
 }
 
-/// `fnmatch` for `*`, `?` and `[…]` (with `!`/`^` negation and ranges).
+/// Whether `c` is in the POSIX character class `name`, or `None` for a name
+/// that is no class.
+fn posix_class(name: &str, c: char) -> Option<bool> {
+    Some(match name {
+        "alpha" => c.is_alphabetic(),
+        "digit" => c.is_ascii_digit(),
+        "alnum" => c.is_alphanumeric(),
+        "upper" => c.is_uppercase(),
+        "lower" => c.is_lowercase(),
+        "space" => matches!(c, ' ' | '\t' | '\n' | '\x0b' | '\x0c' | '\r'),
+        "blank" => matches!(c, ' ' | '\t'),
+        "punct" => c.is_ascii_punctuation(),
+        "print" => !c.is_control(),
+        "graph" => !c.is_control() && !c.is_whitespace(),
+        "cntrl" => c.is_control(),
+        "xdigit" => c.is_ascii_hexdigit(),
+        _ => return None,
+    })
+}
+
+/// `fnmatch` for `*`, `?` and `[…]` (with `!`/`^` negation, ranges and
+/// `[:class:]` names).
 fn glob_match(pat: &str, s: &str) -> bool {
     fn go(p: &[char], s: &[char]) -> bool {
         match p.first() {
@@ -4255,6 +4550,19 @@ fn glob_match(pat: &str, s: &str) -> bool {
                 let mut first = true;
                 while k < p.len() && (p[k] != ']' || first) {
                     first = false;
+                    // `[:alpha:]` and the other POSIX classes.
+                    if p[k] == '[' && p.get(k + 1) == Some(&':') {
+                        let close = (k + 2..p.len().saturating_sub(1))
+                            .find(|&j| p[j] == ':' && p[j + 1] == ']');
+                        if let Some(end) = close {
+                            let name: String = p[k + 2..end].iter().collect();
+                            if let Some(m) = posix_class(&name, c) {
+                                matched |= m;
+                                k = end + 2;
+                                continue;
+                            }
+                        }
+                    }
                     if k + 2 < p.len() && p[k + 1] == '-' && p[k + 2] != ']' {
                         if p[k] <= c && c <= p[k + 2] {
                             matched = true;
@@ -4623,7 +4931,12 @@ fn expand_pattern(
         };
     }
     if pattern.ends_with('/') {
-        bases = bases.into_iter().map(|b| format!("{b}/")).collect();
+        // A trailing slash keeps only the directories (a link to one counts).
+        bases = bases
+            .into_iter()
+            .filter(|b| Path::new(b).is_dir())
+            .map(|b| format!("{b}/"))
+            .collect();
     }
     (bases, false)
 }
@@ -9040,6 +9353,7 @@ pub fn refusal_hint(construct: &str) -> String {
     let op = construct.split('`').nth(1).unwrap_or("");
     let tip: String = match construct {
         "function definition" => "functions are outside the subset; repeat the body, or put it in a .sh script run with ish -b, or write the logic in ish".into(),
+        "`time` builtin" => "time is a bash keyword that is outside the subset; drop it and run the command on its own".into(),
         "`trap` builtin" => "trap is outside the subset; put cleanup after the commands and use `|| cleanup` / set -e".into(),
         "`source` builtin" | "`.` builtin" => "source and . are outside the subset; run the script as a command (ish -b ./x.sh) or write its commands here".into(),
         c if c.starts_with("brace expansion") => "write the words out (d/a d/b) or use a for loop".into(),
