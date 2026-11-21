@@ -144,6 +144,9 @@ pub mod clock;
 /// Configuration — XDG-compliant config, themes, and settings.
 #[cfg(feature = "native")]
 pub mod config;
+/// Cron expressions: parsing and next run times.
+#[cfg(feature = "native")]
+pub mod cron_expr;
 #[cfg(feature = "native")]
 pub(crate) mod crypto_phc;
 #[cfg(feature = "native")]

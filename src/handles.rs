@@ -428,11 +428,18 @@ pub fn preview_of(v: &Value) -> Value {
         Value::Array(items) => Value::Array(items.iter().take(PREVIEW_ROWS).cloned().collect()),
         // A record is previewed by its keys: the field names are the part an
         // agent needs in order to write the next call, and the values may be
-        // arbitrarily large.
+        // arbitrarily large. A short scalar shows its value; an Array, a Record
+        // or a long String shows its type, as a String (`array<int>`), and the
+        // render says so (`@preview`), so a type is not read as a value.
         Value::Record(m) => {
             let mut out = BTreeMap::new();
             for (k, val) in m.iter().take(PREVIEW_ROWS) {
-                out.insert(k.clone(), Value::Str(crate::shapes::observe(val)));
+                let shown = match val {
+                    Value::Int(_) | Value::Float(_) | Value::Bool(_) | Value::Null => val.clone(),
+                    Value::Str(s) if s.chars().count() <= 80 => val.clone(),
+                    _ => Value::Str(crate::shapes::observe(val)),
+                };
+                out.insert(k.clone(), shown);
             }
             Value::Record(out)
         }

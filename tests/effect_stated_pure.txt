@@ -119,6 +119,7 @@ from_epoch
 from_jsonl
 from_toml
 from_yaml
+from_yaml_all
 get
 group
 group-object

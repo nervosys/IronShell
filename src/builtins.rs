@@ -819,6 +819,14 @@ lazy_static::lazy_static! {
         map.insert("coalesce", 1219);
         // A byte count as text such as "1.5 KiB" (1220)
         map.insert("format_bytes", 1220);
+        // The text of a .gz file, every member (1221)
+        map.insert("gzip_read", 1221);
+        // Every document of a YAML stream (1222)
+        map.insert("from_yaml_all", 1222);
+        // The next run times of a cron expression (1223)
+        map.insert("cron_next", 1223);
+        // The expanded fields of a cron expression (1224)
+        map.insert("cron_parse", 1224);
         // 500-519: Database
         map.insert("db_sqlite_open", 500);
         map.insert("db_sqlite_query", 1217);
@@ -3926,6 +3934,14 @@ static BUILTIN_DISPATCH: &[fn(Vec<Value>, Option<Value>, &mut Env) -> Result<Val
     |args, input, _| bi_coalesce(args, input), // 1219
     // A byte count as human-readable text
     |args, input, _| bi_format_bytes(args, input), // 1220
+    // The text of a .gz file
+    |args, input, _| bi_gzip_read(args, input), // 1221
+    // Every document of a YAML stream
+    |args, input, _| bi_from_yaml_all(args, input), // 1222
+    // The next run times of a cron expression
+    |args, input, _| bi_cron_next(args, input), // 1223
+    // The expanded fields of a cron expression
+    |args, input, _| bi_cron_parse(args, input), // 1224
 ];
 
 /// The dispatch row that serves `name`, if the fast table has one.
@@ -6289,7 +6305,7 @@ fn bi_median(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
         return Err(crate::safety::bad_arg_in(
             "median",
             "median of an empty array is undefined",
-            "the array is empty; check len(xs) > 0 first, or use a default",
+            "the array is empty: did a glob or filter match nothing? check len(xs) > 0 first, or use a default",
         ));
     }
     v.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
@@ -6373,7 +6389,7 @@ fn bi_percentile(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
         return Err(crate::safety::bad_arg_in(
             "percentile",
             "percentile of an empty array is undefined",
-            "the array is empty; check len(xs) > 0 first, or use a default",
+            "the array is empty: did a glob or filter match nothing? check len(xs) > 0 first, or use a default",
         ));
     }
     v.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
@@ -9726,6 +9742,16 @@ fn decode_text(builtin: &str, path: &std::path::Path, bytes: Vec<u8>) -> Result<
                 "the file is UTF-16 text; it is refused, not decoded; convert it to UTF-8 first",
             );
         }
+        if e.as_bytes().starts_with(&[0x1f, 0x8b]) {
+            return crate::safety::value_not_representable(
+                builtin,
+                format!(
+                    "{builtin}: `{}` is gzip data, not UTF-8 text",
+                    crate::safety::strip_verbatim_prefix(path).display()
+                ),
+                "the file starts with the gzip magic bytes 1F 8B; read its text with gzip_read(path), or open(path) for a .json.gz, .csv.gz or .jsonl.gz; gzip_decompress(path) writes the uncompressed file beside it",
+            );
+        }
         crate::safety::value_not_representable(
             builtin,
             format!(
@@ -12999,6 +13025,13 @@ fn bi_from_yaml(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
             e
         } else {
             let message = format!("from_yaml: {e}");
+            if message.contains("multiple YAML documents") {
+                return crate::safety::value_not_representable(
+                    "from_yaml",
+                    message,
+                    "the text holds several documents (---); read them with from_yaml_all(text), which returns an Array with one element per document, or open(path) on a .yaml file",
+                );
+            }
             match yaml_unsupported_construct(&message) {
                 Some(construct) => crate::safety::value_not_representable(
                     "from_yaml",
@@ -13023,6 +13056,151 @@ fn bi_from_yaml(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
             }
         }
     })
+}
+
+/// from_yaml_all(text) - Parse every document of a YAML stream.
+/// Args:
+///   - text: String (or the piped text) - YAML with documents separated by `---`
+/// Returns: Array - one element per document
+///
+/// As PyYAML's safe_load_all: `---` starts a document and `...` ends one, a
+/// leading `---` adds no empty document, an empty document is null, and CRLF
+/// line ends are read. Text with no content is `[]`. The YAML subset is the same
+/// as from_yaml's.
+///
+/// Example:
+///   from_yaml_all("a: 1\n---\nb: 2\n") | len     # 2
+fn bi_from_yaml_all(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
+    const B: &str = "from_yaml_all";
+    let (text, rest) = text_subject(B, args, input)?;
+    if !rest.is_empty() {
+        return Err(arity_error(B, "one YAML text", rest.len() + 1));
+    }
+    crate::memory::reserve_parse(B, text.len(), 8)?;
+    crate::yaml::parse_all(&text)
+        .map(Value::Array)
+        .map_err(|e| {
+            if e.downcast_ref::<crate::safety::SafetyError>().is_some() {
+                return e;
+            }
+            let message = format!("{B}: {e}");
+            let hint = match yaml_unsupported_construct(&message) {
+                Some(construct) => format!(
+                    "a document uses {construct}, which is outside IronShell's YAML subset; convert it to JSON and use from_json, or rewrite it without that construct"
+                ),
+                None => "each document is a mapping (`key: value` lines) or a sequence (`- item` lines), indented with spaces; the message names the line of the whole text it could not read".to_string(),
+            };
+            crate::safety::value_not_representable(B, message, &hint)
+        })
+}
+
+/// cron_parse(expr) - The fields of a cron expression, expanded.
+/// Args:
+///   - expr: String (or the piped text) - five fields, or @hourly, @daily, @weekly, @monthly, @yearly
+/// Returns: Record {minute, hour, day_of_month, month, day_of_week, day_rule}
+///
+/// Each field is the Array of values it allows (day of week 0 is Sunday, and 7
+/// is read as Sunday). `day_rule` is "or" when day of month and day of week are
+/// both restricted, as Vixie cron runs them, else "and". Nothing is scheduled.
+///
+/// Example:
+///   cron_parse("*/20 9-10 * * MON-FRI").minute     # [0, 20, 40]
+fn bi_cron_parse(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
+    const B: &str = "cron_parse";
+    let (text, rest) = text_subject(B, args, input)?;
+    if !rest.is_empty() {
+        return Err(arity_error(B, "one cron expression", rest.len() + 1));
+    }
+    let cron = cron_parsed(B, &text)?;
+    let ints = |v: Vec<i64>| Value::Array(v.into_iter().map(Value::Int).collect());
+    let mut r = BTreeMap::new();
+    r.insert("minute".to_string(), ints(cron.minutes()));
+    r.insert("hour".to_string(), ints(cron.hours()));
+    r.insert("day_of_month".to_string(), ints(cron.days_of_month()));
+    r.insert("month".to_string(), ints(cron.months()));
+    r.insert("day_of_week".to_string(), ints(cron.days_of_week()));
+    let rule = if cron.dom_star || cron.dow_star {
+        "and"
+    } else {
+        "or"
+    };
+    r.insert("day_rule".to_string(), Value::Str(rule.to_string()));
+    Ok(Value::Record(r))
+}
+
+fn cron_parsed(builtin: &str, text: &str) -> Result<crate::cron_expr::Cron> {
+    crate::cron_expr::parse(text).map_err(|why| {
+        crate::safety::bad_arg_in(
+            builtin,
+            format!("{builtin}: `{}`: {why}", text.trim()),
+            "write five fields (minute hour day-of-month month day-of-week), such as '*/15 9-17 * * MON-FRI', or @hourly, @daily, @weekly, @monthly, @yearly; a field is *, a number or name, a range A-B, a list A,B, with an optional /step",
+        )
+    })
+}
+
+/// cron_next(expr, n?, from?) - The next run times of a cron expression, in UTC.
+/// Args:
+///   - expr: String (or the piped text) - five fields, or an @ shorthand (not @reboot)
+///   - n: Int (optional) - how many times, 1 to 1000, 1 by default
+///   - from: String (optional) - an ISO 8601 time; the times are after it; now by default
+/// Returns: Array of String - ISO 8601 UTC times, each ending in Z
+///
+/// Standard 5-field cron as Vixie cron reads it: `*`, lists, ranges, steps,
+/// JAN-DEC and SUN-SAT. With both day of month and day of week restricted, a day
+/// matches if either does. A time equal to `from` is not returned. Nothing is
+/// scheduled; cron_add and cron_list manage the real schedule.
+///
+/// Example:
+///   cron_next("*/15 * * * *", 2, "2026-11-21T10:07:00Z")   # ["2026-11-21T10:15:00Z", "2026-11-21T10:30:00Z"]
+fn bi_cron_next(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
+    const B: &str = "cron_next";
+    let (text, rest) = text_subject(B, args, input)?;
+    let (count, from) = match rest.as_slice() {
+        [] => (1, None),
+        [Value::Int(n)] => (*n, None),
+        [Value::Str(f)] => (1, Some(f.as_str())),
+        [Value::Int(n), Value::Str(f)] => (*n, Some(f.as_str())),
+        [other] | [other, _] => {
+            return Err(crate::safety::bad_arg(
+                B,
+                "an Int count then an ISO time String",
+                other.type_name(),
+            ))
+        }
+        _ => {
+            return Err(arity_error(
+                B,
+                "an optional count and an optional time",
+                rest.len(),
+            ))
+        }
+    };
+    if !(1..=1000).contains(&count) {
+        return Err(crate::safety::bad_arg_in(
+            B,
+            format!("{B}: n is {count}, outside 1 to 1000"),
+            "ask for 1 to 1000 run times",
+        ));
+    }
+    let cron = cron_parsed(B, &text)?;
+    let start = match from {
+        Some(f) => parse_iso(B, f)?.0,
+        None => crate::clock::Naive::from_unix(crate::clock::UtcTime::now().timestamp(), 0)
+            .ok_or_else(|| crate::safety::bad_arg(B, "a clock in range", "the system clock"))?,
+    };
+    let times = cron.next_times(&start, count as usize).map_err(|why| {
+        crate::safety::value_not_representable(
+            B,
+            format!("{B}: `{}`: {why}", text.trim()),
+            "check the day-of-month against the month, for example 31 never falls in February, April, June, September or November",
+        )
+    })?;
+    Ok(Value::Array(
+        times
+            .into_iter()
+            .map(|t| Value::Str(t.rfc3339(0, true)))
+            .collect(),
+    ))
 }
 
 /// The unsupported YAML construct a parse error names, in words for a hint, or
@@ -18700,10 +18878,15 @@ fn iso_instant(text: &str) -> Option<(crate::clock::Naive, bool)> {
 
 /// The refusal for text that is not a date in the form asked for.
 fn not_a_date(builtin: &str, text: &str) -> anyhow::Error {
+    let hint = if builtin == "date_parse" {
+        "write an ISO 8601 date such as 2024-02-29, or a datetime such as 2024-02-29T10:00:00Z; for another layout pass a strftime format as the second argument, such as date_parse(s, '%d/%b/%Y:%H:%M:%S %z') (the nginx and Apache log stamp, which is also read without one)"
+    } else {
+        "write an ISO 8601 date such as 2024-02-29, or a datetime such as 2024-02-29T10:00:00Z; date_parse(text, format) reads other layouts and answers ISO 8601"
+    };
     crate::safety::value_not_representable(
         builtin,
         format!("{builtin}: {text:?} is not a date"),
-        "write an ISO 8601 date such as 2024-02-29, or a datetime such as 2024-02-29T10:00:00Z",
+        hint,
     )
 }
 
@@ -19045,6 +19228,9 @@ fn parse_with_layout(builtin: &str, text: &str, layout: &str) -> Result<Value> {
     ))
 }
 
+/// The nginx and Apache access-log timestamp, `10/Oct/2026:13:55:36 +0000`.
+const CLF_LAYOUT: &str = "%d/%b/%Y:%H:%M:%S %z";
+
 /// date_parse(text, format?) - Read a date or datetime and answer it as ISO 8601.
 /// Args:
 ///   - text: String (or the piped text)
@@ -19069,6 +19255,12 @@ fn bi_date_parse(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
     let (text, rest) = text_subject(B, args, input)?;
     match rest.as_slice() {
         [] => {
+            // The Common Log Format stamp of nginx and Apache, which no ISO form
+            // can be mistaken for.
+            if let Some(instant) = crate::clock::parse_with_offset(text.trim(), CLF_LAYOUT) {
+                check_instant(B, &text, instant)?;
+                return Ok(Value::Str(iso_text(instant, false)));
+            }
             let (instant, date_only) = parse_iso(B, &text)?;
             Ok(Value::Str(iso_text(instant, date_only)))
         }
@@ -27706,6 +27898,9 @@ fn render_handle(v: Value, full_bytes: usize) -> anyhow::Result<String> {
     out.push_str(&format!("@shape {}\n", h.shape));
     out.push_str(&format!("@items {}\n", h.items));
     out.push_str(&format!("@bytes {}\n", h.bytes));
+    if matches!(preview, Value::Record(_)) {
+        out.push_str("@preview scalar fields show their values; an Array, a Record or a long String shows its type\n");
+    }
     out.push_str(&aecon_render(&preview));
     if omitted > 0 {
         // Stated explicitly: a preview that looks like a result is how silent
@@ -35992,11 +36187,36 @@ fn bi_open(args: Vec<Value>, _input: Option<Value>) -> Result<Value> {
     crate::memory::reserve_parse("open", md.len() as usize, 2)?;
     let bytes =
         fs::read(&validated).map_err(|e| crate::safety::fs_error("open", &validated, &e))?;
-    let text = decode_text("open", &validated, bytes).map(without_bom)?;
-    let ext = std::path::Path::new(&path)
+    let mut ext = std::path::Path::new(&path)
         .extension()
         .map(|e| e.to_string_lossy().to_ascii_lowercase())
         .unwrap_or_default();
+    // A .gz is decompressed (every member) and then read by its inner extension:
+    // x.json.gz as JSON, x.csv.gz as CSV, x.log.gz as text.
+    let bytes = if ext == "gz" {
+        let inner = std::path::Path::new(&path)
+            .file_stem()
+            .map(std::path::Path::new)
+            .and_then(|s| s.extension())
+            .map(|e| e.to_string_lossy().to_ascii_lowercase())
+            .unwrap_or_default();
+        ext = inner;
+        gunzip_to_vec(
+            "open",
+            &path,
+            std::io::Cursor::new(bytes),
+            crate::security::max_file_size_bytes()?,
+        )?
+    } else {
+        bytes
+    };
+    let text = decode_text("open", &validated, bytes).map(without_bom)?;
+    if std::path::Path::new(&path)
+        .extension()
+        .is_some_and(|e| e.eq_ignore_ascii_case("gz"))
+    {
+        refuse_private_key_text("open", &path, &text)?;
+    }
     if matches!(
         ext.as_str(),
         "json" | "jsonl" | "ndjson" | "toml" | "yaml" | "yml"
@@ -36055,29 +36275,35 @@ fn bi_open(args: Vec<Value>, _input: Option<Value>) -> Result<Value> {
             }
             Ok(crate::plugins::toml_to_value(t))
         }
-        "yaml" | "yml" => crate::yaml::parse(&text).map_err(|e| {
-            // A refusal the parser coded (an integer past 64 bits, a non-finite
-            // number) is already structured: re-raise it under `open` with its
-            // own hint, not stringified into another error's message.
-            if let Some(se) = e.downcast_ref::<crate::safety::SafetyError>() {
-                let detail = se
-                    .message
-                    .strip_prefix("from_yaml: ")
-                    .unwrap_or(&se.message);
-                return crate::safety::value_not_representable(
-                    "open",
-                    format!("open: {path}: {detail}"),
-                    &se.hint,
-                );
-            }
-            // The YAML parser's messages already start with `line N:`.
-            unparsed_data(
-                &path,
-                "YAML",
-                &e.to_string(),
-                format!("fix the YAML at {e}"),
-            )
-        }),
+        "yaml" | "yml" => crate::yaml::parse_all(&text)
+            .map(|mut docs| match docs.len() {
+                0 => Value::Null,
+                1 => docs.remove(0),
+                _ => Value::Array(docs),
+            })
+            .map_err(|e| {
+                // A refusal the parser coded (an integer past 64 bits, a non-finite
+                // number) is already structured: re-raise it under `open` with its
+                // own hint, not stringified into another error's message.
+                if let Some(se) = e.downcast_ref::<crate::safety::SafetyError>() {
+                    let detail = se
+                        .message
+                        .strip_prefix("from_yaml: ")
+                        .unwrap_or(&se.message);
+                    return crate::safety::value_not_representable(
+                        "open",
+                        format!("open: {path}: {detail}"),
+                        &se.hint,
+                    );
+                }
+                // The YAML parser's messages already start with `line N:`.
+                unparsed_data(
+                    &path,
+                    "YAML",
+                    &e.to_string(),
+                    format!("fix the YAML at {e}"),
+                )
+            }),
         "csv" => bi_from_csv(vec![], Some(Value::Str(text))),
         // Tab-separated: the same header row and type inference as CSV.
         "tsv" => parse_delimited(
@@ -42968,7 +43194,7 @@ fn tar_archive_listing(
     file.seek(SeekFrom::Start(0))
         .map_err(|e| crate::safety::fs_error(builtin, archive, &e))?;
     let reader: Box<dyn Read> = if n == 2 && magic == [0x1f, 0x8b] {
-        Box::new(flate2::read::GzDecoder::new(file))
+        Box::new(flate2::read::MultiGzDecoder::new(file))
     } else if let Some(tool) = tar_stream_decompressor(magic).filter(|_| n == 2) {
         drop(file);
         if let Some(listed) = tar_decompressed_entries(builtin, archive, tool)? {
@@ -43730,7 +43956,7 @@ fn tar_extract_in_process(archive: &str, root: &str) -> Result<bool> {
     file.seek(SeekFrom::Start(0))
         .map_err(|e| crate::safety::fs_error(B, archive, &e))?;
     let reader: Box<dyn Read> = if n == 2 && magic == [0x1f, 0x8b] {
-        Box::new(flate2::read::GzDecoder::new(file))
+        Box::new(flate2::read::MultiGzDecoder::new(file))
     } else if n == 2 && tar_stream_decompressor(magic).is_some() {
         return Ok(false);
     } else if n == 2 && &magic == b"PK" {
@@ -43833,7 +44059,7 @@ fn archive_corrupt(builtin: &str, path: &str, e: impl std::fmt::Display) -> anyh
 fn tar_entries(builtin: &str, path: &str, gz: bool) -> Result<Vec<Value>> {
     let f = archive_open(builtin, path)?;
     let reader: Box<dyn std::io::Read> = if gz {
-        Box::new(flate2::read::GzDecoder::new(f))
+        Box::new(flate2::read::MultiGzDecoder::new(f))
     } else {
         Box::new(f)
     };
@@ -44064,7 +44290,7 @@ fn archive_test_local(path: &str, kind: LocalArchive, cap: u64) -> Result<bool> 
         LocalArchive::Tar | LocalArchive::TarGz => {
             let f = archive_open("archive_test", path)?;
             let reader: Box<dyn std::io::Read> = if matches!(kind, LocalArchive::TarGz) {
-                Box::new(flate2::read::GzDecoder::new(f))
+                Box::new(flate2::read::MultiGzDecoder::new(f))
             } else {
                 Box::new(f)
             };
@@ -44095,7 +44321,7 @@ fn archive_test_local(path: &str, kind: LocalArchive, cap: u64) -> Result<bool> 
                 Err(_) => false,
             }
         }
-        LocalArchive::Gzip => sink(&mut flate2::read::GzDecoder::new(archive_open(
+        LocalArchive::Gzip => sink(&mut flate2::read::MultiGzDecoder::new(archive_open(
             "archive_test",
             path,
         )?)),
@@ -44175,7 +44401,7 @@ fn gzip_file_capped(
     let dst = create_new_output(builtin, out_path)?;
     let result = if decompress {
         let mut out = std::io::BufWriter::new(dst);
-        gunzip_capped(flate2::read::GzDecoder::new(src), &mut out, cap)
+        gunzip_capped(flate2::read::MultiGzDecoder::new(src), &mut out, cap)
     } else {
         let mut enc = flate2::write::GzEncoder::new(dst, flate2::Compression::default());
         std::io::copy(&mut std::io::BufReader::new(src), &mut enc)
@@ -44214,6 +44440,20 @@ fn gzip_file_capped(
     }
 }
 
+/// The error of reading a gzip stream that had already produced `produced`
+/// bytes. A header error after output is data that follows a valid member and is
+/// not gzip: `gzip -dc` warns "trailing garbage ignored", exits 2 and keeps what
+/// it wrote; here it is refused, so a bad tail cannot go unnoticed.
+fn gzip_stream_error(e: std::io::Error, produced: u64) -> std::io::Error {
+    if produced > 0 && e.to_string().contains("invalid gzip header") {
+        return std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "the bytes after a valid gzip member are not gzip (gzip -dc ignores them with 'trailing garbage ignored' and exits 2; this refuses them, and nothing is written); cut the file at the end of its last member, or split it with a tool that reads the member sizes",
+        );
+    }
+    e
+}
+
 /// Copies the gzip stream `src` into `dst`, flushing at the end. Returns
 /// `Ok(false)` as soon as the output would pass `cap`; the chunk that would have
 /// passed it is not written. Every read consumes input, so the loop ends.
@@ -44229,7 +44469,7 @@ fn gunzip_capped<R: std::io::Read, W: std::io::Write>(
             Ok(0) => break,
             Ok(n) => n,
             Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
-            Err(e) => return Err(e),
+            Err(e) => return Err(gzip_stream_error(e, total)),
         };
         total = total.saturating_add(n as u64);
         if total > cap {
@@ -44251,6 +44491,109 @@ pub fn __test_gzip_decompress_capped(file: &str, cap: u64) -> Result<Value> {
         &gzip_out_path("gzip_decompress", file, true)?,
     )?;
     gzip_file_capped("gzip_decompress", file, &out, true, cap)
+}
+
+/// All of a gzip stream in memory: every member, at most `cap` bytes out.
+fn gunzip_to_vec<R: std::io::Read>(
+    builtin: &str,
+    label: &str,
+    src: R,
+    cap: u64,
+) -> Result<Vec<u8>> {
+    let mut out = Vec::new();
+    match gunzip_capped(flate2::read::MultiGzDecoder::new(src), &mut out, cap) {
+        Ok(true) => Ok(out),
+        Ok(false) => Err(crate::safety::budget_exceeded(
+            builtin,
+            format!(
+                "{builtin}: {label} decompresses to more than {} MiB and was stopped",
+                cap / (1024 * 1024)
+            ),
+            "raise max_file_size_mb, or write the file out with gzip_decompress and read part of it with head, tail or line_read",
+        )),
+        Err(e) => Err(crate::safety::bad_arg(
+            builtin,
+            "valid gzip data",
+            &format!("{label}: {e}"),
+        )),
+    }
+}
+
+/// Refuse decompressed text that holds a private key, as `cat` refuses a file
+/// that does: the compressed file's bytes show no marker, so the check is
+/// made on the text. Agent mode only, lifted as the file check is.
+fn refuse_private_key_text(builtin: &str, label: &str, text: &str) -> Result<()> {
+    if crate::safety::current_mode() != crate::safety::Mode::Agent
+        || crate::safety::secrets_permitted()
+        || std::env::var("IRONSHELL_POLICY")
+            .is_ok_and(|v| v.trim().eq_ignore_ascii_case("permissive"))
+    {
+        return Ok(());
+    }
+    let holds_key = text.lines().any(|line| {
+        let l = line.trim_start_matches('\u{feff}').trim();
+        (l.starts_with("-----BEGIN ") && l.contains("PRIVATE KEY"))
+            || l.starts_with("PuTTY-User-Key-File-")
+    });
+    if holds_key {
+        return Err(crate::safety::policy_deny(
+            builtin,
+            &format!("access denied: {label} holds a private key once decompressed (judged by its content, not its name)"),
+            "this is a security policy, not a malformed call; no other spelling of the same path will pass",
+        ));
+    }
+    Ok(())
+}
+
+/// The text of a gzip file, every member decompressed, with the checks `cat`
+/// makes: the read jail, the private-key refusal, the size limit.
+fn read_gzip_text(builtin: &str, path: &str) -> Result<String> {
+    crate::security::check_share_egress(builtin, path)?;
+    crate::security::check_read_jail(builtin, path)?;
+    if !std::path::Path::new(path).exists() {
+        return Err(crate::safety::not_found(builtin, "file", path));
+    }
+    let validated = validate_read_path(path)?;
+    let md =
+        fs::metadata(&validated).map_err(|e| crate::safety::fs_error(builtin, &validated, &e))?;
+    if md.is_dir() {
+        return Err(crate::safety::bad_arg_in(
+            builtin,
+            format!("{builtin}: `{path}` is a directory, not a file"),
+            "pass a .gz file",
+        ));
+    }
+    check_file_size_limit(md.len()).context(format!("{builtin}: file too large"))?;
+    let file =
+        fs::File::open(&validated).map_err(|e| crate::safety::fs_error(builtin, &validated, &e))?;
+    let cap = crate::security::max_file_size_bytes()?;
+    let bytes = gunzip_to_vec(builtin, path, std::io::BufReader::new(file), cap)?;
+    crate::memory::reserve_parse(builtin, bytes.len(), 2)?;
+    let text = decode_text(builtin, &validated, bytes).map(without_bom)?;
+    refuse_private_key_text(builtin, path, &text)?;
+    Ok(text)
+}
+
+/// gzip_read(path) - The text of a .gz file, every member decompressed, in memory.
+/// Args:
+///   - path: String (or the piped path) - a .gz file
+/// Returns: String
+///
+/// Nothing is written: `gzip_decompress` writes a file beside the .gz and
+/// refuses to replace one. A file of several members (concatenated, as rotated
+/// logs often are) reads as all of them, as `gzip -dc` does. Data that is not
+/// UTF-8 text is E_BAD_VALUE, and the decompressed size is capped as `cat`
+/// caps a file.
+///
+/// Example:
+///   gzip_read("logs/access.log.2.gz") | lines | len
+fn bi_gzip_read(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
+    const B: &str = "gzip_read";
+    let (path, rest) = text_subject(B, args, input)?;
+    if !rest.is_empty() {
+        return Err(arity_error(B, "one path", rest.len() + 1));
+    }
+    Ok(Value::Str(read_gzip_text(B, &path)?))
 }
 
 /// Where gzip_file writes: path.gz, or the path without its .gz.

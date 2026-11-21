@@ -577,7 +577,7 @@ impl RegistryClient {
     /// escapes `dest`.
     pub fn extract_tarball(&self, tarball: &Path, dest: &Path) -> Result<()> {
         let file = fs::File::open(tarball)?;
-        let gz = flate2::read::GzDecoder::new(file);
+        let gz = flate2::read::MultiGzDecoder::new(file);
         let mut archive = tar::Archive::new(gz);
         for entry in archive
             .entries()

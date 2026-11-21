@@ -933,6 +933,7 @@ fn classified_effect(name: &str) -> Option<Effect> {
         | "gui_mouse_position"
         | "gui_ocr"
         | "gui_screen_size"
+        | "gzip_read"
         | "hadolint_check"
         | "hw_audio"
         | "hw_battery"

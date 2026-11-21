@@ -63,6 +63,71 @@ struct Line {
     number: usize,
 }
 
+/// Whether `line` is a document marker (`---` or `...`), alone or followed by a
+/// comment, at column 0.
+fn is_marker(line: &str, marker: &str) -> bool {
+    match line.trim_end().strip_prefix(marker) {
+        Some("") => true,
+        Some(rest) => rest.starts_with([' ', '\t']) && rest.trim_start().starts_with('#'),
+        None => false,
+    }
+}
+
+/// Parse every document of a YAML stream, as PyYAML's `safe_load_all` does.
+///
+/// Documents are separated by `---`; `...` ends one. An empty document (nothing
+/// but comments, as in `---` followed at once by `---`) is Null. A stream with
+/// no content at all is no documents. Each document is read by [`parse`], so the
+/// subset and the error text are the same, and a line number in an error is the
+/// line of the whole stream.
+pub fn parse_all(src: &str) -> Result<Vec<Value>> {
+    let src = src.strip_prefix('\u{feff}').unwrap_or(src);
+    let mut docs = Vec::new();
+    let mut start = 0usize; // line index of the first line of the current document
+    let mut body = String::new();
+    let mut explicit = false; // the current document began with `---`
+    let mut content = false; // the current document has a line that is not a comment
+    let flush = |docs: &mut Vec<Value>,
+                 body: &mut String,
+                 start: usize,
+                 explicit: &mut bool,
+                 content: &mut bool|
+     -> Result<()> {
+        if *explicit || *content {
+            if *content {
+                // Blank lines keep the line numbers of the stream.
+                let padded = format!("{}{}", "\n".repeat(start), body);
+                docs.push(parse(&padded)?);
+            } else {
+                docs.push(Value::Null);
+            }
+        }
+        body.clear();
+        *explicit = false;
+        *content = false;
+        Ok(())
+    };
+    for (i, raw) in src.lines().enumerate() {
+        if is_marker(raw, "---") {
+            flush(&mut docs, &mut body, start, &mut explicit, &mut content)?;
+            explicit = true;
+            start = i + 1;
+        } else if is_marker(raw, "...") {
+            flush(&mut docs, &mut body, start, &mut explicit, &mut content)?;
+            start = i + 1;
+        } else {
+            let t = raw.trim();
+            if !t.is_empty() && !t.starts_with('#') {
+                content = true;
+            }
+            body.push_str(raw);
+            body.push('\n');
+        }
+    }
+    flush(&mut docs, &mut body, start, &mut explicit, &mut content)?;
+    Ok(docs)
+}
+
 /// Parse a YAML document into a [`Value`].
 ///
 /// Returns an error naming the unsupported construct rather than guessing —
@@ -113,8 +178,8 @@ fn significant_lines(src: &str) -> Result<Vec<Line>> {
         if trimmed == "---" {
             if seen_doc_start || !out.is_empty() {
                 return Err(anyhow!(
-                    "line {number}: multiple YAML documents are not supported; \
-                     split them and parse each separately"
+                    "line {number}: multiple YAML documents are not supported here; \
+                     read them with from_yaml_all(text), or open(path) for a file"
                 ));
             }
             seen_doc_start = true;
@@ -1207,6 +1272,35 @@ mod tests {
                 "parsing {src:?} should name {expect:?}, said: {err}"
             );
         }
+    }
+
+    #[test]
+    fn parse_all_reads_every_document() {
+        let all = |s: &str| parse_all(s).unwrap();
+        assert_eq!(all("a: 1\n---\nb: 2\n").len(), 2);
+        assert_eq!(all("---\na: 1\n---\nb: 2\n").len(), 2);
+        assert_eq!(all("---\r\na: 1\r\n---\r\nb: 2\r\n").len(), 2);
+        assert_eq!(all("a: 1\n...\n---\nb: 2\n...\n").len(), 2);
+        assert_eq!(
+            all("# c\na: 1\n---\n# only a comment\n---\nb: 2\n").len(),
+            3
+        );
+        assert_eq!(
+            all("a: 1\n---\n"),
+            vec![all("a: 1")[0].clone(), Value::Null]
+        );
+        assert_eq!(all("---\n---\n"), vec![Value::Null, Value::Null]);
+        assert!(all("").is_empty());
+        assert!(all("# nothing\n").is_empty());
+        assert_eq!(all("a: 1\n").len(), 1);
+    }
+
+    #[test]
+    fn parse_all_errors_keep_stream_line_numbers() {
+        let err = parse_all("a: 1\n---\nb: 2\n  c: 3\n")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("line 4"), "{err}");
     }
 
     #[test]
