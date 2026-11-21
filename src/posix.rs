@@ -9642,12 +9642,14 @@ fn sed(args: &[String], stdin: &mut Input, sink: &mut Sink) -> Util {
     let mut scripts = Vec::new();
     let mut files = Vec::new();
     let mut inplace: Option<String> = None;
+    let mut separate = false;
     let mut i = 0;
     while i < args.len() {
         let a = &args[i];
         match a.as_str() {
             "-n" => quiet = true,
             "-E" | "-r" => ere = true,
+            "-s" | "--separate" => separate = true,
             s if sed_inplace_suffix(s).is_some() => inplace = sed_inplace_suffix(s),
             "-e" => {
                 i += 1;
@@ -9696,6 +9698,12 @@ fn sed(args: &[String], stdin: &mut Input, sink: &mut Sink) -> Util {
     }
     if let Some(suffix) = inplace {
         return sed_in_place(&mut prog, quiet, &suffix, &files, sink);
+    }
+    // `-s` treats each file as its own input (line numbers and `$` restart).
+    // With one input that is what sed does anyway; with several, the system
+    // sed runs it.
+    if separate && files.len() > 1 {
+        return Util::DeclineFor("option `-s` with more than one file".into());
     }
     let mut status = 0;
     let mut data = Vec::new();
@@ -10932,7 +10940,7 @@ fn sed_operands(args: &[String]) -> Option<Vec<String>> {
     while i < args.len() {
         let a = args[i].as_str();
         match a {
-            "-n" | "-E" | "-r" => {}
+            "-n" | "-E" | "-r" | "-s" | "--separate" => {}
             s if sed_inplace_suffix(s).is_some() => {}
             "-e" => {
                 i += 1;
