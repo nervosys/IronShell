@@ -94,7 +94,7 @@ fn explicit_typed_constant_extraction_compiles_and_runs() {
         "refactor_extract_constant",
         vec![s("pub fn answer()->i32 { 6*7 }"), s("ANSWER"), s("i32")],
     );
-    assert!(output.contains("const ANSWER : i32 = 6 * 7"));
+    assert!(output.contains("const ANSWER: i32 = 6*7"));
     compile_and_run(&output, "assert_eq!(answer(),42);");
     let original = "/// documentation\nasync unsafe fn f<T>(a:T)->T { a }";
     let output = run("refactor_extract_variable", vec![s(original), s("result")]);

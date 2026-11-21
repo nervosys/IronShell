@@ -10364,15 +10364,20 @@ fn bi_grep(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
     // engine as written.
     let backref = grep_has_backref(pattern);
     let translated = if extended {
-        pattern.clone()
+        grep_ere_brackets(pattern)
     } else {
         crate::posix::bre_translate(pattern, true).unwrap_or_default()
     };
     let invalid = |reason: String| {
+        let bracket = reason.contains("class");
         crate::safety::bad_arg_in(
             "grep",
             format!("grep: {pattern:?} is not a valid regular expression: {reason}"),
-            "grep takes a basic regular expression: + ? | ( ) { } are literal unless backslashed, so write \\( and \\| for groups and alternatives, or pass {extended: true} to write them bare (TODO|FIXME)",
+            if bracket {
+                "a bracket expression needs its closing ]; a ] right after [ or [^ is literal, and so is [ inside the brackets, so [[] matches a [ and []a] matches ] or a"
+            } else {
+                "grep takes a basic regular expression: + ? | ( ) { } are literal unless backslashed, so write \\( and \\| for groups and alternatives, or pass {extended: true} to write them bare (TODO|FIXME)"
+            },
         )
     };
     let re = if backref {
@@ -10427,6 +10432,66 @@ fn bi_grep(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
 
 /// Whether a grep pattern holds a back-reference (a backslash and a digit 1 to
 /// 9), read in pairs so that an escaped backslash before a digit is not one.
+/// An extended pattern with its bracket expressions made safe for the regex
+/// crate: in POSIX a `]` first after `[` or `[^` and a `[` that does not start
+/// `[:`, `[.` or `[=` are literal, while the regex crate nests on `[`.
+fn grep_ere_brackets(pattern: &str) -> String {
+    let mut out = String::new();
+    let mut it = pattern.chars().peekable();
+    while let Some(c) = it.next() {
+        match c {
+            '\\' => {
+                out.push(c);
+                if let Some(o) = it.next() {
+                    out.push(o);
+                }
+            }
+            '[' => {
+                out.push('[');
+                if it.peek() == Some(&'^') {
+                    out.push('^');
+                    it.next();
+                }
+                if it.peek() == Some(&']') {
+                    out.push_str("\\]");
+                    it.next();
+                }
+                while let Some(d) = it.next() {
+                    match d {
+                        ']' => {
+                            out.push(']');
+                            break;
+                        }
+                        '[' if matches!(it.peek(), Some(':' | '.' | '=')) => {
+                            let kind = it.next().unwrap_or(':');
+                            out.push('[');
+                            out.push(kind);
+                            let mut prev = ' ';
+                            for e in it.by_ref() {
+                                out.push(e);
+                                if e == ']' && prev == kind {
+                                    break;
+                                }
+                                prev = e;
+                            }
+                        }
+                        '[' => out.push_str("\\["),
+                        '\\' => {
+                            out.push(d);
+                            if let Some(o) = it.next() {
+                                out.push(o);
+                            }
+                        }
+                        _ => out.push(d),
+                    }
+                }
+            }
+            _ => out.push(c),
+        }
+    }
+    out
+}
+
 fn grep_has_backref(pattern: &str) -> bool {
     let mut it = pattern.chars();
     while let Some(c) = it.next() {
@@ -12088,7 +12153,7 @@ fn bi_from_csv(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
             (it.next(), it.next())
         }
     };
-    let delimiter = csv_delimiter_option(options)?;
+    let (delimiter, header) = csv_options(options)?;
     let csv_str = match text_arg {
         Some(Value::Str(s)) => s,
         Some(_) => {
@@ -12102,16 +12167,18 @@ fn bi_from_csv(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
     parse_delimited(
         "from_csv",
         &csv_str,
-        csv::ReaderBuilder::new().delimiter(delimiter),
+        csv::ReaderBuilder::new()
+            .delimiter(delimiter)
+            .has_headers(header),
         delimiter,
     )
 }
 
 /// The delimiter byte named by from_csv's options Record, `,` when none is
 /// given. It must be one ASCII character other than a quote or a line break.
-fn csv_delimiter_option(options: Option<Value>) -> Result<u8> {
+fn csv_options(options: Option<Value>) -> Result<(u8, bool)> {
     let map = match options {
-        None => return Ok(b','),
+        None => return Ok((b',', true)),
         Some(Value::Record(m)) => m,
         Some(other) => {
             return Err(crate::safety::bad_arg_in(
@@ -12124,14 +12191,28 @@ fn csv_delimiter_option(options: Option<Value>) -> Result<u8> {
             ))
         }
     };
-    if let Some(key) = map.keys().find(|k| k.as_str() != "delimiter") {
+    if let Some(key) = map
+        .keys()
+        .find(|k| !matches!(k.as_str(), "delimiter" | "header"))
+    {
         return Err(crate::safety::bad_arg_in(
             "from_csv",
             format!("from_csv: unknown option '{key}'"),
-            "the only option is delimiter, one ASCII character: from_csv(text, {delimiter: ';'})",
+            "the options are delimiter, one ASCII character, and header, a Bool: from_csv(text, {delimiter: ';', header: false})",
         ));
     }
-    match map.get("delimiter") {
+    let header = match map.get("header") {
+        None | Some(Value::Bool(true)) => true,
+        Some(Value::Bool(false)) => false,
+        Some(other) => {
+            return Err(crate::safety::bad_arg_in(
+                "from_csv",
+                format!("from_csv: header is a {}, not a Bool", other.type_name()),
+                "use true (the first row names the columns, the default) or false (columns are c1, c2, ...)",
+            ))
+        }
+    };
+    let delimiter = match map.get("delimiter") {
         None => Ok(b','),
         Some(Value::Str(s)) => {
             let mut chars = s.chars();
@@ -12152,7 +12233,8 @@ fn csv_delimiter_option(options: Option<Value>) -> Result<u8> {
             ),
             "use a single ASCII character as a String: {delimiter: ';'}",
         )),
-    }
+    };
+    delimiter.map(|d| (d, header))
 }
 
 /// Parse delimited text with a header row into an Array of Records, with the
@@ -12170,14 +12252,24 @@ fn parse_delimited(
         }
     }
     let mut reader = builder.from_reader(text.as_bytes());
+    let headerless = !reader.has_headers();
     let headers: Vec<String> = reader
         .headers()
         .map_err(|e| crate::safety::bad_arg(builtin, "CSV text", &e.to_string()))?
         .iter()
-        .map(|h| h.to_string())
+        .enumerate()
+        .map(|(i, h)| {
+            if headerless {
+                format!("c{}", i + 1)
+            } else {
+                h.to_string()
+            }
+        })
         .collect();
 
-    check_csv_headers(builtin, &headers)?;
+    if !headerless {
+        check_csv_headers(builtin, &headers)?;
+    }
     // A file with one header field that holds `;` (or a tab), read with a comma,
     // is most likely separated by that character. It is read as asked, and a
     // note on stderr (stdout is unchanged) says how to read it as separated.
@@ -12794,8 +12886,17 @@ fn csv_escape(s: &str) -> String {
 /// is E_NOT_FOUND, not a header. Quoting is parsed as `from_csv` parses it, so a
 /// quoted header with a comma is one column.
 fn bi_csv_columns(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
-    // Piped, the path or text is the input; called directly, it is the first argument.
-    let subject = match input.or_else(|| args.into_iter().next()) {
+    // Piped, the path or text is the input and the options are the first
+    // argument; called directly, the text is the first and the options the second.
+    let (subject, options) = match input {
+        Some(v) => (Some(v), args.into_iter().next()),
+        None => {
+            let mut it = args.into_iter();
+            (it.next(), it.next())
+        }
+    };
+    let header = csv_options(options)?.1;
+    let subject = match subject {
         Some(Value::Str(s)) => s,
         Some(other) => {
             return Err(crate::safety::bad_arg(
@@ -12823,7 +12924,7 @@ fn bi_csv_columns(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
         let validated = validate_read_path(&subject)?;
         let file = std::fs::File::open(&validated)
             .map_err(|e| crate::safety::fs_error("csv_columns", &validated, &e))?;
-        return csv_header_row(std::io::BufReader::new(file));
+        return csv_header_row(std::io::BufReader::new(file), header);
     }
     // One line that ends like a file name and names no file is a mistyped path,
     // not a header: refuse it rather than return the name as the only column.
@@ -12838,14 +12939,16 @@ fn bi_csv_columns(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
             "pass CSV text with a newline, or an existing file",
         ));
     }
-    csv_header_row(subject.as_bytes())
+    csv_header_row(subject.as_bytes(), header)
 }
 
 /// The first record of a CSV source as its column names. Only the header is
 /// read, so a large file costs one row. A leading byte-order mark is not part
 /// of the first name.
-fn csv_header_row(source: impl std::io::Read) -> Result<Value> {
-    let mut reader = csv::Reader::from_reader(source);
+fn csv_header_row(source: impl std::io::Read, header: bool) -> Result<Value> {
+    let mut reader = csv::ReaderBuilder::new()
+        .has_headers(header)
+        .from_reader(source);
     let mut names: Vec<String> = reader
         .headers()
         .map_err(|e| crate::safety::bad_arg("csv_columns", "CSV text", &e.to_string()))?
@@ -12855,6 +12958,10 @@ fn csv_header_row(source: impl std::io::Read) -> Result<Value> {
     if let Some(first) = names.first_mut() {
         let unmarked = first.trim_start_matches('\u{feff}').to_string();
         *first = unmarked;
+    }
+    if !header {
+        // No header row: the columns are c1, c2, ..., as from_csv names them.
+        names = (1..=names.len()).map(|i| format!("c{i}")).collect();
     }
     Ok(Value::Array(names.into_iter().map(Value::Str).collect()))
 }
@@ -60348,7 +60455,7 @@ fn bi_git_status(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
     };
     let path = git_dir_arg("git_status", &path)?;
     let mut cmd = git_command();
-    cmd.args(["status", "--porcelain", "-b"]);
+    cmd.args(["-c", "core.quotepath=off", "status", "--porcelain", "-b"]);
     cmd.current_dir(&path);
     let output = bounded_cmd_output("git_status", "git", cmd, TOOL_DEADLINE_SECS)?;
     git_succeeded("git_status", &output, &path)?;
@@ -80354,10 +80461,38 @@ fn bi_sed_replace(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
         text
     };
     let before = file.as_ref().map(|_| source.clone());
-    let result = regex_substitute(&re, &replacement, source, global);
+    // A file whose every line ends CR LF is edited as LF text and written back
+    // with CR LF, so `$`, `^` under (?m) and a newline in the pattern behave as
+    // they do on an LF file. A pattern or replacement that names a CR itself is
+    // left to the caller, and a file that mixes endings is edited as it is.
+    let crlf = file.is_some()
+        && source.contains("\r\n")
+        && !source.replace("\r\n", "").contains('\n')
+        && !pattern.contains('\r')
+        && !replacement.contains('\r')
+        && !pattern.contains("\\r")
+        && !replacement.contains("\\r");
+    let source = if crlf {
+        source.replace("\r\n", "\n")
+    } else {
+        source
+    };
+    let matches = if file.is_some() {
+        re.find_iter(&source).count()
+    } else {
+        0
+    };
+    let result = regex_substitute(&re, &replacement, source.clone(), global);
+    let result = if crlf {
+        result.replace('\n', "\r\n")
+    } else {
+        result
+    };
     if let Some((original, path)) = file {
         // The pattern matched nothing, or only text it replaced with itself: the
-        // file is left as it is, unwritten and unjournalled.
+        // file is left as it is, unwritten and unjournalled. `matches` counts
+        // the matches in the file, so a miss (0) differs from a replacement
+        // that left the text as it was.
         let status = if before.as_deref() == Some(result.as_str()) {
             "unchanged"
         } else {
@@ -80368,6 +80503,7 @@ fn bi_sed_replace(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
         Ok(Value::Record(BTreeMap::from([
             ("file".into(), Value::Str(original)),
             ("status".into(), Value::Str(status.into())),
+            ("matches".into(), Value::Int(matches as i64)),
         ])))
     } else {
         Ok(Value::Str(result))

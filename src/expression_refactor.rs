@@ -2,7 +2,8 @@
 //! its inverse: inlining one immutable local into its single following use.
 use crate::{safety, value::Value};
 use anyhow::Result;
-use quote::{quote, ToTokens};
+use quote::ToTokens;
+use syn::spanned::Spanned;
 use syn::visit::Visit;
 fn bad(name: &str, message: &str) -> anyhow::Error {
     safety::arg_err(format!("{name}: {message}"))
@@ -73,7 +74,7 @@ pub(super) fn run(name: &str, args: Vec<Value>, input: Option<Value>) -> Result<
         return Err(bad(name, "invalid argument count or pipeline input"));
     }
     let source = text(name, &args[0], 65536, 256)?;
-    let mut function = syn::parse_str::<syn::ItemFn>(source)
+    let function = syn::parse_str::<syn::ItemFn>(source)
         .map_err(|_| bad(name, "expected exactly one Rust free function with body"))?;
     if function.sig.variadic.is_some()
         || function
@@ -107,28 +108,51 @@ pub(super) fn run(name: &str, args: Vec<Value>, input: Option<Value>) -> Result<
             "binding identifier already occurs or syntax has opaque macros/attributes/nested items",
         ));
     }
-    let Some(syn::Stmt::Expr(_, None)) = function.block.stmts.last() else {
+    let Some(syn::Stmt::Expr(expression, None)) = function.block.stmts.last() else {
         return Err(bad(
             name,
             "function requires a top-level tail expression without semicolon",
         ));
     };
-    let syn::Stmt::Expr(expression, _) = function.block.stmts.pop().unwrap() else {
-        unreachable!()
-    };
-    let declaration = if let Some(ty) = ty {
-        quote!(const #binding: #ty = #expression;)
+    let range = expression.span().byte_range();
+    if range.start >= range.end
+        || range.end > source.len()
+        || !source.is_char_boundary(range.start)
+        || !source.is_char_boundary(range.end)
+    {
+        return Err(bad(name, "cannot locate the tail expression in the source"));
+    }
+    let eol = if source.contains("\r\n") {
+        "\r\n"
     } else {
-        quote!(let #binding = #expression;)
+        "\n"
     };
-    let declaration = syn::parse2::<syn::Stmt>(declaration)
-        .map_err(|_| bad(name, "cannot construct binding declaration"))?;
-    function.block.stmts.push(declaration);
-    function.block.stmts.push(syn::Stmt::Expr(
-        syn::parse2(quote!(#binding)).map_err(|_| bad(name, "cannot construct tail expression"))?,
-        None,
-    ));
-    let output = function.to_token_stream().to_string();
+    let line_start = source[..range.start].rfind('\n').map_or(0, |at| at + 1);
+    let indent = &source[line_start..range.start];
+    let indent = if indent.chars().all(|c| c == ' ' || c == '\t') {
+        indent
+    } else {
+        ""
+    };
+    let separator = if indent.is_empty() && !source[line_start..range.start].is_empty() {
+        " ".to_string()
+    } else {
+        format!("{eol}{indent}")
+    };
+    let binding_text = text(name, &args[1], 256, 32)?;
+    let declaration = if let Some(ty) = ty {
+        let ty_text = text(name, &args[2], 16384, 128)?.trim();
+        let _ = &ty;
+        format!(
+            "const {binding_text}: {ty_text} = {};",
+            &source[range.clone()]
+        )
+    } else {
+        format!("let {binding_text} = {};", &source[range.clone()])
+    };
+    let replacement = format!("{declaration}{separator}{binding_text}");
+    let output = super::rename_refactor::splice(source, &[(range, replacement)])
+        .ok_or_else(|| bad(name, "cannot construct binding declaration"))?;
     if output.len() > 1048576 {
         return Err(budget(name));
     }

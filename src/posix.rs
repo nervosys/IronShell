@@ -9340,7 +9340,7 @@ pub(crate) fn bre_translate(p: &str, keep_backrefs: bool) -> Option<String> {
                 _ => {}
             }
             match c {
-                '+' | '?' | '|' | '(' | ')' | '{' | '}' => {
+                '+' | '?' | '[' | '|' | '(' | ')' | '{' | '}' => {
                     out.push_str(&regex::escape(&c.to_string()));
                 }
                 '\\' => match it.next() {

@@ -1,10 +1,12 @@
 //! Whole-file, syntactic renaming of one Rust identifier. Every identifier
-//! token whose normalized text equals the old name becomes the new name;
-//! lifetimes, strings and comments are not identifiers and are left alone.
+//! token whose normalized text equals the old name becomes the new name,
+//! spliced into the original text at the token's byte span; lifetimes,
+//! strings and comments are not identifiers, and all text, comments and layout
+//! outside the renamed tokens is kept byte for byte.
 use crate::{safety, value::Value};
 use anyhow::Result;
 use quote::ToTokens;
-use syn::{visit::Visit, visit_mut::VisitMut};
+use syn::visit::Visit;
 const RESERVED: [&str; 5] = ["self", "Self", "super", "crate", "_"];
 fn bad(name: &str, message: &str) -> anyhow::Error {
     safety::arg_err(format!("{name}: {message}"))
@@ -103,19 +105,40 @@ impl<'ast> Visit<'ast> for Scan<'_> {
         syn::visit::visit_foreign_item(self, value);
     }
 }
-/// Renames every identifier whose normalized text is `old`. Lifetimes and
-/// labels are not identifiers in the source, so they are skipped.
-struct Rename<'a> {
+/// Collects the byte span of every identifier whose normalized text is
+/// `old`. Lifetimes and labels are not identifiers in the source, so they are
+/// skipped. The text between the spans is never touched.
+struct Spans<'a> {
     old: &'a str,
-    new: &'a syn::Ident,
+    spans: Vec<std::ops::Range<usize>>,
 }
-impl VisitMut for Rename<'_> {
-    fn visit_ident_mut(&mut self, ident: &mut syn::Ident) {
+impl<'ast> Visit<'ast> for Spans<'_> {
+    fn visit_ident(&mut self, ident: &'ast syn::Ident) {
         if normalized(ident) == self.old {
-            *ident = self.new.clone();
+            self.spans.push(ident.span().byte_range());
         }
     }
-    fn visit_lifetime_mut(&mut self, _: &mut syn::Lifetime) {}
+    fn visit_lifetime(&mut self, _: &'ast syn::Lifetime) {}
+}
+/// Replaces each byte range of `source` (ascending, non-overlapping) with its
+/// text, copying everything between the ranges unchanged.
+pub(super) fn splice(source: &str, edits: &[(std::ops::Range<usize>, String)]) -> Option<String> {
+    let mut out = String::with_capacity(source.len());
+    let mut at = 0;
+    for (range, text) in edits {
+        if range.start < at
+            || range.end < range.start
+            || !source.is_char_boundary(range.start)
+            || !source.is_char_boundary(range.end)
+        {
+            return None;
+        }
+        out.push_str(&source[at..range.start]);
+        out.push_str(text);
+        at = range.end;
+    }
+    out.push_str(&source[at..]);
+    Some(out)
 }
 fn identifier(name: &str, value: &str, what: &str) -> Result<syn::Ident> {
     let ident = syn::parse_str::<syn::Ident>(value)
@@ -142,8 +165,7 @@ pub(super) fn run(name: &str, args: Vec<Value>, input: Option<Value>) -> Result<
     if old == new {
         return Err(bad(name, "old and new names are equal"));
     }
-    let mut file =
-        syn::parse_file(source).map_err(|_| bad(name, "expected one Rust source file"))?;
+    let file = syn::parse_file(source).map_err(|_| bad(name, "expected one Rust source file"))?;
     let mut scan = Scan {
         old: &old,
         new: &new,
@@ -164,12 +186,20 @@ pub(super) fn run(name: &str, args: Vec<Value>, input: Option<Value>) -> Result<
             "old name occurs in a macro, non-doc attribute, or verbatim syntax",
         ));
     }
-    Rename {
+    let mut spans = Spans {
         old: &old,
-        new: &new_ident,
-    }
-    .visit_file_mut(&mut file);
-    let output = file.to_token_stream().to_string();
+        spans: Vec::new(),
+    };
+    spans.visit_file(&file);
+    spans.spans.sort_by_key(|range| range.start);
+    spans.spans.dedup();
+    let edits: Vec<_> = spans
+        .spans
+        .into_iter()
+        .map(|range| (range, new_text.to_string()))
+        .collect();
+    let output = splice(source, &edits)
+        .ok_or_else(|| bad(name, "identifier spans do not match the source text"))?;
     if output.len() > 2_097_152 {
         return Err(budget(name));
     }

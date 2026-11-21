@@ -2647,6 +2647,7 @@ dependencies = [
  "notify",
  "openssl",
  "ort",
+ "proc-macro2",
  "quote",
  "rand 0.8.7",
  "ratatui",
