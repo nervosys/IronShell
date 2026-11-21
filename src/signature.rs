@@ -3430,7 +3430,7 @@ pub static SIGNATURES: &[Signature] = &[
             ),
         ],
         returns: "Array",
-        doc: "Run a read-only SQL query over piped rows, rows given as the first argument, a JSON/CSV file or a SQLite database, returning rows as records. A query with no rows and no source runs over an empty database: sql(\"select 1 as x\") answers [{x: 1}]. A trailing params Array binds its values to the query's ? placeholders in order, so a value is never spliced into the query text. With params and no rows the query runs over the same empty database: sql(\"select ? + 1 as y\", [41]) answers [{y: 42}]. A table in the query needs rows or a source first: sql(source, query, params). Several tables: give a Record of tables, one field per table, as the first argument or piped: sql({orders: open(\"orders.csv\"), cust: open(\"cust.csv\")}, \"select cust.name, orders.total from orders join cust on orders.cid = cust.id\"). In a CSV or TSV an empty cell is NULL in a numeric column and '' in a text column.",
+        doc: "Text columns are not converted to numbers: sum, total and avg over a TEXT value that is not a clean number (\"12x\", \"1,234.50\", \"$5\") are E_BAD_ARG naming the value, so clean and cast it first, e.g. sum(cast(replace(p, ',', '') as real)); clean numeric text such as \"12\" or \"1.5\" is summed as a number. Arithmetic on text (p * 2) is not refused: it uses SQLite's leading-number rule, so \"12x\" * 2 is 24. Run a read-only SQL query over piped rows, rows given as the first argument, a JSON/CSV file or a SQLite database, returning rows as records. A query with no rows and no source runs over an empty database: sql(\"select 1 as x\") answers [{x: 1}]. A trailing params Array binds its values to the query's ? placeholders in order, so a value is never spliced into the query text. With params and no rows the query runs over the same empty database: sql(\"select ? + 1 as y\", [41]) answers [{y: 42}]. A table in the query needs rows or a source first: sql(source, query, params). Several tables: give a Record of tables, one field per table, as the first argument or piped: sql({orders: open(\"orders.csv\"), cust: open(\"cust.csv\")}, \"select cust.name, orders.total from orders join cust on orders.cid = cust.id\"). In a CSV or TSV an empty cell is NULL in a numeric column and '' in a text column.",
         examples: &[
             (
                 r#"sql("select 1 as x") | first | fn(r) => r.x"#,
@@ -6020,7 +6020,7 @@ pub static SIGNATURES: &[Signature] = &[
         subject: None,
         params: &[],
         returns: "Array",
-        doc: "Mounted filesystems as {filesystem, size, used, available, use_percent, mounted_on, size_bytes, used_bytes, available_bytes, use_pct}. size, used and available are strings in binary units (K is 1024, so 3724.3G is GiB) and use_percent is a string such as \"99%\"; size_bytes, used_bytes, available_bytes and use_pct are the same figures as Ints (exact on Windows; on Unix parsed from df -h, so rounded as df rounds).",
+        doc: "Disk free space of each mounted filesystem, as {filesystem, size, used, available, use_percent, mounted_on, size_bytes, used_bytes, available_bytes, use_pct}. size, used and available are strings in binary units (K is 1024, so 3724.3G is GiB) and use_percent is a string such as \"99%\"; size_bytes, used_bytes, available_bytes and use_pct are the same figures as Ints (exact on Windows; on Unix parsed from df -h, so rounded as df rounds).",
         examples: &[("typeof(df())", "Array")],
     },
     Signature {
@@ -6936,12 +6936,12 @@ pub static SIGNATURES: &[Signature] = &[
         aliases: &[],
         subject: None,
         params: &[opt(
-            "n",
-            Ty::Int,
-            "undone steps to re-apply, from 1 to 10000; default 1",
-        )],
+            "n_or_options",
+            Ty::Any,
+            "undone steps to re-apply, from 1 to 10000, default 1; or {force: Bool}",
+        ), opt("options", Ty::Record, "{force: Bool}: re-apply a step even though its file changed after the undo (default false)")],
         returns: "Record",
-        doc: "Re-apply the last n steps that session_undo() put back, most recently undone first. Returns reapplied, removed, skipped, failed, steps and complete, where complete is false if any step could not be re-applied. Each re-applied step is first recorded in the journal, so session_undo() reverses it. A step whose re-apply fails stays on the redo stack and stops the redo, so it can be retried. Covers local file contents only. Any new recorded write discards the redo stack (a write that is recorded and then refused still discards it), which is kept per session directory and bounded with the journal to 8 MiB per file and 64 MiB in total.",
+        doc: "Re-apply the last n steps that session_undo() put back, most recently undone first. A file that changed (or was removed) after its undo is not overwritten: that is E_BAD_STATE naming the file, unless the first step is not the one refused, in which case the refused step is listed as skipped and the redo stops; {force: true} re-applies it anyway. Returns reapplied, removed, skipped, failed, steps and complete, where complete is false if any step could not be re-applied. Each re-applied step is first recorded in the journal, so session_undo() reverses it. A step whose re-apply fails stays on the redo stack and stops the redo, so it can be retried. Covers local file contents only. Any new recorded write discards the redo stack (a write that is recorded and then refused still discards it), which is kept per session directory and bounded with the journal to 8 MiB per file and 64 MiB in total.",
         examples: &[
             (r#"typeof(session_redo())"#, r#"Record"#),
             (r#"typeof(session_redo(2))"#, r#"Record"#),
@@ -7179,9 +7179,9 @@ pub static SIGNATURES: &[Signature] = &[
         subject_required: false,
         aliases: &[],
         subject: None,
-        params: &[opt_range("count", Ty::Int, 1, 10000, "how many commits, newest first; default 10")],
+        params: &[opt("count_or_options", Ty::Any, "how many commits (Int from 1 to 10000, newest first; default 10), or {n: Int, files: Bool}"), opt("options", Ty::Record, "{n: Int, files: Bool}: with a Record the rows are typed, and files: true adds each commit's changed paths")],
         returns: "Array",
-        doc: "The most recent count commits of the current repository as an Array of `<short hash> <subject>` lines, newest first. Read-only. Outside a repository E_BAD_STATE; a repository with no commits, or a failed git, E_TOOL_FAILED. Refuses pipeline input.",
+        doc: "The commit history (log) of the current repository: the most recent count commits as an Array of `<short hash> <subject>` lines, newest first. With an options Record (`git_log({n: 20, files: true})` or `git_log(20, {files: true})`) it returns records {hash, author, date, subject} instead, and files: true adds `files`, the paths each commit changed (a way to count the most changed files). Read-only. Outside a repository E_BAD_STATE; a repository with no commits, or a failed git, E_TOOL_FAILED. Refuses pipeline input.",
         examples: &[
             (r#"(try { git_log(0) } catch e { e.error.code })"#, "E_BAD_ARG"),
             (r#"(try { git_log("3") } catch e { e.error.code })"#, "E_BAD_ARG"),

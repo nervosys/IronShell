@@ -594,6 +594,15 @@ fn run(
                 format!("the query ran past its {}s budget", QUERY_BUDGET.as_secs()),
                 "narrow the query, or bound a recursive CTE with LIMIT",
             );
+        } else if text.contains(crate::sql_num::MARKER) {
+            (
+                text.clone(),
+                "a text column is not converted to numbers for sum, total or avg; clean it and \
+                 cast it first, e.g. sum(cast(replace(replace(p, ',', ''), '$', '') as real)), \
+                 or use nullif(p, '') to skip blanks. Arithmetic such as p * 2 does not refuse \
+                 text: SQLite reads its leading number"
+                    .to_string(),
+            )
         } else if text.contains("Multiple statements") {
             (
                 "sql takes one statement per call: the query holds more than one".to_string(),
@@ -759,7 +768,13 @@ fn connect(
                 .to_string(),
         )),
     };
-    let memory = || Connection::open_in_memory().map_err(|e| internal(builtin, &e));
+    // Tables built from shell values get the strict sum, total and avg, which
+    // refuse text that is not a clean number instead of reading its prefix.
+    let memory = || {
+        let conn = Connection::open_in_memory().map_err(|e| internal(builtin, &e))?;
+        crate::sql_num::register(&conn).map_err(|e| internal(builtin, &e))?;
+        Ok::<Connection, anyhow::Error>(conn)
+    };
     match args.len() {
         1 => {
             let query = str_arg(0, "the query")?;
