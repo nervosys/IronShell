@@ -7988,15 +7988,24 @@ fn tr_items(spec: &str) -> Option<Vec<(Option<String>, Vec<char>)>> {
             let rest: String = chars[i..].iter().collect();
             let end = rest.find(":]")?;
             let class = &rest[2..end];
-            let members: Vec<char> = match class {
-                "upper" => ('A'..='Z').collect(),
-                "lower" => ('a'..='z').collect(),
-                "digit" => ('0'..='9').collect(),
-                "space" => vec![' ', '\t', '\n', '\r', '\x0b', '\x0c'],
-                "alpha" => ('A'..='Z').chain('a'..='z').collect(),
-                "alnum" => ('0'..='9').chain('A'..='Z').chain('a'..='z').collect(),
+            // Each class in byte order, as GNU tr walks it in the C locale, so
+            // a class in SET1 pairs with SET2 the way GNU tr pairs it.
+            let test: fn(&u8) -> bool = match class {
+                "upper" => |b| b.is_ascii_uppercase(),
+                "lower" => |b| b.is_ascii_lowercase(),
+                "digit" => |b| b.is_ascii_digit(),
+                "xdigit" => |b| b.is_ascii_hexdigit(),
+                "space" => |b| matches!(b, b' ' | b'\t' | b'\n' | b'\r' | 0x0b | 0x0c),
+                "blank" => |b| matches!(b, b' ' | b'\t'),
+                "alpha" => |b| b.is_ascii_alphabetic(),
+                "alnum" => |b| b.is_ascii_alphanumeric(),
+                "punct" => |b| b.is_ascii_punctuation(),
+                "cntrl" => |b| b.is_ascii_control(),
+                "graph" => |b| b.is_ascii_graphic(),
+                "print" => |b| b.is_ascii_graphic() || *b == b' ',
                 _ => return None,
             };
+            let members: Vec<char> = (0u8..=127).filter(test).map(char::from).collect();
             out.push((Some(class.to_string()), members));
             i += rest[..end + 2].chars().count();
             continue;
@@ -10657,15 +10666,18 @@ fn sed(args: &[String], stdin: &mut Input, sink: &mut Sink) -> Util {
     files.extend(positional);
     // Only the text of `a`, `i` and `c` goes on in the next -e: a script
     // that ends in a backslash anywhere else is an error GNU sed reports.
+    // The line has an `a`, `i` or `c` at the start of a command, after its
+    // address: its text is what the backslash continues.
+    let text_cmd_re = regex::Regex::new(
+        r"(?:^|[;{}])\s*(?:(?:\d+|\$|/(?:[^/\\]|\\.)*/)(?:\s*,\s*(?:\d+|\$|/(?:[^/\\]|\\.)*/))?\s*!?\s*)?[aic](?:\s|\\|$)",
+    )
+    .ok();
     for sc in scripts.iter().take(scripts.len().saturating_sub(1)) {
         let slashes = sc.chars().rev().take_while(|&c| c == '\\').count();
         let last_line = sc.rsplit('\n').next().unwrap_or("");
-        // The line has an `a`, `i` or `c` at the start of a command, after
-        // its address: its text is what the backslash continues.
-        let text_cmd = regex::Regex::new(
-            r"(?:^|[;{}])\s*(?:(?:\d+|\$|/(?:[^/\\]|\\.)*/)(?:\s*,\s*(?:\d+|\$|/(?:[^/\\]|\\.)*/))?\s*!?\s*)?[aic](?:\s|\\|$)",
-        )
-        .is_ok_and(|re| re.is_match(last_line));
+        let text_cmd = text_cmd_re
+            .as_ref()
+            .is_some_and(|re| re.is_match(last_line));
         if slashes % 2 == 1 && !text_cmd {
             return Util::DeclineFor("an -e script ending in a backslash".into());
         }
