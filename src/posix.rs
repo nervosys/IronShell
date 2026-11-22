@@ -2272,6 +2272,13 @@ fn open_target_inner(path: &str, append: bool) -> Result<(), String> {
     let known = OPENED.with(|o| o.borrow().iter().any(|(p, _)| p == path));
     let mark = crate::journal::mark();
     if !known {
+        // The journal budget judges this step as it judges `write_file`'s: past
+        // it the run ends, and the target is neither created nor truncated.
+        if let Err(e) = crate::journal::check_budget() {
+            stop_run(&e);
+            PENDING_REFUSAL.with(|p| p.borrow_mut().take());
+            return Err(e.to_string());
+        }
         let before = std::fs::metadata(path).ok().map(|m| m.len());
         crate::journal::record_paths(
             "posix",

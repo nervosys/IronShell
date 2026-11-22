@@ -220,7 +220,7 @@ impl ModelDownloader {
         // the other fetch builtins: no loopback, private or link-local target.
         // reqwest's default client follows redirects without looking at them,
         // so this download uses a client whose redirect policy checks each hop.
-        crate::security::validate_http_url("download_model", &url)?;
+        crate::security::validate_public_http_url("download_model", &url)?;
         let client = url_download_client()?;
 
         let temp_path = self
@@ -599,7 +599,7 @@ fn url_download_client() -> Result<Client> {
 /// refuse it. It applies the same URL check as the first URL, so a hop to a
 /// loopback, private, link-local or metadata address is refused.
 fn redirect_hop_refusal(next: &str) -> Option<String> {
-    match crate::security::validate_http_url("download_model", next) {
+    match crate::security::validate_public_http_url("download_model", next) {
         Ok(_) => None,
         Err(e) => Some(format!("redirect to {next} refused: {e}")),
     }

@@ -2136,6 +2136,25 @@ impl CheckedHttpUrl {
     }
 }
 
+thread_local! {
+    /// Set while [`validate_public_http_url`] runs: the request is one a
+    /// server makes for a remote client, so no mode or operator list admits
+    /// an internal destination.
+    static PUBLIC_ONLY: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// [`validate_http_url`] for a request a server makes on behalf of a remote
+/// client (the model API's download and each of its redirect hops): loopback
+/// and private destinations are refused in every mode and whatever
+/// `IRONSHELL_NET_ALLOW` lists, because the client is not the operator of this
+/// machine. Only the debug-build test seam admits loopback.
+pub fn validate_public_http_url(builtin: &str, url_str: &str) -> Result<String> {
+    PUBLIC_ONLY.with(|p| p.set(true));
+    let checked = validate_http_url(builtin, url_str);
+    PUBLIC_ONLY.with(|p| p.set(false));
+    checked
+}
+
 /// Test seam for the loopback tests. In a debug build, with
 /// `IRONSHELL_TEST_ALLOW_LOOPBACK=1`, loopback addresses and names pass the
 /// check; nothing else is exempted, and a release build ignores the variable.
@@ -2313,6 +2332,9 @@ fn operator_lists_exact(host: &str, port: u16) -> bool {
 /// operator lists the host exactly in `IRONSHELL_NET_ALLOW`. The debug-build
 /// test seam admits loopback.
 fn internal_allowed(host: &str, port: u16, loopback: bool) -> bool {
+    if PUBLIC_ONLY.with(|p| p.get()) {
+        return loopback && loopback_allowed_for_tests();
+    }
     if crate::safety::current_mode() != crate::safety::Mode::Agent
         || crate::safety::policy_permissive()
     {
@@ -2331,6 +2353,10 @@ fn refuse_reach(builtin: &str, host: &str, shown: &str, reach: Reach) -> anyhow:
         Reach::Reserved => (
             format!("access to {shown} is blocked: it is not a routable destination (SSRF protection)"),
             "this is a security policy, not a malformed call: unspecified, multicast, reserved, documentation and carrier-grade NAT addresses are refused in every mode".to_string(),
+        ),
+        _ if PUBLIC_ONLY.with(|p| p.get()) => (
+            format!("access to {shown} is blocked: it is this machine or a private network, and a server fetches only public addresses for a client (SSRF protection)"),
+            "this is a security policy, not a malformed call: a download the model API makes for a client may reach only public addresses, in every mode and whatever IRONSHELL_NET_ALLOW lists".to_string(),
         ),
         _ => (
             format!("access to {shown} is blocked in agent mode: it is this machine or a private network (SSRF protection)"),

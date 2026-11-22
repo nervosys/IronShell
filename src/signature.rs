@@ -15656,7 +15656,6 @@ pub const TAKES_NO_INPUT: &[&str] = &[
     "git_remote",
     "git_root",
     "git_stash_list",
-    "git_tags",
     "governor_reset",
     "governor_status",
     "group_list",

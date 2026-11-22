@@ -88400,7 +88400,9 @@ mod archive_prescan_tests {
         let listed = tar_archive_entries("tar_extract", archive.to_str().unwrap());
         let _ = std::fs::remove_dir_all(&dir);
         let listed = listed.unwrap();
-        assert_eq!(listed, entries(&[("a", Some("../../etc"))]));
+        // The target is listed resolved against the link's folder, so one
+        // that climbs out of the archive is ".." (see archive_link_check_target).
+        assert_eq!(listed, entries(&[("a", Some(".."))]));
         assert!(check_archive_entries("tar_extract", listed.into_iter()).is_err());
     }
 
