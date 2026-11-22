@@ -281,10 +281,20 @@ fn http_get_to_this_machine_is_denied_before_the_gate() {
         assert!(j["error"].get("approval").is_none(), "{url}: {j}");
         assert!(!j.to_string().contains("apv_"), "{url}: {j}");
     }
-    // The allowlist does not lift it.
+    // A wildcard, another host or another port in the allowlist does not
+    // lift it.
+    for allow in ["*", "example.com", "localhost:9999"] {
+        let o = d.run_with(
+            &["-c", r#"http_get("http://localhost:3002/health")"#],
+            &[("IRONSHELL_NET_ALLOW", allow)],
+        );
+        assert_eq!(error_json(&o)["error"]["code"], "E_POLICY_DENY", "{allow}");
+    }
+    // Since round 66 the operator may list the exact host: the request is
+    // then made (and fails, or not, on its own merits), never a policy refusal.
     let o = d.run_with(
         &["-c", r#"http_get("http://localhost:3002/health")"#],
         &[("IRONSHELL_NET_ALLOW", "localhost")],
     );
-    assert_eq!(error_json(&o)["error"]["code"], "E_POLICY_DENY");
+    assert!(!err(&o).contains("E_POLICY_DENY"), "{}", err(&o));
 }
